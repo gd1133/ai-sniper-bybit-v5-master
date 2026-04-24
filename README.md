@@ -2,6 +2,12 @@
 
 Bot de trading com dashboard web em tempo real, operacao multiativo e integracao com Bybit, Supabase e IA para validacao de sinais.
 
+## Documentacao completa
+
+Para a documentacao tecnica, operacional e comercial completa, consulte:
+
+- `docs/DOCUMENTACAO_COMPLETA.md`
+
 ## Stack
 
 - **Backend:** Python, Flask, SQLite
