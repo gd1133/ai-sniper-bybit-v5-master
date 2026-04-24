@@ -1922,12 +1922,13 @@ def sniper_broadcast_signal():
             _release_signal_slot(symbol)
 
 if __name__ == "__main__":
+    render_port = int(os.getenv("PORT", "5000"))
+
     # Inicia o robô em thread separada
     threading.Thread(target=sniper_worker_loop, daemon=True).start()
-    
-    # Inicia o servidor do Dashboard
-    print("✅ DuoIA Maestro v60.1 Online na Porta 5000")
-    
+
+    print(f"✅ DuoIA Maestro v60.1 Online na Porta {render_port}")
+
     # ☁️ SINCRONIZAÇÃO NUVEM NA PARTIDA (Async)
     if cloud_db:
         print("☁️ Iniciando Sincronização com Supabase Cloud em background...")
@@ -1936,8 +1937,8 @@ if __name__ == "__main__":
     print(f"💰 Saldo Carregado: {TEST_BALANCE} USDT")
     if TEST_MODE_ENABLED:
         print("🧪 PAPER TRADING ATIVO - Preço real, saldo fictício, sem ordens reais")
-    print("📊 Dashboard: http://localhost:5000")
+    print(f"📊 Dashboard: http://0.0.0.0:{render_port}")
     print("🧠 Cérebro Triplo: ATIVO (Rigor 50%)")
     print("⚡ Execução: REAL OFF (somente saldo real dos clientes)")
-    app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
+    app.run(host='0.0.0.0', port=render_port, debug=False, use_reloader=False)
 
