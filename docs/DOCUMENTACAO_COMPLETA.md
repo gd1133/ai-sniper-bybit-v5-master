@@ -312,8 +312,9 @@ Configuracao observada no codigo:
 - **Threshold minimo no fallback soberano do 3o cerebro:** 80%
 - **Maximo de moedas simultaneas:** 5
 - **Posicao unica:** desativada
+- **Valor da ordem:** 5% da banca total do cliente
 - **Take Profit:** 100%
-- **Stop Loss:** 30%
+- **Stop Loss:** 3%
 - **Cooldown institucional:** 15 segundos
 - **Top moedas por ciclo:** 8
 - **Delay entre ativos no scanner:** 0.25 segundo
@@ -546,6 +547,7 @@ Antes de usar, o cliente deve saber:
 ## 14.2 O que precisa ser informado ao cliente
 
 - como o saldo sera usado,
+- que cada ordem usa 5% da banca total,
 - quais chaves serao cadastradas,
 - se a conta esta em modo teste ou real,
 - quais sao as regras atuais de TP e SL,

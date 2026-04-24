@@ -98,7 +98,7 @@ SNIPER_SIGNAL_LOCK = threading.Lock()
 SNIPER_SIGNAL_RESERVATIONS = set()
 EXECUTE_TRADES_REAL = False      # Segurança: nunca envia ordem real no modo treinamento atual
 PAPER_TRADE_TP_PCT = 100.0       # Fecha somente quando dobrar a margem projetada
-PAPER_TRADE_SL_PCT = -30.0       # Stop de perda em 30%
+PAPER_TRADE_SL_PCT = -3.0        # Stop de perda em 3% da entrada
 ENABLE_RANDOM_TEST_TRADES = False
 
 # Anti-loop de ativo único (evita ficar preso na mesma moeda por muitos ciclos)
@@ -964,7 +964,7 @@ def _settle_paper_trades():
             pnl_value = round(margin * (pnl_pct / 100), 2)
 
             if pnl_pct >= PAPER_TRADE_TP_PCT or pnl_pct <= PAPER_TRADE_SL_PCT:
-                reason = 'PAPER_TP_100' if pnl_pct >= PAPER_TRADE_TP_PCT else 'PAPER_SL_30'
+                reason = 'PAPER_TP_100' if pnl_pct >= PAPER_TRADE_TP_PCT else 'PAPER_SL_3'
                 notes = f"{trade.get('notes', '')} | {reason} @ {current_price:.8f}"
                 db.close_trade(
                     trade_id=trade_id,

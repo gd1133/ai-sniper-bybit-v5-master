@@ -32,8 +32,9 @@ O motor combina:
 
 - Ate **5 moedas simultaneas**
 - Sem repetir moeda ja aberta
+- **Valor da ordem:** 5% da banca total do cliente
 - **Take Profit:** 100%
-- **Stop Loss:** 30%
+- **Stop Loss:** 3%
 - Modo teste e modo real
 - Gestao de investidores/clientes com armazenamento seguro de credenciais
 

@@ -83,15 +83,15 @@ const getTradeProgressPercent = (trade) => {
   const pnlPct = Number(trade?.pnl_pct || 0);
   if (!Number.isFinite(pnlPct)) return 0;
   if (pnlPct >= 0) return Math.max(0, Math.min(100, pnlPct));
-  return Math.max(0, Math.min(100, (Math.abs(pnlPct) / 30) * 100));
+  return Math.max(0, Math.min(100, (Math.abs(pnlPct) / 3) * 100));
 };
 
 const getTradeProgressText = (trade) => {
   if (!hasLivePrice(trade)) return 'Aguardando preço ao vivo';
   const pnlPct = Number(trade?.pnl_pct || 0);
-  if (!Number.isFinite(pnlPct)) return 'TP 100% • SL 30%';
+  if (!Number.isFinite(pnlPct)) return 'TP 100% • SL 3%';
   if (pnlPct >= 0) return `Faltam ${Math.max(0, 100 - pnlPct).toFixed(2)}% para TP`;
-  return `Faltam ${Math.max(0, 30 - Math.abs(pnlPct)).toFixed(2)}% para SL`;
+  return `Faltam ${Math.max(0, 3 - Math.abs(pnlPct)).toFixed(2)}% para SL`;
 };
 
 /**
@@ -383,7 +383,7 @@ const App = () => {
                 icon={<Database size={18}/>} 
                 emerald 
               />
-              <KpiCard label="TRADES ATIVOS" value={`${Math.min(data.active_trades?.length || 0, 5)}/5`} sub="5 moedas diferentes • TP 100% • SL 30%" icon={<Database size={18}/>} />
+              <KpiCard label="TRADES ATIVOS" value={`${Math.min(data.active_trades?.length || 0, 5)}/5`} sub="5 moedas diferentes • Ordem 5% da banca • TP 100% • SL 3%" icon={<Database size={18}/>} />
               <KpiCard label="RADAR LIVE" value={data.symbol || "---"} sub="TOP VOLUME BYBIT" icon={<Activity size={18}/>} highlight={data.confidence >= 60} />
               <KpiCard label="IA CONFIANÇA" value={`${data.confidence}%`} progress={data.confidence} icon={<ShieldCheck size={18}/>} emerald={data.confidence >= 60} highlight={data.confidence >= 60} />
             </div>
@@ -436,7 +436,7 @@ const App = () => {
                        <div className="text-center py-6">
                          <div className="w-12 h-12 mx-auto rounded-2xl bg-zinc-900 flex items-center justify-center text-zinc-700 mb-4"><Zap size={18} /></div>
                          <p className="text-lg font-black italic text-zinc-700">AGUARDANDO MOEDA</p>
-                          <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-600 mt-2">Nova entrada so apos TP 100% ou SL 30%</p>
+                           <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-600 mt-2">Cada ordem usa 5% da banca • TP 100% • SL 3%</p>
                        </div>
                        <div className="h-2 rounded-full bg-zinc-900" />
                      </div>
@@ -655,7 +655,7 @@ const App = () => {
                      <span className="text-[10px] font-black text-zinc-200 uppercase tracking-widest">Certificação Tactical</span>
                   </div>
                   <p className="text-[9px] text-zinc-500 font-bold uppercase leading-relaxed italic">
-                     TRIPLO CÉREBRO COM RIGOR DE {evidence.threshold || 60}% • ATÉ {evidence.max_positions || 5} ENTRADAS SIMULTÂNEAS, SEM REPETIR MOEDA • TP 100% E SL 30%.
+                     TRIPLO CÉREBRO COM RIGOR DE {evidence.threshold || 60}% • ATÉ {evidence.max_positions || 5} ENTRADAS SIMULTÂNEAS, SEM REPETIR MOEDA • ORDEM 5% DA BANCA • TP 100% E SL 3%.
                   </p>
                </div>
             </div>
@@ -884,7 +884,7 @@ const App = () => {
           </div>
           <div className="flex items-center gap-3 text-[10px] font-black text-zinc-500 uppercase tracking-widest italic">
              <ShieldCheck size={14} className="text-zinc-600"/>
-             Protocolo 100/30 Verificado
+             Protocolo 100/3 Verificado
            </div>
          </div>
          <p className="text-[9px] font-black text-zinc-700 uppercase tracking-[0.5em] italic">Motor Sniper v60.7 &copy; 2026</p>
