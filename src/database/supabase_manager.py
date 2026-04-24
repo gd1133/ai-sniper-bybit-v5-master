@@ -208,3 +208,43 @@ class SupabaseManager:
             self.client.table("trades").insert(trade_data).execute()
         except Exception as e:
             self._handle_cloud_error("registrar trade", e)
+
+    def close_open_trades_by_symbol(self, symbol: str, current_price: float, closed_at: str, note_suffix: str = "MANUAL_CLOSE") -> int:
+        """Fecha trades open no Supabase por símbolo, quando houver sincronização cloud."""
+        if not self.is_available():
+            return 0
+
+        try:
+            result = self.client.table("trades").select("*").eq("pair", symbol).eq("status", "open").execute()
+            rows = getattr(result, "data", None) or []
+            closed = 0
+
+            for row in rows:
+                try:
+                    entry_price = float(row.get("entry_price") or 0)
+                    margin = float(row.get("profit") or 0)
+                    side = str(row.get("side") or "").upper()
+                    if entry_price <= 0 or margin <= 0 or current_price <= 0:
+                        pnl_pct = 0.0
+                        profit_value = 0.0
+                    else:
+                        is_sell = side in {"VENDER", "SELL"}
+                        pnl_pct = ((entry_price - current_price) / entry_price) * 100 if is_sell else ((current_price - entry_price) / entry_price) * 100
+                        profit_value = round(margin * (pnl_pct / 100), 2)
+
+                    notes = f"{str(row.get('notes') or '').strip()} | {note_suffix} @ {float(current_price):.8f}".strip()
+                    self.client.table("trades").update({
+                        "pnl_pct": round(float(pnl_pct), 4),
+                        "profit": profit_value,
+                        "closed_at": closed_at,
+                        "notes": notes,
+                        "status": "closed",
+                    }).eq("id", row.get("id")).execute()
+                    closed += 1
+                except Exception:
+                    continue
+
+            return closed
+        except Exception as e:
+            self._handle_cloud_error(f"fechar trades open de {symbol}", e)
+            return 0

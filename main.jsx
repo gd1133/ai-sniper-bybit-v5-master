@@ -104,6 +104,7 @@ const App = () => {
   const [showAddForm, setShowAddForm] = useState(false);
   const [addFormMsg, setAddFormMsg] = useState(null);
   const [addFormSaving, setAddFormSaving] = useState(false);
+  const [manualClosingSymbol, setManualClosingSymbol] = useState(null);
   const [addFormFields, setAddFormFields] = useState({
     id: null, nome: '', saldo_base: 1000, bybit_key: '', bybit_secret: '', tg_token: '', chat_id: '', is_testnet: true
   });
@@ -241,6 +242,49 @@ const App = () => {
         alert(json.error || 'Erro ao remover');
       }
     } catch (e) { console.error(e); alert('Erro ao remover'); }
+  };
+
+  const refreshStatusSnapshot = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/status`);
+      if (!res.ok) return;
+      const json = await res.json();
+      setData(prev => ({
+        ...prev,
+        ...json,
+        balance: json.balance ?? json.test_balance ?? 0,
+        test_balance: json.test_balance ?? 0,
+        test_mode: json.test_mode ?? false
+      }));
+    } catch (e) {
+      console.error('Erro ao atualizar status', e);
+    }
+  };
+
+  const handleManualCloseTrade = async (trade) => {
+    const symbol = trade?.raw_symbol || trade?.symbol;
+    if (!symbol || trade?.isSignalCard) return;
+    if (!confirm(`Fechar manualmente a operação de ${trade.symbol}?`)) return;
+
+    try {
+      setManualClosingSymbol(String(trade.symbol || symbol).toUpperCase());
+      const res = await fetch(`${API_BASE}/api/trade/manual-close`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol }),
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        alert(json.error || 'Erro ao fechar operação manualmente');
+        return;
+      }
+      await refreshStatusSnapshot();
+    } catch (e) {
+      console.error(e);
+      alert('Erro ao fechar operação manualmente');
+    } finally {
+      setManualClosingSymbol(null);
+    }
   };
 
   const handleFieldChange = (key, value) => setAddFormFields(prev => ({ ...prev, [key]: value }));
@@ -472,7 +516,7 @@ const App = () => {
                          </div>
                        </div>
 
-                       <div className="space-y-3">
+                        <div className="space-y-3">
                          <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest">
                            <span className="text-zinc-500">{getTradeRelationLabel(trade)}</span>
                            <span className={getTradeTone(trade) ? 'text-green-500' : 'text-red-500'}>{getTradeProgressText(trade)}</span>
@@ -483,16 +527,26 @@ const App = () => {
                              style={{ width: `${getTradeProgressPercent(trade)}%` }}
                            />
                          </div>
-                         <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-widest">
-                           <span className="text-zinc-500">
-                             {trade.isSignalCard ? `Confiança ${trade.confidence || 0}%` : `Margem ${formatDollar(trade.entry || 0)}`}
-                           </span>
-                            <span className={getTradeTone(trade) ? 'text-green-500' : 'text-red-500'}>
-                              {hasLivePrice(trade) ? formatSignedPercent(trade.price_change_pct || 0) : '--'}
+                          <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-widest">
+                            <span className="text-zinc-500">
+                              {trade.isSignalCard ? `Confiança ${trade.confidence || 0}%` : `Margem ${formatDollar(trade.entry || 0)}`}
                             </span>
-                         </div>
-                       </div>
-                     </div>
+                             <span className={getTradeTone(trade) ? 'text-green-500' : 'text-red-500'}>
+                               {hasLivePrice(trade) ? formatSignedPercent(trade.price_change_pct || 0) : '--'}
+                             </span>
+                          </div>
+                          {!trade.isSignalCard && (
+                            <button
+                              type="button"
+                              onClick={() => handleManualCloseTrade(trade)}
+                              disabled={manualClosingSymbol === String(trade.symbol || '').toUpperCase()}
+                              className="w-full rounded-2xl border border-green-500/30 bg-green-500/10 px-4 py-3 text-[10px] font-black uppercase tracking-widest text-green-400 transition-all hover:bg-green-500/15 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              {manualClosingSymbol === String(trade.symbol || '').toUpperCase() ? 'Saindo...' : 'Sair manual'}
+                            </button>
+                          )}
+                        </div>
+                      </div>
                    ))}
                  </div>
               </div>

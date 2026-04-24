@@ -315,6 +315,7 @@ Configuracao observada no codigo:
 - **Valor da ordem:** 5% da banca total do cliente
 - **Take Profit:** 100%
 - **Stop Loss:** 3%
+- **Saida manual pelo painel:** disponivel para encerramento antecipado
 - **Cooldown institucional:** 15 segundos
 - **Top moedas por ciclo:** 8
 - **Delay entre ativos no scanner:** 0.25 segundo

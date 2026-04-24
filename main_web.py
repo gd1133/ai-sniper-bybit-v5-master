@@ -984,6 +984,84 @@ def _settle_paper_trades():
         print(f"⚠️ [_settle_paper_trades] erro: {e}")
         return 0.0
 
+
+def _manual_close_open_trades(symbol, requested_by="dashboard"):
+    """Fecha manualmente todos os trades abertos do símbolo informado."""
+    canonical_symbol = _canonicalize_symbol(symbol)
+    if not canonical_symbol:
+        raise ValueError("Símbolo inválido para fechamento manual.")
+
+    normalized_symbol = _normalize_symbol_key(canonical_symbol)
+    open_trades = db.get_open_trades(200)
+    matching_trades = [
+        trade for trade in open_trades
+        if _normalize_symbol_key(_canonicalize_symbol(trade.get('pair')) or trade.get('pair')) == normalized_symbol
+    ]
+
+    if not matching_trades:
+        return {
+            "symbol": _limpar_simbolo(canonical_symbol),
+            "closed_count": 0,
+            "total_pnl_value": 0.0,
+            "current_price": 0.0,
+        }
+
+    closed_at = time.strftime("%d/%m %H:%M", time.localtime())
+    total_pnl_value = 0.0
+    current_price_reference = 0.0
+    closed_count = 0
+
+    for trade in matching_trades:
+        trade_id = trade.get('id')
+        side = trade.get('side')
+        margin = _coerce_float(trade.get('profit'), default=0.0)
+        entry_price = _extract_entry_price(trade)
+        if not trade_id or margin <= 0 or entry_price <= 0:
+            continue
+
+        live = _get_live_price_snapshot(canonical_symbol, entry_price, side)
+        current_price = _coerce_float(live.get('current_price'), default=0.0)
+        if current_price <= 0:
+            continue
+
+        pnl_pct = round(_coerce_float(live.get('pnl_pct'), default=0.0), 4)
+        pnl_value = round(margin * (pnl_pct / 100), 2)
+        notes = f"{trade.get('notes', '')} | MANUAL_CLOSE_{str(requested_by).upper()} @ {current_price:.8f}"
+
+        if db.close_trade(
+            trade_id=trade_id,
+            pnl_pct=pnl_pct,
+            profit=pnl_value,
+            closed_at=closed_at,
+            notes=notes,
+        ):
+            total_pnl_value += pnl_value
+            current_price_reference = current_price
+            closed_count += 1
+
+    if closed_count and cloud_db and getattr(cloud_db, "is_available", lambda: False)():
+        try:
+            cloud_db.close_open_trades_by_symbol(
+                canonical_symbol,
+                current_price=current_price_reference,
+                closed_at=closed_at,
+                note_suffix=f"MANUAL_CLOSE_{str(requested_by).upper()}",
+            )
+        except Exception as cloud_err:
+            print(f"⚠️ [SUPABASE] Falha ao fechar trades manualmente em nuvem: {cloud_err}")
+
+    _sync_active_trades_from_db()
+    central_state['trades'] = db.get_recent_trades(20)
+    if closed_count:
+        central_state['status'] = f"✅ Saída manual executada em {_limpar_simbolo(canonical_symbol)}"
+
+    return {
+        "symbol": _limpar_simbolo(canonical_symbol),
+        "closed_count": closed_count,
+        "total_pnl_value": round(total_pnl_value, 2),
+        "current_price": round(current_price_reference, 8) if current_price_reference > 0 else 0.0,
+    }
+
 def broadcast_ordem_global(symbol, side, entry_price, res_ia):
     """
     DISPARO EM MASSA: 
@@ -1077,6 +1155,7 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                                 "side": side,
                                 "pnl_pct": 0.0,
                                 "profit": round(margem, 2),
+                                "entry_price": round(entry_price, 8),
                                 "closed_at": closed_at,
                                 "notes": f"SNIPER v60.1 - Conf: {res_ia.get('probabilidade')}%",
                                 "status": "open",
@@ -1461,6 +1540,29 @@ def get_status():
         return jsonify(central_state)
     except:
         return jsonify(central_state)
+
+
+@app.route('/api/trade/manual-close', methods=['POST'])
+def api_manual_close_trade():
+    """Fecha manualmente uma operação aberta por símbolo."""
+    data = request.json or {}
+    try:
+        symbol = data.get('symbol')
+        result = _manual_close_open_trades(symbol, requested_by='dashboard')
+        if result.get('closed_count', 0) <= 0:
+            return jsonify({
+                "success": False,
+                "error": "Nenhuma operação aberta elegível para fechamento manual.",
+                **result,
+            }), 404
+
+        return jsonify({
+            "success": True,
+            "msg": f"Saída manual executada em {result['symbol']}.",
+            **result,
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 400
 
 @app.route('/api/trades/client/<int:client_id>', methods=['GET'])
 def get_client_trades(client_id):
