@@ -1,0 +1,64 @@
+# Motor Sniper v60.7
+
+Bot de trading com dashboard web em tempo real, operacao multiativo e integracao com Bybit, Supabase e IA para validacao de sinais.
+
+## Stack
+
+- **Backend:** Python, Flask, SQLite
+- **Frontend:** React, Vite
+- **Trading/mercado:** CCXT / Bybit
+- **IA:** Groq + Gemini + motor local
+- **Persistencia cloud:** Supabase
+
+## Logica estrategica
+
+O motor combina:
+
+- **SMA 200** para contexto de tendencia
+- **Fibonacci 0.618** para zona de entrada
+- **RSI** para leitura de momentum
+- **Volume** para confirmar forca
+- **Consenso de IA** com validacao entre radar tatico, estrategista cloud e logica local
+
+## Regras operacionais atuais
+
+- Ate **5 moedas simultaneas**
+- Sem repetir moeda ja aberta
+- **Take Profit:** 100%
+- **Stop Loss:** 30%
+- Modo teste e modo real
+- Gestao de investidores/clientes com armazenamento seguro de credenciais
+
+## Seguranca
+
+- Credenciais sensiveis ficam fora do Git
+- `.env` e bancos locais estao ignorados no versionamento
+- Campos sensiveis de clientes no Supabase sao protegidos no aplicativo
+- Projeto preparado para operar com fallback local quando a nuvem estiver indisponivel
+
+## Escalabilidade
+
+- Painel e backend separados
+- Suporte a monitoramento multiativo
+- Cache de tickers e filtros locais para reduzir chamadas externas
+- Estrutura pronta para evoluir regras de consenso, filas e workers
+
+## Variaveis de ambiente
+
+Copie `.env.example` para `.env` e preencha com suas chaves.
+
+## Como rodar
+
+### Backend
+
+```bash
+pip install -r requirements.txt
+python main_web.py
+```
+
+### Frontend
+
+```bash
+npm install
+npm run build
+```
