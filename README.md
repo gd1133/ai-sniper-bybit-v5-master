@@ -24,6 +24,7 @@ O motor combina:
 - **Fibonacci 0.618** para zona de entrada
 - **RSI** para leitura de momentum
 - **Volume** para confirmar forca
+- **Fluxo institucional** para procurar onde o grande dinheiro esta entrando ou saindo
 - **Consenso de IA** com validacao entre radar tatico, estrategista cloud e logica local
 - **Fallback soberano do 3º cerebro** quando Gemini e Groq falham, com execucao local a partir de 80% de confianca
 

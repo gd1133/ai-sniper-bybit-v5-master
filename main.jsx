@@ -535,10 +535,10 @@ const App = () => {
                           {op.decisao} • {op.probabilidade}% • Score {op.score}
                         </p>
                         <p className="text-[10px] font-bold uppercase tracking-widest text-green-500 mt-1">
-                          Dinheiro Forte {op.money_flow_score || 0} • Volume x{op.volume_ratio || 0}
+                          Dinheiro Forte {op.money_flow_score || 0} • Fluxo {op.money_flow_side || 'WAIT'} • Volume x{op.volume_ratio || 0}
                         </p>
                         <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 mt-1">
-                          Lucro Histórico {formatDollar(op.profit_total || 0)} • Win Rate {Number(op.win_rate || 0).toFixed(1)}%
+                          Lucro Histórico {formatDollar(op.profit_total || 0)} • Win Rate {Number(op.win_rate || 0).toFixed(1)}% • Base {op.sample_size || 0}
                         </p>
                         <p className="text-xs text-zinc-400 mt-1">{op.motivo}</p>
                       </div>

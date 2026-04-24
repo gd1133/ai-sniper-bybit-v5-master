@@ -96,7 +96,12 @@ class IndicatorEngine:
                 'fib_618': 0,
                 'volume_trend': 'BAIXO',
                 'supertrend_signal': 0,
-                'atr': 0
+                'atr': 0,
+                'recent_return_pct': 0,
+                'candle_body_ratio': 0,
+                'range_expansion': 0,
+                'distance_from_sma_pct': 0,
+                'money_flow_side': 'WAIT',
             }
         
         last = self.df.iloc[-1]
@@ -117,6 +122,18 @@ class IndicatorEngine:
         # SuperTrend Signal
         st_signal = int(last['supertrend'])
         fib_distance_pct = (abs(current_price - last['fib_618']) / current_price * 100) if current_price else 0
+        reference_close = self.df['close'].iloc[-4] if len(self.df) >= 4 else current_price
+        recent_return_pct = ((current_price - reference_close) / reference_close * 100) if reference_close else 0
+        candle_range = max(float(last['high'] - last['low']), 1e-9)
+        candle_body_ratio = (abs(float(last['close'] - last['open'])) / candle_range) * 100
+        range_expansion = float(candle_range / (float(last['atr']) + 1e-9))
+        distance_from_sma_pct = (abs(current_price - sma) / sma * 100) if sma else 0
+
+        money_flow_side = "WAIT"
+        if trend == "ALTA" and recent_return_pct > 0 and float(last['volume_ratio']) >= 1.3:
+            money_flow_side = "BUY"
+        elif trend == "BAIXA" and recent_return_pct < 0 and float(last['volume_ratio']) >= 1.3:
+            money_flow_side = "SELL"
 
         return {
             'trend': trend,
@@ -128,7 +145,12 @@ class IndicatorEngine:
             'volume_ratio': float(last['volume_ratio']),
             'fib_distance_pct': float(fib_distance_pct),
             'supertrend_signal': st_signal,
-            'atr': float(last['atr'])
+            'atr': float(last['atr']),
+            'recent_return_pct': float(recent_return_pct),
+            'candle_body_ratio': float(candle_body_ratio),
+            'range_expansion': float(range_expansion),
+            'distance_from_sma_pct': float(distance_from_sma_pct),
+            'money_flow_side': money_flow_side,
         }
 
     def get_smart_money_zones(self):

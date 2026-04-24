@@ -143,6 +143,8 @@ Responsabilidades:
 - RSI,
 - Fibonacci,
 - volume ratio,
+- fluxo institucional,
+- impulso direcional,
 - contexto tecnico para o validador.
 
 ### Broker
@@ -173,8 +175,9 @@ O loop principal:
 7. calcula indicadores,
 8. aplica filtro local rapido,
 9. chama consenso de IA,
-10. ranqueia oportunidades,
-11. dispara o melhor sinal elegivel.
+10. mede dinheiro forte, liquidez e historico por moeda/lado,
+11. ranqueia oportunidades,
+12. dispara o melhor sinal elegivel.
 
 ## 5.2 Validacao de sinal
 

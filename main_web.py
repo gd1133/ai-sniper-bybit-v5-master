@@ -153,6 +153,95 @@ def _coerce_float(*values, default=0.0):
     return float(default)
 
 
+def _clamp(value, minimum=0.0, maximum=100.0):
+    return max(minimum, min(maximum, float(value)))
+
+
+def _get_symbol_trade_edge(symbol, side, limit=300):
+    """
+    Mede histórico recente da moeda/lado para priorizar setups com mais chance.
+    """
+    try:
+        normalized_symbol = _normalize_symbol_key(_canonicalize_symbol(symbol) or symbol)
+        normalized_side = str(side or '').upper()
+        trades = db.get_recent_trades(limit)
+        matching = []
+
+        for trade in trades:
+            if str(trade.get('status', 'closed')).lower() != 'closed':
+                continue
+            trade_symbol = _normalize_symbol_key(_canonicalize_symbol(trade.get('pair')) or trade.get('pair'))
+            trade_side = str(trade.get('side') or '').upper()
+            if trade_symbol != normalized_symbol or trade_side != normalized_side:
+                continue
+            matching.append(trade)
+
+        if not matching:
+            return {
+                "sample_size": 0,
+                "win_rate": 0.0,
+                "profit_total": 0.0,
+                "edge_score": 0.0,
+            }
+
+        wins = sum(1 for trade in matching if _coerce_float(trade.get('profit'), default=0.0) > 0)
+        sample_size = len(matching)
+        win_rate = (wins / sample_size) * 100 if sample_size else 0.0
+        profit_total = sum(_coerce_float(trade.get('profit'), default=0.0) for trade in matching)
+        edge_score = _clamp(((win_rate - 50.0) * 0.30) + min(12.0, profit_total * 0.05), -10.0, 20.0)
+
+        return {
+            "sample_size": sample_size,
+            "win_rate": round(win_rate, 2),
+            "profit_total": round(profit_total, 2),
+            "edge_score": round(edge_score, 2),
+        }
+    except Exception:
+        return {
+            "sample_size": 0,
+            "win_rate": 0.0,
+            "profit_total": 0.0,
+            "edge_score": 0.0,
+        }
+
+
+def _build_money_flow_metrics(signals, ticker, decision):
+    """
+    Estima onde o grande dinheiro está com base em volume, impulso e expansão.
+    """
+    volume_ratio = _coerce_float(signals.get('volume_ratio'), default=0.0)
+    recent_return_pct = abs(_coerce_float(signals.get('recent_return_pct'), default=0.0))
+    distance_from_sma_pct = _coerce_float(signals.get('distance_from_sma_pct'), default=0.0)
+    candle_body_ratio = _coerce_float(signals.get('candle_body_ratio'), default=0.0)
+    range_expansion = _coerce_float(signals.get('range_expansion'), default=0.0)
+    quote_volume = _coerce_float(ticker.get('quoteVolume'), default=0.0)
+    quote_volume_millions = quote_volume / 1_000_000
+    money_flow_side = str(signals.get('money_flow_side') or 'WAIT').upper()
+    normalized_decision = str(decision or '').upper()
+
+    institutional_pressure = _clamp(max(0.0, volume_ratio - 1.0) * 35.0, 0.0, 35.0)
+    momentum_score = _clamp(recent_return_pct * 10.0, 0.0, 20.0)
+    trend_strength = _clamp(distance_from_sma_pct * 3.0, 0.0, 15.0)
+    aggression_score = _clamp((candle_body_ratio * 0.12) + (range_expansion * 4.0), 0.0, 15.0)
+    liquidity_score = _clamp(quote_volume_millions / 2.0, 0.0, 15.0)
+    directional_bonus = 10.0 if money_flow_side and money_flow_side == normalized_decision.replace('COMPRAR', 'BUY').replace('VENDER', 'SELL') else 0.0
+
+    money_flow_score = _clamp(
+        institutional_pressure + momentum_score + trend_strength + aggression_score + liquidity_score + directional_bonus,
+        0.0,
+        100.0,
+    )
+
+    return {
+        "money_flow_score": round(money_flow_score, 2),
+        "institutional_pressure": round(institutional_pressure, 2),
+        "volume_ratio": round(volume_ratio, 2),
+        "quote_volume_millions": round(quote_volume_millions, 2),
+        "recent_return_pct": round(_coerce_float(signals.get('recent_return_pct'), default=0.0), 2),
+        "money_flow_side": money_flow_side,
+    }
+
+
 def _sanitize_signal_payload(raw_data):
     """Normaliza sinais externos e preenche preço de entrada quando possível."""
     data = dict(raw_data or {})
@@ -1114,14 +1203,30 @@ def sniper_worker_loop():
                             volume = float(t.get('quoteVolume', 0) or 0)
 
                             if prob >= THRESHOLD_ENTRADA and decisao in ['COMPRAR', 'VENDER', 'BUY', 'SELL']:
-                                # Score final: confiança + peso de volume para buscar "onde o dinheiro está"
-                                score = prob + min(20.0, volume / 1_000_000)
+                                money_flow = _build_money_flow_metrics(signals, t, decisao)
+                                edge = _get_symbol_trade_edge(sym, decisao)
+                                # Score final: confiança + fluxo de dinheiro + liquidez + histórico
+                                score = (
+                                    prob
+                                    + min(20.0, volume / 1_000_000)
+                                    + (money_flow['money_flow_score'] * 0.35)
+                                    + edge['edge_score']
+                                )
                                 oportunidades.append({
                                     'symbol': sym,
                                     'clean_symbol': clean_sym,
                                     'score': score,
                                     'probabilidade': prob,
-                                    'res': res
+                                    'res': res,
+                                    'money_flow_score': money_flow['money_flow_score'],
+                                    'money_flow_side': money_flow['money_flow_side'],
+                                    'institutional_pressure': money_flow['institutional_pressure'],
+                                    'volume_ratio': money_flow['volume_ratio'],
+                                    'quote_volume_millions': money_flow['quote_volume_millions'],
+                                    'recent_return_pct': money_flow['recent_return_pct'],
+                                    'profit_total': edge['profit_total'],
+                                    'win_rate': edge['win_rate'],
+                                    'sample_size': edge['sample_size'],
                                 })
                         except Exception:
                             continue
@@ -1137,7 +1242,13 @@ def sniper_worker_loop():
                             'score_ajustado': round(float(o.get('adjusted_score', o['score'])), 2),
                             'probabilidade': round(float(o['probabilidade']), 2),
                             'decisao': str(o['res'].get('decisao', 'ABORTAR')).upper(),
-                            'motivo': str(o['res'].get('motivo', 'Sem motivo'))
+                            'motivo': str(o['res'].get('motivo', 'Sem motivo')),
+                            'money_flow_score': round(float(o.get('money_flow_score', 0)), 2),
+                            'money_flow_side': str(o.get('money_flow_side', 'WAIT')),
+                            'volume_ratio': round(float(o.get('volume_ratio', 0)), 2),
+                            'profit_total': round(float(o.get('profit_total', 0)), 2),
+                            'win_rate': round(float(o.get('win_rate', 0)), 2),
+                            'sample_size': int(o.get('sample_size', 0) or 0),
                         }
                         for o in oportunidades_ordenadas[:5]
                     ]
@@ -1177,7 +1288,13 @@ def sniper_worker_loop():
                                 'score_ajustado': round(float(o.get('adjusted_score', o['score'])), 2),
                                 'probabilidade': round(float(o['probabilidade']), 2),
                                 'decisao': str(o['res'].get('decisao', 'ABORTAR')).upper(),
-                                'motivo': str(o['res'].get('motivo', 'Sem motivo'))
+                                'motivo': str(o['res'].get('motivo', 'Sem motivo')),
+                                'money_flow_score': round(float(o.get('money_flow_score', 0)), 2),
+                                'money_flow_side': str(o.get('money_flow_side', 'WAIT')),
+                                'volume_ratio': round(float(o.get('volume_ratio', 0)), 2),
+                                'profit_total': round(float(o.get('profit_total', 0)), 2),
+                                'win_rate': round(float(o.get('win_rate', 0)), 2),
+                                'sample_size': int(o.get('sample_size', 0) or 0),
                             }
                             for o in sorted(oportunidades_ordenadas, key=lambda x: x.get('adjusted_score', x['score']), reverse=True)[:5]
                         ]
