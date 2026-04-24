@@ -275,6 +275,21 @@ Se os servicos cloud falham, o sistema pode:
 - entrar em fallback automatico,
 - ou operar em modo local only.
 
+### 6.5.1 Papel soberano do 3o cerebro
+
+Quando **Gemini e Groq falham ao mesmo tempo** por rate limit, timeout ou fallback simultaneo, o sistema ativa o **3o cerebro soberano**.
+
+Nesse modo:
+
+- o score final passa a ser **100% local**,
+- a direcao da ordem passa a ser definida pela **tendencia macro**,
+- **ALTA = BUY**,
+- **BAIXA = SELL**,
+- a entrada so e autorizada com **minimo de 80% de confianca**,
+- se nao houver direcao valida ou o score ficar abaixo de 80%, a ordem e abortada.
+
+Isso cria um modo de contingencia em que o motor continua operando com seguranca mesmo sem apoio das IAs cloud.
+
 ## 6.5 Travas soberanas
 
 Mesmo com score alto, o sistema ainda pode abortar a entrada quando:
@@ -291,6 +306,7 @@ Mesmo com score alto, o sistema ainda pode abortar a entrada quando:
 Configuracao observada no codigo:
 
 - **Threshold minimo:** 60%
+- **Threshold minimo no fallback soberano do 3o cerebro:** 80%
 - **Maximo de moedas simultaneas:** 5
 - **Posicao unica:** desativada
 - **Take Profit:** 100%
@@ -487,6 +503,7 @@ Principais riscos tecnicos:
 
 1. **Rate limit de IA**
    - pode atrasar ou empobrecer validacao cloud.
+   - quando Gemini e Groq falham juntos, o 3o cerebro assume com regra de 80%.
 
 2. **Falha externa de API**
    - Bybit, Groq, Gemini e Supabase podem sofrer indisponibilidade.

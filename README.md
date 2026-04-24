@@ -25,6 +25,7 @@ O motor combina:
 - **RSI** para leitura de momentum
 - **Volume** para confirmar forca
 - **Consenso de IA** com validacao entre radar tatico, estrategista cloud e logica local
+- **Fallback soberano do 3º cerebro** quando Gemini e Groq falham, com execucao local a partir de 80% de confianca
 
 ## Regras operacionais atuais
 

@@ -65,6 +65,18 @@ class GroqValidator:
 
         return "BUY" if buy_weight > sell_weight else "SELL"
 
+    def _resolve_local_fallback_side(self, tech_data):
+        """
+        Resolve o lado soberano do 3º cérebro quando as clouds falham.
+        Usa a tendência macro como direção final por segurança.
+        """
+        trend = str(tech_data.get('trend', '---')).upper()
+        if trend == "ALTA":
+            return "BUY"
+        if trend == "BAIXA":
+            return "SELL"
+        return "WAIT"
+
     def local_signal(self, tech_data):
         """
         🟢 CÉREBRO 1: MOTOR MATEMÁTICO (LOCAL)
@@ -197,6 +209,9 @@ class GroqValidator:
             "rsi_safe": 20 < rsi < 80,
         }
         
+        fallback_local_active = False
+        local_fallback_side = "WAIT"
+
         if force_local_only:
             # 🧠 MODO FALLBACK: Apenas 3º Cérebro (Local)
             print(f"🧠 [3º CÉREBRO ONLY] Usando análise LOCAL para {symbol}")
@@ -205,6 +220,8 @@ class GroqValidator:
             tactical_action = 'WAIT'
             strategic_action = 'WAIT'
             strategic_motivo = "🧠 3º Cérebro (Matemática Pura) ativado"
+            fallback_local_active = True
+            local_fallback_side = self._resolve_local_fallback_side(tech_data)
         else:
             # ⚙️ MODO NORMAL: Tenta usar Groq + Gemini
             tactical_score, tactical_action = self.get_tactical_signal(tech_data, symbol)
@@ -218,6 +235,8 @@ class GroqValidator:
                 tactical_action = 'WAIT'
                 strategic_action = 'WAIT'
                 strategic_motivo = "Fallback automático: Usando 3º Cérebro (Local)"
+                fallback_local_active = True
+                local_fallback_side = self._resolve_local_fallback_side(tech_data)
 
         tactical_action = self._normalize_side(tactical_action)
         strategic_action = self._normalize_side(strategic_action)
@@ -233,7 +252,7 @@ class GroqValidator:
 
         # 2. Cálculo Ponderado
         # Se apenas local, dá peso total ao local
-        if force_local_only:
+        if fallback_local_active:
             final_prob = local_score
             pesos = "Local 100%"
         else:
@@ -244,21 +263,31 @@ class GroqValidator:
         # 3. Decisão de Sentido baseada no lado explícito das IAs cloud
         decisao = "SCANNER"
         motivo_soberano = ""
-        
-        # Só autoriza se bater 60%
-        if final_prob >= 60:
-            if cloud_side == "BUY":
+
+        required_confidence = 80 if fallback_local_active else 60
+
+        # Só autoriza se bater o mínimo exigido
+        if final_prob >= required_confidence:
+            decision_side = local_fallback_side if fallback_local_active else cloud_side
+
+            if decision_side == "BUY":
                 decisao = "COMPRAR"
-            elif cloud_side == "SELL":
+            elif decision_side == "SELL":
                 decisao = "VENDER"
 
-            # 🛑 TRAVA SOBERANA: lado da IA não pode contrariar a SMA200.
-            if (cloud_side == "BUY" and trend == "BAIXA") or (cloud_side == "SELL" and trend == "ALTA"):
+            # 🛑 TRAVA SOBERANA: lado da decisão não pode contrariar a SMA200.
+            if (decision_side == "BUY" and trend == "BAIXA") or (decision_side == "SELL" and trend == "ALTA"):
                 decisao = "ABORTAR"
-                motivo_soberano = f"Trava Soberana: IA={cloud_side} conflita com tendência {trend}."
-            elif cloud_side == "WAIT":
+                motivo_soberano = f"Trava Soberana: lado={decision_side} conflita com tendência {trend}."
+            elif decision_side == "WAIT":
                 decisao = "ABORTAR"
-                motivo_soberano = "Trava Soberana: IAs cloud sem consenso de direção explícita."
+                motivo_soberano = (
+                    "Trava Soberana: 3º cérebro sem direção válida."
+                    if fallback_local_active else
+                    "Trava Soberana: IAs cloud sem consenso de direção explícita."
+                )
+        elif fallback_local_active:
+            motivo_soberano = "Fallback local ativo, mas abaixo da confiança mínima de 80%."
 
         # 4. Formata Motivo Educativo
         motivo_consensuado = (f"Confluência de {final_prob}% detectada. "
@@ -266,23 +295,36 @@ class GroqValidator:
                               f"Lados Cloud => Gemini: {strategic_action} | Groq: {tactical_action}. "
                               f"Veredito: {strategic_motivo}")
 
+        if fallback_local_active:
+            motivo_consensuado = (
+                f"{motivo_consensuado} | Fallback soberano do 3º cérebro: "
+                f"direção {local_fallback_side} com mínimo de 80%."
+            )
+
         if motivo_soberano:
             motivo_consensuado = f"{motivo_consensuado} | {motivo_soberano}"
 
         # Logging para o Telegram (Educational Purpose)
-        if final_prob >= 60 and decisao in ["COMPRAR", "VENDER"]:
+        if final_prob >= required_confidence and decisao in ["COMPRAR", "VENDER"]:
             print(f"✅ [CONSENSUS ALERT] {final_prob}% - {decisao}")
         
         return {
             "probabilidade": final_prob,
             "decisao": decisao,
             "motivo": motivo_consensuado,
-            "brains": {"local": "online", "groq": "online", "gemini": "online"},
+            "brains": {
+                "local": "ONLY" if fallback_local_active else "online",
+                "groq": "fallback" if fallback_local_active else "online",
+                "gemini": "fallback" if fallback_local_active else "online"
+            },
             "breakdown": {"local": local_score, "groq": tactical_score, "gemini": strategic_score},
             "tactical_action": tactical_action,
             "strategic_action": strategic_action,
             "cloud_side": cloud_side,
+            "fallback_local_side": local_fallback_side,
+            "fallback_local_active": fallback_local_active,
             "strategic_reason": strategic_motivo,
-            "weights": {"local": 25, "groq": 35, "gemini": 40},
+            "weights": {"local": 100, "groq": 0, "gemini": 0} if fallback_local_active else {"local": 25, "groq": 35, "gemini": 40},
+            "required_confidence": required_confidence,
             "local_checks": local_checks,
         }
