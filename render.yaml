@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: ai-sniper-bybit-v5-mestre
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main_web.py
