@@ -19,6 +19,7 @@ class GroqValidator:
         self.gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.gemini_key}"
         self.global_cooldown_until = 0
         self.groq_cooldown_until = 0
+        self.gemini_min_confidence = 60
 
     def _limpar_json(self, texto):
         """Limpa marcações de markdown e espaços para evitar erros de parsing."""
@@ -76,6 +77,14 @@ class GroqValidator:
         if trend == "BAIXA":
             return "SELL"
         return "WAIT"
+
+    def _normalize_gemini_score(self, score):
+        """Gemini nunca trabalha abaixo do piso estratégico de 60%."""
+        try:
+            numeric = int(float(score))
+        except Exception:
+            numeric = self.gemini_min_confidence
+        return max(self.gemini_min_confidence, min(100, numeric))
 
     def local_signal(self, tech_data):
         """
@@ -155,7 +164,7 @@ class GroqValidator:
         Com rate limit detection e cooldown automático.
         """
         if time.time() < self.global_cooldown_until:
-            return 50, "⏸️ Gemini em cooldown..."
+            return self.gemini_min_confidence, "⏸️ Gemini em cooldown...", "WAIT", True
 
         try:
             history = self.memory.get_context()
@@ -172,22 +181,23 @@ class GroqValidator:
                     raw = self._limpar_json(res.json()['candidates'][0]['content']['parts'][0]['text'])
                     data = json.loads(raw)
                     lado = self._normalize_side(data.get('lado', data.get('action', 'WAIT')))
-                    return int(data.get('probabilidade', 50)), data.get('motivo', '✅ Processado'), lado
+                    score = self._normalize_gemini_score(data.get('probabilidade', self.gemini_min_confidence))
+                    return score, data.get('motivo', '✅ Processado'), lado, False
                 except Exception as parse_err:
-                    return 50, f"Resposta inválida: {str(parse_err)[:20]}", "WAIT"
+                    return self.gemini_min_confidence, f"Resposta inválida: {str(parse_err)[:20]}", "WAIT", True
             elif res.status_code == 429:
                 print(f"⚠️ [GEMINI] Rate limit 429. Cooldown 120s")
                 self.global_cooldown_until = time.time() + 120
-                return 50, "Rate limit", "WAIT"
+                return self.gemini_min_confidence, "Rate limit", "WAIT", True
             else:
                 print(f"⚠️ [GEMINI] Status {res.status_code}")
-                return 50, f"Erro {res.status_code}", "WAIT"
+                return self.gemini_min_confidence, f"Erro {res.status_code}", "WAIT", True
         except requests.Timeout:
             print(f"⏱️ [GEMINI] Timeout 5s")
-            return 50, "Timeout", "WAIT"
+            return self.gemini_min_confidence, "Timeout", "WAIT", True
         except Exception as e:
             print(f"⚠️ [GEMINI] {type(e).__name__}: {str(e)[:30]}")
-            return 50, "Erro", "WAIT"
+            return self.gemini_min_confidence, "Erro", "WAIT", True
 
     def consensus_predict(self, tech_data, symbol, force_local_only=False):
         """
@@ -225,10 +235,10 @@ class GroqValidator:
         else:
             # ⚙️ MODO NORMAL: Tenta usar Groq + Gemini
             tactical_score, tactical_action = self.get_tactical_signal(tech_data, symbol)
-            strategic_score, strategic_motivo, strategic_action = self.get_strategic_signal(tech_data, symbol)
+            strategic_score, strategic_motivo, strategic_action, strategic_fallback = self.get_strategic_signal(tech_data, symbol)
             
             # Se ambos falharem (rate limit), ativa fallback automático
-            if tactical_score <= 45 and strategic_score <= 50:
+            if tactical_score <= 45 and strategic_fallback:
                 print(f"🚨 [AUTO-FALLBACK] Ambos APIs retornaram fallback. Ativando 3º Cérebro...")
                 tactical_score = local_score
                 strategic_score = local_score
