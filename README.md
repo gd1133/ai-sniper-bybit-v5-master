@@ -38,6 +38,7 @@ O motor combina:
 - **Saida manual:** disponivel no painel para encerrar operacao antes do TP/SL
 - Modo teste e modo real
 - Gestao de investidores/clientes com armazenamento seguro de credenciais
+- Telegram do cliente opcional: so recebe sinal privado se preencher token e chat id
 
 ## Seguranca
 

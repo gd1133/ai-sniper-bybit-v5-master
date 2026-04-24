@@ -1138,8 +1138,11 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                              f"❌ SL: ${entry_price * 0.97:.2f} (-3% trava)\n\n"
                              f"⏱️ *Cooldown Institucional:* 10 min após fechamento")
                     
-                    url_tg = f"https://api.telegram.org/bot{c.get('tg_token')}/sendMessage"
-                    requests.post(url_tg, json={"chat_id": c.get('chat_id'), "text": c_msg, "parse_mode": "Markdown"})
+                    client_tg_token = str(c.get('tg_token') or '').strip()
+                    client_chat_id = str(c.get('chat_id') or '').strip()
+                    if client_tg_token and client_chat_id:
+                        url_tg = f"https://api.telegram.org/bot{client_tg_token}/sendMessage"
+                        requests.post(url_tg, json={"chat_id": client_chat_id, "text": c_msg, "parse_mode": "Markdown"})
 
                     # Regista no histórico do cliente (com status OPEN)
                     closed_at = time.strftime("%d/%m %H:%M", time.localtime())

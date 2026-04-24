@@ -374,6 +374,8 @@ O sistema possui camada de cadastro para clientes com campos como:
 - token Telegram,
 - chat id.
 
+Os campos de Telegram sao **opcionais**. O cliente pode operar apenas com a API da corretora. O Telegram privado so e usado quando token e chat id forem preenchidos.
+
 ### Responsabilidades desta camada
 
 - centralizar cadastro,

@@ -905,8 +905,8 @@ const App = () => {
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                 <div className="space-y-3">
-                  <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">Token Telegram (Bot)</label>
-                     <input value={addFormFields.tg_token} onChange={(e)=>handleFieldChange('tg_token', e.target.value)} placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11" className="w-full bg-black border border-white/10 p-5 rounded-[1.5rem] focus:border-green-500 outline-none transition-all font-mono text-sm" required />
+                     <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">Token Telegram (Opcional)</label>
+                     <input value={addFormFields.tg_token} onChange={(e)=>handleFieldChange('tg_token', e.target.value)} placeholder="Preencha so se quiser receber sinais no Telegram" className="w-full bg-black border border-white/10 p-5 rounded-[1.5rem] focus:border-green-500 outline-none transition-all font-mono text-sm" />
                 </div>
                 {/* API Key Telegram removed: use only Bot Token + Chat ID */}
                 <div />
@@ -914,8 +914,11 @@ const App = () => {
 
                <div className="grid grid-cols-1 md:grid-cols-2 gap-8 items-end">
                   <div className="space-y-3">
-                     <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">Telegram Chat ID</label>
-                     <input value={addFormFields.chat_id} onChange={(e)=>handleFieldChange('chat_id', e.target.value)} placeholder="6674676849" className="w-full bg-black border border-white/10 p-5 rounded-[1.5rem] focus:border-green-500 outline-none transition-all font-mono" required />
+                     <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">Telegram Chat ID (Opcional)</label>
+                     <input value={addFormFields.chat_id} onChange={(e)=>handleFieldChange('chat_id', e.target.value)} placeholder="Preencha junto com o token se quiser alertas" className="w-full bg-black border border-white/10 p-5 rounded-[1.5rem] focus:border-green-500 outline-none transition-all font-mono" />
+                     <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest ml-1 mt-2">
+                       Telegram e opcional. Sem esses campos, o cliente opera so com a API da corretora.
+                     </p>
                   </div>
                   <div className="flex gap-4 items-center">
                     <button type="submit" disabled={addFormSaving} className="flex-1 bg-green-500 hover:bg-green-400 text-black font-black py-6 rounded-[1.5rem] text-lg transition-all shadow-2xl shadow-green-900/30 flex items-center justify-center gap-4 uppercase italic disabled:opacity-50">
