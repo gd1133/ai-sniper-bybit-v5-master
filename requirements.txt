@@ -1,10 +1,10 @@
 
-ccxt==4.2.0
-pandas==2.1.0
-pandas_ta==0.3.14b0
+ccxt==4.5.34
+pandas==2.2.3
 flask==3.0.0
 flask-cors==4.0.0
 requests==2.31.0
 python-dotenv==1.0.1
 groq==0.4.2
 cryptography==46.0.3
+supabase==2.29.0
