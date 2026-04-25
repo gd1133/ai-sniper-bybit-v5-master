@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 if sys.platform == 'win32':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
 
@@ -44,7 +44,7 @@ public_price_broker = None
 
 load_dotenv()
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='dist', static_url_path='')
 CORS(app)
 
 # Inicializa o Banco de Dados Local (Cria tabelas se não existirem)
@@ -108,6 +108,92 @@ PENALIDADE_STREAK_MESMA_MOEDA = 10      # Penalidade por repetição consecutiva
 SCAN_TOP_COINS = 8                       # Menos ativos por ciclo para responder mais rápido
 SCAN_INTER_SYMBOL_DELAY_SECS = 0.25      # Respiro curto sem travar o radar
 TEST_MODE_ENABLED = db.is_test_mode_enabled()
+
+
+def _frontend_index_path():
+    return os.path.join(app.static_folder or "", 'index.html')
+
+
+def _frontend_is_built():
+    return bool(app.static_folder) and os.path.isfile(_frontend_index_path())
+
+
+def _frontend_asset_exists(path):
+    return bool(path) and bool(app.static_folder) and os.path.isfile(os.path.join(app.static_folder, path))
+
+
+def _render_frontend_status_page():
+    return (
+        """<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DuoIA Maestro</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #020617;
+        color: #e2e8f0;
+        font-family: Inter, Arial, sans-serif;
+      }
+      main {
+        max-width: 720px;
+        margin: 24px;
+        padding: 32px;
+        border: 1px solid rgba(148, 163, 184, 0.2);
+        border-radius: 20px;
+        background: rgba(15, 23, 42, 0.92);
+        box-shadow: 0 20px 50px rgba(15, 23, 42, 0.45);
+      }
+      h1 {
+        margin-top: 0;
+        margin-bottom: 12px;
+        font-size: 2rem;
+      }
+      p {
+        margin: 0 0 12px;
+        line-height: 1.6;
+      }
+      code {
+        padding: 2px 8px;
+        border-radius: 999px;
+        background: rgba(30, 41, 59, 0.95);
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>DuoIA Maestro online</h1>
+      <p>A API Flask esta respondendo normalmente.</p>
+      <p>O bundle do frontend nao foi encontrado em <code>dist/index.html</code>, entao o dashboard React ainda nao foi publicado neste deploy.</p>
+      <p>Assim que o build do Vite for gerado, esta rota passara a entregar o dashboard automaticamente.</p>
+    </main>
+  </body>
+</html>""",
+        200,
+        {"Content-Type": "text/html; charset=utf-8"},
+    )
+
+
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def serve_frontend(path):
+    """Entrega o dashboard React no root sem interferir nas rotas da API."""
+    if path.startswith('api/'):
+        return jsonify({"error": "Endpoint não encontrado"}), 404
+
+    if _frontend_asset_exists(path):
+        return send_from_directory(app.static_folder, path)
+
+    if _frontend_is_built():
+        return send_from_directory(app.static_folder, 'index.html')
+
+    return _render_frontend_status_page()
 
 def _limpar_simbolo(sym):
     """Remove o sufixo da Bybit para limpeza visual no Dashboard."""

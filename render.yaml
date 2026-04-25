@@ -3,5 +3,5 @@ services:
     name: ai-sniper-bybit-v5-mestre
     env: python
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt && npm ci && npm run build
     startCommand: gunicorn -w 2 -k gthread --threads 8 -b 0.0.0.0:$PORT main_web:app

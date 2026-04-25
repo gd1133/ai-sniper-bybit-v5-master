@@ -19,7 +19,14 @@ import {
   Settings
 } from 'lucide-react';
 
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:5000';
+const getApiBase = () => {
+  const configuredBase = import.meta.env.VITE_API_BASE?.trim();
+  if (configuredBase) return configuredBase.replace(/\/$/, '');
+  if (typeof window !== 'undefined') return window.location.origin;
+  return 'http://localhost:5000';
+};
+
+const API_BASE = getApiBase();
 
 const formatEntryPrice = (value) => {
   const numeric = Number(value);
@@ -832,7 +839,7 @@ const App = () => {
                       setAddFormMsg({ type: 'error', text: json.error || 'Erro ao atualizar' });
                     }
                   } else {
-                    const res = await fetch((import.meta.env.VITE_API_BASE || 'http://127.0.0.1:5000') + '/api/vincular_cliente', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                    const res = await fetch(`${API_BASE}/api/vincular_cliente`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
                      const json = await res.json();
                      if (res.ok && json.status === 'sucesso') {
                        if (json.client) {
