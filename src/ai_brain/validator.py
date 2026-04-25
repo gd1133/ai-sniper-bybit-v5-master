@@ -2,7 +2,10 @@ import os
 import json
 import requests
 import time
-from groq import Groq
+try:
+    from groq import Groq
+except Exception:
+    Groq = None
 from src.ai_brain.learning import TradeLearner
 
 class GroqValidator:
@@ -13,7 +16,17 @@ class GroqValidator:
     """
     def __init__(self, api_key_gemini, api_key_groq):
         self.gemini_key = api_key_gemini
-        self.groq_client = Groq(api_key=api_key_groq)
+        self.groq_client = None
+        if Groq is not None and api_key_groq:
+            try:
+                self.groq_client = Groq(api_key=api_key_groq)
+            except TypeError as e:
+                # Erro comum de incompatibilidade entre groq/httpx (argumento proxies).
+                print(f"⚠️ [GROQ INIT] Incompatibilidade de dependencias: {e}")
+            except Exception as e:
+                print(f"⚠️ [GROQ INIT] Falha ao inicializar cliente: {type(e).__name__}: {e}")
+        else:
+            print("⚠️ [GROQ INIT] SDK indisponivel ou chave ausente; usando fallback local.")
         self.memory = TradeLearner()
         self.model = "gemini-2.5-flash"
         self.gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.gemini_key}"
@@ -119,6 +132,9 @@ class GroqValidator:
         Focado em risco e velocidade do candle.
         Com retry logic e rate limit handling.
         """
+        if self.groq_client is None:
+            return 45, "WAIT"
+
         if time.time() < self.groq_cooldown_until:
             return 45, "WAIT"
 
