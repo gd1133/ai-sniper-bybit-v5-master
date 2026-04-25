@@ -4,4 +4,4 @@ services:
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: python main_web.py
+    startCommand: gunicorn -w 2 -k gthread --threads 8 -b 0.0.0.0:$PORT main_web:app
