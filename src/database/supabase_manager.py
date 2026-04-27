@@ -1,13 +1,15 @@
 import base64
 import hashlib
 import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from cryptography.fernet import Fernet, InvalidToken
 from supabase import Client, create_client
 from dotenv import load_dotenv
 
-load_dotenv()
+ENV_PATH = Path(__file__).resolve().parents[2] / '.env'
+load_dotenv(dotenv_path=ENV_PATH)
 
 
 def _normalize_account_mode(value: Any) -> str:
