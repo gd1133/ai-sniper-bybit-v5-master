@@ -10,6 +10,17 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _normalize_account_mode(value: Any) -> str:
+    normalized = str(value or '').strip().lower()
+    if normalized in {'testnet', 'real'}:
+        return normalized
+    if value in [True, 1, '1', 'true', 'TRUE', 'True']:
+        return 'testnet'
+    if value in [False, 0, '0', 'false', 'FALSE', 'False']:
+        return 'real'
+    return 'testnet'
+
+
 class SupabaseManager:
     def __init__(self):
         self.url = os.getenv("SUPABASE_URL")
@@ -81,6 +92,7 @@ class SupabaseManager:
         return protected
 
     def _prepare_client_payload(self, client: Dict[str, Any]) -> Dict[str, Any]:
+        account_mode = _normalize_account_mode(client.get("account_mode", client.get("is_testnet")))
         payload = {
             "nome": client.get("nome"),
             "bybit_key": client.get("bybit_key"),
@@ -90,8 +102,12 @@ class SupabaseManager:
             "chat_id": client.get("chat_id"),
             "status": client.get("status", "ativo"),
             "saldo_base": float(client.get("saldo_base", 1000.0) or 1000.0),
-            "is_testnet": bool(client.get("is_testnet", True)),
-            "balance_source": client.get("balance_source", "form_test_balance"),
+            "is_testnet": account_mode == "testnet",
+            "account_mode": account_mode,
+            "balance_source": client.get(
+                "balance_source",
+                "broker_testnet_balance" if account_mode == "testnet" else "broker_real_balance",
+            ),
         }
         client_id = client.get("id")
         if client_id is not None:
@@ -110,8 +126,14 @@ class SupabaseManager:
         if "is_testnet" in normalized:
             value = normalized.get("is_testnet")
             normalized["is_testnet"] = 1 if value in [True, 1, "1", "true", "TRUE"] else 0
+        normalized["account_mode"] = _normalize_account_mode(
+            normalized.get("account_mode", normalized.get("is_testnet"))
+        )
+        normalized["is_testnet"] = 1 if normalized["account_mode"] == "testnet" else 0
         if "balance_source" not in normalized:
-            normalized["balance_source"] = "form_test_balance"
+            normalized["balance_source"] = (
+                "broker_testnet_balance" if normalized["account_mode"] == "testnet" else "broker_real_balance"
+            )
         return normalized
 
     def get_clients(self, active_only: bool = False) -> Optional[List[Dict[str, Any]]]:

@@ -3,6 +3,32 @@ import os
 from typing import List, Dict, Any
 
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '..', 'database.db')
+VALID_ACCOUNT_MODES = {'testnet', 'real'}
+VALID_OPERATION_MODES = {'paper', 'testnet', 'real'}
+
+
+def is_truthy(value: Any) -> bool:
+    return str(value or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def normalize_account_mode(value: Any) -> str:
+    normalized = str(value or '').strip().lower()
+    if normalized in VALID_ACCOUNT_MODES:
+        return normalized
+    if value in [True, 1, '1', 'true', 'TRUE', 'True']:
+        return 'testnet'
+    if value in [False, 0, '0', 'false', 'FALSE', 'False']:
+        return 'real'
+    return 'testnet'
+
+
+def normalize_operation_mode(value: Any) -> str:
+    normalized = str(value or '').strip().lower()
+    if normalized == 'test':
+        return 'paper'
+    if normalized in VALID_OPERATION_MODES:
+        return normalized
+    return 'paper'
 
 
 def _connect():
@@ -40,9 +66,29 @@ def init_db():
         status TEXT DEFAULT 'ativo',
         saldo_base REAL DEFAULT 1000.0,
         is_testnet INTEGER DEFAULT 1,
+        account_mode TEXT DEFAULT 'testnet',
+        balance_source TEXT DEFAULT 'broker_testnet_balance',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     ''')
+    _ensure_column(cur, 'clientes_sniper', 'account_mode', "TEXT DEFAULT 'testnet'")
+    _ensure_column(cur, 'clientes_sniper', 'balance_source', "TEXT DEFAULT 'broker_testnet_balance'")
+    cur.execute("""
+        UPDATE clientes_sniper
+        SET account_mode = CASE
+            WHEN COALESCE(is_testnet, 1) = 1 THEN 'testnet'
+            ELSE 'real'
+        END
+        WHERE account_mode IS NULL OR TRIM(account_mode) = ''
+    """)
+    cur.execute("""
+        UPDATE clientes_sniper
+        SET balance_source = CASE
+            WHEN COALESCE(account_mode, 'testnet') = 'testnet' THEN 'broker_testnet_balance'
+            ELSE 'broker_real_balance'
+        END
+        WHERE balance_source IS NULL OR TRIM(balance_source) = ''
+    """)
 
     # Tabela de histórico de trades (para P&L tracking)
     cur.execute('''
@@ -109,6 +155,13 @@ def add_client(data: Dict[str, Any]):
     try:
         conn = _connect()
         cur = conn.cursor()
+        account_mode = normalize_account_mode(data.get('account_mode', data.get('is_testnet')))
+        balance_source = str(
+            data.get(
+                'balance_source',
+                'broker_testnet_balance' if account_mode == 'testnet' else 'broker_real_balance',
+            )
+        )
         payload = (
             data.get('nome'),
             data.get('bybit_key'),
@@ -118,7 +171,9 @@ def add_client(data: Dict[str, Any]):
             data.get('chat_id'),
             data.get('status', 'ativo'),
             data.get('saldo_base', 1000.0),
-            1 if data.get('is_testnet', True) else 0
+            1 if account_mode == 'testnet' else 0,
+            account_mode,
+            balance_source,
         )
         explicit_id = data.get('id')
 
@@ -129,13 +184,13 @@ def add_client(data: Dict[str, Any]):
                 return int(explicit_id) if update_client(int(explicit_id), data) else False
 
             cur.execute(
-                'INSERT INTO clientes_sniper (id, nome, bybit_key, bybit_secret, tg_token, tg_api_key, chat_id, status, saldo_base, is_testnet) VALUES (?,?,?,?,?,?,?,?,?,?)',
+                'INSERT INTO clientes_sniper (id, nome, bybit_key, bybit_secret, tg_token, tg_api_key, chat_id, status, saldo_base, is_testnet, account_mode, balance_source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
                 (int(explicit_id), *payload)
             )
             inserted_id = int(explicit_id)
         else:
             cur.execute(
-                'INSERT INTO clientes_sniper (nome, bybit_key, bybit_secret, tg_token, tg_api_key, chat_id, status, saldo_base, is_testnet) VALUES (?,?,?,?,?,?,?,?,?)',
+                'INSERT INTO clientes_sniper (nome, bybit_key, bybit_secret, tg_token, tg_api_key, chat_id, status, saldo_base, is_testnet, account_mode, balance_source) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
                 payload
             )
             inserted_id = cur.lastrowid
@@ -226,8 +281,15 @@ def update_client(client_id: int, data: Dict[str, Any]) -> bool:
     try:
         conn = _connect()
         cur = conn.cursor()
+        account_mode = normalize_account_mode(data.get('account_mode', data.get('is_testnet')))
+        balance_source = str(
+            data.get(
+                'balance_source',
+                'broker_testnet_balance' if account_mode == 'testnet' else 'broker_real_balance',
+            )
+        )
         cur.execute(
-            "UPDATE clientes_sniper SET nome=?, bybit_key=?, bybit_secret=?, tg_token=?, tg_api_key=?, chat_id=?, status=?, saldo_base=?, is_testnet=? WHERE id=?",
+            "UPDATE clientes_sniper SET nome=?, bybit_key=?, bybit_secret=?, tg_token=?, tg_api_key=?, chat_id=?, status=?, saldo_base=?, is_testnet=?, account_mode=?, balance_source=? WHERE id=?",
             (
                 data.get('nome'),
                 data.get('bybit_key'),
@@ -237,7 +299,9 @@ def update_client(client_id: int, data: Dict[str, Any]) -> bool:
                 data.get('chat_id'),
                 data.get('status', 'ativo'),
                 data.get('saldo_base', 1000.0),
-                1 if data.get('is_testnet', True) else 0,
+                1 if account_mode == 'testnet' else 0,
+                account_mode,
+                balance_source,
                 client_id,
             ),
         )
@@ -362,6 +426,19 @@ def set_test_balance(amount: float) -> bool:
 def is_test_mode_enabled() -> bool:
     """Verifica se modo teste está ativo"""
     return get_config('TEST_MODE', 'false').lower() == 'true'
+
+
+def get_operation_mode() -> str:
+    mode = normalize_operation_mode(get_config('APP_MODE', ''))
+    if mode in VALID_OPERATION_MODES and get_config('APP_MODE') is not None:
+        return mode
+    if is_test_mode_enabled():
+        return 'paper'
+    return 'testnet' if is_truthy(os.getenv('USE_TESTNET', 'true')) else 'real'
+
+
+def set_operation_mode(mode: str) -> bool:
+    return set_config('APP_MODE', normalize_operation_mode(mode))
 
 
 def enable_test_mode() -> bool:

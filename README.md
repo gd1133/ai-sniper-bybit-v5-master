@@ -58,6 +58,46 @@ O motor combina:
 
 Copie `.env.example` para `.env` e preencha com suas chaves.
 
+Principais variaveis do modo operacional:
+
+- `APP_MODE=paper|testnet|real`
+- `ALLOW_ORDER_EXECUTION=true|false`
+- `ALLOW_REAL_TRADING=true|false`
+- `USE_TESTNET=true|false` (compatibilidade para fallback legado)
+
+Regras de seguranca:
+
+- `paper`: usa preco real e saldo ficticio, nunca envia ordem
+- `testnet`: consulta e pode enviar ordens para a Bybit testnet apenas se `ALLOW_ORDER_EXECUTION=true`
+- `real`: consulta e pode enviar ordens reais apenas se `ALLOW_ORDER_EXECUTION=true` **e** `ALLOW_REAL_TRADING=true`
+
+## Supabase
+
+O projeto usa a tabela `clientes` com os campos:
+
+- `account_mode` (`testnet` ou `real`)
+- `is_testnet` (compatibilidade)
+- `balance_source`
+
+Se o schema da nuvem estiver desatualizado, aplique `tools/supabase_schema.sql`.
+
+## Deploy no Render / GitHub
+
+Valores recomendados para subir com seguranca:
+
+```env
+APP_MODE=paper
+ALLOW_ORDER_EXECUTION=false
+ALLOW_REAL_TRADING=false
+USE_TESTNET=true
+```
+
+Depois do deploy:
+
+1. Use o dashboard para alternar entre `paper`, `testnet` e `real`
+2. Cadastre clientes com `Conta Testnet` ou `Conta Real`
+3. So habilite `ALLOW_REAL_TRADING=true` quando quiser liberar execucao real
+
 ## Como rodar
 
 ### Backend

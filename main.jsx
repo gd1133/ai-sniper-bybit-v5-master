@@ -27,6 +27,54 @@ const getApiBase = () => {
 };
 
 const API_BASE = getApiBase();
+const OPERATION_MODE_META = {
+  paper: {
+    badge: '🧪 PAPER',
+    label: 'PAPER TRADING',
+    dot: 'bg-yellow-500',
+    shell: 'bg-yellow-500/10 border-yellow-500/30 text-yellow-500',
+  },
+  testnet: {
+    badge: '🛰️ TESTNET',
+    label: 'BYBIT TESTNET',
+    dot: 'bg-blue-400',
+    shell: 'bg-blue-500/10 border-blue-500/30 text-blue-300',
+  },
+  real: {
+    badge: '💼 REAL',
+    label: 'CONTA REAL',
+    dot: 'bg-red-500',
+    shell: 'bg-red-500/10 border-red-500/30 text-red-400',
+  },
+};
+
+const normalizeOperationMode = (value) => {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'test') return 'paper';
+  return ['paper', 'testnet', 'real'].includes(normalized) ? normalized : 'paper';
+};
+
+const normalizeAccountMode = (value) => {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (['testnet', 'real'].includes(normalized)) return normalized;
+  if (value === true || value === 1 || value === '1' || value === 'true') return 'testnet';
+  if (value === false || value === 0 || value === '0' || value === 'false') return 'real';
+  return 'testnet';
+};
+
+const normalizeInvestorRecord = (client) => {
+  const accountMode = normalizeAccountMode(client?.account_mode ?? client?.is_testnet);
+  return {
+    ...client,
+    banca: client?.saldo_real ?? client?.saldo_base ?? client?.banca ?? 0,
+    saldo_real: client?.saldo_real,
+    saldo_configurado: client?.saldo_base ?? client?.saldo_configurado ?? 0,
+    mode: accountMode.toUpperCase(),
+    account_mode: accountMode,
+    storage_source: String(client?.storage_source || client?.source || 'local').toUpperCase(),
+    pnl: client?.pnl ?? '+0.0%',
+  };
+};
 
 const formatEntryPrice = (value) => {
   const numeric = Number(value);
@@ -111,9 +159,10 @@ const App = () => {
   const [showAddForm, setShowAddForm] = useState(false);
   const [addFormMsg, setAddFormMsg] = useState(null);
   const [addFormSaving, setAddFormSaving] = useState(false);
+  const [modeUpdating, setModeUpdating] = useState(false);
   const [manualClosingSymbol, setManualClosingSymbol] = useState(null);
   const [addFormFields, setAddFormFields] = useState({
-    id: null, nome: '', saldo_base: 1000, bybit_key: '', bybit_secret: '', tg_token: '', chat_id: '', is_testnet: true
+    id: null, nome: '', saldo_base: 0, bybit_key: '', bybit_secret: '', tg_token: '', chat_id: '', account_mode: 'testnet'
   });
   const [data, setData] = useState({
     balance: 0,  // Será atualizado do backend
@@ -125,6 +174,10 @@ const App = () => {
     trades: [],
     test_balance: 0,
     test_mode: false,
+    operation_mode: 'paper',
+    operation_mode_label: 'PAPER TRADING',
+    execution_enabled: false,
+    execution_label: 'Sem ordens reais',
     last_sniper_signal: null,
     evidence: null,
     ia2_decision: { 
@@ -180,7 +233,11 @@ const App = () => {
             ...json,
             balance: json.balance ?? json.test_balance ?? 0,
             test_balance: json.test_balance ?? 0,
-            test_mode: json.test_mode ?? false
+            test_mode: json.test_mode ?? false,
+            operation_mode: normalizeOperationMode(json.operation_mode ?? json.mode),
+            operation_mode_label: json.operation_mode_label ?? prev.operation_mode_label,
+            execution_enabled: json.execution_enabled ?? prev.execution_enabled,
+            execution_label: json.execution_label ?? prev.execution_label,
           }));
         }
       } catch (e) {
@@ -194,11 +251,11 @@ const App = () => {
       }
     };
 
-    const fetchInvestidores = async () => {
+  const fetchInvestidores = async () => {
       try {
         const result = await fetchJson('/api/investidores');
         if (!result.ok) return;
-        if (mounted) setInvestidores(result.json);
+        if (mounted) setInvestidores((result.json || []).map(normalizeInvestorRecord));
       } catch (e) {
         logApiError('Erro fetching /api/investidores', e);
       }
@@ -212,7 +269,7 @@ const App = () => {
   }, []);
 
   const openNewInvestorModal = () => {
-    setAddFormFields({ id: null, nome: '', saldo_base: 1000, bybit_key: '', bybit_secret: '', tg_token: '', chat_id: '', is_testnet: true });
+    setAddFormFields({ id: null, nome: '', saldo_base: 0, bybit_key: '', bybit_secret: '', tg_token: '', chat_id: '', account_mode: 'testnet' });
     setAddFormMsg(null);
     setShowAddForm(true);
   };
@@ -225,12 +282,12 @@ const App = () => {
       setAddFormFields({
         id: c.id,
         nome: c.nome || '',
-        saldo_base: c.saldo_base || 1000,
+        saldo_base: c.saldo_base || 0,
         bybit_key: c.bybit_key || '',
         bybit_secret: c.bybit_secret || '',
         tg_token: c.tg_token || '',
         chat_id: c.chat_id || '',
-        is_testnet: c.is_testnet === 1
+        account_mode: normalizeAccountMode(c.account_mode ?? c.is_testnet)
       });
       setAddFormMsg(null);
       setShowAddForm(true);
@@ -261,10 +318,37 @@ const App = () => {
         ...json,
         balance: json.balance ?? json.test_balance ?? 0,
         test_balance: json.test_balance ?? 0,
-        test_mode: json.test_mode ?? false
+        test_mode: json.test_mode ?? false,
+        operation_mode: normalizeOperationMode(json.operation_mode ?? json.mode),
+        operation_mode_label: json.operation_mode_label ?? prev.operation_mode_label,
+        execution_enabled: json.execution_enabled ?? prev.execution_enabled,
+        execution_label: json.execution_label ?? prev.execution_label,
       }));
     } catch (e) {
       console.error('Erro ao atualizar status', e);
+    }
+  };
+
+  const handleOperationModeChange = async (mode) => {
+    if (modeUpdating || normalizeOperationMode(mode) === currentOperationMode) return;
+    try {
+      setModeUpdating(true);
+      const res = await fetch(`${API_BASE}/api/mode/toggle`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode }),
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        alert(json.error || json.message || 'Erro ao alternar modo');
+        return;
+      }
+      await refreshStatusSnapshot();
+    } catch (e) {
+      console.error('Erro ao alternar modo operacional', e);
+      alert('Erro ao alternar modo operacional');
+    } finally {
+      setModeUpdating(false);
     }
   };
 
@@ -298,15 +382,7 @@ const App = () => {
   const upsertInvestor = (client) => {
     if (!client?.id) return;
     setInvestidores(prev => {
-      const normalized = {
-        ...client,
-        banca: client.saldo_real ?? client.saldo_base ?? client.banca ?? 0,
-        saldo_real: client.saldo_real,
-        saldo_configurado: client.saldo_base ?? client.saldo_configurado ?? 0,
-        mode: client.is_testnet === 1 || client.is_testnet === true ? 'TESTNET' : 'REAL',
-        storage_source: String(client.storage_source || client.source || 'local').toUpperCase(),
-        pnl: client.pnl ?? '+0.0%',
-      };
+      const normalized = normalizeInvestorRecord(client);
       const existingIndex = prev.findIndex(inv => Number(inv.id) === Number(client.id));
       if (existingIndex === -1) return [normalized, ...prev];
       const next = [...prev];
@@ -317,9 +393,11 @@ const App = () => {
 
   // Lista de pessoas (será alimentada pelo banco local futuramente)
   const [investidores, setInvestidores] = useState([]);
-  const formIsTestMode = Boolean(addFormFields.is_testnet);
-  const formBalanceLabel = formIsTestMode ? 'Saldo de Teste (USDT)' : 'Saldo Real (lido da Bybit)';
-  const formBalancePlaceholder = formIsTestMode ? '1000' : 'Lido automaticamente da conta real';
+  const currentOperationMode = normalizeOperationMode(data.operation_mode);
+  const currentOperationMeta = OPERATION_MODE_META[currentOperationMode] || OPERATION_MODE_META.paper;
+  const formAccountMode = normalizeAccountMode(addFormFields.account_mode);
+  const formBalanceLabel = formAccountMode === 'testnet' ? 'Saldo sincronizado da Testnet' : 'Saldo sincronizado da Conta Real';
+  const formBalancePlaceholder = formAccountMode === 'testnet' ? 'Será lido da Bybit Testnet' : 'Será lido da Bybit Real';
 
   // Métricas live derivadas dos trades abertos (atualiza cards do topo em tempo real)
   const activeTrades = data.active_trades || [];
@@ -403,18 +481,34 @@ const App = () => {
         </nav>
 
         <div className="hidden md:flex items-center gap-4">
-           {/* Indicador de Modo Teste/Real */}
-           <div className={`px-4 py-1.5 rounded-full border flex items-center gap-2 ${data.test_mode ? 'bg-yellow-500/10 border-yellow-500/30' : 'bg-red-500/10 border-red-500/30'}`}>
-              <div className={`w-1.5 h-1.5 rounded-full animate-pulse ${data.test_mode ? 'bg-yellow-500' : 'bg-red-500'}`} />
-              <span className={`text-[10px] font-black uppercase italic ${data.test_mode ? 'text-yellow-500' : 'text-red-500'}`}>
-                {data.test_mode ? '🧪 MODO TESTE' : '💼 MODO REAL'}
+           <div className={`px-4 py-1.5 rounded-full border flex items-center gap-2 ${currentOperationMeta.shell}`}>
+              <div className={`w-1.5 h-1.5 rounded-full animate-pulse ${currentOperationMeta.dot}`} />
+              <span className="text-[10px] font-black uppercase italic">
+                {currentOperationMeta.badge}
               </span>
            </div>
+
+           <div className="flex bg-black p-1 rounded-xl border border-white/10">
+             {['paper', 'testnet', 'real'].map((mode) => (
+               <button
+                 key={mode}
+                 type="button"
+                 disabled={modeUpdating}
+                 onClick={() => handleOperationModeChange(mode)}
+                 className={`px-4 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${
+                   currentOperationMode === mode
+                     ? 'bg-green-500 text-black'
+                     : 'text-zinc-500 hover:text-white hover:bg-white/5'
+                 } ${modeUpdating ? 'opacity-50 cursor-not-allowed' : ''}`}
+               >
+                 {OPERATION_MODE_META[mode].badge}
+               </button>
+             ))}
+           </div>
            
-           {/* Status da Análise */}
            <div className="bg-zinc-900/50 px-4 py-1.5 rounded-full border border-green-500/20 flex items-center gap-2">
               <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" />
-              <span className="text-[10px] font-black text-green-500 uppercase italic">{data.status || 'Conectando...'}</span>
+              <span className="text-[10px] font-black text-green-500 uppercase italic">{data.execution_label || data.status || 'Conectando...'}</span>
            </div>
         </div>
       </header>
@@ -426,11 +520,11 @@ const App = () => {
           <div className="animate-in fade-in duration-500 space-y-8">
             <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
               <KpiCard 
-                label={data.test_mode ? "🧪 SALDO PAPER (USDT)" : "BALANCE EST. (USDT)"} 
-                value={`$${(data.test_mode ? currentBalanceLive : (data.balance || 100)).toLocaleString('pt-PT', { maximumFractionDigits: 2 })}`}
-                sub={data.test_mode
+                label={currentOperationMode === 'paper' ? "🧪 SALDO PAPER (USDT)" : `💰 SALDO ${currentOperationMode === 'testnet' ? 'TESTNET' : 'REAL'} (USDT)`} 
+                value={`$${(currentOperationMode === 'paper' ? currentBalanceLive : (data.balance || 100)).toLocaleString('pt-PT', { maximumFractionDigits: 2 })}`}
+                sub={currentOperationMode === 'paper'
                   ? `Base: $${Number(data.balance || 0).toLocaleString('pt-PT', { maximumFractionDigits: 2 })} • Aberto: $${unrealizedPnl.toLocaleString('pt-PT', { maximumFractionDigits: 2 })}`
-                  : "Modo Produção"}
+                  : (data.execution_label || data.operation_mode_label || 'Modo Produção')}
                 icon={<Database size={18}/>} 
                 emerald 
               />
@@ -756,8 +850,8 @@ const App = () => {
                       <td className="p-8">
                         <div className="font-black italic text-xl uppercase">{inv.nome}</div>
                         <div className="flex items-center gap-2 mt-3 flex-wrap">
-                          <span className={`px-3 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest ${String(inv.mode || 'TESTNET').toUpperCase() === 'REAL' ? 'bg-green-500/10 border-green-500/30 text-green-400' : 'bg-yellow-500/10 border-yellow-500/30 text-yellow-300'}`}>
-                            {String(inv.mode || 'TESTNET').toUpperCase() === 'REAL' ? 'Conta Real' : 'Modo Teste'}
+                          <span className={`px-3 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest ${String(inv.account_mode || inv.mode || 'TESTNET').toUpperCase() === 'REAL' ? 'bg-green-500/10 border-green-500/30 text-green-400' : 'bg-blue-500/10 border-blue-500/30 text-blue-300'}`}>
+                            {String(inv.account_mode || inv.mode || 'TESTNET').toUpperCase() === 'REAL' ? 'Conta Real' : 'Conta Testnet'}
                           </span>
                           <span className={`px-3 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest ${String(inv.storage_source || 'LOCAL').toUpperCase() === 'SUPABASE' ? 'bg-blue-500/10 border-blue-500/30 text-blue-300' : 'bg-zinc-800 border-white/10 text-zinc-300'}`}>
                             {String(inv.storage_source || 'LOCAL').toUpperCase()}
@@ -816,12 +910,13 @@ const App = () => {
                 setAddFormMsg(null);
                 const payload = {
                   nome: addFormFields.nome,
-                  saldo_base: addFormFields.is_testnet ? (parseFloat(addFormFields.saldo_base) || 1000) : null,
+                  saldo_base: parseFloat(addFormFields.saldo_base) || 0,
                   bybit_key: addFormFields.bybit_key,
                   bybit_secret: addFormFields.bybit_secret,
                   tg_token: addFormFields.tg_token,
                   chat_id: addFormFields.chat_id,
-                  is_testnet: addFormFields.is_testnet
+                  account_mode: formAccountMode,
+                  is_testnet: formAccountMode === 'testnet'
                 };
                 try {
                   // Se id definido, atualiza; caso contrário cria novo
@@ -834,7 +929,7 @@ const App = () => {
                          setAddFormFields(prev => ({ ...prev, id: json.client.id, saldo_base: json.client.saldo_base ?? prev.saldo_base }));
                        }
                        setAddFormMsg({ type: 'success', text: json.msg || 'Investidor atualizado' });
-                       const invRes = await fetch(`${API_BASE}/api/investidores`); if (invRes.ok) setInvestidores(await invRes.json());
+                        const invRes = await fetch(`${API_BASE}/api/investidores`); if (invRes.ok) setInvestidores((await invRes.json()).map(normalizeInvestorRecord));
                      } else {
                       setAddFormMsg({ type: 'error', text: json.error || 'Erro ao atualizar' });
                     }
@@ -847,7 +942,7 @@ const App = () => {
                          setAddFormFields(prev => ({ ...prev, id: json.client.id, saldo_base: json.client.saldo_base ?? prev.saldo_base }));
                        }
                        setAddFormMsg({ type: 'success', text: json.msg || 'Investidor salvo com sucesso' });
-                       try { const invRes = await fetch(`${API_BASE}/api/investidores`); if (invRes.ok) setInvestidores(await invRes.json()); } catch (e) { }
+                        try { const invRes = await fetch(`${API_BASE}/api/investidores`); if (invRes.ok) setInvestidores((await invRes.json()).map(normalizeInvestorRecord)); } catch (e) { }
                      } else {
                       setAddFormMsg({ type: 'error', text: json.msg || json.error || 'Erro ao salvar investidor' });
                     }
@@ -859,44 +954,46 @@ const App = () => {
                <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                   <div className="space-y-3 md:col-span-2">
                      <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">Modo da Conta</label>
-                     <div className="grid grid-cols-2 gap-4">
-                        <button
-                          type="button"
-                          onClick={() => handleFieldChange('is_testnet', true)}
-                          className={`px-5 py-4 rounded-[1.5rem] border text-sm font-black uppercase italic transition-all ${formIsTestMode ? 'bg-yellow-500/15 border-yellow-500/40 text-yellow-300' : 'bg-black border-white/10 text-zinc-500 hover:text-white'}`}
-                        >
-                          🧪 Modo Teste
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleFieldChange('is_testnet', false)}
-                          className={`px-5 py-4 rounded-[1.5rem] border text-sm font-black uppercase italic transition-all ${!formIsTestMode ? 'bg-green-500/15 border-green-500/40 text-green-300' : 'bg-black border-white/10 text-zinc-500 hover:text-white'}`}
-                        >
-                          💼 Conta Real
-                        </button>
-                     </div>
-                     <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest ml-1">
-                       {formIsTestMode
-                         ? 'No teste, o saldo digitado aqui vira a banca do treinamento.'
-                         : 'Na conta real, o saldo vem direto da Bybit e o campo abaixo fica apenas informativo.'}
-                     </p>
-                  </div>
+                      <div className="grid grid-cols-2 gap-4">
+                         <button
+                           type="button"
+                           onClick={() => handleFieldChange('account_mode', 'testnet')}
+                           className={`px-5 py-4 rounded-[1.5rem] border text-sm font-black uppercase italic transition-all ${formAccountMode === 'testnet' ? 'bg-blue-500/15 border-blue-500/40 text-blue-300' : 'bg-black border-white/10 text-zinc-500 hover:text-white'}`}
+                         >
+                           🛰️ Conta Testnet
+                         </button>
+                         <button
+                           type="button"
+                           onClick={() => handleFieldChange('account_mode', 'real')}
+                           className={`px-5 py-4 rounded-[1.5rem] border text-sm font-black uppercase italic transition-all ${formAccountMode === 'real' ? 'bg-green-500/15 border-green-500/40 text-green-300' : 'bg-black border-white/10 text-zinc-500 hover:text-white'}`}
+                         >
+                           💼 Conta Real
+                         </button>
+                      </div>
+                      <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest ml-1">
+                        {formAccountMode === 'testnet'
+                          ? 'A conta testnet valida chaves sandbox e sincroniza saldo da Bybit Testnet.'
+                          : 'A conta real valida chaves reais e sincroniza saldo da Bybit Real.'}
+                      </p>
+                   </div>
                   <div className="space-y-3">
                      <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">Nome do Cliente</label>
                      <input value={addFormFields.nome} onChange={(e)=>handleFieldChange('nome', e.target.value)} className="w-full bg-black border border-white/10 p-5 rounded-[1.5rem] focus:border-green-500 outline-none transition-all italic text-lg" placeholder="Ex: Roberto Ferreira" required />
                   </div>
                   <div className="space-y-3">
                      <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">{formBalanceLabel}</label>
-                     <input
-                       value={formIsTestMode ? addFormFields.saldo_base : (addFormFields.saldo_base ? `Sincronizado: ${addFormFields.saldo_base}` : '')}
-                       onChange={(e)=>handleFieldChange('saldo_base', e.target.value)}
-                       type="text"
-                       disabled={!formIsTestMode}
-                       className={`w-full p-5 rounded-[1.5rem] outline-none transition-all font-mono text-lg border ${formIsTestMode ? 'bg-black border-white/10 focus:border-green-500' : 'bg-zinc-950 border-white/5 text-zinc-500 cursor-not-allowed'}`}
-                       placeholder={formBalancePlaceholder}
-                       required={formIsTestMode}
-                     />
-                  </div>
+                      <input
+                        value={addFormFields.saldo_base ? `Sincronizado: ${addFormFields.saldo_base}` : ''}
+                        onChange={() => {}}
+                        type="text"
+                        disabled
+                        className="w-full p-5 rounded-[1.5rem] outline-none transition-all font-mono text-lg border bg-zinc-950 border-white/5 text-zinc-500 cursor-not-allowed"
+                        placeholder={formBalancePlaceholder}
+                      />
+                      <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest ml-1">
+                        O saldo aparece depois que a chave for validada e salva.
+                      </p>
+                   </div>
                 </div>
                
                <div className="grid grid-cols-1 md:grid-cols-2 gap-8">

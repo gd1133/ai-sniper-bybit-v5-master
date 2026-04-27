@@ -3,5 +3,14 @@ services:
     name: ai-sniper-bybit-v5-mestre
     env: python
     plan: free
+    envVars:
+      - key: APP_MODE
+        value: paper
+      - key: ALLOW_ORDER_EXECUTION
+        value: "false"
+      - key: ALLOW_REAL_TRADING
+        value: "false"
+      - key: USE_TESTNET
+        value: "true"
     buildCommand: pip install -r requirements.txt && npm ci && npm run build
     startCommand: gunicorn -w 2 -k gthread --threads 8 -b 0.0.0.0:$PORT main_web:app

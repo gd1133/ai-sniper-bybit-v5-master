@@ -44,6 +44,75 @@ public_price_broker = None
 
 load_dotenv()
 
+VALID_OPERATION_MODES = {'paper', 'testnet', 'real'}
+VALID_ACCOUNT_MODES = {'testnet', 'real'}
+
+
+def _parse_bool_env(name, default='false'):
+    return str(os.getenv(name, default) or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _normalize_operation_mode(value):
+    raw = str(value or '').strip().lower()
+    if raw == 'test':
+        return 'paper'
+    if raw in VALID_OPERATION_MODES:
+        return raw
+    return 'paper'
+
+
+def _normalize_account_mode(value):
+    raw = str(value or '').strip().lower()
+    if raw in VALID_ACCOUNT_MODES:
+        return raw
+    if value in [True, 1, '1', 'true', 'TRUE', 'True']:
+        return 'testnet'
+    if value in [False, 0, '0', 'false', 'FALSE', 'False']:
+        return 'real'
+    return 'testnet'
+
+
+def _is_testnet_account(value):
+    return _normalize_account_mode(value) == 'testnet'
+
+
+def _mode_display_label(mode):
+    labels = {
+        'paper': 'PAPER TRADING',
+        'testnet': 'BYBIT TESTNET',
+        'real': 'CONTA REAL',
+    }
+    return labels.get(_normalize_operation_mode(mode), 'PAPER TRADING')
+
+
+def _mode_balance_source(mode):
+    return 'broker_testnet_balance' if _normalize_account_mode(mode) == 'testnet' else 'broker_real_balance'
+
+
+def _mode_uses_testnet(mode):
+    return _normalize_operation_mode(mode) == 'testnet'
+
+
+def _is_order_execution_enabled(mode):
+    mode = _normalize_operation_mode(mode)
+    if mode == 'paper':
+        return False
+    if not ALLOW_ORDER_EXECUTION:
+        return False
+    if mode == 'real' and not ALLOW_REAL_TRADING:
+        return False
+    return True
+
+
+def _execution_status_label(mode):
+    mode = _normalize_operation_mode(mode)
+    if mode == 'paper':
+        return 'Sem ordens reais'
+    if mode == 'testnet':
+        return 'Ordens na testnet ativas' if _is_order_execution_enabled(mode) else 'Ordens na testnet bloqueadas'
+    return 'Ordens reais ativas' if _is_order_execution_enabled(mode) else 'Ordens reais bloqueadas'
+
+
 app = Flask(__name__, static_folder='dist', static_url_path='')
 CORS(app)
 
@@ -52,12 +121,15 @@ db.init_db()
 
 # 🧪 CARREGA CONFIGURAÇÕES DE TESTE
 TEST_BALANCE = db.get_test_balance()  # Saldo fictício para treinar
-TEST_MODE_ENABLED = db.is_test_mode_enabled()
+APP_MODE = _normalize_operation_mode(db.get_operation_mode())
+TEST_MODE_ENABLED = APP_MODE == 'paper'
+ALLOW_ORDER_EXECUTION = _parse_bool_env('ALLOW_ORDER_EXECUTION', 'false')
+ALLOW_REAL_TRADING = _parse_bool_env('ALLOW_REAL_TRADING', 'false')
 
 # Estado Global de Sincronização (O que o Dashboard React consome)
 central_state = {
     "balance": TEST_BALANCE,  # Carregado do banco de dados
-    "status": "INICIANDO SISTEMA..." if not TEST_MODE_ENABLED else "🧪 PAPER TRADING ATIVO",
+    "status": "INICIANDO SISTEMA...",
     "symbol": "---",
     "confidence": 0,
     "opportunities": [],
@@ -67,6 +139,10 @@ central_state = {
     "recent_sniper_signals": [],
     "test_balance": TEST_BALANCE,  # Novo campo para teste
     "test_mode": TEST_MODE_ENABLED,  # Novo campo para teste
+    "operation_mode": APP_MODE,
+    "operation_mode_label": _mode_display_label(APP_MODE),
+    "execution_enabled": _is_order_execution_enabled(APP_MODE),
+    "execution_label": _execution_status_label(APP_MODE),
     "pnl_total": 0.0,  # Lucro/Perda Total
     "pnl_percentage": 0.0,  # % de lucro/perda
     "winning_trades": 0,  # Número de trades vencedores
@@ -84,6 +160,31 @@ client_balance_cache = {
     "timestamp": 0,
 }
 
+
+def _sync_runtime_mode_state(persist=False):
+    global APP_MODE, TEST_MODE_ENABLED
+    APP_MODE = _normalize_operation_mode(APP_MODE)
+    TEST_MODE_ENABLED = APP_MODE == 'paper'
+    central_state['test_mode'] = TEST_MODE_ENABLED
+    central_state['operation_mode'] = APP_MODE
+    central_state['operation_mode_label'] = _mode_display_label(APP_MODE)
+    central_state['execution_enabled'] = _is_order_execution_enabled(APP_MODE)
+    central_state['execution_label'] = _execution_status_label(APP_MODE)
+
+    if TEST_MODE_ENABLED:
+        central_state['balance'] = TEST_BALANCE
+        central_state['test_balance'] = TEST_BALANCE
+        central_state['status'] = f"🧪 {_mode_display_label(APP_MODE)}: {TEST_BALANCE} USDT (preço real, sem ordens)"
+    else:
+        central_state['status'] = f"💼 {_mode_display_label(APP_MODE)}: sincronizando saldo dos clientes"
+
+    if persist:
+        db.set_operation_mode(APP_MODE)
+        db.set_config('TEST_MODE', 'true' if TEST_MODE_ENABLED else 'false')
+
+
+_sync_runtime_mode_state()
+
 # Modo Fallback: Se True, usa APENAS o 3º Cérebro (Local Brain)
 USE_LOCAL_BRAIN_ONLY = False
 
@@ -96,7 +197,6 @@ SNIPER_POSICAO_UNICA = False     # Multi-ativo: permite até 5 moedas simultâne
 # Trava atômica para bloquear corrida entre validação e gravação de sinal
 SNIPER_SIGNAL_LOCK = threading.Lock()
 SNIPER_SIGNAL_RESERVATIONS = set()
-EXECUTE_TRADES_REAL = False      # Segurança: nunca envia ordem real no modo treinamento atual
 PAPER_TRADE_TP_PCT = 100.0       # Fecha somente quando dobrar a margem projetada
 PAPER_TRADE_SL_PCT = -3.0        # Stop de perda em 3% da entrada
 ENABLE_RANDOM_TEST_TRADES = False
@@ -107,7 +207,6 @@ PENALIDADE_MOEDA_JA_ABERTA = 25           # Reduz score de ativo já aberto
 PENALIDADE_STREAK_MESMA_MOEDA = 10      # Penalidade por repetição consecutiva
 SCAN_TOP_COINS = 8                       # Menos ativos por ciclo para responder mais rápido
 SCAN_INTER_SYMBOL_DELAY_SECS = 0.25      # Respiro curto sem travar o radar
-TEST_MODE_ENABLED = db.is_test_mode_enabled()
 
 
 def _frontend_index_path():
@@ -430,11 +529,10 @@ def _get_public_price_broker():
         from src.broker.bybit_client import BybitClient as _BybitClient
         BybitClient = _BybitClient
 
-    use_testnet = os.getenv('USE_TESTNET', 'TRUE').lower() in ['1', 'true', 'yes']
     public_price_broker = BybitClient(
         os.getenv("BYBIT_API_KEY"),
         os.getenv("BYBIT_API_SECRET"),
-        testnet=use_testnet,
+        testnet=_mode_uses_testnet(APP_MODE),
     )
     return public_price_broker
 
@@ -500,6 +598,9 @@ def _get_registered_client_by_id(client_id):
 def _save_client_everywhere(client_data):
     """Persiste o cliente e devolve o registro final + status de sincronização."""
     payload = dict(client_data or {})
+    payload['account_mode'] = _normalize_account_mode(payload.get('account_mode', payload.get('is_testnet')))
+    payload['is_testnet'] = _is_testnet_account(payload.get('account_mode'))
+    payload['balance_source'] = payload.get('balance_source') or _mode_balance_source(payload.get('account_mode'))
     remote_record = None
     cloud_synced = False
 
@@ -537,16 +638,12 @@ def _delete_client_everywhere(client_id):
     return cloud_deleted, local_deleted
 
 
-def _resolve_client_balance_payload(raw_data, broker, is_test, existing_client=None):
-    """Saldo digitado vale para teste; conta real usa saldo lido da Bybit."""
+def _resolve_client_balance_payload(raw_data, broker, account_mode, existing_client=None):
+    """Sincroniza saldo do broker para testnet/real e preserva último valor conhecido como fallback."""
     payload = dict(raw_data or {})
-    if is_test:
-        try:
-            payload['saldo_base'] = round(float(payload.get('saldo_base') or 1000.0), 2)
-        except Exception:
-            payload['saldo_base'] = 1000.0
-        payload['balance_source'] = 'form_test_balance'
-        return payload
+    normalized_account_mode = _normalize_account_mode(account_mode)
+    payload['account_mode'] = normalized_account_mode
+    payload['is_testnet'] = _is_testnet_account(normalized_account_mode)
 
     real_balance = broker.get_balance() if broker is not None else None
     if real_balance is not None:
@@ -554,26 +651,24 @@ def _resolve_client_balance_payload(raw_data, broker, is_test, existing_client=N
     elif existing_client is not None:
         payload['saldo_base'] = round(float(existing_client.get('saldo_base') or 0.0), 2)
     else:
-        payload['saldo_base'] = 0.0
+        try:
+            payload['saldo_base'] = round(float(payload.get('saldo_base') or 0.0), 2)
+        except Exception:
+            payload['saldo_base'] = 0.0
 
-    payload['balance_source'] = 'broker_real_balance'
+    payload['balance_source'] = _mode_balance_source(normalized_account_mode)
     return payload
 
 
-def _validate_client_broker_credentials(client_data, is_test):
-    """
-    No modo teste, o cadastro usa apenas os dados do formulário e não depende
-    de autenticação da Bybit para ativar o investidor.
-    """
-    if is_test:
-        return None, True, 'Paper trading: usando saldo e chaves do formulário.'
-
+def _validate_client_broker_credentials(client_data, account_mode):
+    """Valida o broker no ambiente correto da Bybit."""
+    normalized_account_mode = _normalize_account_mode(account_mode)
     broker = None
     try:
         broker = _ensure_broker_class()(
             client_data.get('bybit_key'),
             client_data.get('bybit_secret'),
-            testnet=False,
+            testnet=_is_testnet_account(normalized_account_mode),
         )
         ok, msg = broker.test_connection()
         return broker, ok, msg
@@ -599,25 +694,12 @@ def _fetch_active_client_balances(force=False):
         for client in active_clients:
             balance = None
             error = None
+            account_mode = _normalize_account_mode(client.get('account_mode', client.get('is_testnet')))
             try:
-                if bool(client.get('is_testnet', 1) == 1):
-                    balance = round(float(client.get('saldo_base', 0) or 0), 2)
-                    total += balance
-                    items.append({
-                        "id": client.get('id'),
-                        "nome": client.get('nome'),
-                        "saldo_real": balance,
-                        "saldo_base": float(client.get('saldo_base', 0) or 0),
-                        "is_testnet": True,
-                        "status": client.get('status'),
-                        "error": None,
-                    })
-                    continue
-
                 broker = broker_cls(
                     client.get('bybit_key'),
                     client.get('bybit_secret'),
-                    testnet=bool(client.get('is_testnet', 1) == 1),
+                    testnet=_is_testnet_account(account_mode),
                 )
                 balance = broker.get_balance()
                 if balance is not None:
@@ -631,7 +713,8 @@ def _fetch_active_client_balances(force=False):
                 "nome": client.get('nome'),
                 "saldo_real": balance,
                 "saldo_base": float(client.get('saldo_base', 0) or 0),
-                "is_testnet": bool(client.get('is_testnet', 1) == 1),
+                "is_testnet": _is_testnet_account(account_mode),
+                "account_mode": account_mode,
                 "status": client.get('status'),
                 "error": error,
             })
@@ -650,18 +733,26 @@ def _refresh_real_balance_state(force=False):
     """Atualiza o estado global com o saldo verdadeiro dos clientes."""
     if TEST_MODE_ENABLED:
         central_state['test_mode'] = True
+        central_state['operation_mode'] = APP_MODE
+        central_state['operation_mode_label'] = _mode_display_label(APP_MODE)
+        central_state['execution_enabled'] = _is_order_execution_enabled(APP_MODE)
+        central_state['execution_label'] = _execution_status_label(APP_MODE)
         return
 
     balances = _fetch_active_client_balances(force=force)
     valid_items = [item for item in balances.get("items", []) if item.get("saldo_real") is not None]
     central_state['real_client_balances'] = balances.get("items", [])
     central_state['test_mode'] = False
+    central_state['operation_mode'] = APP_MODE
+    central_state['operation_mode_label'] = _mode_display_label(APP_MODE)
+    central_state['execution_enabled'] = _is_order_execution_enabled(APP_MODE)
+    central_state['execution_label'] = _execution_status_label(APP_MODE)
 
     if valid_items:
         central_state['balance'] = balances.get("total", 0.0)
-        central_state['status'] = f"💼 MODO REAL: saldo real de {len(valid_items)} cliente(s)"
+        central_state['status'] = f"💼 {_mode_display_label(APP_MODE)}: saldo sincronizado de {len(valid_items)} cliente(s)"
     else:
-        central_state['status'] = "💼 MODO REAL: aguardando saldo válido dos clientes"
+        central_state['status'] = f"💼 {_mode_display_label(APP_MODE)}: aguardando saldo válido dos clientes"
 
 
 def _calculate_live_trade_metrics(entry_price, current_price, side):
@@ -1185,17 +1276,21 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
         for cliente in clientes:
             def task_cliente(c):
                 try:
-                    # Configura ambiente (Testnet ou Real)
-                    is_test = True if c.get('is_testnet', 1) == 1 else False
-                    broker = _ensure_broker_class()(c.get('bybit_key'), c.get('bybit_secret'), testnet=is_test)
+                    account_mode = _normalize_account_mode(c.get('account_mode', c.get('is_testnet')))
+                    broker = _ensure_broker_class()(
+                        c.get('bybit_key'),
+                        c.get('bybit_secret'),
+                        testnet=_is_testnet_account(account_mode),
+                    )
                     
                     # Gestão Dinâmica: 5% Banca (GAIN) / 3% (RECOVERY)
                     margem = float(c.get('saldo_base', 1000.0)) * 0.05
                     qty = margem / entry_price
 
                     # --- EXECUÇÃO REAL NA EXCHANGE (PROTOCOLO SNIPER) ---
-                    if EXECUTE_TRADES_REAL and not TEST_MODE_ENABLED:
-                        print(f"🚀 [EXECUÇÃO REAL] {c.get('nome')} - {side} {qty:.4f} {symbol}")
+                    if _is_order_execution_enabled(APP_MODE):
+                        exec_label = 'TESTNET' if APP_MODE == 'testnet' else 'REAL'
+                        print(f"🚀 [EXECUÇÃO {exec_label}] {c.get('nome')} - {side} {qty:.4f} {symbol}")
                         order_result = broker.execute_market_order(symbol, side.lower(), qty)
                         
                         if order_result:
@@ -1205,7 +1300,12 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                         else:
                             print(f"⚠️  [ORDEM FALHADA] {c.get('nome')} - Fallback para simulação")
                     else:
-                        mode_label = "PAPER TRADING / PREÇO REAL" if TEST_MODE_ENABLED else "SALDO REAL / SEM ORDENS"
+                        if APP_MODE == 'paper':
+                            mode_label = "PAPER TRADING / PREÇO REAL"
+                        elif APP_MODE == 'testnet':
+                            mode_label = "TESTNET / ORDENS BLOQUEADAS"
+                        else:
+                            mode_label = "SALDO REAL / ORDENS BLOQUEADAS"
                         print(f"📊 [{mode_label}] {c.get('nome')} - execução real bloqueada por segurança")
 
                     # --- NOTIFICAÇÃO PRIVADA EDUCATIVA (SNIPER PROTOCOL) ---
@@ -1218,7 +1318,8 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                              f"📍 *Entrada:* ${entry_price:.2f}\n\n"
                              f"🧠 *Confiança Cérebro Triplo:* {res_ia.get('probabilidade')}%\n"
                              f"📝 *Motivo:* {res_ia.get('motivo')}\n"
-                             f"🔐 *Modo:* {'PAPER TRADING / PREÇO REAL' if TEST_MODE_ENABLED else 'SALDO REAL / SEM ORDENS'}\n\n"
+                             f"🔐 *Modo:* {_mode_display_label(APP_MODE)} • {_execution_status_label(APP_MODE)}\n"
+                             f"👤 *Conta:* {account_mode.upper()}\n\n"
                              f"🛡️  *PROTEÇÃO ATIVA:*\n"
                              f"✅ TP: ${entry_price * 1.10:.2f} (+100% lucro)\n"
                              f"❌ SL: ${entry_price * 0.97:.2f} (-3% trava)\n\n"
@@ -1287,17 +1388,19 @@ def sniper_worker_loop():
         return
     
     # Scanner Master
-    use_testnet = os.getenv('USE_TESTNET', 'TRUE').lower() in ['1', 'true', 'yes']
-    master_broker = BybitClient(os.getenv("BYBIT_API_KEY"), os.getenv("BYBIT_API_SECRET"), testnet=use_testnet)
+    master_broker = BybitClient(
+        os.getenv("BYBIT_API_KEY"),
+        os.getenv("BYBIT_API_SECRET"),
+        testnet=_mode_uses_testnet(APP_MODE),
+    )
     validator = GroqValidator(os.getenv("GEMINI_API_KEY"), os.getenv("GROQ_API_KEY"))
 
     print(f"🚀 Motor Sniper v60.1 Operante. Rigor: {THRESHOLD_ENTRADA}%")
     
-    # 🧪 Log do Saldo de Teste
     if TEST_MODE_ENABLED:
-        print(f"🧪 PAPER TRADING ATIVO - Saldo base: {TEST_BALANCE} USDT")
+        print(f"🧪 {_mode_display_label(APP_MODE)} ATIVO - Saldo base: {TEST_BALANCE} USDT")
     else:
-        print(f"💼 Modo Produção - Saldo Inicial: {TEST_BALANCE} USDT")
+        print(f"💼 {_mode_display_label(APP_MODE)} - Saldo inicial sincronizado dos clientes")
     
     # Cache de tickers com TTL
     tickers_cache = {"data": [], "timestamp": 0}
@@ -1319,6 +1422,10 @@ def sniper_worker_loop():
             if TEST_MODE_ENABLED:
                 central_state['test_balance'] = TEST_BALANCE
                 central_state['test_mode'] = True
+                central_state['operation_mode'] = APP_MODE
+                central_state['operation_mode_label'] = _mode_display_label(APP_MODE)
+                central_state['execution_enabled'] = _is_order_execution_enabled(APP_MODE)
+                central_state['execution_label'] = _execution_status_label(APP_MODE)
             pnl_lucro = _calcular_pnl_trades()
             _atualizar_saldo_com_pnl(pnl_lucro)
             _sync_active_trades_from_db()
@@ -1529,7 +1636,9 @@ def get_investidores():
             "saldo_real": (balance_map.get(r.get('id')) or {}).get('saldo_real'),
             "saldo_configurado": r.get('saldo_base', 0),
             "status": r.get('status'),
-            "mode": "TESTNET" if r.get('is_testnet', 1) == 1 else "REAL"
+            "mode": _normalize_account_mode(r.get('account_mode', r.get('is_testnet'))).upper(),
+            "account_mode": _normalize_account_mode(r.get('account_mode', r.get('is_testnet'))),
+            "balance_source": r.get('balance_source'),
         } for r in rows])
     except: return jsonify([])
 
@@ -1551,18 +1660,18 @@ def api_update_cliente(client_id):
     """Atualiza um cliente existente."""
     data = request.json or {}
     try:
-        is_test = True if data.get('is_testnet', True) in [True, 'true', 1] else False
+        account_mode = _normalize_account_mode(data.get('account_mode', data.get('is_testnet')))
         existing_client = _get_registered_client_by_id(client_id)
-        broker, ok, msg = _validate_client_broker_credentials(data, is_test)
+        broker, ok, msg = _validate_client_broker_credentials(data, account_mode)
 
-        data = _resolve_client_balance_payload(data, broker, is_test, existing_client=existing_client)
+        data = _resolve_client_balance_payload(data, broker, account_mode, existing_client=existing_client)
         data['status'] = 'ativo' if ok else data.get('status', 'erro_api')
         data['id'] = client_id
         record, cloud_synced, local_synced = _save_client_everywhere(data)
         if record:
             return jsonify({
                 "success": True,
-                "msg": "Cliente atualizado! Saldo do formulário vale para teste; conta real usa saldo da Bybit." if not is_test else "Cliente atualizado!",
+                "msg": f"Cliente atualizado! Conta {account_mode.upper()} sincronizada com a Bybit.",
                 "valid": ok,
                 "client": record,
                 "synced_to_cloud": cloud_synced,
@@ -1599,16 +1708,16 @@ def add_cliente():
     """Recebe novos investidores do formulário SaaS."""
     data = request.json
     try:
-        is_test = True if data.get('is_testnet', True) in [True, 'true', 1] else False
-        broker, ok, msg = _validate_client_broker_credentials(data, is_test)
+        account_mode = _normalize_account_mode(data.get('account_mode', data.get('is_testnet')))
+        broker, ok, msg = _validate_client_broker_credentials(data, account_mode)
         
-        data = _resolve_client_balance_payload(data, broker, is_test)
+        data = _resolve_client_balance_payload(data, broker, account_mode)
         data['status'] = 'ativo' if ok else 'erro_api'
         record, cloud_synced, local_synced = _save_client_everywhere(data)
         if record:
             return jsonify({
                 "status": "sucesso",
-                "msg": "Investidor Conectado! Conta real usa saldo da Bybit; saldo digitado fica para teste." if not is_test else "Investidor Conectado!",
+                "msg": f"Investidor conectado! Conta {account_mode.upper()} validada na Bybit.",
                 "valid": ok,
                 "client": record,
                 "synced_to_cloud": cloud_synced,
@@ -1686,14 +1795,17 @@ def get_neural_performance():
 def update_dashboard_balance():
     """Atualiza saldo do Dashboard em tempo real."""
     try:
-        # 🧪 Se está em modo teste, usa o saldo de teste
         if TEST_MODE_ENABLED:
             return jsonify({
                 "balance": TEST_BALANCE,
-                "status": f"🧪 PAPER TRADING: saldo base {TEST_BALANCE} USDT",
+                "status": central_state.get('status'),
                 "symbol": central_state['symbol'],
                 "confidence": central_state['confidence'],
-                "test_mode": True
+                "test_mode": True,
+                "operation_mode": APP_MODE,
+                "operation_mode_label": _mode_display_label(APP_MODE),
+                "execution_enabled": _is_order_execution_enabled(APP_MODE),
+                "execution_label": _execution_status_label(APP_MODE),
             })
         
         _refresh_real_balance_state(force=True)
@@ -1704,6 +1816,10 @@ def update_dashboard_balance():
             "symbol": central_state['symbol'],
             "confidence": central_state['confidence'],
             "test_mode": False,
+            "operation_mode": APP_MODE,
+            "operation_mode_label": _mode_display_label(APP_MODE),
+            "execution_enabled": _is_order_execution_enabled(APP_MODE),
+            "execution_label": _execution_status_label(APP_MODE),
             "real_client_balances": central_state.get('real_client_balances', []),
         })
     except Exception as e:
@@ -1714,6 +1830,10 @@ def update_dashboard_balance():
             "symbol": central_state['symbol'],
             "confidence": central_state['confidence'],
             "test_mode": True,
+            "operation_mode": APP_MODE,
+            "operation_mode_label": _mode_display_label(APP_MODE),
+            "execution_enabled": _is_order_execution_enabled(APP_MODE),
+            "execution_label": _execution_status_label(APP_MODE),
             "error": str(e)
         })
 
@@ -1757,7 +1877,7 @@ def set_test_balance():
         # Armazena em memória + DB
         central_state['balance'] = TEST_BALANCE
         central_state['test_balance'] = TEST_BALANCE
-        central_state['status'] = f"🧪 PAPER TRADING: Saldo base {TEST_BALANCE} {currency}"
+        central_state['status'] = f"🧪 {_mode_display_label(APP_MODE)}: saldo base {TEST_BALANCE} {currency}"
         db.set_test_balance(TEST_BALANCE)
         db.set_config('INITIAL_BALANCE', str(TEST_BALANCE))
         
@@ -1864,67 +1984,67 @@ def learn_from_history():
 
 @app.route('/api/mode/toggle', methods=['POST'])
 def toggle_test_mode():
-    """🔄 ALTERNAR ENTRE PAPER TRADING E MODO REAL
+    """🔄 ALTERNAR ENTRE PAPER, TESTNET E REAL
     
     POST /api/mode/toggle
-    {"mode": "test"} ou {"mode": "real"}
-    
-    Modo Teste: Usa saldo fictício com preço real, sem ordens reais
-    Modo Real: Usa saldo real do broker Bybit, com ordens bloqueadas
+    {"mode": "paper"} | {"mode": "testnet"} | {"mode": "real"}
     """
-    global TEST_MODE_ENABLED, TEST_BALANCE
+    global APP_MODE, TEST_BALANCE
     
     try:
-        new_mode = request.json.get('mode', 'test').lower()
+        new_mode = _normalize_operation_mode((request.json or {}).get('mode', 'paper'))
         
-        if new_mode not in ['test', 'real']:
-            return jsonify({"error": "Mode deve ser 'test' ou 'real'"}), 400
+        if new_mode not in VALID_OPERATION_MODES:
+            return jsonify({"error": "Mode deve ser 'paper', 'testnet' ou 'real'"}), 400
         
-        # Atualiza configuração no banco
-        is_test = (new_mode == 'test')
-        db.set_config('TEST_MODE', 'true' if is_test else 'false')
-        
-        # Atualiza variáveis globais
-        TEST_MODE_ENABLED = is_test
-        if is_test:
+        APP_MODE = new_mode
+        _sync_runtime_mode_state(persist=True)
+
+        if TEST_MODE_ENABLED:
             TEST_BALANCE = db.get_test_balance()
             central_state['balance'] = TEST_BALANCE
             central_state['test_balance'] = TEST_BALANCE
-            central_state['status'] = f"🧪 PAPER TRADING: {TEST_BALANCE} USDT (preço real, sem ordens reais)"
         else:
             _refresh_real_balance_state(force=True)
-            central_state['status'] = "💼 MODO REAL: saldo real dos clientes / ordens bloqueadas"
         
         # Log
-        mode_emoji = "🧪" if is_test else "💼"
-        mode_name = "TESTE" if is_test else "REAL"
+        mode_name = _mode_display_label(APP_MODE)
+        mode_emoji = "🧪" if APP_MODE == 'paper' else ("🛰️" if APP_MODE == 'testnet' else "💼")
         print(f"\n{mode_emoji} ALTERNAÇÃO DE MODO: {mode_name}")
         print(f"   Status: {central_state['status']}")
-        if is_test:
+        print(f"   Execução: {_execution_status_label(APP_MODE)}")
+        if TEST_MODE_ENABLED:
             print(f"   Saldo: {TEST_BALANCE} USDT (paper trading)")
         print()
         
         return jsonify({
             "success": True,
             "mode": new_mode,
+            "operation_mode": APP_MODE,
+            "operation_mode_label": mode_name,
             "status": central_state['status'],
-            "balance": TEST_BALANCE if is_test else "Real (será buscado)",
-            "message": f"✅ Sistema alternado para MODO {mode_name.upper()}!"
+            "balance": TEST_BALANCE if TEST_MODE_ENABLED else "Broker (será buscado)",
+            "execution_enabled": _is_order_execution_enabled(APP_MODE),
+            "execution_label": _execution_status_label(APP_MODE),
+            "message": f"✅ Sistema alternado para {mode_name}!"
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
 @app.route('/api/mode/current', methods=['GET'])
 def get_current_mode():
-    """📊 RETORNA MODO ATUAL (TESTE OU REAL)"""
+    """📊 RETORNA MODO ATUAL (PAPER, TESTNET OU REAL)"""
     try:
-        mode = "test" if TEST_MODE_ENABLED else "real"
         return jsonify({
-            "mode": mode,
+            "mode": APP_MODE,
+            "operation_mode": APP_MODE,
+            "operation_mode_label": _mode_display_label(APP_MODE),
             "is_test": TEST_MODE_ENABLED,
             "status": central_state.get('status', 'desconhecido'),
             "balance": TEST_BALANCE if TEST_MODE_ENABLED else "Carregando do broker...",
-            "emoji": "🧪" if TEST_MODE_ENABLED else "💼"
+            "execution_enabled": _is_order_execution_enabled(APP_MODE),
+            "execution_label": _execution_status_label(APP_MODE),
+            "emoji": "🧪" if APP_MODE == 'paper' else ("🛰️" if APP_MODE == 'testnet' else "💼")
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 400
@@ -2021,10 +2141,11 @@ if __name__ == "__main__":
         threading.Thread(target=cloud_db.sync_clients, args=(db,), daemon=True).start()
 
     print(f"💰 Saldo Carregado: {TEST_BALANCE} USDT")
+    print(f"🧭 Modo operacional: {_mode_display_label(APP_MODE)}")
+    print(f"⚡ Execução: {_execution_status_label(APP_MODE)}")
     if TEST_MODE_ENABLED:
-        print("🧪 PAPER TRADING ATIVO - Preço real, saldo fictício, sem ordens reais")
+        print("🧪 Paper ativo - preço real, saldo fictício, sem ordens")
     print(f"📊 Dashboard: http://0.0.0.0:{render_port}")
     print("🧠 Cérebro Triplo: ATIVO (Rigor 50%)")
-    print("⚡ Execução: REAL OFF (somente saldo real dos clientes)")
     app.run(host='0.0.0.0', port=render_port, debug=False, use_reloader=False)
 
