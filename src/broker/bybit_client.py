@@ -83,32 +83,73 @@ class BybitClient:
         data, timestamp = cache_entry
         return (time.time() - timestamp) < ttl
 
+    def _is_auth_error(self, msg):
+        """Retorna True apenas para erros reais de autenticação/autorização da Bybit."""
+        return (
+            '10003' in msg          # Invalid API Key
+            or '10004' in msg       # Invalid sign / timestamp mismatch
+            or 'API key is invalid' in msg
+            or '403' in msg
+            or 'Forbidden' in msg
+            or 'CloudFront' in msg
+            or 'timestamp' in msg.lower()
+        )
+        # Nota: retCode genérico NÃO está aqui — erros como 10016 (account type
+        # not found) são erros de parâmetro, não de autenticação.
+
     def get_balance(self):
-        """Busca saldo USDT com fallback para Contas Unificadas (UTA)."""
+        """Busca saldo USDT com fallback para múltiplos tipos de conta Bybit.
+
+        Tenta em ordem: Conta Unificada (UTA) → Conta de Contratos Clássica →
+        Swap (legado).  Apenas erros reais de autenticação invalidam as
+        credenciais; erros de tipo-de-conta (ex.: 10016) avançam para o
+        próximo fallback.
+        """
+        def _usdt_from(balance):
+            return float(balance['total']['USDT']) if (
+                'total' in balance and 'USDT' in balance['total']
+            ) else None
+
+        # Tentativa 1: Conta Unificada (UTA)
         try:
-            # Tentativa 1: Conta Unificada
             balance = self.exchange.fetch_balance(params={'accountType': 'UNIFIED'})
-            if 'total' in balance and 'USDT' in balance['total']:
-                return float(balance['total']['USDT'])
-            
-            # Tentativa 2: Conta Linear/Swap Clássica
-            balance = self.exchange.fetch_balance(params={'type': 'swap'})
-            if 'total' in balance and 'USDT' in balance['total']:
-                return float(balance['total']['USDT'])
-            return 0.0
+            usdt = _usdt_from(balance)
+            if usdt is not None:
+                return usdt
         except Exception as e:
-            # O CCXT/Bybit frequentemente devolve um payload JSON na mensagem.
-            # Detectamos erros de autenticação/bloqueio para evitar spam de logs
             msg = str(e)
-            if ('10003' in msg or 'API key is invalid' in msg or 'retCode' in msg
-                    or '403' in msg or 'Forbidden' in msg or 'CloudFront' in msg
-                    or '10004' in msg or 'timestamp' in msg.lower()):
-                # Marca a instância como não autenticada para evitar futuras chamadas privadas
+            if self._is_auth_error(msg):
                 self.authenticated = False
                 return None
-            # Mensagem genérica para outros erros (rede/timeout) — mantém log conciso
+            # Erro de tipo de conta ou outro — tenta próximo fallback
+
+        # Tentativa 2: Conta de Contratos Clássica (não-UTA)
+        try:
+            balance = self.exchange.fetch_balance(params={'accountType': 'CONTRACT'})
+            usdt = _usdt_from(balance)
+            if usdt is not None:
+                return usdt
+        except Exception as e:
+            msg = str(e)
+            if self._is_auth_error(msg):
+                self.authenticated = False
+                return None
+
+        # Tentativa 3: Swap/Linear (parâmetro legado)
+        try:
+            balance = self.exchange.fetch_balance(params={'type': 'swap'})
+            usdt = _usdt_from(balance)
+            if usdt is not None:
+                return usdt
+        except Exception as e:
+            msg = str(e)
+            if self._is_auth_error(msg):
+                self.authenticated = False
+                return None
             print(f"[ERRO BROKER] Falha ao consultar saldo: {msg}")
             return None
+
+        return 0.0
 
     def fetch_ohlcv(self, symbol, timeframe="15m"):
         """Fetch dados com Cache para não sobrecarregar a Bybit."""
@@ -172,27 +213,32 @@ class BybitClient:
     def test_connection(self):
         """Valida a conectividade mínima com a Bybit.
 
-        - Se tem credenciais, tenta buscar o saldo (endpoint autenticado).
-        - Caso contrário, tenta um endpoint público (tickers) para garantir que a API pública responde.
+        - Se tem credenciais, tenta buscar o saldo (endpoint autenticado) em
+          todos os tipos de conta suportados (UTA, CONTRACT, swap).
+        - Caso contrário, tenta um endpoint público (tickers).
         Retorna (True, mensagem) em caso de sucesso, (False, mensagem) em caso de falha.
         """
         try:
             if self.authenticated:
-                # endpoint autenticado
                 bal = self.get_balance()
                 if bal is None:
-                    # Tenta detectar o erro real fazendo uma chamada direta
+                    # get_balance() já tentou todos os fallbacks e só retorna
+                    # None para erros reais de autenticação.  Refazemos a
+                    # chamada direta para capturar a mensagem de erro original.
                     try:
                         self.exchange.fetch_balance(params={'accountType': 'UNIFIED'})
                     except Exception as inner_e:
-                        return False, str(inner_e)
-                    return False, "Auth failed: invalid API key or permission denied"
-                return True, f"Authenticated: OK (USDT {bal})"
+                        inner_msg = str(inner_e)
+                        # Extrai só a primeira linha para mensagem mais limpa
+                        short = inner_msg.split('\n')[0][:200]
+                        return False, short
+                    return False, "Chave API inválida ou sem permissão de leitura de saldo"
+                return True, f"Autenticado OK (USDT {bal:.2f})"
             else:
                 _ = self.exchange.fetch_tickers()
-                return True, "Public API: OK (no credentials)"
+                return True, "API pública OK (sem credenciais)"
         except Exception as e:
-            return False, str(e)
+            return False, str(e).split('\n')[0][:200]
 
     def set_tp_sl_sniper(self, symbol, side, entry_price, position_qty):
         """
