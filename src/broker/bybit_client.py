@@ -98,14 +98,16 @@ class BybitClient:
             return 0.0
         except Exception as e:
             # O CCXT/Bybit frequentemente devolve um payload JSON na mensagem.
-            # Detectamos erros de autenticação (retCode 10003) para evitar spam de logs
+            # Detectamos erros de autenticação/bloqueio para evitar spam de logs
             msg = str(e)
-            if '10003' in msg or 'API key is invalid' in msg or 'retCode' in msg:
+            if ('10003' in msg or 'API key is invalid' in msg or 'retCode' in msg
+                    or '403' in msg or 'Forbidden' in msg or 'CloudFront' in msg
+                    or '10004' in msg or 'timestamp' in msg.lower()):
                 # Marca a instância como não autenticada para evitar futuras chamadas privadas
                 self.authenticated = False
                 return None
             # Mensagem genérica para outros erros (rede/timeout) — mantém log conciso
-            print(f"[ERRO BROKER] Falha ao consultar saldo (não autenticado/erro de rede): {msg}")
+            print(f"[ERRO BROKER] Falha ao consultar saldo: {msg}")
             return None
 
     def fetch_ohlcv(self, symbol, timeframe="15m"):
@@ -179,6 +181,11 @@ class BybitClient:
                 # endpoint autenticado
                 bal = self.get_balance()
                 if bal is None:
+                    # Tenta detectar o erro real fazendo uma chamada direta
+                    try:
+                        self.exchange.fetch_balance(params={'accountType': 'UNIFIED'})
+                    except Exception as inner_e:
+                        return False, str(inner_e)
                     return False, "Auth failed: invalid API key or permission denied"
                 return True, f"Authenticated: OK (USDT {bal})"
             else:

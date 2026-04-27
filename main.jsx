@@ -928,7 +928,10 @@ const App = () => {
                          upsertInvestor(json.client);
                          setAddFormFields(prev => ({ ...prev, id: json.client.id, saldo_base: json.client.saldo_base ?? prev.saldo_base }));
                        }
-                       setAddFormMsg({ type: 'success', text: json.msg || 'Investidor atualizado' });
+                       const msgAtualiza = json.valid === false
+                         ? `Salvo, mas API inválida: ${json.api_error || 'verifique as chaves'}`
+                         : (json.msg || 'Investidor atualizado');
+                       setAddFormMsg({ type: json.valid === false ? 'error' : 'success', text: msgAtualiza });
                         const invRes = await fetch(`${API_BASE}/api/investidores`); if (invRes.ok) setInvestidores((await invRes.json()).map(normalizeInvestorRecord));
                      } else {
                       setAddFormMsg({ type: 'error', text: json.error || 'Erro ao atualizar' });
@@ -941,7 +944,10 @@ const App = () => {
                          upsertInvestor(json.client);
                          setAddFormFields(prev => ({ ...prev, id: json.client.id, saldo_base: json.client.saldo_base ?? prev.saldo_base }));
                        }
-                       setAddFormMsg({ type: 'success', text: json.msg || 'Investidor salvo com sucesso' });
+                       const msgSalvo = json.valid === false
+                         ? `Salvo, mas API inválida: ${json.api_error || 'verifique as chaves'}`
+                         : (json.msg || 'Investidor salvo com sucesso');
+                       setAddFormMsg({ type: json.valid === false ? 'error' : 'success', text: msgSalvo });
                         try { const invRes = await fetch(`${API_BASE}/api/investidores`); if (invRes.ok) setInvestidores((await invRes.json()).map(normalizeInvestorRecord)); } catch (e) { }
                      } else {
                       setAddFormMsg({ type: 'error', text: json.msg || json.error || 'Erro ao salvar investidor' });
