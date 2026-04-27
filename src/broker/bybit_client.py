@@ -106,9 +106,9 @@ class BybitClient:
         próximo fallback.
         """
         def _usdt_from(balance):
-            return float(balance['total']['USDT']) if (
-                'total' in balance and 'USDT' in balance['total']
-            ) else None
+            total = (balance or {}).get('total') or {}
+            usdt = total.get('USDT')
+            return float(usdt) if usdt is not None else None
 
         # Tentativa 1: Conta Unificada (UTA)
         try:
