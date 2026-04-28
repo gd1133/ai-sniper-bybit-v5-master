@@ -730,13 +730,17 @@ def _get_bybit_server_time_ms(base_url, timeout=10):
 
 
 def _compute_safe_recv_window(base_url):
-    server_time_ms, round_trip_ms = _get_bybit_server_time_ms(base_url)
-    local_time_ms = int(time.time() * 1000)
-    offset_ms = abs(server_time_ms - local_time_ms)
-    recv_window = 10000
-    if round_trip_ms > 2500 or offset_ms > 2000:
-        recv_window = 20000
-    return min(recv_window, 30000)
+    try:
+        server_time_ms, round_trip_ms = _get_bybit_server_time_ms(base_url)
+        local_time_ms = int(time.time() * 1000)
+        offset_ms = abs(server_time_ms - local_time_ms)
+        recv_window = 10000
+        if round_trip_ms > 2500 or offset_ms > 2000:
+            recv_window = 20000
+        return min(recv_window, 30000)
+    except Exception as e:
+        print(f"⚠️ [recv_window] falha ao calcular janela de recepção ({e}). Usando padrão 20000ms")
+        return 20000
 
 
 def _extract_unified_usdt_balance(wallet_payload):
