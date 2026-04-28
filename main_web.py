@@ -33,6 +33,7 @@ except Exception as e:
 
 # Importações pesadas (CCXT, TensorFlow, etc.) carregadas sob demanda
 BybitClient = None
+BybitV5HTTP = None
 IndicatorEngine = None
 GroqValidator = None
 public_price_broker = None
@@ -91,6 +92,12 @@ def _mode_balance_source(mode):
 
 def _mode_uses_testnet(mode):
     return _normalize_operation_mode(mode) == 'testnet'
+
+
+def _resolve_client_testnet_flag(value):
+    if value is None:
+        return _parse_bool_env('BYBIT_TESTNET', 'true') if 'BYBIT_TESTNET' in os.environ else _parse_bool_env('USE_TESTNET', 'true')
+    return _normalize_account_mode(value) == 'testnet'
 
 
 def _get_synced_account_mode_for_operation(mode):
@@ -567,6 +574,14 @@ def _ensure_broker_class():
     return BybitClient
 
 
+def _ensure_pybit_http_class():
+    global BybitV5HTTP
+    if BybitV5HTTP is None:
+        from pybit.unified_trading import HTTP as _HTTP
+        BybitV5HTTP = _HTTP
+    return BybitV5HTTP
+
+
 def _get_master_telegram_config():
     """Recarrega o .env para usar o token/chat mais recente do Telegram."""
     load_dotenv(override=True)
@@ -680,6 +695,154 @@ def _resolve_client_balance_payload(raw_data, broker, account_mode, existing_cli
 
     payload['balance_source'] = _mode_balance_source(normalized_account_mode)
     return payload
+
+
+def _get_bybit_v5_base_url(is_testnet):
+    return 'https://api-testnet.bybit.com' if is_testnet else 'https://api.bybit.com'
+
+
+def _get_bybit_server_time_ms(base_url, timeout=10):
+    started_at = int(time.time() * 1000)
+    response = requests.get(f'{base_url}/v5/market/time', timeout=timeout)
+    finished_at = int(time.time() * 1000)
+
+    if response.status_code == 403:
+        raise RuntimeError(f'Bybit GET {base_url}/v5/market/time -> HTTP 403 Forbidden')
+    response.raise_for_status()
+
+    payload = response.json() or {}
+    result = payload.get('result') or {}
+    if str(payload.get('retCode', 0)) not in {'0', 'None'}:
+        raise RuntimeError(f"Bybit GET {base_url}/v5/market/time -> {payload.get('retMsg') or 'erro desconhecido'}")
+
+    time_nano = result.get('timeNano')
+    if time_nano not in [None, '']:
+        try:
+            return int(int(time_nano) / 1_000_000), finished_at - started_at
+        except Exception:
+            pass
+
+    time_second = result.get('timeSecond')
+    if time_second not in [None, '']:
+        return int(time_second) * 1000, finished_at - started_at
+
+    raise RuntimeError('Bybit /v5/market/time sem timestamp válido')
+
+
+def _compute_safe_recv_window(base_url):
+    server_time_ms, round_trip_ms = _get_bybit_server_time_ms(base_url)
+    local_time_ms = int(time.time() * 1000)
+    offset_ms = abs(server_time_ms - local_time_ms)
+    recv_window = 10000
+    if round_trip_ms > 2500 or offset_ms > 2000:
+        recv_window = 20000
+    return min(recv_window, 30000)
+
+
+def _extract_unified_usdt_balance(wallet_payload):
+    ret_code = wallet_payload.get('retCode')
+    if ret_code != 0:
+        raise RuntimeError(
+            f"Bybit get_wallet_balance falhou: retCode={ret_code} retMsg={wallet_payload.get('retMsg', 'desconhecido')}"
+        )
+
+    accounts = ((wallet_payload or {}).get('result') or {}).get('list') or []
+    if not accounts:
+        return 0.0
+
+    account = accounts[0] or {}
+    for field in ('totalWalletBalance', 'totalEquity'):
+        raw_value = account.get(field)
+        if raw_value not in [None, '']:
+            try:
+                return float(raw_value)
+            except Exception:
+                continue
+
+    for coin in account.get('coin') or []:
+        if str(coin.get('coin') or '').upper() != 'USDT':
+            continue
+        for field in ('walletBalance', 'equity', 'usdValue'):
+            raw_value = coin.get(field)
+            if raw_value not in [None, '']:
+                try:
+                    return float(raw_value)
+                except Exception:
+                    continue
+
+    return 0.0
+
+
+def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=None, client_id=None, existing_client=None):
+    """Valida credenciais Bybit V5 com pybit e persiste o cliente no fluxo atual do projeto."""
+    payload = dict(client_payload or {})
+    resolved_testnet = _resolve_client_testnet_flag(is_testnet)
+    account_mode = 'testnet' if resolved_testnet else 'real'
+    payload['account_mode'] = account_mode
+    payload['is_testnet'] = resolved_testnet
+    payload['balance_source'] = _mode_balance_source(account_mode)
+
+    if client_id is not None:
+        payload['id'] = client_id
+
+    if api_key:
+        payload['bybit_key'] = api_key
+    if api_secret:
+        payload['bybit_secret'] = api_secret
+
+    if existing_client is not None and 'nome' not in payload:
+        payload['nome'] = existing_client.get('nome')
+
+    base_url = _get_bybit_v5_base_url(resolved_testnet)
+    recv_window = None
+    validation_message = None
+    valid = False
+
+    try:
+        recv_window = _compute_safe_recv_window(base_url)
+        session = _ensure_pybit_http_class()(
+            testnet=resolved_testnet,
+            api_key=api_key,
+            api_secret=api_secret,
+            recv_window=recv_window,
+        )
+        wallet_payload = session.get_wallet_balance(accountType='UNIFIED', coin='USDT')
+        balance = _extract_unified_usdt_balance(wallet_payload)
+        payload['saldo_base'] = round(float(balance), 2)
+        payload['status'] = 'ativo'
+        valid = True
+        validation_message = f'Conta {account_mode.upper()} validada via Bybit V5'
+    except Exception as e:
+        validation_message = str(e)
+        payload['status'] = 'erro_api'
+        if existing_client is not None:
+            try:
+                payload['saldo_base'] = round(float(existing_client.get('saldo_base') or 0.0), 2)
+            except Exception:
+                payload['saldo_base'] = 0.0
+        else:
+            try:
+                payload['saldo_base'] = round(float(payload.get('saldo_base') or 0.0), 2)
+            except Exception:
+                payload['saldo_base'] = 0.0
+
+    record = None
+    cloud_synced = False
+    local_synced = False
+    if client_payload is not None:
+        record, cloud_synced, local_synced = _save_client_everywhere(payload)
+
+    return {
+        'valid': valid,
+        'msg': validation_message,
+        'record': record,
+        'synced_to_cloud': cloud_synced,
+        'synced_to_local': local_synced,
+        'recv_window': recv_window,
+        'base_url': base_url,
+        'balance': payload.get('saldo_base', 0.0),
+        'account_mode': account_mode,
+    }
 
 
 def _validate_client_broker_credentials(client_data, account_mode):
@@ -1690,18 +1853,27 @@ def api_update_cliente(client_id):
     try:
         account_mode = _normalize_account_mode(data.get('account_mode', data.get('is_testnet')))
         existing_client = _get_registered_client_by_id(client_id)
-        broker, ok, msg = _validate_client_broker_credentials(data, account_mode)
-
-        data = _resolve_client_balance_payload(data, broker, account_mode, existing_client=existing_client)
-        data['status'] = 'ativo' if ok else data.get('status', 'erro_api')
-        data['id'] = client_id
-        record, cloud_synced, local_synced = _save_client_everywhere(data)
+        validation = validar_e_salvar_cliente(
+            data.get('bybit_key'),
+            data.get('bybit_secret'),
+            _is_testnet_account(account_mode),
+            client_payload=data,
+            client_id=client_id,
+            existing_client=existing_client,
+        )
+        ok = validation.get('valid', False)
+        msg = validation.get('msg')
+        record = validation.get('record')
+        cloud_synced = validation.get('synced_to_cloud', False)
+        local_synced = validation.get('synced_to_local', False)
         if record:
             return jsonify({
                 "success": True,
-                "msg": f"Cliente atualizado! Conta {account_mode.upper()} sincronizada com a Bybit.",
+                "msg": f"Cliente atualizado! Conta {validation.get('account_mode', account_mode).upper()} sincronizada com a Bybit.",
                 "valid": ok,
                 "api_error": None if ok else msg,
+                "recv_window": validation.get('recv_window'),
+                "bybit_base_url": validation.get('base_url'),
                 "client": record,
                 "synced_to_cloud": cloud_synced,
                 "synced_to_local": local_synced,
@@ -1738,17 +1910,25 @@ def add_cliente():
     data = request.json
     try:
         account_mode = _normalize_account_mode(data.get('account_mode', data.get('is_testnet')))
-        broker, ok, msg = _validate_client_broker_credentials(data, account_mode)
-        
-        data = _resolve_client_balance_payload(data, broker, account_mode)
-        data['status'] = 'ativo' if ok else 'erro_api'
-        record, cloud_synced, local_synced = _save_client_everywhere(data)
+        validation = validar_e_salvar_cliente(
+            data.get('bybit_key'),
+            data.get('bybit_secret'),
+            _is_testnet_account(account_mode),
+            client_payload=data,
+        )
+        ok = validation.get('valid', False)
+        msg = validation.get('msg')
+        record = validation.get('record')
+        cloud_synced = validation.get('synced_to_cloud', False)
+        local_synced = validation.get('synced_to_local', False)
         if record:
             return jsonify({
                 "status": "sucesso",
-                "msg": f"Investidor conectado! Conta {account_mode.upper()} validada na Bybit.",
+                "msg": f"Investidor conectado! Conta {validation.get('account_mode', account_mode).upper()} validada na Bybit.",
                 "valid": ok,
                 "api_error": None if ok else msg,
+                "recv_window": validation.get('recv_window'),
+                "bybit_base_url": validation.get('base_url'),
                 "client": record,
                 "synced_to_cloud": cloud_synced,
                 "synced_to_local": local_synced,

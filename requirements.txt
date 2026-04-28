@@ -10,3 +10,4 @@ httpx==0.27.2
 gunicorn==22.0.0
 cryptography==46.0.3
 supabase==2.29.0
+pybit==5.12.0
