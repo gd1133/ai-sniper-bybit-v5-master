@@ -706,6 +706,16 @@ _BYBIT_HEADERS = {
     'Accept': 'application/json',
 }
 
+_MAX_ERROR_DETAIL_LENGTH = 200
+
+
+def _safe_round_balance(source_dict, key='saldo_base'):
+    """Returns a safely rounded float balance from a dict, defaulting to 0.0."""
+    try:
+        return round(float(source_dict.get(key) or 0.0), 2)
+    except Exception:
+        return 0.0
+
 
 def _is_bybit_ip_restriction_error(error_str):
     """Returns True when Bybit returned 403 due to IP/geo-restriction, not invalid keys.
@@ -845,33 +855,15 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
             # The keys may still be valid — preserve existing balance and status.
             validation_message = (
                 f'Chaves salvas. Validação da API indisponível neste servidor '
-                f'(IP restrito pela Bybit). Detalhes: {err_str[:200]}'
+                f'(IP restrito pela Bybit). Detalhes: {err_str[:_MAX_ERROR_DETAIL_LENGTH]}'
             )
-            payload['status'] = existing_client.get('status', 'ativo') if existing_client else 'ativo'
+            payload['status'] = (existing_client or {}).get('status', 'ativo')
             valid = True
-            if existing_client is not None:
-                try:
-                    payload['saldo_base'] = round(float(existing_client.get('saldo_base') or 0.0), 2)
-                except Exception:
-                    payload['saldo_base'] = 0.0
-            else:
-                try:
-                    payload['saldo_base'] = round(float(payload.get('saldo_base') or 0.0), 2)
-                except Exception:
-                    payload['saldo_base'] = 0.0
+            payload['saldo_base'] = _safe_round_balance(existing_client or payload)
         else:
             validation_message = err_str
             payload['status'] = 'erro_api'
-            if existing_client is not None:
-                try:
-                    payload['saldo_base'] = round(float(existing_client.get('saldo_base') or 0.0), 2)
-                except Exception:
-                    payload['saldo_base'] = 0.0
-            else:
-                try:
-                    payload['saldo_base'] = round(float(payload.get('saldo_base') or 0.0), 2)
-                except Exception:
-                    payload['saldo_base'] = 0.0
+            payload['saldo_base'] = _safe_round_balance(existing_client or payload)
 
     record = None
     cloud_synced = False
