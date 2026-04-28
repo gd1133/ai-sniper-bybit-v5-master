@@ -417,7 +417,8 @@ const App = () => {
 
   const realizedPnl = Number(data.pnl_total || 0);
   const totalPnlLive = realizedPnl + unrealizedPnl;
-  const currentBalanceLive = Number(data.balance || 0) + unrealizedPnl;
+  const syncedBalance = Number(data.balance ?? 0);
+  const currentBalanceLive = syncedBalance + unrealizedPnl;
   const latestSignal = data.last_sniper_signal;
   const evidence = data.evidence || {};
   const signalAlreadyListed = latestSignal && activeTrades.some((trade) => (
@@ -521,10 +522,10 @@ const App = () => {
             <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
               <KpiCard 
                 label={currentOperationMode === 'paper' ? "🧪 SALDO PAPER (USDT)" : `💰 SALDO ${currentOperationMode === 'testnet' ? 'TESTNET' : 'REAL'} (USDT)`} 
-                value={`$${(currentOperationMode === 'paper' ? currentBalanceLive : (data.balance || 100)).toLocaleString('pt-PT', { maximumFractionDigits: 2 })}`}
+                value={`$${(currentOperationMode === 'paper' ? currentBalanceLive : syncedBalance).toLocaleString('pt-PT', { maximumFractionDigits: 2 })}`}
                 sub={currentOperationMode === 'paper'
-                  ? `Base: $${Number(data.balance || 0).toLocaleString('pt-PT', { maximumFractionDigits: 2 })} • Aberto: $${unrealizedPnl.toLocaleString('pt-PT', { maximumFractionDigits: 2 })}`
-                  : (data.execution_label || data.operation_mode_label || 'Modo Produção')}
+                  ? `Base: $${syncedBalance.toLocaleString('pt-PT', { maximumFractionDigits: 2 })} • Aberto: $${unrealizedPnl.toLocaleString('pt-PT', { maximumFractionDigits: 2 })}`
+                  : (data.status || data.execution_label || data.operation_mode_label || 'Modo Produção')}
                 icon={<Database size={18}/>} 
                 emerald 
               />
@@ -557,9 +558,9 @@ const App = () => {
               <KpiCard 
                 label="💰 SALDO ATUAL" 
                 value={`$${currentBalanceLive.toLocaleString('pt-PT', { maximumFractionDigits: 2 })}`}
-                sub={`Base: $${(data.balance || 0).toLocaleString('pt-PT', { maximumFractionDigits: 2 })} • Variação aberta: $${unrealizedPnl.toLocaleString('pt-PT', { maximumFractionDigits: 2 })}`}
+                sub={`Base: $${syncedBalance.toLocaleString('pt-PT', { maximumFractionDigits: 2 })} • Variação aberta: $${unrealizedPnl.toLocaleString('pt-PT', { maximumFractionDigits: 2 })}`}
                 icon={<Database size={18}/>} 
-                emerald={currentBalanceLive >= (data.balance || 0)}
+                emerald={currentBalanceLive >= syncedBalance}
               />
             </div>
 

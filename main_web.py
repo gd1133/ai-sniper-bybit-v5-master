@@ -93,6 +93,28 @@ def _mode_uses_testnet(mode):
     return _normalize_operation_mode(mode) == 'testnet'
 
 
+def _get_synced_account_mode_for_operation(mode):
+    normalized_mode = _normalize_operation_mode(mode)
+    if normalized_mode == 'testnet':
+        return 'testnet'
+    if normalized_mode == 'real':
+        return 'real'
+    return None
+
+
+def _filter_balance_items_for_operation_mode(items, mode):
+    target_account_mode = _get_synced_account_mode_for_operation(mode)
+    if target_account_mode is None:
+        return []
+
+    filtered_items = []
+    for item in items or []:
+        item_account_mode = _normalize_account_mode(item.get('account_mode', item.get('is_testnet')))
+        if item_account_mode == target_account_mode:
+            filtered_items.append({**item, "account_mode": item_account_mode})
+    return filtered_items
+
+
 def _is_order_execution_enabled(mode):
     mode = _normalize_operation_mode(mode)
     if mode == 'paper':
@@ -740,19 +762,25 @@ def _refresh_real_balance_state(force=False):
         return
 
     balances = _fetch_active_client_balances(force=force)
-    valid_items = [item for item in balances.get("items", []) if item.get("saldo_real") is not None]
-    central_state['real_client_balances'] = balances.get("items", [])
+    mode_items = _filter_balance_items_for_operation_mode(balances.get("items", []), APP_MODE)
+    valid_items = [item for item in mode_items if item.get("saldo_real") is not None]
     central_state['test_mode'] = False
     central_state['operation_mode'] = APP_MODE
     central_state['operation_mode_label'] = _mode_display_label(APP_MODE)
     central_state['execution_enabled'] = _is_order_execution_enabled(APP_MODE)
     central_state['execution_label'] = _execution_status_label(APP_MODE)
+    central_state['real_client_balances'] = mode_items
 
     if valid_items:
-        central_state['balance'] = balances.get("total", 0.0)
+        central_state['balance'] = round(sum(float(item.get("saldo_real") or 0.0) for item in valid_items), 2)
         central_state['status'] = f"💼 {_mode_display_label(APP_MODE)}: saldo sincronizado de {len(valid_items)} cliente(s)"
-    else:
+    elif mode_items:
+        central_state['balance'] = 0.0
         central_state['status'] = f"💼 {_mode_display_label(APP_MODE)}: aguardando saldo válido dos clientes"
+    else:
+        account_label = 'REAL' if _get_synced_account_mode_for_operation(APP_MODE) == 'real' else 'TESTNET'
+        central_state['balance'] = 0.0
+        central_state['status'] = f"💼 {_mode_display_label(APP_MODE)}: nenhum cliente {account_label} ativo"
 
 
 def _calculate_live_trade_metrics(entry_price, current_price, side):
