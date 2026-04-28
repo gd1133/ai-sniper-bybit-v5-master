@@ -1,15 +1,11 @@
 [phases.setup]
-nixPkgs = ["python311Full", "nodejs_20"]
+nixPkgs = ["python310", "python310Packages.pip"]
 
 [phases.install]
 cmds = [
-  "python3 -m pip install --upgrade pip --quiet",
-  "python3 -m pip install -r requirements.txt",
-  "npm ci"
+  "python -m pip install --upgrade pip",
+  "pip install -r requirements.txt"
 ]
 
-[phases.build]
-cmds = ["npm run build"]
-
 [start]
-cmd = "python3 -m gunicorn main_web:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120"
+cmd = "python -m gunicorn main_web:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120"
