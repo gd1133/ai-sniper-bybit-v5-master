@@ -17,7 +17,11 @@ create table if not exists public.clientes (
     updated_at timestamptz not null default timezone('utc', now())
 );
 
+alter table public.clientes add column if not exists tg_api_key text;
 alter table public.clientes add column if not exists account_mode text;
+alter table public.clientes add column if not exists balance_source text;
+alter table public.clientes add column if not exists updated_at timestamptz not null default timezone('utc', now());
+
 update public.clientes
 set account_mode = case
     when coalesce(is_testnet, true) then 'testnet'
@@ -48,6 +52,9 @@ create table if not exists public.trades (
     nome_cliente text,
     created_at timestamptz not null default timezone('utc', now())
 );
+
+alter table public.trades add column if not exists entry_price numeric(18, 8) default 0;
+alter table public.trades add column if not exists nome_cliente text;
 
 create index if not exists idx_clientes_status on public.clientes(status);
 create index if not exists idx_trades_client_id on public.trades(client_id);
