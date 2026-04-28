@@ -191,6 +191,11 @@ const App = () => {
     let lastApiErrorLogAt = 0;
     console.log('Dashboard Iniciado - Conectando em:', API_BASE);
 
+    const isAbortError = (err) => {
+      const message = String(err?.message || '').toLowerCase();
+      return err?.name === 'AbortError' || message.includes('aborted');
+    };
+
     const logApiError = (label, err) => {
       const now = Date.now();
       if (now - lastApiErrorLogAt > 8000) {
@@ -199,9 +204,9 @@ const App = () => {
       }
     };
 
-    const fetchJson = async (path, timeoutMs = 5000) => {
+    const fetchJson = async (path, timeoutMs = 12000) => {
       const ctrl = new AbortController();
-      const timeoutId = setTimeout(() => ctrl.abort(), timeoutMs);
+      const timeoutId = setTimeout(() => ctrl.abort('timeout'), timeoutMs);
       try {
         const res = await fetch(`${API_BASE}${path}`, { signal: ctrl.signal });
         if (!res.ok) {
@@ -241,6 +246,7 @@ const App = () => {
           }));
         }
       } catch (e) {
+        if (isAbortError(e)) return;
         logApiError('Erro Total na API:', e);
         if (mounted) {
           setData(prev => ({
@@ -257,6 +263,7 @@ const App = () => {
         if (!result.ok) return;
         if (mounted) setInvestidores((result.json || []).map(normalizeInvestorRecord));
       } catch (e) {
+        if (isAbortError(e)) return;
         logApiError('Erro fetching /api/investidores', e);
       }
     };
@@ -1006,11 +1013,11 @@ const App = () => {
                <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                   <div className="space-y-3">
                      <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">API Key Bybit</label>
-                     <input value={addFormFields.bybit_key} onChange={(e)=>handleFieldChange('bybit_key', e.target.value)} type="password" placeholder="••••••••••••" className="w-full bg-black border border-white/10 p-5 rounded-[1.5rem] focus:border-green-500 outline-none transition-all font-mono" required />
+                    <input value={addFormFields.bybit_key} onChange={(e)=>handleFieldChange('bybit_key', e.target.value)} type="password" autoComplete="new-password" placeholder="••••••••••••" className="w-full bg-black border border-white/10 p-5 rounded-[1.5rem] focus:border-green-500 outline-none transition-all font-mono" required />
                   </div>
                   <div className="space-y-3">
                      <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">API Secret Bybit</label>
-                     <input value={addFormFields.bybit_secret} onChange={(e)=>handleFieldChange('bybit_secret', e.target.value)} type="password" placeholder="••••••••••••" className="w-full bg-black border border-white/10 p-5 rounded-[1.5rem] focus:border-green-500 outline-none transition-all font-mono" required />
+                    <input value={addFormFields.bybit_secret} onChange={(e)=>handleFieldChange('bybit_secret', e.target.value)} type="password" autoComplete="new-password" placeholder="••••••••••••" className="w-full bg-black border border-white/10 p-5 rounded-[1.5rem] focus:border-green-500 outline-none transition-all font-mono" required />
                   </div>
                </div>
 
