@@ -3,6 +3,7 @@ import hashlib
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
 
 from cryptography.fernet import Fernet, InvalidToken
 from supabase import Client, create_client
@@ -211,6 +212,36 @@ class SupabaseManager:
         except Exception as e:
             self._handle_cloud_error(f"deletar cliente {client_id}", e)
             return False
+
+    def update_client_validation_status(self, user_id: int, ok: bool, error_message: str = "") -> bool:
+        """Atualiza status do cliente após validação Bybit usando filtro por ID exato."""
+        if not self.is_available():
+            return False
+
+        status_value = 'ativo' if ok else 'erro_api'
+        timestamp = datetime.now(timezone.utc).isoformat()
+
+        try:
+            self.client.table("clientes").update({
+                "status": status_value,
+                "updated_at": timestamp,
+            }).eq("id", int(user_id)).execute()
+        except Exception as e:
+            self._handle_cloud_error(f"atualizar status de validação do cliente {user_id}", e)
+            return False
+
+        # Limpa (ou grava) campos de erro conhecidos de forma tolerante a schema.
+        error_fields = ("api_error", "error_message", "last_error")
+        for field in error_fields:
+            try:
+                self.client.table("clientes").update({
+                    field: None if ok else str(error_message or '').strip(),
+                    "updated_at": timestamp,
+                }).eq("id", int(user_id)).execute()
+            except Exception:
+                continue
+
+        return True
 
     def sync_clients(self, local_db_manager):
         """Sincroniza clientes locais para o Supabase."""

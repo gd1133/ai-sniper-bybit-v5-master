@@ -4,6 +4,7 @@ from datetime import datetime
 # Global para carregar CCXT apenas uma vez
 _ccxt_instance = None
 _pd_instance = None
+_pybit_http_class = None
 
 def _get_ccxt():
     """Carrega CCXT lazy (apenas primeira vez)."""
@@ -22,6 +23,15 @@ def _get_pd():
         _pd_instance = pd
     return _pd_instance
 
+
+def _get_pybit_http():
+    """Carrega pybit HTTP lazy (apenas primeira vez)."""
+    global _pybit_http_class
+    if _pybit_http_class is None:
+        from pybit.unified_trading import HTTP as pybit_http
+        _pybit_http_class = pybit_http
+    return _pybit_http_class
+
 class BybitClient:
     """
     IA 1: Responsável pela comunicação com a Bybit.
@@ -32,6 +42,10 @@ class BybitClient:
         # Carrega CCXT apenas quando BybitClient é instanciado
         ccxt = _get_ccxt()
         
+        self.testnet = bool(testnet)
+        self.active_endpoint = 'https://api-demo.bybit.com' if self.testnet else 'https://api.bybit.com'
+        self.pybit_session = None
+
         # Não inclua chaves vazias na configuração — passar apiKey=None faz a API
         # interpretar como credencial inválida e causa erro 10003.
         cfg = {
@@ -40,7 +54,7 @@ class BybitClient:
             'options': {
                 'defaultType': 'swap', # Foco em Perpétuos (Linear)
                 'adjustForTimeDifference': True,
-                'recvWindow': 10000,
+                'recvWindow': 20000,
             }
         }
         if api_key and api_secret:
@@ -48,13 +62,36 @@ class BybitClient:
             cfg['secret'] = api_secret
 
         self.exchange = ccxt.bybit(cfg)
-        # Ativa modo sandbox apenas se explicitado E se tiver credenciais
-        # (sandbox sem credenciais causa falha em endpoints públicos)
+        # Ativa modo demo/testnet apenas se explicitado E se tiver credenciais.
+        # A Bybit descontinuou api-testnet.bybit.com — o endpoint correto agora
+        # é api-demo.bybit.com (Demo Trading). Sobrescrevemos as URLs do CCXT
+        # para evitar 403 Forbidden no endpoint antigo.
         if testnet and api_key and api_secret:
             try:
                 self.exchange.set_sandbox_mode(True)
             except Exception:
                 pass
+            # Força URL do novo Demo Trading da Bybit (substitui testnet antigo)
+            demo_url = 'https://api-demo.bybit.com'
+            try:
+                api_urls = self.exchange.urls.get('api', {})
+                for key in list(api_urls.keys()):
+                    api_urls[key] = demo_url
+            except Exception:
+                pass
+        elif (not testnet) and api_key and api_secret:
+            prod_url = 'https://api.bybit.com'
+            try:
+                api_urls = self.exchange.urls.get('api', {})
+                for key in list(api_urls.keys()):
+                    api_urls[key] = prod_url
+            except Exception:
+                pass
+
+        if api_key and api_secret:
+            self._init_pybit_session(api_key, api_secret)
+
+        print(f"🔍 [BYBIT ENDPOINT] testnet={self.testnet} endpoint={self.active_endpoint}")
 
         # Indica se esta instância tem credenciais de escrita/autenticação
         self.authenticated = bool(api_key and api_secret)
@@ -69,6 +106,35 @@ class BybitClient:
         self.last_request_time = {}
         self.adaptive_delay = 0.5 
         self.rate_limit_block_until = 0
+
+    def _init_pybit_session(self, api_key, api_secret):
+        """Inicializa sessão pybit V5 com recv_window ampliado para ambientes com latência."""
+        try:
+            HTTP = _get_pybit_http()
+            self.pybit_session = HTTP(
+                testnet=False,
+                api_key=api_key,
+                api_secret=api_secret,
+                recv_window=20000,
+            )
+            try:
+                self.pybit_session.endpoint = self.active_endpoint
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"⚠️ [PYBIT] Sessão HTTP indisponível: {e}")
+            self.pybit_session = None
+
+    def _format_bybit_error(self, payload):
+        """Normaliza erros da Bybit V5 para o front-end receber mensagem clara."""
+        try:
+            if isinstance(payload, dict):
+                code = payload.get('retCode')
+                msg = payload.get('retMsg') or 'Erro Bybit'
+                return f"Bybit retCode={code}: {msg}"
+        except Exception:
+            pass
+        return str(payload)
 
     def _apply_rate_limit(self, endpoint):
         """Aplica delay adaptativo para evitar expulsão da API."""
@@ -220,6 +286,23 @@ class BybitClient:
         """
         try:
             if self.authenticated:
+                if self.pybit_session is not None:
+                    print(f"🔎 [BYBIT VALIDATION] endpoint={self.active_endpoint}")
+                    try:
+                        rsp = self.pybit_session.get_wallet_balance(accountType='UNIFIED', coin='USDT')
+                        if int((rsp or {}).get('retCode', -1)) != 0:
+                            return False, self._format_bybit_error(rsp)
+
+                        result = (rsp or {}).get('result') or {}
+                        rows = result.get('list') or []
+                        usdt_bal = 0.0
+                        if rows:
+                            usdt_bal = float(rows[0].get('totalWalletBalance') or 0.0)
+                        return True, f"Autenticado OK (USDT {usdt_bal:.2f})"
+                    except Exception as pybit_err:
+                        short = str(pybit_err).split('\n')[0][:220]
+                        return False, short
+
                 bal = self.get_balance()
                 if bal is None:
                     # get_balance() já tentou todos os fallbacks e só retorna
