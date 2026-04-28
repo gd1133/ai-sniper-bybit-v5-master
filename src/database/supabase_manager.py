@@ -1,6 +1,8 @@
 import base64
 import hashlib
 import os
+import time
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timezone
@@ -50,13 +52,41 @@ class SupabaseManager:
         self.cloud_disable_reason = reason
         print(f"⚠️ Supabase desativado para esta sessão: {reason}. Fallback local ativo.")
 
+    # Controle de throttle para evitar spam de erros no log
+    _last_error_log: float = 0
+    _error_count: int = 0
+    _ERROR_LOG_INTERVAL: float = 60.0  # Loga no máximo 1x por minuto
+
     def _handle_cloud_error(self, action: str, error: Exception):
         message = str(error)
         normalized = message.lower()
         if "pgrst205" in normalized or "could not find the table" in normalized or "schema cache" in normalized:
             self._disable_cloud("tabela ausente ou schema cache inválido")
             return
-        print(f"❌ Erro ao {action} no Supabase: {error}")
+
+        # Erros de conexão SSL/HTTP2 são transitórios — reconecta silenciosamente
+        is_transient = any(kw in normalized for kw in (
+            "eof occurred", "connectionterminated", "protocol_error",
+            "compression_error", "ssl.c", "send_headers", "stream"
+        ))
+
+        now = time.time()
+        self._error_count += 1
+
+        if is_transient:
+            # Reconecta o client para limpar conexões HTTP2 corrompidas
+            try:
+                if self.url and self.key:
+                    self.client = create_client(self.url, self.key)
+            except Exception:
+                pass
+            # Loga apenas 1x por minuto para não spammar
+            if now - self._last_error_log >= self._ERROR_LOG_INTERVAL:
+                print(f"⚠️ [Supabase] Reconexão automática ({self._error_count}x erros transitórios)")
+                self._last_error_log = now
+                self._error_count = 0
+        else:
+            print(f"❌ Erro ao {action} no Supabase: {error}")
 
     def _build_cipher(self) -> Optional[Fernet]:
         if not self.crypto_secret:
