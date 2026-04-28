@@ -701,9 +701,31 @@ def _get_bybit_v5_base_url(is_testnet):
     return 'https://api-testnet.bybit.com' if is_testnet else 'https://api.bybit.com'
 
 
+_BYBIT_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (compatible; BybitBot/5.0)',
+    'Accept': 'application/json',
+}
+
+
+def _is_bybit_ip_restriction_error(error_str):
+    """Returns True when Bybit returned 403 due to IP/geo-restriction, not invalid keys.
+
+    Matches the specific message from pybit's FailedRequestError (status_code 403)
+    and from our own _get_bybit_server_time_ms helper.
+    """
+    s = error_str.lower()
+    return (
+        'ip rate limit' in s
+        or 'from the usa' in s
+        or 'breached' in s
+        or 'cloudfront' in s
+        or 'market/time' in s
+    )
+
+
 def _get_bybit_server_time_ms(base_url, timeout=10):
     started_at = int(time.time() * 1000)
-    response = requests.get(f'{base_url}/v5/market/time', timeout=timeout)
+    response = requests.get(f'{base_url}/v5/market/time', headers=_BYBIT_HEADERS, timeout=timeout)
     finished_at = int(time.time() * 1000)
 
     if response.status_code == 403:
@@ -817,18 +839,39 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
         valid = True
         validation_message = f'Conta {account_mode.upper()} validada via Bybit V5'
     except Exception as e:
-        validation_message = str(e)
-        payload['status'] = 'erro_api'
-        if existing_client is not None:
-            try:
-                payload['saldo_base'] = round(float(existing_client.get('saldo_base') or 0.0), 2)
-            except Exception:
-                payload['saldo_base'] = 0.0
+        err_str = str(e)
+        if _is_bybit_ip_restriction_error(err_str):
+            # Bybit is blocking requests from this server's IP (geo/cloud restriction).
+            # The keys may still be valid — preserve existing balance and status.
+            validation_message = (
+                f'Chaves salvas. Validação da API indisponível neste servidor '
+                f'(IP restrito pela Bybit). Detalhes: {err_str[:200]}'
+            )
+            payload['status'] = existing_client.get('status', 'ativo') if existing_client else 'ativo'
+            valid = True
+            if existing_client is not None:
+                try:
+                    payload['saldo_base'] = round(float(existing_client.get('saldo_base') or 0.0), 2)
+                except Exception:
+                    payload['saldo_base'] = 0.0
+            else:
+                try:
+                    payload['saldo_base'] = round(float(payload.get('saldo_base') or 0.0), 2)
+                except Exception:
+                    payload['saldo_base'] = 0.0
         else:
-            try:
-                payload['saldo_base'] = round(float(payload.get('saldo_base') or 0.0), 2)
-            except Exception:
-                payload['saldo_base'] = 0.0
+            validation_message = err_str
+            payload['status'] = 'erro_api'
+            if existing_client is not None:
+                try:
+                    payload['saldo_base'] = round(float(existing_client.get('saldo_base') or 0.0), 2)
+                except Exception:
+                    payload['saldo_base'] = 0.0
+            else:
+                try:
+                    payload['saldo_base'] = round(float(payload.get('saldo_base') or 0.0), 2)
+                except Exception:
+                    payload['saldo_base'] = 0.0
 
     record = None
     cloud_synced = False

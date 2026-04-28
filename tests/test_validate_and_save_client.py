@@ -64,7 +64,7 @@ if __name__ == '__main__':
                 self.kwargs = kwargs
 
             def get_wallet_balance(self, **kwargs):
-                raise RuntimeError('HTTP 403 Forbidden')
+                raise RuntimeError('API key invalid (ErrCode: 10003)')
 
         main_web.BybitV5HTTP = _FailingBybitHTTP
         failure = main_web.validar_e_salvar_cliente(
@@ -83,6 +83,35 @@ if __name__ == '__main__':
         if failed_payload.get('status') != 'erro_api' or float(failed_payload.get('saldo_base') or 0) != 777.0:
             print(f"❌ Payload salvo incorreto na falha: {failed_payload}")
             raise SystemExit(5)
+
+        # Test IP-restriction: pybit error when Render's IP is blocked by Bybit
+        class _IpBlockedBybitHTTP:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            def get_wallet_balance(self, **kwargs):
+                raise RuntimeError(
+                    'You have breached the IP rate limit or your IP is from the USA. '
+                    '(ErrCode: 403) (ErrTime: 10:00:00).\nRequest → GET /v5/account/wallet-balance: {}.'
+                )
+
+        main_web.BybitV5HTTP = _IpBlockedBybitHTTP
+        ip_blocked = main_web.validar_e_salvar_cliente(
+            'key',
+            'secret',
+            False,
+            client_payload={'nome': 'Cliente Render'},
+            existing_client={'saldo_base': 555.0, 'status': 'ativo'},
+        )
+
+        if not ip_blocked.get('valid'):
+            print(f"❌ IP restrito deveria ser salvo como válido: {ip_blocked}")
+            raise SystemExit(6)
+
+        ip_payload = captured_payloads[-1]
+        if ip_payload.get('status') != 'ativo' or float(ip_payload.get('saldo_base') or 0) != 555.0:
+            print(f"❌ Payload incorreto para IP restrito: {ip_payload}")
+            raise SystemExit(7)
 
         print('✅ validar_e_salvar_cliente integrado corretamente')
         raise SystemExit(0)
