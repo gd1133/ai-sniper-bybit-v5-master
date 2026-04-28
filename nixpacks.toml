@@ -3,8 +3,8 @@ nixPkgs = ["python311", "nodejs_20"]
 
 [phases.install]
 cmds = [
-  "python3.11 -m pip install --upgrade pip",
-  "python3.11 -m pip install -r requirements.txt",
+  "python3 -m pip install --upgrade pip --quiet",
+  "python3 -m pip install -r requirements.txt",
   "npm ci"
 ]
 
@@ -12,4 +12,4 @@ cmds = [
 cmds = ["npm run build"]
 
 [start]
-cmd = "python3.11 -m gunicorn main_web:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120"
+cmd = "python3 -m gunicorn main_web:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120"
