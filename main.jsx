@@ -536,7 +536,7 @@ const App = () => {
                 icon={<Database size={18}/>} 
                 emerald 
               />
-              <KpiCard label="TRADES ATIVOS" value={`${Math.min(data.active_trades?.length || 0, 5)}/5`} sub="5 moedas diferentes • Ordem 5% da banca • TP 100% • SL 3%" icon={<Database size={18}/>} />
+              <KpiCard label="TRADES ATIVOS" value={`${Math.min(data.active_trades?.length || 0, 5)}/5`} sub="5 moedas diferentes • Ordem 15% da banca • TP 100% • SL 3%" icon={<Database size={18}/>} />
               <KpiCard label="RADAR LIVE" value={data.symbol || "---"} sub="TOP VOLUME BYBIT" icon={<Activity size={18}/>} highlight={data.confidence >= 60} />
               <KpiCard label="IA CONFIANÇA" value={`${data.confidence}%`} progress={data.confidence} icon={<ShieldCheck size={18}/>} emerald={data.confidence >= 60} highlight={data.confidence >= 60} />
             </div>
@@ -589,7 +589,7 @@ const App = () => {
                        <div className="text-center py-6">
                          <div className="w-12 h-12 mx-auto rounded-2xl bg-zinc-900 flex items-center justify-center text-zinc-700 mb-4"><Zap size={18} /></div>
                          <p className="text-lg font-black italic text-zinc-700">AGUARDANDO MOEDA</p>
-                           <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-600 mt-2">Cada ordem usa 5% da banca • TP 100% • SL 3%</p>
+                           <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-600 mt-2">Cada ordem usa 15% da banca • TP 100% • SL 3%</p>
                        </div>
                        <div className="h-2 rounded-full bg-zinc-900" />
                      </div>
@@ -818,7 +818,7 @@ const App = () => {
                      <span className="text-[10px] font-black text-zinc-200 uppercase tracking-widest">Certificação Tactical</span>
                   </div>
                   <p className="text-[9px] text-zinc-500 font-bold uppercase leading-relaxed italic">
-                     TRIPLO CÉREBRO COM RIGOR DE {evidence.threshold || 60}% • ATÉ {evidence.max_positions || 5} ENTRADAS SIMULTÂNEAS, SEM REPETIR MOEDA • ORDEM 5% DA BANCA • TP 100% E SL 3%.
+                     TRIPLO CÉREBRO COM RIGOR DE {evidence.threshold || 60}% • ATÉ {evidence.max_positions || 5} ENTRADAS SIMULTÂNEAS, SEM REPETIR MOEDA • ORDEM 15% DA BANCA • TP 100% E SL 3%.
                   </p>
                </div>
             </div>
