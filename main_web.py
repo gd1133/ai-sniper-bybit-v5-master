@@ -16,6 +16,7 @@ if sys.platform == 'win32':
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
+from src.config import get_bybit_base_url, get_bybit_credentials, resolve_use_testnet
 
 # --- IMPORTAÇÕES DAS PASTAS INTERNAS (SRC) - LAZY LOADING ---
 try:
@@ -96,7 +97,7 @@ def _mode_uses_testnet(mode):
 
 def _resolve_client_testnet_flag(value):
     if value is None:
-        return _parse_bool_env('BYBIT_TESTNET', 'true') if 'BYBIT_TESTNET' in os.environ else _parse_bool_env('USE_TESTNET', 'true')
+        return resolve_use_testnet()
     return _normalize_account_mode(value) == 'testnet'
 
 
@@ -558,9 +559,10 @@ def _get_public_price_broker():
         from src.broker.bybit_client import BybitClient as _BybitClient
         BybitClient = _BybitClient
 
+    bybit_api_key, bybit_api_secret = get_bybit_credentials()
     public_price_broker = BybitClient(
-        os.getenv("BYBIT_API_KEY"),
-        os.getenv("BYBIT_API_SECRET"),
+        bybit_api_key,
+        bybit_api_secret,
         testnet=_mode_uses_testnet(APP_MODE),
     )
     return public_price_broker
@@ -698,7 +700,7 @@ def _resolve_client_balance_payload(raw_data, broker, account_mode, existing_cli
 
 
 def _get_bybit_v5_base_url(is_testnet):
-    return 'https://api-testnet.bybit.com' if is_testnet else 'https://api.bybit.com'
+    return get_bybit_base_url(is_testnet)
 
 
 def _get_bybit_server_time_ms(base_url, timeout=10):
@@ -1652,8 +1654,7 @@ def sniper_worker_loop():
     
     # Scanner Master
     master_broker = BybitClient(
-        os.getenv("BYBIT_API_KEY"),
-        os.getenv("BYBIT_API_SECRET"),
+        *get_bybit_credentials(),
         testnet=_mode_uses_testnet(APP_MODE),
     )
     validator = GroqValidator(os.getenv("GEMINI_API_KEY"), os.getenv("GROQ_API_KEY"))

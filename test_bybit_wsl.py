@@ -1,15 +1,19 @@
 from dotenv import load_dotenv
 load_dotenv()
-import os
 from pybit.unified_trading import HTTP
+from src.config import get_bybit_base_url, get_bybit_credentials, resolve_use_testnet
 
 print("Testando conexao Bybit do WSL...")
+use_testnet = resolve_use_testnet()
+api_key, api_secret = get_bybit_credentials()
 s = HTTP(
-    testnet=False,
-    api_key=os.getenv("BYBIT_API_KEY"),
-    api_secret=os.getenv("BYBIT_API_SECRET"),
+    testnet=use_testnet,
+    api_key=api_key,
+    api_secret=api_secret,
     recv_window=20000
 )
+r = None
+s.endpoint = get_bybit_base_url(use_testnet)
 r = s.get_wallet_balance(accountType="UNIFIED", coin="USDT")
 code = r.get("retCode")
 msg = r.get("retMsg")

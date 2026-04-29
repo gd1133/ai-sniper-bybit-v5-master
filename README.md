@@ -58,18 +58,18 @@ O motor combina:
 
 Copie `.env.example` para `.env` e preencha com suas chaves.
 
-Principais variaveis do modo operacional:
+Padrao unico das credenciais Bybit:
 
-- `APP_MODE=paper|testnet|real`
-- `ALLOW_ORDER_EXECUTION=true|false`
-- `ALLOW_REAL_TRADING=true|false`
-- `USE_TESTNET=true|false` (compatibilidade para fallback legado)
+- `BYBIT_API_KEY`
+- `BYBIT_API_SECRET`
+- `USE_TESTNET=true|false`
 
-Regras de seguranca:
+Regras do endpoint:
 
-- `paper`: usa preco real e saldo ficticio, nunca envia ordem
-- `testnet`: consulta e pode enviar ordens para a Bybit testnet apenas se `ALLOW_ORDER_EXECUTION=true`
-- `real`: consulta e pode enviar ordens reais apenas se `ALLOW_ORDER_EXECUTION=true` **e** `ALLOW_REAL_TRADING=true`
+- `USE_TESTNET=true`: conecta obrigatoriamente em `https://api-testnet.bybit.com`
+- `USE_TESTNET=false`: conecta obrigatoriamente em `https://api.bybit.com`
+
+O modo operacional do dashboard (`paper`, `testnet`, `real`) continua sendo controlado pela aplicacao/banco, sem precisar duplicar variaveis de ambiente no deploy.
 
 ## Supabase
 
@@ -86,17 +86,16 @@ Se o schema da nuvem estiver desatualizado, aplique `tools/supabase_schema.sql`.
 Valores recomendados para subir com seguranca:
 
 ```env
-APP_MODE=paper
-ALLOW_ORDER_EXECUTION=false
-ALLOW_REAL_TRADING=false
 USE_TESTNET=true
+BYBIT_API_KEY=YOUR_BYBIT_API_KEY
+BYBIT_API_SECRET=YOUR_BYBIT_API_SECRET
 ```
 
 Depois do deploy:
 
 1. Use o dashboard para alternar entre `paper`, `testnet` e `real`
 2. Cadastre clientes com `Conta Testnet` ou `Conta Real`
-3. So habilite `ALLOW_REAL_TRADING=true` quando quiser liberar execucao real
+3. Ajuste `USE_TESTNET` apenas quando quiser trocar o ambiente padrao da conexao master
 
 ## Como rodar
 

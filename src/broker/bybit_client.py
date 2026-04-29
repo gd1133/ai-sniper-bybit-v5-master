@@ -1,6 +1,8 @@
 import time
 from datetime import datetime
 
+from src.config import get_bybit_base_url, get_bybit_credentials, resolve_use_testnet
+
 # Global para carregar CCXT apenas uma vez
 _ccxt_instance = None
 _pd_instance = None
@@ -38,12 +40,15 @@ class BybitClient:
     Versão 1.8.2: Importação Lazy de CCXT (carrega apenas quando usado) + Rate Limiting + Cache.
     Blindagem contra bloqueios de API.
     """
-    def __init__(self, api_key, api_secret, testnet=True):
+    def __init__(self, api_key=None, api_secret=None, testnet=None):
         # Carrega CCXT apenas quando BybitClient é instanciado
         ccxt = _get_ccxt()
-        
-        self.testnet = bool(testnet)
-        self.active_endpoint = 'https://api-demo.bybit.com' if self.testnet else 'https://api.bybit.com'
+
+        env_api_key, env_api_secret = get_bybit_credentials()
+        api_key = str(api_key or env_api_key or '').strip()
+        api_secret = str(api_secret or env_api_secret or '').strip()
+        self.testnet = resolve_use_testnet(testnet)
+        self.active_endpoint = get_bybit_base_url(self.testnet)
         self.pybit_session = None
 
         # Não inclua chaves vazias na configuração — passar apiKey=None faz a API
@@ -62,31 +67,7 @@ class BybitClient:
             cfg['secret'] = api_secret
 
         self.exchange = ccxt.bybit(cfg)
-        # Ativa modo demo/testnet apenas se explicitado E se tiver credenciais.
-        # A Bybit descontinuou api-testnet.bybit.com — o endpoint correto agora
-        # é api-demo.bybit.com (Demo Trading). Sobrescrevemos as URLs do CCXT
-        # para evitar 403 Forbidden no endpoint antigo.
-        if testnet and api_key and api_secret:
-            try:
-                self.exchange.set_sandbox_mode(True)
-            except Exception:
-                pass
-            # Força URL do novo Demo Trading da Bybit (substitui testnet antigo)
-            demo_url = 'https://api-demo.bybit.com'
-            try:
-                api_urls = self.exchange.urls.get('api', {})
-                for key in list(api_urls.keys()):
-                    api_urls[key] = demo_url
-            except Exception:
-                pass
-        elif (not testnet) and api_key and api_secret:
-            prod_url = 'https://api.bybit.com'
-            try:
-                api_urls = self.exchange.urls.get('api', {})
-                for key in list(api_urls.keys()):
-                    api_urls[key] = prod_url
-            except Exception:
-                pass
+        self._configure_exchange_endpoint()
 
         if api_key and api_secret:
             self._init_pybit_session(api_key, api_secret)
@@ -107,20 +88,46 @@ class BybitClient:
         self.adaptive_delay = 0.5 
         self.rate_limit_block_until = 0
 
+    def _configure_exchange_endpoint(self):
+        """Aplica e valida o endpoint exato exigido pelo ambiente configurado."""
+        if self.testnet:
+            self.exchange.set_sandbox_mode(True)
+
+        api_urls = self.exchange.urls.get('api')
+        if isinstance(api_urls, dict):
+            for key in list(api_urls.keys()):
+                api_urls[key] = self.active_endpoint
+        else:
+            self.exchange.urls['api'] = self.active_endpoint
+
+        self._validate_exchange_endpoint()
+
+    def _validate_exchange_endpoint(self):
+        api_urls = self.exchange.urls.get('api')
+        if isinstance(api_urls, dict):
+            invalid_urls = {key: value for key, value in api_urls.items() if value != self.active_endpoint}
+            if invalid_urls:
+                raise RuntimeError(
+                    f"Endpoint Bybit inconsistente para USE_TESTNET={self.testnet}: {invalid_urls}"
+                )
+            return
+
+        if api_urls != self.active_endpoint:
+            raise RuntimeError(
+                f"Endpoint Bybit inconsistente para USE_TESTNET={self.testnet}: {api_urls}"
+            )
+
     def _init_pybit_session(self, api_key, api_secret):
         """Inicializa sessão pybit V5 com recv_window ampliado para ambientes com latência."""
         try:
             HTTP = _get_pybit_http()
             self.pybit_session = HTTP(
-                testnet=False,
+                testnet=self.testnet,
                 api_key=api_key,
                 api_secret=api_secret,
                 recv_window=20000,
             )
-            try:
-                self.pybit_session.endpoint = self.active_endpoint
-            except Exception:
-                pass
+            self.pybit_session.endpoint = self.active_endpoint
         except Exception as e:
             print(f"⚠️ [PYBIT] Sessão HTTP indisponível: {e}")
             self.pybit_session = None
