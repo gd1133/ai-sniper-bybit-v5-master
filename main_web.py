@@ -16,7 +16,7 @@ if sys.platform == 'win32':
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
-from src.config import get_bybit_base_url, get_bybit_credentials, resolve_use_testnet
+from src.config import get_bybit_base_url, get_bybit_credentials, get_environment_config, resolve_use_testnet
 
 # --- IMPORTAÇÕES DAS PASTAS INTERNAS (SRC) - LAZY LOADING ---
 try:
@@ -45,13 +45,12 @@ public_price_broker = None
 # ==============================================================================
 
 load_dotenv()
+ENV_CONFIG = get_environment_config()
+ENVIRONMENT = ENV_CONFIG.name
+print(f"[SISTEMA] Iniciando em modo: {ENVIRONMENT}")
 
 VALID_OPERATION_MODES = {'paper', 'testnet', 'real'}
 VALID_ACCOUNT_MODES = {'testnet', 'real'}
-
-
-def _parse_bool_env(name, default='false'):
-    return str(os.getenv(name, default) or '').strip().lower() in {'1', 'true', 'yes', 'on'}
 
 
 def _normalize_operation_mode(value):
@@ -97,7 +96,7 @@ def _mode_uses_testnet(mode):
 
 def _resolve_client_testnet_flag(value):
     if value is None:
-        return resolve_use_testnet()
+        return resolve_use_testnet(default=ENV_CONFIG.use_testnet)
     return _normalize_account_mode(value) == 'testnet'
 
 
@@ -153,8 +152,8 @@ db.init_db()
 TEST_BALANCE = db.get_test_balance()  # Saldo fictício para treinar
 APP_MODE = _normalize_operation_mode(db.get_operation_mode())
 TEST_MODE_ENABLED = APP_MODE == 'paper'
-ALLOW_ORDER_EXECUTION = _parse_bool_env('ALLOW_ORDER_EXECUTION', 'false')
-ALLOW_REAL_TRADING = _parse_bool_env('ALLOW_REAL_TRADING', 'false')
+ALLOW_ORDER_EXECUTION = ENV_CONFIG.allow_order_execution
+ALLOW_REAL_TRADING = ENV_CONFIG.allow_real_trading
 
 # Estado Global de Sincronização (O que o Dashboard React consome)
 central_state = {

@@ -1,7 +1,7 @@
 import sqlite3
 import os
 from typing import List, Dict, Any
-from src.config import resolve_use_testnet
+from src.config import get_environment_config
 
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '..', 'database.db')
 VALID_ACCOUNT_MODES = {'testnet', 'real'}
@@ -435,7 +435,7 @@ def get_operation_mode() -> str:
         return mode
     if is_test_mode_enabled():
         return 'paper'
-    return 'testnet' if resolve_use_testnet() else 'real'
+    return get_environment_config().default_operation_mode
 
 
 def set_operation_mode(mode: str) -> bool:

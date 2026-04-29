@@ -58,14 +58,20 @@ O motor combina:
 
 Copie `.env.example` para `.env` e preencha com suas chaves.
 
+Variavel mestre do ambiente:
+
+- `ENVIRONMENT=development|production`
+
 Padrao unico das credenciais Bybit:
 
 - `BYBIT_API_KEY`
 - `BYBIT_API_SECRET`
-- `USE_TESTNET=true|false`
 
 Regras do endpoint:
 
+- `ENVIRONMENT=development`: por padrao usa `USE_TESTNET=true`, `ALLOW_REAL_TRADING=false` e `ALLOW_ORDER_EXECUTION=false`
+- `ENVIRONMENT=production`: por padrao usa `USE_TESTNET=false`, `ALLOW_REAL_TRADING=true` e `ALLOW_ORDER_EXECUTION=true`
+- Se voce precisar de excecao local, ainda pode sobrescrever explicitamente `USE_TESTNET`, `ALLOW_REAL_TRADING` ou `ALLOW_ORDER_EXECUTION`
 - `USE_TESTNET=true`: conecta obrigatoriamente em `https://api-testnet.bybit.com`
 - `USE_TESTNET=false`: conecta obrigatoriamente em `https://api.bybit.com`
 
@@ -86,7 +92,7 @@ Se o schema da nuvem estiver desatualizado, aplique `tools/supabase_schema.sql`.
 Valores recomendados para subir com seguranca:
 
 ```env
-USE_TESTNET=true
+ENVIRONMENT=development
 BYBIT_API_KEY=YOUR_BYBIT_API_KEY
 BYBIT_API_SECRET=YOUR_BYBIT_API_SECRET
 ```
@@ -95,7 +101,7 @@ Depois do deploy:
 
 1. Use o dashboard para alternar entre `paper`, `testnet` e `real`
 2. Cadastre clientes com `Conta Testnet` ou `Conta Real`
-3. Ajuste `USE_TESTNET` apenas quando quiser trocar o ambiente padrao da conexao master
+3. Ajuste `ENVIRONMENT` para `production` quando quiser subir com execucao real por padrao
 
 ## Como rodar
 

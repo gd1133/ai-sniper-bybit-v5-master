@@ -1,20 +1,18 @@
 import os
 from typing import Any, Tuple
+from .environment import get_environment_config, is_truthy
 
 BYBIT_TESTNET_URL = 'https://api-testnet.bybit.com'
 BYBIT_PRODUCTION_URL = 'https://api.bybit.com'
-_TRUTHY_VALUES = {'1', 'true', 'yes', 'on'}
 
 
-def _is_truthy(value: Any) -> bool:
-    return str(value or '').strip().lower() in _TRUTHY_VALUES
-
-
-def resolve_use_testnet(value: Any = None, *, default: bool = True) -> bool:
+def resolve_use_testnet(value: Any = None, *, default: bool = None) -> bool:
     if value is None:
+        if default is None:
+            default = get_environment_config().use_testnet
         raw_value = os.getenv('USE_TESTNET', 'true' if default else 'false')
-        return _is_truthy(raw_value)
-    return _is_truthy(value) if isinstance(value, str) else bool(value)
+        return is_truthy(raw_value)
+    return is_truthy(value) if isinstance(value, str) else bool(value)
 
 
 def get_bybit_base_url(use_testnet: Any = None) -> str:
