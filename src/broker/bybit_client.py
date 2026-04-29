@@ -279,44 +279,47 @@ class BybitClient:
     def test_connection(self):
         """Valida a conectividade mínima com a Bybit.
 
-        - Se tem credenciais, tenta buscar o saldo (endpoint autenticado) em
-          todos os tipos de conta suportados (UTA, CONTRACT, swap).
+        - Se tem credenciais, valida por múltiplos tipos de conta para evitar
+          falso negativo em demo/testnet (UNIFIED vs CONTRACT).
         - Caso contrário, tenta um endpoint público (tickers).
         Retorna (True, mensagem) em caso de sucesso, (False, mensagem) em caso de falha.
         """
         try:
             if self.authenticated:
+                # 1) Validação principal via CCXT com fallback de accountType.
+                bal = self.get_balance()
+                if bal is not None:
+                    return True, f"Autenticado OK (USDT {bal:.2f})"
+
+                # 2) Fallback via pybit para capturar melhor mensagem de erro.
                 if self.pybit_session is not None:
                     print(f"🔎 [BYBIT VALIDATION] endpoint={self.active_endpoint}")
-                    try:
-                        rsp = self.pybit_session.get_wallet_balance(accountType='UNIFIED', coin='USDT')
-                        if int((rsp or {}).get('retCode', -1)) != 0:
-                            return False, self._format_bybit_error(rsp)
+                    pybit_errors = []
+                    for account_type in ['UNIFIED', 'CONTRACT']:
+                        try:
+                            rsp = self.pybit_session.get_wallet_balance(accountType=account_type, coin='USDT')
+                            if int((rsp or {}).get('retCode', -1)) == 0:
+                                result = (rsp or {}).get('result') or {}
+                                rows = result.get('list') or []
+                                usdt_bal = 0.0
+                                if rows:
+                                    usdt_bal = float(rows[0].get('totalWalletBalance') or 0.0)
+                                return True, f"Autenticado OK ({account_type}, USDT {usdt_bal:.2f})"
+                            pybit_errors.append(self._format_bybit_error(rsp))
+                        except Exception as pybit_err:
+                            pybit_errors.append(str(pybit_err).split('\n')[0][:220])
 
-                        result = (rsp or {}).get('result') or {}
-                        rows = result.get('list') or []
-                        usdt_bal = 0.0
-                        if rows:
-                            usdt_bal = float(rows[0].get('totalWalletBalance') or 0.0)
-                        return True, f"Autenticado OK (USDT {usdt_bal:.2f})"
-                    except Exception as pybit_err:
-                        short = str(pybit_err).split('\n')[0][:220]
-                        return False, short
+                    if pybit_errors:
+                        return False, pybit_errors[0][:220]
 
-                bal = self.get_balance()
-                if bal is None:
-                    # get_balance() já tentou todos os fallbacks e só retorna
-                    # None para erros reais de autenticação.  Refazemos a
-                    # chamada direta para capturar a mensagem de erro original.
-                    try:
-                        self.exchange.fetch_balance(params={'accountType': 'UNIFIED'})
-                    except Exception as inner_e:
-                        inner_msg = str(inner_e)
-                        # Extrai só a primeira linha para mensagem mais limpa
-                        short = inner_msg.split('\n')[0][:200]
-                        return False, short
-                    return False, "Chave API inválida ou sem permissão de leitura de saldo"
-                return True, f"Autenticado OK (USDT {bal:.2f})"
+                # 3) Último fallback para retornar erro limpo.
+                try:
+                    self.exchange.fetch_balance(params={'accountType': 'UNIFIED'})
+                except Exception as inner_e:
+                    inner_msg = str(inner_e)
+                    short = inner_msg.split('\n')[0][:200]
+                    return False, short
+                return False, "Chave API inválida ou sem permissão de leitura de saldo"
             else:
                 _ = self.exchange.fetch_tickers()
                 return True, "API pública OK (sem credenciais)"
