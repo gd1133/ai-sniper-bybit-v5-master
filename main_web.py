@@ -2009,6 +2009,17 @@ def add_cliente():
     except Exception as e:
         return jsonify({"status": "erro", "msg": str(e)}), 400
 
+
+@app.route('/api/server-ip', methods=['GET'])
+def get_server_ip():
+    try:
+        import urllib.request
+        with urllib.request.urlopen('https://api.ipify.org', timeout=5) as resp:
+            ip = resp.read().decode('utf-8').strip()
+        return jsonify({'server_ip': ip})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/status', methods=['GET'])
 def get_status():
     try:
