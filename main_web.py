@@ -264,6 +264,7 @@ SCAN_TOP_COINS = 8                       # Menos ativos por ciclo para responder
 SCAN_INTER_SYMBOL_DELAY_SECS = 0.25      # Respiro curto sem travar o radar
 RECENT_SIGNAL_WINDOW_SECS = 900          # Janela para penalizar sinais repetidos (15 min)
 PENALIDADE_SINAL_RECENTE = 18            # Penalidade por repetição recente no histórico
+MAX_RECENT_SIGNAL_PENALTY = 70           # Limite máximo da penalidade por repetição
 
 
 def _frontend_index_path():
@@ -404,7 +405,7 @@ def _parse_iso_timestamp(value):
         return None
     try:
         return datetime.fromisoformat(str(value)).timestamp()
-    except Exception:
+    except (TypeError, ValueError):
         return None
 
 
@@ -437,7 +438,7 @@ def _get_recent_signal_stats(symbol, window_secs=RECENT_SIGNAL_WINDOW_SECS):
 def _directional_momentum_bonus(recent_return_pct, decision):
     try:
         recent_return_pct = float(recent_return_pct or 0)
-    except Exception:
+    except (TypeError, ValueError):
         recent_return_pct = 0.0
     decision = str(decision or '').upper()
     magnitude = abs(recent_return_pct)
@@ -1967,7 +1968,7 @@ def sniper_worker_loop():
                                 adjusted -= (same_symbol_streak * PENALIDADE_STREAK_MESMA_MOEDA)
 
                             if recent_hits:
-                                adjusted -= min(70.0, recent_hits * PENALIDADE_SINAL_RECENTE)
+                                adjusted -= min(MAX_RECENT_SIGNAL_PENALTY, recent_hits * PENALIDADE_SINAL_RECENTE)
                                 if recent_age is not None and recent_age < BLOQUEIO_REPETICAO_MOEDA_SECS:
                                     adjusted -= 1000
 
