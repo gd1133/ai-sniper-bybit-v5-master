@@ -265,6 +265,7 @@ SCAN_INTER_SYMBOL_DELAY_SECS = 0.25      # Respiro curto sem travar o radar
 RECENT_SIGNAL_WINDOW_SECS = 900          # Janela para penalizar sinais repetidos (15 min)
 PENALIDADE_SINAL_RECENTE = 18            # Penalidade por repetição recente no histórico
 MAX_RECENT_SIGNAL_PENALTY = 70           # Limite máximo da penalidade por repetição
+PENALIDADE_BLOQUEIO_TOTAL = 1000         # Penalidade dura para bloquear repetição imediata
 
 
 def _frontend_index_path():
@@ -401,6 +402,7 @@ def _clamp(value, minimum=0.0, maximum=100.0):
 
 
 def _parse_iso_timestamp(value):
+    """Converte timestamp ISO em epoch (segundos) ou retorna None se inválido."""
     if not value:
         return None
     try:
@@ -410,6 +412,7 @@ def _parse_iso_timestamp(value):
 
 
 def _get_recent_signal_stats(symbol, window_secs=RECENT_SIGNAL_WINDOW_SECS):
+    """Retorna (hits, idade_do_ultimo) de sinais recentes de um símbolo."""
     normalized_symbol = _normalize_symbol_key(_canonicalize_symbol(symbol) or symbol)
     now = time.time()
     hits = 0
@@ -436,6 +439,7 @@ def _get_recent_signal_stats(symbol, window_secs=RECENT_SIGNAL_WINDOW_SECS):
 
 
 def _directional_momentum_bonus(recent_return_pct, decision):
+    """Premia momentum alinhado com BUY/SELL e penaliza divergência de direção."""
     try:
         recent_return_pct = float(recent_return_pct or 0)
     except (TypeError, ValueError):
@@ -1963,14 +1967,14 @@ def sniper_worker_loop():
                             if cand['clean_symbol'] == last_signal_symbol:
                                 # Bloqueio duro por janela de tempo
                                 if (agora - last_signal_at) < BLOQUEIO_REPETICAO_MOEDA_SECS:
-                                    adjusted -= 1000
+                                    adjusted -= PENALIDADE_BLOQUEIO_TOTAL
                                 # Penalidade por repetição sequencial
                                 adjusted -= (same_symbol_streak * PENALIDADE_STREAK_MESMA_MOEDA)
 
                             if recent_hits:
                                 adjusted -= min(MAX_RECENT_SIGNAL_PENALTY, recent_hits * PENALIDADE_SINAL_RECENTE)
                                 if recent_age is not None and recent_age < BLOQUEIO_REPETICAO_MOEDA_SECS:
-                                    adjusted -= 1000
+                                    adjusted -= PENALIDADE_BLOQUEIO_TOTAL
 
                             cand['adjusted_score'] = adjusted
                             if adjusted > best_adjusted:
