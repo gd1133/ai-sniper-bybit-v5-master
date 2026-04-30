@@ -28,6 +28,8 @@ class _FakeCcxt:
 
 
 class _FakeHTTP:
+    __module__ = 'pybit.unified_trading'
+
     def __init__(self, **kwargs):
         self.kwargs = kwargs
         self.endpoint = None
@@ -50,12 +52,18 @@ if __name__ == '__main__':
         if any(url != 'https://api-testnet.bybit.com' for url in testnet_client.exchange.urls['api'].values()):
             print(f"❌ URLs CCXT testnet incorretas: {testnet_client.exchange.urls}")
             raise SystemExit(2)
+        if testnet_client.exchange.cfg.get('options', {}).get('defaultSubType') != 'linear':
+            print(f"❌ defaultSubType deveria ser linear: {testnet_client.exchange.cfg}")
+            raise SystemExit(8)
         if not testnet_client.exchange.sandbox_enabled:
             print("❌ Sandbox deveria estar ativo em USE_TESTNET=true")
             raise SystemExit(3)
         if testnet_client.pybit_session.endpoint != 'https://api-testnet.bybit.com':
             print(f"❌ Endpoint pybit testnet incorreto: {testnet_client.pybit_session.endpoint}")
             raise SystemExit(4)
+        if testnet_client.pybit_api_version != 'v5' or 'pybit.unified_trading' not in testnet_client.pybit_sdk_module:
+            print(f"❌ pybit deveria estar configurado para V5: version={testnet_client.pybit_api_version} module={testnet_client.pybit_sdk_module}")
+            raise SystemExit(9)
 
         prod_client = bybit_client.BybitClient('key', 'secret', testnet=False)
         if prod_client.active_endpoint != 'https://api.bybit.com':

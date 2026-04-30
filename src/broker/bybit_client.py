@@ -3,6 +3,10 @@ from datetime import datetime
 
 from src.config import get_bybit_base_url, get_bybit_credentials, resolve_use_testnet
 
+AUTH_10003_ALERT = (
+    "ERRO DE AUTENTICAÇÃO: Verifique se a chave de API é de produção e se o 2FA está ativo na Bybit"
+)
+
 # Global para carregar CCXT apenas uma vez
 _ccxt_instance = None
 _pd_instance = None
@@ -57,7 +61,8 @@ class BybitClient:
             'enableRateLimit': True,
             'rateLimit': 100,  # Delay mínimo entre requisições
             'options': {
-                'defaultType': 'swap', # Foco em Perpétuos (Linear)
+                'defaultType': 'swap', # Foco em Perpétuos
+                'defaultSubType': 'linear',
                 'adjustForTimeDifference': True,
                 'recvWindow': 20000,
             }
@@ -68,6 +73,8 @@ class BybitClient:
 
         self.exchange = ccxt.bybit(cfg)
         self._configure_exchange_endpoint()
+        self.pybit_api_version = 'v5'
+        self.pybit_sdk_module = ''
 
         if api_key and api_secret:
             self._init_pybit_session(api_key, api_secret)
@@ -121,6 +128,11 @@ class BybitClient:
         """Inicializa sessão pybit V5 com recv_window ampliado para ambientes com latência."""
         try:
             HTTP = _get_pybit_http()
+            self.pybit_sdk_module = getattr(HTTP, '__module__', '')
+            if 'pybit.unified_trading' not in self.pybit_sdk_module:
+                raise RuntimeError(
+                    f"SDK pybit incompatível: esperado pybit.unified_trading (V5), recebido {self.pybit_sdk_module or 'desconhecido'}"
+                )
             self.pybit_session = HTTP(
                 testnet=self.testnet,
                 api_key=api_key,
@@ -128,6 +140,7 @@ class BybitClient:
                 recv_window=20000,
             )
             self.pybit_session.endpoint = self.active_endpoint
+            print(f"🔌 [PYBIT V5] módulo={self.pybit_sdk_module} endpoint={self.active_endpoint}")
         except Exception as e:
             print(f"⚠️ [PYBIT] Sessão HTTP indisponível: {e}")
             self.pybit_session = None
@@ -169,6 +182,51 @@ class BybitClient:
         )
         # Nota: retCode genérico NÃO está aqui — erros como 10016 (account type
         # not found) são erros de parâmetro, não de autenticação.
+
+    def _emit_authentication_alert(self):
+        print(AUTH_10003_ALERT)
+
+    def _handle_v5_ret_code(self, payload, route_label):
+        """Valida retCode padronizado da API V5 e dispara alerta de autenticação quando necessário."""
+        if not isinstance(payload, dict):
+            return False, str(payload)
+
+        ret_code = payload.get('retCode')
+        if str(ret_code) in {'0', 'None'} or ret_code is None:
+            return True, ''
+
+        ret_msg = str(payload.get('retMsg') or 'Erro Bybit').strip()
+        message = f"{route_label} falhou: retCode={ret_code} retMsg={ret_msg}"
+        if str(ret_code) == '10003':
+            self.authenticated = False
+            self._emit_authentication_alert()
+        return False, message
+
+    def _normalize_v5_symbol(self, symbol):
+        raw = str(symbol or '').strip().upper()
+        if not raw:
+            return raw
+        return raw.replace('/', '').replace(':USDT', '')
+
+    def _normalize_v5_side(self, side):
+        normalized = str(side or '').strip().lower()
+        return 'Buy' if normalized == 'buy' else 'Sell'
+
+    def _validate_insurance_fund(self):
+        """Consulta o fundo de seguros V5 apenas para validar conectividade inicial."""
+        if self.pybit_session is None:
+            return True, "SDK pybit V5 indisponível para validar fundo de seguros"
+
+        try:
+            rsp = self.pybit_session.get_insurance(coin='USDT')
+            ok, error_message = self._handle_v5_ret_code(rsp, 'v5/market/insurance')
+            if not ok:
+                return False, error_message
+
+            items = ((rsp or {}).get('result') or {}).get('list') or []
+            return True, f"Fundo de seguros OK ({len(items)} registros)"
+        except Exception as e:
+            return False, str(e).split('\n')[0][:220]
 
     def get_balance(self):
         """Busca saldo USDT com fallback para múltiplos tipos de conta Bybit.
@@ -276,8 +334,33 @@ class BybitClient:
                 print(f"[ERRO BROKER] Ordem não executada: cliente sem credenciais.")
                 return None
             print(f"🔥 [ORDEM SNIPER] {side.upper()} {qty} em {symbol}")
+
+            if self.pybit_session is not None:
+                v5_symbol = self._normalize_v5_symbol(symbol)
+                payload = {
+                    'category': 'linear',
+                    'symbol': v5_symbol,
+                    'side': self._normalize_v5_side(side),
+                    'orderType': 'Market',
+                    'qty': str(qty),
+                }
+                rsp = self.pybit_session.place_order(**payload)
+                ok, error_message = self._handle_v5_ret_code(rsp, 'v5/order/create')
+                if not ok:
+                    print(f"❌ [ERRO EXECUÇÃO] {error_message}")
+                    return None
+
+                result = (rsp or {}).get('result') or {}
+                return {
+                    **result,
+                    'id': result.get('orderId') or result.get('orderLinkId'),
+                    'route': 'v5/order/create',
+                    'category': 'linear',
+                    'symbol': v5_symbol,
+                }
+
             params = {'category': 'linear'}
-            order = self.exchange.create_market_order(symbol, side, qty, params=params)
+            order = self.exchange.create_order(symbol, 'market', side, qty, params=params)
             return order
         except Exception as e:
             print(f"❌ [ERRO EXECUÇÃO] Falha crítica na ordem: {e}")
@@ -293,10 +376,14 @@ class BybitClient:
         """
         try:
             if self.authenticated:
+                insurance_ok, insurance_message = self._validate_insurance_fund()
+                if not insurance_ok:
+                    return False, insurance_message
+
                 # 1) Validação principal via CCXT com fallback de accountType.
                 bal = self.get_balance()
                 if bal is not None:
-                    return True, f"Autenticado OK (USDT {bal:.2f})"
+                    return True, f"{insurance_message} | Autenticado OK (USDT {bal:.2f})"
 
                 # 2) Fallback via pybit para capturar melhor mensagem de erro.
                 if self.pybit_session is not None:
@@ -305,14 +392,18 @@ class BybitClient:
                     for account_type in ['UNIFIED', 'CONTRACT']:
                         try:
                             rsp = self.pybit_session.get_wallet_balance(accountType=account_type, coin='USDT')
-                            if int((rsp or {}).get('retCode', -1)) == 0:
+                            ok, error_message = self._handle_v5_ret_code(
+                                rsp,
+                                f'v5/account/wallet-balance ({account_type})',
+                            )
+                            if ok:
                                 result = (rsp or {}).get('result') or {}
                                 rows = result.get('list') or []
                                 usdt_bal = 0.0
                                 if rows:
                                     usdt_bal = float(rows[0].get('totalWalletBalance') or 0.0)
-                                return True, f"Autenticado OK ({account_type}, USDT {usdt_bal:.2f})"
-                            pybit_errors.append(self._format_bybit_error(rsp))
+                                return True, f"{insurance_message} | Autenticado OK ({account_type}, USDT {usdt_bal:.2f})"
+                            pybit_errors.append(error_message)
                         except Exception as pybit_err:
                             pybit_errors.append(str(pybit_err).split('\n')[0][:220])
 
