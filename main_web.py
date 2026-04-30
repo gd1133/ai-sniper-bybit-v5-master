@@ -40,6 +40,7 @@ GroqValidator = None
 public_price_broker = None
 RUNTIME_START_LOCK = threading.Lock()
 RUNTIME_STARTED = False
+SNIPER_INIT_FAILED = False
 
 # ==============================================================================
 # 🔘 TACTICAL v60.1 PRO - MAESTRO SAAS (FULL EDITION)
@@ -1690,6 +1691,8 @@ def sniper_worker_loop():
             time.sleep(10)
 
     if master_broker is None or validator is None:
+        global SNIPER_INIT_FAILED
+        SNIPER_INIT_FAILED = True
         print("❌ [SNIPER INIT] Não foi possível inicializar o Motor Sniper após 5 tentativas.")
         return
 
@@ -1916,6 +1919,7 @@ def health_check():
             "worker_status": central_state.get('status', 'unknown'),
             "balance": central_state.get('balance', 0),
             "active_trades": len(central_state.get('active_trades', [])),
+            "sniper_init_failed": SNIPER_INIT_FAILED,
             "timestamp": time.time()
         })
     except Exception as e:

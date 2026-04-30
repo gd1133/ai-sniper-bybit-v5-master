@@ -33,5 +33,11 @@ graceful_timeout = 30
 
 def post_fork(server, worker):
     """Start background services inside the worker process."""
-    from main_web import start_runtime_services
-    start_runtime_services()
+    try:
+        from main_web import start_runtime_services
+        start_runtime_services()
+    except Exception as exc:
+        import logging
+        logging.getLogger("gunicorn.error").error(
+            "post_fork: start_runtime_services falhou: %s", exc, exc_info=True
+        )
