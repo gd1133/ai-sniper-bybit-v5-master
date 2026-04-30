@@ -945,11 +945,14 @@ def _fetch_active_client_balances(force=False):
                     balance = broker.get_balance()
                     if balance is not None:
                         balance = round(float(balance), 2)
-                        if _is_testnet_account(account_mode) and balance == 0.0:
-                            balance = TESTNET_DEFAULT_BALANCE
-                        total += balance
                 except Exception as e:
                     error = str(e)
+                if _is_testnet_account(account_mode):
+                    fallback_base = float(client.get('saldo_base', 0) or 0)
+                    if balance is None or balance == 0.0:
+                        balance = fallback_base if fallback_base > 0 else TESTNET_DEFAULT_BALANCE
+                if balance is not None:
+                    total += balance
             elif include_inactive:
                 error = "cliente inativo"
 
