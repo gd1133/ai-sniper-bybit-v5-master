@@ -53,6 +53,9 @@ print(f"[SISTEMA] Iniciando em modo: {ENVIRONMENT}")
 
 VALID_OPERATION_MODES = {'paper', 'testnet', 'real'}
 VALID_ACCOUNT_MODES = {'testnet', 'real'}
+AUTH_10003_ALERT = (
+    "⚠️ ERRO 10003: chave expirada/inválida, 2FA desativado ou ambiente incorreto (testnet/real)."
+)
 
 
 def _normalize_operation_mode(value):
@@ -721,10 +724,6 @@ def _resolve_client_balance_payload(raw_data, broker, account_mode, existing_cli
     return payload
 
 
-def _get_bybit_v5_base_url(is_testnet):
-    return get_bybit_base_url(is_testnet)
-
-
 def _get_bybit_server_time_ms(base_url, timeout=10):
     started_at = int(time.time() * 1000)
     response = requests.get(f'{base_url}/v5/market/time', timeout=timeout)
@@ -786,8 +785,14 @@ def _format_bybit_validation_error(exc):
     return msg
 
 
+def _emit_bybit_auth_alert():
+    print(AUTH_10003_ALERT)
+
+
 def _extract_unified_usdt_balance(wallet_payload):
     ret_code = wallet_payload.get('retCode')
+    if ret_code == 10003:
+        _emit_bybit_auth_alert()
     if ret_code != 0:
         raise RuntimeError(
             f"Bybit get_wallet_balance falhou: retCode={ret_code} retMsg={wallet_payload.get('retMsg', 'desconhecido')}"
@@ -840,20 +845,25 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
     if existing_client is not None and 'nome' not in payload:
         payload['nome'] = existing_client.get('nome')
 
-    base_url = _get_bybit_v5_base_url(resolved_testnet)
+    base_url = get_bybit_base_url(resolved_testnet)
     recv_window = None
     validation_message = None
     valid = False
 
     try:
-        recv_window = _compute_safe_recv_window(base_url)
+        print("Aguardando validação da API...")
+        recv_window = 20000
         session = _ensure_pybit_http_class()(
             testnet=resolved_testnet,
             api_key=api_key,
             api_secret=api_secret,
             recv_window=recv_window,
         )
-        wallet_payload = session.get_wallet_balance(accountType='UNIFIED', coin='USDT')
+        wallet_payload = session.get_wallet_balance(
+            accountType='UNIFIED',
+            coin='USDT',
+            category='linear',
+        )
         balance = _extract_unified_usdt_balance(wallet_payload)
         if resolved_testnet and float(balance) == 0.0:
             balance = TESTNET_DEFAULT_BALANCE
