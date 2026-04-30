@@ -766,6 +766,25 @@ def _compute_safe_recv_window(base_url):
         return 20000
 
 
+def _format_bybit_validation_error(exc):
+    """Extrai mensagem amigável de exceções pybit.
+
+    Exceções pybit têm o formato:
+        (ErrCode: 33004) (ErrMsg: api key is invalid.) (timestamp: ...). REQUEST → GET https://...
+    Extraímos somente o ErrMsg; se ausente, retornamos mensagem genérica sem expor a URL.
+    """
+    msg = str(exc)
+    errmsg_match = re.search(r'\(ErrMsg:\s*([^)]+)\)', msg, re.IGNORECASE)
+    if errmsg_match:
+        return errmsg_match.group(1).strip().rstrip('.')
+    errcode_match = re.search(r'\(ErrCode:\s*(\d+)\)', msg, re.IGNORECASE)
+    if errcode_match:
+        return f"Erro Bybit #{errcode_match.group(1)}: verifique as chaves API"
+    if re.search(r'REQUEST\s*[→>]', msg):
+        return "Falha ao conectar à Bybit. Verifique as chaves API e a conexão."
+    return msg
+
+
 def _extract_unified_usdt_balance(wallet_payload):
     ret_code = wallet_payload.get('retCode')
     if ret_code != 0:
@@ -840,7 +859,7 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
         valid = True
         validation_message = f'Conta {account_mode.upper()} validada via Bybit V5'
     except Exception as e:
-        validation_message = str(e)
+        validation_message = _format_bybit_validation_error(e)
         payload['status'] = 'erro_api'
         if existing_client is not None:
             try:
