@@ -526,7 +526,12 @@ def _evaluate_hunter_filters(signals, decision):
     else:
         pivot_ok = False
 
-    fib_ok = _coerce_float(signals.get('fib_distance_pct'), default=999.0) <= HUNTER_FIB_MAX_PCT
+    fib_distance = None
+    try:
+        fib_distance = float(signals.get('fib_distance_pct'))
+    except Exception:
+        fib_distance = None
+    fib_ok = fib_distance is not None and fib_distance <= HUNTER_FIB_MAX_PCT
     volume_ok = _coerce_float(signals.get('volume_ratio'), default=0.0) >= HUNTER_VOL_MIN_RATIO
 
     support = _coerce_float(signals.get('support'), default=0.0)
