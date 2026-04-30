@@ -262,6 +262,8 @@ PENALIDADE_MOEDA_JA_ABERTA = 25           # Reduz score de ativo já aberto
 PENALIDADE_STREAK_MESMA_MOEDA = 10      # Penalidade por repetição consecutiva
 SCAN_TOP_COINS = 8                       # Menos ativos por ciclo para responder mais rápido
 SCAN_INTER_SYMBOL_DELAY_SECS = 0.25      # Respiro curto sem travar o radar
+RECENT_SIGNAL_WINDOW_SECS = 900          # Janela para penalizar sinais repetidos (15 min)
+PENALIDADE_SINAL_RECENTE = 18            # Penalidade por repetição recente no histórico
 
 
 def _frontend_index_path():
@@ -395,6 +397,58 @@ def _coerce_float(*values, default=0.0):
 
 def _clamp(value, minimum=0.0, maximum=100.0):
     return max(minimum, min(maximum, float(value)))
+
+
+def _parse_iso_timestamp(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value)).timestamp()
+    except Exception:
+        return None
+
+
+def _get_recent_signal_stats(symbol, window_secs=RECENT_SIGNAL_WINDOW_SECS):
+    normalized_symbol = _normalize_symbol_key(_canonicalize_symbol(symbol) or symbol)
+    now = time.time()
+    hits = 0
+    latest_age = None
+
+    for signal in central_state.get('recent_sniper_signals', []):
+        if not isinstance(signal, dict):
+            continue
+        raw_symbol = signal.get('raw_symbol') or signal.get('symbol')
+        if not raw_symbol:
+            continue
+        if _normalize_symbol_key(_canonicalize_symbol(raw_symbol) or raw_symbol) != normalized_symbol:
+            continue
+        ts = _parse_iso_timestamp(signal.get('received_at') or signal.get('created_at'))
+        if ts is None:
+            continue
+        age = now - ts
+        if age <= window_secs:
+            hits += 1
+            if latest_age is None or age < latest_age:
+                latest_age = age
+
+    return hits, latest_age
+
+
+def _directional_momentum_bonus(recent_return_pct, decision):
+    try:
+        recent_return_pct = float(recent_return_pct or 0)
+    except Exception:
+        recent_return_pct = 0.0
+    decision = str(decision or '').upper()
+    magnitude = abs(recent_return_pct)
+
+    if decision in {'COMPRAR', 'BUY'} and recent_return_pct > 0:
+        return min(12.0, magnitude * 2.0)
+    if decision in {'VENDER', 'SELL'} and recent_return_pct < 0:
+        return min(12.0, magnitude * 2.0)
+    if magnitude <= 0:
+        return 0.0
+    return -min(8.0, magnitude * 1.5)
 
 
 def _get_symbol_trade_edge(symbol, side, limit=300):
@@ -1838,12 +1892,14 @@ def sniper_worker_loop():
                             if prob >= THRESHOLD_ENTRADA and decisao in ['COMPRAR', 'VENDER', 'BUY', 'SELL']:
                                 money_flow = _build_money_flow_metrics(signals, t, decisao)
                                 edge = _get_symbol_trade_edge(sym, decisao)
+                                directional_bonus = _directional_momentum_bonus(signals.get('recent_return_pct'), decisao)
                                 # Score final: confiança + fluxo de dinheiro + liquidez + histórico
                                 score = (
                                     prob
                                     + min(20.0, volume / 1_000_000)
                                     + (money_flow['money_flow_score'] * 0.35)
                                     + edge['edge_score']
+                                    + directional_bonus
                                 )
                                 oportunidades.append({
                                     'symbol': sym,
@@ -1860,6 +1916,7 @@ def sniper_worker_loop():
                                     'profit_total': edge['profit_total'],
                                     'win_rate': edge['win_rate'],
                                     'sample_size': edge['sample_size'],
+                                    'directional_bonus': directional_bonus,
                                 })
                         except Exception:
                             continue
@@ -1897,6 +1954,7 @@ def sniper_worker_loop():
                         for cand in oportunidades_ordenadas:
                             adjusted = float(cand['score'])
                             clean_upper = str(cand['clean_symbol']).upper()
+                            recent_hits, recent_age = _get_recent_signal_stats(cand['symbol'])
 
                             if clean_upper in open_symbols:
                                 adjusted -= PENALIDADE_MOEDA_JA_ABERTA
@@ -1907,6 +1965,11 @@ def sniper_worker_loop():
                                     adjusted -= 1000
                                 # Penalidade por repetição sequencial
                                 adjusted -= (same_symbol_streak * PENALIDADE_STREAK_MESMA_MOEDA)
+
+                            if recent_hits:
+                                adjusted -= min(70.0, recent_hits * PENALIDADE_SINAL_RECENTE)
+                                if recent_age is not None and recent_age < BLOQUEIO_REPETICAO_MOEDA_SECS:
+                                    adjusted -= 1000
 
                             cand['adjusted_score'] = adjusted
                             if adjusted > best_adjusted:
