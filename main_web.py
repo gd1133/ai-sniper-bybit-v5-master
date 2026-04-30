@@ -493,7 +493,7 @@ def _resolve_client_bankroll(client, broker, account_mode):
     except Exception:
         live_balance = None
 
-    if live_balance is None or float(live_balance) == 0.0:
+    if live_balance is None or float(live_balance) <= 0.0:
         if _is_testnet_account(account_mode) and fallback_balance <= 0:
             return TESTNET_DEFAULT_BALANCE
         return fallback_balance
@@ -1802,11 +1802,15 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                     tp_price, sl_price = _calculate_tp_sl_prices(entry_price, side)
 
                     # --- EXECUÇÃO REAL NA EXCHANGE (PROTOCOLO SNIPER) ---
-                    if exec_enabled and broker is not None:
-                        exec_label = 'TESTNET' if APP_MODE == 'testnet' else 'REAL'
+                    exec_ready = exec_enabled and broker is not None
+                    if exec_ready:
                         leverage_ok = broker.ensure_cross_margin_leverage(symbol, leverage=10)
                         if not leverage_ok:
+                            exec_ready = False
                             print(f"⚠️ [MARGEM] Falha ao confirmar cross 10x para {c.get('nome')}.")
+
+                    if exec_ready:
+                        exec_label = 'TESTNET' if APP_MODE == 'testnet' else 'REAL'
                         print(f"🚀 [EXECUÇÃO {exec_label}] {c.get('nome')} - {side} {qty:.4f} {symbol}")
                         order_result = broker.execute_market_order(symbol, side.lower(), qty)
                         

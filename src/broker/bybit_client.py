@@ -404,7 +404,7 @@ class BybitClient:
                         symbol=v5_symbol,
                         tradeMode=0,
                     )
-                    ok, error_message = self._handle_v5_ret_code(margin_rsp, "v5/position/switch-isolated")
+                    ok, error_message = self._handle_v5_ret_code(margin_rsp, "v5/position/switch-margin-mode")
                     if not ok:
                         print(f"⚠️ [MARGIN] Falha ao definir margem cross: {error_message}")
                         success = False
