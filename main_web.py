@@ -925,24 +925,33 @@ def _fetch_active_client_balances(force=False):
 
     try:
         active_clients = _get_registered_clients(active_only=True)
+        include_inactive = False
+        if not active_clients:
+            active_clients = _get_registered_clients(active_only=False)
+            include_inactive = True
+
         for client in active_clients:
             balance = None
             error = None
             account_mode = _normalize_account_mode(client.get('account_mode', client.get('is_testnet')))
-            try:
-                broker = broker_cls(
-                    client.get('bybit_key'),
-                    client.get('bybit_secret'),
-                    testnet=_is_testnet_account(account_mode),
-                )
-                balance = broker.get_balance()
-                if balance is not None:
-                    balance = round(float(balance), 2)
-                    if _is_testnet_account(account_mode) and balance == 0.0:
-                        balance = TESTNET_DEFAULT_BALANCE
-                    total += balance
-            except Exception as e:
-                error = str(e)
+            should_query = not include_inactive or str(client.get('status') or '').lower() == 'ativo'
+            if should_query:
+                try:
+                    broker = broker_cls(
+                        client.get('bybit_key'),
+                        client.get('bybit_secret'),
+                        testnet=_is_testnet_account(account_mode),
+                    )
+                    balance = broker.get_balance()
+                    if balance is not None:
+                        balance = round(float(balance), 2)
+                        if _is_testnet_account(account_mode) and balance == 0.0:
+                            balance = TESTNET_DEFAULT_BALANCE
+                        total += balance
+                except Exception as e:
+                    error = str(e)
+            elif include_inactive:
+                error = "cliente inativo"
 
             items.append({
                 "id": client.get('id'),
@@ -1587,23 +1596,27 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                           json={"chat_id": master_chat, "text": m_msg, "parse_mode": "Markdown"})
 
         # 2. Loop de Execução para Clientes Cadastrados
-        clientes = _get_registered_clients(active_only=True)
+        exec_enabled = _is_order_execution_enabled(APP_MODE)
+        clientes = _get_registered_clients(active_only=exec_enabled)
         for cliente in clientes:
             def task_cliente(c):
                 try:
                     account_mode = _normalize_account_mode(c.get('account_mode', c.get('is_testnet')))
-                    broker = _ensure_broker_class()(
-                        c.get('bybit_key'),
-                        c.get('bybit_secret'),
-                        testnet=_is_testnet_account(account_mode),
-                    )
+                    broker = None
+                    execution_note = "SIMULATED"
+                    if exec_enabled:
+                        broker = _ensure_broker_class()(
+                            c.get('bybit_key'),
+                            c.get('bybit_secret'),
+                            testnet=_is_testnet_account(account_mode),
+                        )
                     
                     # Gestão Dinâmica: 5% Banca (GAIN) / 3% (RECOVERY)
                     margem = float(c.get('saldo_base', 1000.0)) * 0.05
                     qty = margem / entry_price
 
                     # --- EXECUÇÃO REAL NA EXCHANGE (PROTOCOLO SNIPER) ---
-                    if _is_order_execution_enabled(APP_MODE):
+                    if exec_enabled and broker is not None:
                         exec_label = 'TESTNET' if APP_MODE == 'testnet' else 'REAL'
                         print(f"🚀 [EXECUÇÃO {exec_label}] {c.get('nome')} - {side} {qty:.4f} {symbol}")
                         order_result = broker.execute_market_order(symbol, side.lower(), qty)
@@ -1612,8 +1625,10 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                             # ✅ Executa Proteção: TP +100% / SL -3%
                             broker.set_tp_sl_sniper(symbol, side.lower(), entry_price, qty)
                             print(f"✅ [ORDEM EXECUTADA] ID: {order_result.get('id', 'N/A')}")
+                            execution_note = "EXEC_OK"
                         else:
                             print(f"⚠️  [ORDEM FALHADA] {c.get('nome')} - Fallback para simulação")
+                            execution_note = "EXEC_FAIL_FALLBACK"
                     else:
                         if APP_MODE == 'paper':
                             mode_label = "PAPER TRADING / PREÇO REAL"
@@ -1622,6 +1637,7 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                         else:
                             mode_label = "SALDO REAL / ORDENS BLOQUEADAS"
                         print(f"📊 [{mode_label}] {c.get('nome')} - execução real bloqueada por segurança")
+                        execution_note = "EXEC_BLOCKED_SIMULATED"
 
                     # --- NOTIFICAÇÃO PRIVADA EDUCATIVA (SNIPER PROTOCOL) ---
                     c_msg = (f"🎯 *SNIPER GIVALDO v60.1 - DISPARO CONFIRMADO*\n\n"
@@ -1648,8 +1664,20 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
 
                     # Regista no histórico do cliente (com status OPEN)
                     closed_at = time.strftime("%d/%m %H:%M", time.localtime())
-                    db.record_trade(c.get('id'), symbol, side, 0.0, round(margem, 2), closed_at, 
-                                  notes=f"SNIPER v60.1 - Conf: {res_ia.get('probabilidade')}% | Entrada: {entry_price:.8f}", status="open", entry_price=entry_price)
+                    db.record_trade(
+                        c.get('id'),
+                        symbol,
+                        side,
+                        0.0,
+                        round(margem, 2),
+                        closed_at,
+                        notes=(
+                            f"SNIPER v60.1 - Conf: {res_ia.get('probabilidade')}% | "
+                            f"Entrada: {entry_price:.8f} | {execution_note}"
+                        ),
+                        status="open",
+                        entry_price=entry_price,
+                    )
 
                     # --- SINCRONIZAÇÃO NUVEM (SUPABASE) ---
                     if cloud_db:
@@ -1662,7 +1690,10 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                                 "profit": round(margem, 2),
                                 "entry_price": round(entry_price, 8),
                                 "closed_at": closed_at,
-                                "notes": f"SNIPER v60.1 - Conf: {res_ia.get('probabilidade')}%",
+                                "notes": (
+                                    f"SNIPER v60.1 - Conf: {res_ia.get('probabilidade')}% | "
+                                    f"{execution_note}"
+                                ),
                                 "status": "open",
                                 "nome_cliente": c.get('nome') # Campo extra para facilitar análise na nuvem
                             })
@@ -2518,4 +2549,3 @@ if __name__ == "__main__":
     print(f"📊 Dashboard: http://0.0.0.0:{render_port}")
     print("🧠 Cérebro Triplo: ATIVO (Rigor 50%)")
     app.run(host='0.0.0.0', port=render_port, debug=False, use_reloader=False)
-

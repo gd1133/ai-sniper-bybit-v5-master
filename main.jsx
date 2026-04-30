@@ -234,17 +234,22 @@ const App = () => {
         }
         const json = result.json;
         if (mounted) {
-          setData(prev => ({
-            ...prev,
-            ...json,
-            balance: json.balance ?? json.test_balance ?? 0,
-            test_balance: json.test_balance ?? 0,
-            test_mode: json.test_mode ?? false,
-            operation_mode: normalizeOperationMode(json.operation_mode ?? json.mode),
-            operation_mode_label: json.operation_mode_label ?? prev.operation_mode_label,
-            execution_enabled: json.execution_enabled ?? prev.execution_enabled,
-            execution_label: json.execution_label ?? prev.execution_label,
-          }));
+          setData(prev => {
+            const resolvedOperationMode = normalizeOperationMode(
+              json.operation_mode ?? json.mode ?? prev.operation_mode
+            );
+            return {
+              ...prev,
+              ...json,
+              balance: json.balance ?? json.test_balance ?? 0,
+              test_balance: json.test_balance ?? 0,
+              test_mode: json.test_mode ?? false,
+              operation_mode: resolvedOperationMode,
+              operation_mode_label: json.operation_mode_label ?? prev.operation_mode_label,
+              execution_enabled: json.execution_enabled ?? prev.execution_enabled,
+              execution_label: json.execution_label ?? prev.execution_label,
+            };
+          });
         }
       } catch (e) {
         if (isAbortError(e)) return;
@@ -341,17 +346,22 @@ const App = () => {
       const res = await fetch(`${API_BASE}/api/status`);
       if (!res.ok) return;
       const json = await res.json();
-      setData(prev => ({
-        ...prev,
-        ...json,
-        balance: json.balance ?? json.test_balance ?? 0,
-        test_balance: json.test_balance ?? 0,
-        test_mode: json.test_mode ?? false,
-        operation_mode: normalizeOperationMode(json.operation_mode ?? json.mode),
-        operation_mode_label: json.operation_mode_label ?? prev.operation_mode_label,
-        execution_enabled: json.execution_enabled ?? prev.execution_enabled,
-        execution_label: json.execution_label ?? prev.execution_label,
-      }));
+      setData(prev => {
+        const resolvedOperationMode = normalizeOperationMode(
+          json.operation_mode ?? json.mode ?? prev.operation_mode
+        );
+        return {
+          ...prev,
+          ...json,
+          balance: json.balance ?? json.test_balance ?? 0,
+          test_balance: json.test_balance ?? 0,
+          test_mode: json.test_mode ?? false,
+          operation_mode: resolvedOperationMode,
+          operation_mode_label: json.operation_mode_label ?? prev.operation_mode_label,
+          execution_enabled: json.execution_enabled ?? prev.execution_enabled,
+          execution_label: json.execution_label ?? prev.execution_label,
+        };
+      });
     } catch (e) {
       console.error('Erro ao atualizar status', e);
     }
