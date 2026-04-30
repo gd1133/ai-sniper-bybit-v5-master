@@ -938,6 +938,8 @@ def _fetch_active_client_balances(force=False):
                 balance = broker.get_balance()
                 if balance is not None:
                     balance = round(float(balance), 2)
+                    if _is_testnet_account(account_mode) and balance == 0.0:
+                        balance = TESTNET_DEFAULT_BALANCE
                     total += balance
             except Exception as e:
                 error = str(e)
@@ -987,8 +989,13 @@ def _refresh_real_balance_state(force=False):
         central_state['balance'] = round(sum(float(item.get("saldo_real") or 0.0) for item in valid_items), 2)
         central_state['status'] = f"💼 {_mode_display_label(APP_MODE)}: saldo sincronizado de {len(valid_items)} cliente(s)"
     elif mode_items:
-        central_state['balance'] = 0.0
-        central_state['status'] = f"💼 {_mode_display_label(APP_MODE)}: aguardando saldo válido dos clientes"
+        items_with_base = [item for item in mode_items if float(item.get('saldo_base', 0) or 0) > 0]
+        if items_with_base:
+            central_state['balance'] = round(sum(float(item.get('saldo_base') or 0) for item in items_with_base), 2)
+            central_state['status'] = f"💼 {_mode_display_label(APP_MODE)}: saldo configurado de {len(items_with_base)} cliente(s)"
+        else:
+            central_state['balance'] = 0.0
+            central_state['status'] = f"💼 {_mode_display_label(APP_MODE)}: aguardando saldo válido dos clientes"
     else:
         account_label = 'REAL' if _get_synced_account_mode_for_operation(APP_MODE) == 'real' else 'TESTNET'
         central_state['balance'] = 0.0
@@ -1939,8 +1946,12 @@ def get_investidores():
         return jsonify([{
             "id": r.get('id'),
             "nome": r.get('nome'),
-            "banca": (balance_map.get(r.get('id')) or {}).get('saldo_real', r.get('saldo_base', 0)),
+            "banca": (lambda live, base: live if live is not None else base)(
+                (balance_map.get(r.get('id')) or {}).get('saldo_real'),
+                r.get('saldo_base', 0) or 0,
+            ),
             "saldo_real": (balance_map.get(r.get('id')) or {}).get('saldo_real'),
+            "saldo_base": r.get('saldo_base', 0) or 0,
             "saldo_configurado": r.get('saldo_base', 0),
             "status": r.get('status'),
             "mode": _normalize_account_mode(r.get('account_mode', r.get('is_testnet'))).upper(),
