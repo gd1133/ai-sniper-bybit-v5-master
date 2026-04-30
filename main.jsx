@@ -17,7 +17,9 @@ import {
   CheckCircle2,
   Trash2,
   Settings,
-  Pencil
+  Pencil,
+  ChevronUp,
+  ChevronDown
 } from 'lucide-react';
 
 const getApiBase = () => {
@@ -62,6 +64,19 @@ const normalizeAccountMode = (value) => {
   if (value === false || value === 0 || value === '0' || value === 'false') return 'real';
   return 'testnet';
 };
+
+const parseBalanceInput = (value) => {
+  const raw = String(value ?? '').trim();
+  if (!raw) return NaN;
+  const cleaned = raw.replace(/\s+/g, '');
+  const hasComma = cleaned.includes(',');
+  const normalized = hasComma
+    ? cleaned.replace(/\./g, '').replace(',', '.')
+    : cleaned.replace(/,/g, '');
+  return Number(normalized);
+};
+
+const roundMoney = (value) => Math.round(value * 100) / 100;
 
 const normalizeInvestorRecord = (client) => {
   const accountMode = normalizeAccountMode(client?.account_mode ?? client?.is_testnet);
@@ -307,6 +322,17 @@ const App = () => {
     } catch (e) { console.error('Erro ao carregar cliente', e); }
   };
 
+  const refreshInvestidores = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/investidores`);
+      if (!res.ok) return;
+      const json = await res.json();
+      setInvestidores((json || []).map(normalizeInvestorRecord));
+    } catch (e) {
+      console.error('Erro fetching /api/investidores', e);
+    }
+  };
+
   const handleDeleteInvestor = async (id) => {
     if (!confirm('Confirmar remoção do investidor? Esta ação é irreversível.')) return;
     try {
@@ -322,8 +348,9 @@ const App = () => {
   };
 
   const handleSaveBalance = async (id) => {
-    const saldo = parseFloat(balanceEditValue);
-    if (isNaN(saldo) || saldo < 0) { alert('Valor inválido'); return; }
+    const saldoParsed = parseBalanceInput(balanceEditValue);
+    if (!Number.isFinite(saldoParsed) || saldoParsed < 0) { alert('Valor inválido'); return; }
+    const saldo = roundMoney(saldoParsed);
     try {
       const res = await fetch(`${API_BASE}/api/cliente/${id}/saldo`, {
         method: 'PATCH',
@@ -332,9 +359,10 @@ const App = () => {
       });
       const json = await res.json();
       if (res.ok) {
-        setInvestidores(prev => prev.map(i => i.id === id ? { ...i, banca: saldo, saldo_real: saldo, saldo_base: saldo } : i));
+        setInvestidores(prev => prev.map(i => i.id === id ? { ...i, banca: saldo, saldo_real: saldo, saldo_base: saldo, saldo_configurado: saldo } : i));
         setBalanceEditId(null);
         setBalanceEditValue('');
+        await refreshInvestidores();
       } else {
         alert(json.error || 'Erro ao salvar saldo');
       }
@@ -433,6 +461,13 @@ const App = () => {
   const [investidores, setInvestidores] = useState([]);
   const [balanceEditId, setBalanceEditId] = useState(null);
   const [balanceEditValue, setBalanceEditValue] = useState('');
+  const balanceStep = 1;
+  const adjustBalanceValue = (delta) => {
+    const current = parseBalanceInput(balanceEditValue);
+    const base = Number.isFinite(current) ? current : 0;
+    const next = Math.max(0, roundMoney(base + delta));
+    setBalanceEditValue(String(next));
+  };
   const currentOperationMode = normalizeOperationMode(data.operation_mode);
   const currentOperationMeta = OPERATION_MODE_META[currentOperationMode] || OPERATION_MODE_META.paper;
   const formAccountMode = normalizeAccountMode(addFormFields.account_mode);
@@ -903,15 +938,37 @@ const App = () => {
                         {balanceEditId === inv.id ? (
                           <div className="flex items-center gap-2">
                             <input
-                              type="number"
-                              min="0"
-                              step="0.01"
+                              type="text"
+                              inputMode="decimal"
                               value={balanceEditValue}
                               onChange={e => setBalanceEditValue(e.target.value)}
-                              onKeyDown={e => { if (e.key === 'Enter') handleSaveBalance(inv.id); if (e.key === 'Escape') { setBalanceEditId(null); setBalanceEditValue(''); } }}
+                              onKeyDown={e => {
+                                if (e.key === 'Enter') handleSaveBalance(inv.id);
+                                if (e.key === 'Escape') { setBalanceEditId(null); setBalanceEditValue(''); }
+                                if (e.key === 'ArrowUp') { e.preventDefault(); adjustBalanceValue(balanceStep); }
+                                if (e.key === 'ArrowDown') { e.preventDefault(); adjustBalanceValue(-balanceStep); }
+                              }}
                               className="w-28 bg-zinc-900 border border-green-500/40 text-white font-mono font-bold text-sm rounded-xl px-3 py-2 focus:outline-none focus:border-green-400"
                               autoFocus
                             />
+                            <div className="flex flex-col">
+                              <button
+                                type="button"
+                                onClick={() => adjustBalanceValue(balanceStep)}
+                                className="text-zinc-500 hover:text-green-300 transition-colors"
+                                title="Aumentar saldo"
+                              >
+                                <ChevronUp size={16} />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => adjustBalanceValue(-balanceStep)}
+                                className="text-zinc-500 hover:text-red-300 transition-colors"
+                                title="Diminuir saldo"
+                              >
+                                <ChevronDown size={16} />
+                              </button>
+                            </div>
                             <button onClick={() => handleSaveBalance(inv.id)} className="text-green-400 hover:text-green-300 transition-colors"><CheckCircle2 size={18}/></button>
                             <button onClick={() => { setBalanceEditId(null); setBalanceEditValue(''); }} className="text-zinc-600 hover:text-white transition-colors"><X size={16}/></button>
                           </div>
