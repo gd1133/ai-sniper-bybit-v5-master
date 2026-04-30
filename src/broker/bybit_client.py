@@ -529,7 +529,7 @@ class BybitClient:
             normalized_side = str(side or '').strip().lower()
             is_sell = normalized_side in {"sell", "vender"}
             tp_price = entry_price * (0.90 if is_sell else 1.10)  # 10% move = 100% lucro com 10x
-            sl_price = entry_price * (1.03 if is_sell else 0.97)  # -3% na direção contrária
+            sl_price = entry_price * (1.03 if is_sell else 0.97)  # SELL: SL acima (1.03x), BUY: SL abaixo (0.97x)
             
             print(f"🛡️  [PROTEÇÃO SNIPER] {symbol}")
             print(f"   📍 Entrada: ${entry_price:.2f}")
