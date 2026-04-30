@@ -387,6 +387,68 @@ class BybitClient:
             print(f"❌ [ERRO EXECUÇÃO] Falha crítica na ordem: {e}")
             return None
 
+    def ensure_cross_margin_leverage(self, symbol, leverage=10):
+        """Garante margem cross e alavancagem configurada antes da entrada."""
+        if not self.authenticated:
+            print("⚠️ [MARGIN] Cliente sem credenciais para configurar margem/alavancagem.")
+            return False
+
+        success = True
+        v5_symbol = self._normalize_v5_symbol(symbol)
+
+        if self.pybit_session is not None:
+            try:
+                if hasattr(self.pybit_session, "switch_margin_mode"):
+                    margin_rsp = self.pybit_session.switch_margin_mode(
+                        category="linear",
+                        symbol=v5_symbol,
+                        tradeMode=0,
+                    )
+                    ok, error_message = self._handle_v5_ret_code(margin_rsp, "v5/position/switch-isolated")
+                    if not ok:
+                        print(f"⚠️ [MARGIN] Falha ao definir margem cross: {error_message}")
+                        success = False
+                elif hasattr(self.pybit_session, "set_margin_mode"):
+                    margin_rsp = self.pybit_session.set_margin_mode(
+                        category="linear",
+                        symbol=v5_symbol,
+                        tradeMode=0,
+                    )
+                    ok, error_message = self._handle_v5_ret_code(margin_rsp, "v5/position/set-margin-mode")
+                    if not ok:
+                        print(f"⚠️ [MARGIN] Falha ao definir margem cross: {error_message}")
+                        success = False
+            except Exception as e:
+                print(f"⚠️ [MARGIN] Erro ao configurar margem cross: {e}")
+                success = False
+
+            try:
+                if hasattr(self.pybit_session, "set_leverage"):
+                    leverage_rsp = self.pybit_session.set_leverage(
+                        category="linear",
+                        symbol=v5_symbol,
+                        buyLeverage=str(leverage),
+                        sellLeverage=str(leverage),
+                    )
+                    ok, error_message = self._handle_v5_ret_code(leverage_rsp, "v5/position/set-leverage")
+                    if not ok:
+                        print(f"⚠️ [LEVERAGE] Falha ao definir alavancagem: {error_message}")
+                        success = False
+            except Exception as e:
+                print(f"⚠️ [LEVERAGE] Erro ao configurar alavancagem: {e}")
+                success = False
+
+        try:
+            if hasattr(self.exchange, "set_margin_mode"):
+                self.exchange.set_margin_mode("cross", symbol, params={"category": "linear"})
+            if hasattr(self.exchange, "set_leverage"):
+                self.exchange.set_leverage(leverage, symbol, params={"category": "linear"})
+        except Exception as e:
+            print(f"⚠️ [MARGIN] Falha ao configurar via CCXT: {e}")
+            success = False
+
+        return success
+
     def test_connection(self):
         """Valida a conectividade mínima com a Bybit.
 
@@ -464,8 +526,10 @@ class BybitClient:
                 return False
             
             # Cálculo de TP/SL (Bybit usa preços absolutos, não percentuais)
-            tp_price = entry_price * 1.10  # +10% = +100% de margem (alavancagem 10x)
-            sl_price = entry_price * 0.97  # -3% = Stop Loss Institucional
+            normalized_side = str(side or '').strip().lower()
+            is_sell = normalized_side in {"sell", "vender"}
+            tp_price = entry_price * (0.90 if is_sell else 1.10)  # 10% move = 100% lucro com 10x
+            sl_price = entry_price * (1.03 if is_sell else 0.97)  # -3% na direção contrária
             
             print(f"🛡️  [PROTEÇÃO SNIPER] {symbol}")
             print(f"   📍 Entrada: ${entry_price:.2f}")

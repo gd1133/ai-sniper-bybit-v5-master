@@ -231,7 +231,7 @@ def start_runtime_services():
 
         threading.Thread(target=sniper_worker_loop, daemon=True).start()
         threading.Thread(target=_monitor_sl_tp_automatico, daemon=True).start()
-        print("   Monitor SL/TP: ATIVO (-3% SL / +6% TP)")
+        print("   Monitor SL/TP: ATIVO (-3% SL / +100% lucro)")
 
         if cloud_db:
             print("☁️ Iniciando Sincronização com Supabase Cloud em background...")
@@ -252,9 +252,14 @@ SNIPER_POSICAO_UNICA = False     # Multi-ativo: permite até 5 moedas simultâne
 # Trava atômica para bloquear corrida entre validação e gravação de sinal
 SNIPER_SIGNAL_LOCK = threading.Lock()
 SNIPER_SIGNAL_RESERVATIONS = set()
-PAPER_TRADE_TP_PCT = 100.0       # Fecha somente quando dobrar a margem projetada
+PAPER_TRADE_TP_PCT = 10.0        # 10% de preço = 100% lucro com 10x
 PAPER_TRADE_SL_PCT = -3.0        # Stop de perda em 3% da entrada
 ENABLE_RANDOM_TEST_TRADES = False
+
+# Parâmetros do modo Caçador (V60.7)
+HUNTER_FIB_MAX_PCT = 1.5          # distância máxima da fib para entrada válida
+HUNTER_VOL_MIN_RATIO = 1.0        # volume acima da média
+HUNTER_SR_TOLERANCE_PCT = 0.3     # tolerância (%) para validar suporte/resistência
 
 # Anti-loop de ativo único (evita ficar preso na mesma moeda por muitos ciclos)
 BLOQUEIO_REPETICAO_MOEDA_SECS = 60       # 1 min para girar moedas rápido
@@ -454,6 +459,110 @@ def _directional_momentum_bonus(recent_return_pct, decision):
     if magnitude <= 0:
         return 0.0
     return -min(8.0, magnitude * 1.5)
+
+
+def _normalize_trade_decision(decision):
+    value = str(decision or '').strip().upper()
+    mapping = {
+        "COMPRAR": "BUY",
+        "BUY": "BUY",
+        "LONG": "BUY",
+        "VENDER": "SELL",
+        "SELL": "SELL",
+        "SHORT": "SELL",
+    }
+    return mapping.get(value, value)
+
+
+def _calculate_tp_sl_prices(entry_price, side, tp_pct=10.0, sl_pct=3.0):
+    normalized_side = _normalize_trade_decision(side)
+    is_sell = normalized_side == "SELL"
+    tp_price = entry_price * (1 - tp_pct / 100) if is_sell else entry_price * (1 + tp_pct / 100)
+    sl_price = entry_price * (1 + sl_pct / 100) if is_sell else entry_price * (1 - sl_pct / 100)
+    return tp_price, sl_price
+
+
+def _resolve_client_bankroll(client, broker, account_mode):
+    fallback_balance = _coerce_float(client.get('saldo_base'), default=0.0)
+    if broker is None:
+        return fallback_balance
+
+    live_balance = None
+    try:
+        live_balance = broker.get_balance()
+    except Exception:
+        live_balance = None
+
+    if live_balance is None or float(live_balance) == 0.0:
+        if _is_testnet_account(account_mode) and fallback_balance <= 0:
+            return TESTNET_DEFAULT_BALANCE
+        return fallback_balance
+
+    return float(live_balance)
+
+
+def _evaluate_hunter_filters(signals, decision):
+    normalized_side = _normalize_trade_decision(decision)
+    trend = str(signals.get('trend', '')).upper()
+    price = _coerce_float(signals.get('price'), default=0.0)
+    sma = _coerce_float(signals.get('sma_200'), default=0.0)
+
+    sma_ok = trend in {"ALTA", "BAIXA"}
+    if normalized_side == "BUY":
+        sma_ok = sma_ok and trend == "ALTA" and price >= sma
+    elif normalized_side == "SELL":
+        sma_ok = sma_ok and trend == "BAIXA" and price <= sma
+    else:
+        sma_ok = False
+
+    pivot_dir = str(signals.get('pivot_direction', '')).upper()
+    st_signal = int(signals.get('supertrend_signal') or 0)
+    st_dir = "ALTA" if st_signal == 1 else "BAIXA" if st_signal == -1 else "NEUTRO"
+    pivot_ok = pivot_dir in {"ALTA", "BAIXA"} and st_dir == pivot_dir
+    if normalized_side == "BUY":
+        pivot_ok = pivot_ok and pivot_dir == "ALTA"
+    elif normalized_side == "SELL":
+        pivot_ok = pivot_ok and pivot_dir == "BAIXA"
+    else:
+        pivot_ok = False
+
+    fib_ok = _coerce_float(signals.get('fib_distance_pct'), default=999.0) <= HUNTER_FIB_MAX_PCT
+    volume_ok = _coerce_float(signals.get('volume_ratio'), default=0.0) >= HUNTER_VOL_MIN_RATIO
+
+    support = _coerce_float(signals.get('support'), default=0.0)
+    resistance = _coerce_float(signals.get('resistance'), default=0.0)
+    tolerance = HUNTER_SR_TOLERANCE_PCT / 100
+    near_support = support > 0 and price > 0 and abs(price - support) / price <= tolerance
+    near_resistance = resistance > 0 and price > 0 and abs(price - resistance) / price <= tolerance
+    break_support = support > 0 and price > 0 and price <= support * (1 - tolerance)
+    break_resistance = resistance > 0 and price > 0 and price >= resistance * (1 + tolerance)
+
+    if normalized_side == "BUY":
+        sr_ok = break_resistance or near_support
+    elif normalized_side == "SELL":
+        sr_ok = break_support or near_resistance
+    else:
+        sr_ok = False
+
+    return {
+        "sma": sma_ok,
+        "supertrend": pivot_ok,
+        "fib": fib_ok,
+        "volume": volume_ok,
+        "sr": sr_ok,
+    }
+
+
+def _log_hunter_filter_status(statuses):
+    print(
+        "[CAÇADOR] SMA: {sma} | SuperTrend: {st} | Fib: {fib} | Vol: {vol} | S/R: {sr}".format(
+            sma="OK" if statuses.get("sma") else "FAIL",
+            st="OK" if statuses.get("supertrend") else "FAIL",
+            fib="OK" if statuses.get("fib") else "FAIL",
+            vol="OK" if statuses.get("volume") else "FAIL",
+            sr="OK" if statuses.get("sr") else "FAIL",
+        )
+    )
 
 
 def _get_symbol_trade_edge(symbol, side, limit=300):
@@ -1335,11 +1444,11 @@ def _monitor_sl_tp_automatico():
     """
     Monitora trades abertos e fecha automaticamente quando atingem:
     - Stop Loss: -3% (perda maxima institucional)
-    - Take Profit: +6% (lucro alvo)
+    - Take Profit: +100% de lucro (10% preço com alavancagem 10x)
     Executa em background a cada 10 segundos.
     """
     SL_PCT = -3.0
-    TP_PCT =  6.0
+    TP_PCT = 10.0
 
     while True:
         try:
@@ -1360,7 +1469,7 @@ def _monitor_sl_tp_automatico():
                 if pnl_pct <= SL_PCT:
                     motivo = f"SL_AUTO -3% (real: {pnl_pct:.2f}%)"
                 elif pnl_pct >= TP_PCT:
-                    motivo = f"TP_AUTO +6% (real: {pnl_pct:.2f}%)"
+                    motivo = f"TP_AUTO +100% (real: {pnl_pct:.2f}%)"
 
                 if motivo:
                     try:
@@ -1683,13 +1792,21 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                             testnet=_is_testnet_account(account_mode),
                         )
                     
-                    # Gestão Dinâmica: 5% Banca (GAIN) / 3% (RECOVERY)
-                    margem = float(c.get('saldo_base', 1000.0)) * 0.05
+                    # Gestão Dinâmica: 5% da banca UTA (Gain) / 3% SL fixo
+                    bankroll = _resolve_client_bankroll(c, broker, account_mode)
+                    margem = float(bankroll) * 0.05
+                    if margem <= 0:
+                        print(f"⚠️ [CAÇADOR] Banca inválida para {c.get('nome')}. Entrada ignorada.")
+                        return
                     qty = margem / entry_price
+                    tp_price, sl_price = _calculate_tp_sl_prices(entry_price, side)
 
                     # --- EXECUÇÃO REAL NA EXCHANGE (PROTOCOLO SNIPER) ---
                     if exec_enabled and broker is not None:
                         exec_label = 'TESTNET' if APP_MODE == 'testnet' else 'REAL'
+                        leverage_ok = broker.ensure_cross_margin_leverage(symbol, leverage=10)
+                        if not leverage_ok:
+                            print(f"⚠️ [MARGEM] Falha ao confirmar cross 10x para {c.get('nome')}.")
                         print(f"🚀 [EXECUÇÃO {exec_label}] {c.get('nome')} - {side} {qty:.4f} {symbol}")
                         order_result = broker.execute_market_order(symbol, side.lower(), qty)
                         
@@ -1716,6 +1833,7 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                              f"👤 *Trader:* {c.get('nome')}\n"
                              f"📦 *Ativo:* {symbol}\n"
                              f"📈 *Lado:* {side.upper()}\n"
+                             f"💰 *Banca UTA:* ${bankroll:.2f}\n"
                              f"💰 *Margem:* ${margem:.2f} (5% da banca)\n"
                              f"🎯 *Quantidade:* {qty:.4f}\n"
                              f"📍 *Entrada:* ${entry_price:.2f}\n\n"
@@ -1724,8 +1842,8 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                              f"🔐 *Modo:* {_mode_display_label(APP_MODE)} • {_execution_status_label(APP_MODE)}\n"
                              f"👤 *Conta:* {account_mode.upper()}\n\n"
                              f"🛡️  *PROTEÇÃO ATIVA:*\n"
-                             f"✅ TP: ${entry_price * 1.10:.2f} (+100% lucro)\n"
-                             f"❌ SL: ${entry_price * 0.97:.2f} (-3% trava)\n\n"
+                             f"✅ TP: ${tp_price:.2f} (+100% lucro)\n"
+                             f"❌ SL: ${sl_price:.2f} (-3% trava)\n\n"
                              f"⏱️ *Cooldown Institucional:* 10 min após fechamento")
                     
                     client_tg_token = str(c.get('tg_token') or '').strip()
@@ -1912,6 +2030,7 @@ def sniper_worker_loop():
                                     'score': score,
                                     'probabilidade': prob,
                                     'res': res,
+                                    'signals': signals,
                                     'money_flow_score': money_flow['money_flow_score'],
                                     'money_flow_side': money_flow['money_flow_side'],
                                     'institutional_pressure': money_flow['institutional_pressure'],
@@ -2008,6 +2127,18 @@ def sniper_worker_loop():
                         central_state['symbol'] = melhor['clean_symbol']
                         central_state['confidence'] = melhor['probabilidade']
                         central_state['ia2_decision']['motivo'] = melhor['res'].get('motivo', 'Confluência detectada')
+
+                        hunter_status = _evaluate_hunter_filters(
+                            melhor.get('signals', {}),
+                            melhor['res'].get('decisao', 'ABORTAR'),
+                        )
+                        _log_hunter_filter_status(hunter_status)
+                        if not all(hunter_status.values()):
+                            print("[CAÇADOR] Condição não atingida - Aguardando próximo candle.")
+                            central_state['status'] = '🧭 [CAÇADOR] Condição não atingida - Aguardando próximo candle.'
+                            time.sleep(30)
+                            continue
+
                         broadcast_ordem_global(
                             melhor['symbol'],
                             melhor['res'].get('decisao', 'ABORTAR'),
