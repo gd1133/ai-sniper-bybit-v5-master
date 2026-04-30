@@ -152,6 +152,7 @@ db.init_db()
 
 # 🧪 CARREGA CONFIGURAÇÕES DE TESTE
 TEST_BALANCE = db.get_test_balance()  # Saldo fictício para treinar
+TESTNET_DEFAULT_BALANCE = 1000.0     # Saldo fictício aplicado a contas testnet com saldo zero
 APP_MODE = _normalize_operation_mode(db.get_operation_mode())
 TEST_MODE_ENABLED = APP_MODE == 'paper'
 ALLOW_ORDER_EXECUTION = ENV_CONFIG.allow_order_execution
@@ -854,6 +855,8 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
         )
         wallet_payload = session.get_wallet_balance(accountType='UNIFIED', coin='USDT')
         balance = _extract_unified_usdt_balance(wallet_payload)
+        if resolved_testnet and float(balance) == 0.0:
+            balance = TESTNET_DEFAULT_BALANCE
         payload['saldo_base'] = round(float(balance), 2)
         payload['status'] = 'ativo'
         valid = True
