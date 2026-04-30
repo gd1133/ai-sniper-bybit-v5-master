@@ -1,5 +1,5 @@
 """
-Tests for account mode and operation mode normalisation helpers in main_web.py:
+Tests for account mode and operation mode normalization helpers in main_web.py:
   - _normalize_account_mode
   - _normalize_operation_mode
   - _is_testnet_account
@@ -199,7 +199,7 @@ def test_get_bybit_v5_base_url_testnet():
 def test_get_bybit_v5_base_url_production():
     url = main_web._get_bybit_v5_base_url(False)
     assert 'testnet' not in url
-    assert 'bybit.com' in url
+    assert url.startswith('https://api.bybit.com')
 
 
 # ---------------------------------------------------------------------------
@@ -249,5 +249,5 @@ if __name__ == '__main__':
         print(f'\n{failed} test(s) FAILED')
         raise SystemExit(1)
 
-    print(f'\n✅ All {len(tests)} account mode normalisation tests passed')
+    print(f'\n✅ All {len(tests)} account mode normalization tests passed')
     raise SystemExit(0)
