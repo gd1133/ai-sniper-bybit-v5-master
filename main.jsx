@@ -16,7 +16,8 @@ import {
   Save,
   CheckCircle2,
   Trash2,
-  Settings
+  Settings,
+  Pencil
 } from 'lucide-react';
 
 const getApiBase = () => {
@@ -315,6 +316,26 @@ const App = () => {
     } catch (e) { console.error(e); alert('Erro ao remover'); }
   };
 
+  const handleSaveBalance = async (id) => {
+    const saldo = parseFloat(balanceEditValue);
+    if (isNaN(saldo) || saldo < 0) { alert('Valor inválido'); return; }
+    try {
+      const res = await fetch(`${API_BASE}/api/cliente/${id}/saldo`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ saldo_base: saldo }),
+      });
+      const json = await res.json();
+      if (res.ok) {
+        setInvestidores(prev => prev.map(i => i.id === id ? { ...i, banca: saldo, saldo_real: saldo, saldo_base: saldo } : i));
+        setBalanceEditId(null);
+        setBalanceEditValue('');
+      } else {
+        alert(json.error || 'Erro ao salvar saldo');
+      }
+    } catch (e) { console.error(e); alert('Erro ao salvar saldo'); }
+  };
+
   const refreshStatusSnapshot = async () => {
     try {
       const res = await fetch(`${API_BASE}/api/status`);
@@ -400,6 +421,8 @@ const App = () => {
 
   // Lista de pessoas (será alimentada pelo banco local futuramente)
   const [investidores, setInvestidores] = useState([]);
+  const [balanceEditId, setBalanceEditId] = useState(null);
+  const [balanceEditValue, setBalanceEditValue] = useState('');
   const currentOperationMode = normalizeOperationMode(data.operation_mode);
   const currentOperationMeta = OPERATION_MODE_META[currentOperationMode] || OPERATION_MODE_META.paper;
   const formAccountMode = normalizeAccountMode(addFormFields.account_mode);
@@ -866,7 +889,33 @@ const App = () => {
                           </span>
                         </div>
                       </td>
-                      <td className="p-8 font-mono text-zinc-400 font-bold">${Number(inv.saldo_real ?? inv.banca ?? 0).toLocaleString()}</td>
+                      <td className="p-8">
+                        {balanceEditId === inv.id ? (
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={balanceEditValue}
+                              onChange={e => setBalanceEditValue(e.target.value)}
+                              onKeyDown={e => { if (e.key === 'Enter') handleSaveBalance(inv.id); if (e.key === 'Escape') { setBalanceEditId(null); setBalanceEditValue(''); } }}
+                              className="w-28 bg-zinc-900 border border-green-500/40 text-white font-mono font-bold text-sm rounded-xl px-3 py-2 focus:outline-none focus:border-green-400"
+                              autoFocus
+                            />
+                            <button onClick={() => handleSaveBalance(inv.id)} className="text-green-400 hover:text-green-300 transition-colors"><CheckCircle2 size={18}/></button>
+                            <button onClick={() => { setBalanceEditId(null); setBalanceEditValue(''); }} className="text-zinc-600 hover:text-white transition-colors"><X size={16}/></button>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-3 group">
+                            <span className="font-mono text-zinc-400 font-bold">${Number(inv.saldo_real ?? inv.banca ?? 0).toLocaleString()}</span>
+                            <button
+                              onClick={() => { setBalanceEditId(inv.id); setBalanceEditValue(String(Number(inv.saldo_real ?? inv.banca ?? 0))); }}
+                              className="text-zinc-700 hover:text-yellow-400 transition-colors opacity-0 group-hover:opacity-100"
+                              title="Definir saldo manualmente"
+                            ><Pencil size={14}/></button>
+                          </div>
+                        )}
+                      </td>
                       <td className="p-8 font-black text-green-500 italic text-lg">{inv.pnl}</td>
                       <td className="p-8">
                         <div className="flex items-center gap-2">

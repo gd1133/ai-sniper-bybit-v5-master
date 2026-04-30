@@ -2020,6 +2020,34 @@ def api_delete_cliente(client_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
+@app.route('/api/cliente/<int:client_id>/saldo', methods=['PATCH'])
+def api_patch_cliente_saldo(client_id):
+    """Atualiza apenas o saldo_base de um cliente sem revalidar credenciais."""
+    data = request.json or {}
+    try:
+        novo_saldo = float(data.get('saldo_base', 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "saldo_base inválido"}), 400
+
+    novo_saldo = round(novo_saldo, 2)
+    existing = _get_registered_client_by_id(client_id)
+    if existing is None:
+        return jsonify({"error": "Cliente não encontrado"}), 404
+
+    payload = dict(existing)
+    payload['saldo_base'] = novo_saldo
+
+    record, cloud_synced, local_synced = _save_client_everywhere(payload)
+    if record:
+        return jsonify({
+            "success": True,
+            "saldo_base": novo_saldo,
+            "synced_to_cloud": cloud_synced,
+            "synced_to_local": local_synced,
+        })
+    return jsonify({"error": "Falha ao atualizar saldo"}), 500
+
+
 @app.route('/api/vincular_cliente', methods=['POST'])
 def add_cliente():
     """Recebe novos investidores do formulário SaaS."""
