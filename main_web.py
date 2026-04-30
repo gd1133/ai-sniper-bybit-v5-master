@@ -38,6 +38,8 @@ BybitV5HTTP = None
 IndicatorEngine = None
 GroqValidator = None
 public_price_broker = None
+RUNTIME_START_LOCK = threading.Lock()
+RUNTIME_STARTED = False
 
 # ==============================================================================
 # 🔘 TACTICAL v60.1 PRO - MAESTRO SAAS (FULL EDITION)
@@ -213,6 +215,26 @@ def _sync_runtime_mode_state(persist=False):
 
 
 _sync_runtime_mode_state()
+
+
+def start_runtime_services():
+    """Inicia as threads do robô uma única vez, inclusive sob gunicorn/wsgi."""
+    global RUNTIME_STARTED
+
+    with RUNTIME_START_LOCK:
+        if RUNTIME_STARTED:
+            return False
+
+        threading.Thread(target=sniper_worker_loop, daemon=True).start()
+        threading.Thread(target=_monitor_sl_tp_automatico, daemon=True).start()
+        print("   Monitor SL/TP: ATIVO (-3% SL / +6% TP)")
+
+        if cloud_db:
+            print("☁️ Iniciando Sincronização com Supabase Cloud em background...")
+            threading.Thread(target=cloud_db.sync_clients, args=(db,), daemon=True).start()
+
+        RUNTIME_STARTED = True
+        return True
 
 # Modo Fallback: Se True, usa APENAS o 3º Cérebro (Local Brain)
 USE_LOCAL_BRAIN_ONLY = False
@@ -2423,19 +2445,9 @@ def sniper_broadcast_signal():
 if __name__ == "__main__":
     render_port = int(os.getenv("PORT", "5000"))
 
-    # Inicia o robô em thread separada
-    threading.Thread(target=sniper_worker_loop, daemon=True).start()
-
-    # Monitor SL/TP automatico (-3% stop loss / +6% take profit)
-    threading.Thread(target=_monitor_sl_tp_automatico, daemon=True).start()
-    print("   Monitor SL/TP: ATIVO (-3% SL / +6% TP)")
+    start_runtime_services()
 
     print(f"✅ DuoIA Maestro v60.1 Online na Porta {render_port}")
-
-    # ☁️ SINCRONIZAÇÃO NUVEM NA PARTIDA (Async)
-    if cloud_db:
-        print("☁️ Iniciando Sincronização com Supabase Cloud em background...")
-        threading.Thread(target=cloud_db.sync_clients, args=(db,), daemon=True).start()
 
     print(f"💰 Saldo Carregado: {TEST_BALANCE} USDT")
     print(f"🧭 Modo operacional: {_mode_display_label(APP_MODE)}")
