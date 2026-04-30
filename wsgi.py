@@ -1,3 +1,1 @@
-from main_web import app, start_runtime_services
-
-start_runtime_services()
+from main_web import app  # noqa: F401  – exposed for gunicorn

@@ -1672,13 +1672,26 @@ def sniper_worker_loop():
         print(f"❌ Erro ao carregar: {e}")
         time.sleep(5)
         return
-    
-    # Scanner Master
-    master_broker = BybitClient(
-        *get_bybit_credentials(),
-        testnet=_mode_uses_testnet(APP_MODE),
-    )
-    validator = GroqValidator(os.getenv("GEMINI_API_KEY"), os.getenv("GROQ_API_KEY"))
+
+    # Scanner Master – wrapped so a transient init error retries instead of
+    # killing the thread permanently.
+    master_broker = None
+    validator = None
+    for _attempt in range(5):
+        try:
+            master_broker = BybitClient(
+                *get_bybit_credentials(),
+                testnet=_mode_uses_testnet(APP_MODE),
+            )
+            validator = GroqValidator(os.getenv("GEMINI_API_KEY"), os.getenv("GROQ_API_KEY"))
+            break
+        except Exception as init_err:
+            print(f"⚠️ [SNIPER INIT] tentativa {_attempt + 1}/5 falhou: {init_err}")
+            time.sleep(10)
+
+    if master_broker is None or validator is None:
+        print("❌ [SNIPER INIT] Não foi possível inicializar o Motor Sniper após 5 tentativas.")
+        return
 
     print(f"🚀 Motor Sniper v60.1 Operante. Rigor: {THRESHOLD_ENTRADA}%")
     

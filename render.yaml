@@ -7,4 +7,4 @@ services:
       - key: ENVIRONMENT
         value: development
     buildCommand: pip install -r requirements.txt && npm ci && npm run build
-    startCommand: gunicorn -w 2 -k gthread --threads 8 -b 0.0.0.0:$PORT main_web:app
+    startCommand: python -m gunicorn wsgi:app --config gunicorn.conf.py
