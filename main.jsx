@@ -162,7 +162,8 @@ const getTradeProgressText = (trade) => {
   const pnlPct = Number(trade?.pnl_pct || 0);
   if (!Number.isFinite(pnlPct)) return 'TP 100% • SL 3%';
   if (pnlPct >= 0) return `Faltam ${Math.max(0, 100 - pnlPct).toFixed(2)}% para TP`;
-  return `Faltam ${Math.max(0, 3 - Math.abs(pnlPct)).toFixed(2)}% para SL`;
+  if (Math.abs(pnlPct) >= 3) return `SL ULTRAPASSADO (${Math.abs(pnlPct).toFixed(2)}%)`;
+  return `Faltam ${(3 - Math.abs(pnlPct)).toFixed(2)}% para SL`;
 };
 
 /**

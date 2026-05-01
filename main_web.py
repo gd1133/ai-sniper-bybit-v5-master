@@ -1654,13 +1654,16 @@ def _settle_paper_trades():
             margin = float(trade.get('profit', 0) or 0)
             entry_price = _extract_entry_price(trade)
 
-            if margin <= 0 or entry_price <= 0 or not symbol:
+            # Skip only if we can't compute a live price (no entry_price or symbol)
+            if entry_price <= 0 or not symbol:
                 continue
 
             live = _get_live_price_snapshot(symbol, entry_price, side)
             pnl_pct = float(live.get('pnl_pct', 0) or 0)
             current_price = float(live.get('current_price', 0) or 0)
-            pnl_value = round(margin * (pnl_pct / 100), 2)
+            # margin may be 0 (trade was recorded without a committed balance);
+            # we still honour SL/TP so the card doesn't freeze on the dashboard.
+            pnl_value = round(margin * (pnl_pct / 100), 2) if margin > 0 else 0.0
 
             if pnl_pct >= PAPER_TRADE_TP_PCT or pnl_pct <= PAPER_TRADE_SL_PCT:
                 reason = 'PAPER_TP_100' if pnl_pct >= PAPER_TRADE_TP_PCT else 'PAPER_SL_3'
