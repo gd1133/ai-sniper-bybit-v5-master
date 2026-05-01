@@ -4,7 +4,7 @@ from datetime import datetime
 from src.config import get_bybit_base_url, get_bybit_credentials, resolve_use_testnet
 
 AUTH_10003_ALERT = (
-    "ERRO DE AUTENTICAÇÃO: Verifique se a chave de API é de produção e se o 2FA está ativo na Bybit"
+    "⚠️ ERRO 10003: chave expirada/inválida, 2FA desativado ou ambiente incorreto (testnet/real)."
 )
 
 # Global para carregar CCXT apenas uma vez
@@ -202,6 +202,42 @@ class BybitClient:
             self._emit_authentication_alert()
         return False, message
 
+    def _extract_unified_usdt_balance(self, wallet_payload):
+        """Extrai saldo USDT da conta UNIFIED (UTA) usando resposta V5."""
+        if not isinstance(wallet_payload, dict):
+            return None
+
+        ok, error_message = self._handle_v5_ret_code(wallet_payload, 'v5/account/wallet-balance')
+        if not ok:
+            print(f"⚠️ [BYBIT BALANCE] {error_message}")
+            return None
+
+        accounts = ((wallet_payload or {}).get('result') or {}).get('list') or []
+        if not accounts:
+            return 0.0
+
+        account = accounts[0] or {}
+        for field in ('totalWalletBalance', 'totalEquity'):
+            raw_value = account.get(field)
+            if raw_value not in [None, '']:
+                try:
+                    return float(raw_value)
+                except Exception:
+                    continue
+
+        for coin in account.get('coin') or []:
+            if str(coin.get('coin') or '').upper() != 'USDT':
+                continue
+            for field in ('walletBalance', 'equity', 'usdValue'):
+                raw_value = coin.get(field)
+                if raw_value not in [None, '']:
+                    try:
+                        return float(raw_value)
+                    except Exception:
+                        continue
+
+        return 0.0
+
     def _normalize_v5_symbol(self, symbol):
         raw = str(symbol or '').strip().upper()
         if not raw:
@@ -229,46 +265,31 @@ class BybitClient:
             return False, str(e).split('\n')[0][:220]
 
     def get_balance(self):
-        """Busca saldo USDT com fallback para múltiplos tipos de conta Bybit.
-
-        Tenta em ordem: Conta Unificada (UTA) → Conta de Contratos Clássica →
-        Swap (legado).  Apenas erros reais de autenticação invalidam as
-        credenciais; erros de tipo-de-conta (ex.: 10016) avançam para o
-        próximo fallback.
-        """
+        """Busca saldo USDT usando conta UNIFIED (UTA) com categoria linear."""
         def _usdt_from(balance):
             total = (balance or {}).get('total') or {}
             usdt = total.get('USDT')
             return float(usdt) if usdt is not None else None
 
-        # Tentativa 1: Conta Unificada (UTA)
-        try:
-            balance = self.exchange.fetch_balance(params={'accountType': 'UNIFIED'})
-            usdt = _usdt_from(balance)
-            if usdt is not None:
-                return usdt
-        except Exception as e:
-            msg = str(e)
-            if self._is_auth_error(msg):
-                self.authenticated = False
-                return None
-            # Erro de tipo de conta ou outro — tenta próximo fallback
+        if self.pybit_session is not None and hasattr(self.pybit_session, 'get_wallet_balance'):
+            try:
+                payload = self.pybit_session.get_wallet_balance(
+                    accountType='UNIFIED',
+                    coin='USDT',
+                    category='linear',
+                )
+                usdt = self._extract_unified_usdt_balance(payload)
+                if usdt is not None:
+                    return usdt
+            except Exception as e:
+                msg = str(e)
+                if self._is_auth_error(msg):
+                    self.authenticated = False
+                    return None
+                print(f"[ERRO BROKER] Falha ao consultar saldo UNIFIED: {msg}")
 
-        # Tentativa 2: Conta de Contratos Clássica (não-UTA)
         try:
-            balance = self.exchange.fetch_balance(params={'accountType': 'CONTRACT'})
-            usdt = _usdt_from(balance)
-            if usdt is not None:
-                return usdt
-        except Exception as e:
-            msg = str(e)
-            if self._is_auth_error(msg):
-                self.authenticated = False
-                return None
-
-        # Tentativa 3: Swap/Linear (parâmetro legado)
-        try:
-            balance = self.exchange.fetch_balance(params={'type': 'swap'})
+            balance = self.exchange.fetch_balance(params={'accountType': 'UNIFIED', 'category': 'linear'})
             usdt = _usdt_from(balance)
             if usdt is not None:
                 return usdt
@@ -366,6 +387,68 @@ class BybitClient:
             print(f"❌ [ERRO EXECUÇÃO] Falha crítica na ordem: {e}")
             return None
 
+    def ensure_cross_margin_leverage(self, symbol, leverage=10):
+        """Garante margem cross e alavancagem configurada antes da entrada."""
+        if not self.authenticated:
+            print("⚠️ [MARGIN] Cliente sem credenciais para configurar margem/alavancagem.")
+            return False
+
+        success = True
+        v5_symbol = self._normalize_v5_symbol(symbol)
+
+        if self.pybit_session is not None:
+            try:
+                if hasattr(self.pybit_session, "switch_margin_mode"):
+                    margin_rsp = self.pybit_session.switch_margin_mode(
+                        category="linear",
+                        symbol=v5_symbol,
+                        tradeMode=0,
+                    )
+                    ok, error_message = self._handle_v5_ret_code(margin_rsp, "v5/position/switch-margin-mode")
+                    if not ok:
+                        print(f"⚠️ [MARGIN] Falha ao definir margem cross: {error_message}")
+                        success = False
+                elif hasattr(self.pybit_session, "set_margin_mode"):
+                    margin_rsp = self.pybit_session.set_margin_mode(
+                        category="linear",
+                        symbol=v5_symbol,
+                        tradeMode=0,
+                    )
+                    ok, error_message = self._handle_v5_ret_code(margin_rsp, "v5/position/set-margin-mode")
+                    if not ok:
+                        print(f"⚠️ [MARGIN] Falha ao definir margem cross: {error_message}")
+                        success = False
+            except Exception as e:
+                print(f"⚠️ [MARGIN] Erro ao configurar margem cross: {e}")
+                success = False
+
+            try:
+                if hasattr(self.pybit_session, "set_leverage"):
+                    leverage_rsp = self.pybit_session.set_leverage(
+                        category="linear",
+                        symbol=v5_symbol,
+                        buyLeverage=str(leverage),
+                        sellLeverage=str(leverage),
+                    )
+                    ok, error_message = self._handle_v5_ret_code(leverage_rsp, "v5/position/set-leverage")
+                    if not ok:
+                        print(f"⚠️ [LEVERAGE] Falha ao definir alavancagem: {error_message}")
+                        success = False
+            except Exception as e:
+                print(f"⚠️ [LEVERAGE] Erro ao configurar alavancagem: {e}")
+                success = False
+
+        try:
+            if hasattr(self.exchange, "set_margin_mode"):
+                self.exchange.set_margin_mode("cross", symbol, params={"category": "linear"})
+            if hasattr(self.exchange, "set_leverage"):
+                self.exchange.set_leverage(leverage, symbol, params={"category": "linear"})
+        except Exception as e:
+            print(f"⚠️ [MARGIN] Falha ao configurar via CCXT: {e}")
+            success = False
+
+        return success
+
     def test_connection(self):
         """Valida a conectividade mínima com a Bybit.
 
@@ -389,9 +472,13 @@ class BybitClient:
                 if self.pybit_session is not None:
                     print(f"🔎 [BYBIT VALIDATION] endpoint={self.active_endpoint}")
                     pybit_errors = []
-                    for account_type in ['UNIFIED', 'CONTRACT']:
+                    for account_type in ['UNIFIED']:
                         try:
-                            rsp = self.pybit_session.get_wallet_balance(accountType=account_type, coin='USDT')
+                            rsp = self.pybit_session.get_wallet_balance(
+                                accountType=account_type,
+                                coin='USDT',
+                                category='linear',
+                            )
                             ok, error_message = self._handle_v5_ret_code(
                                 rsp,
                                 f'v5/account/wallet-balance ({account_type})',
@@ -439,8 +526,10 @@ class BybitClient:
                 return False
             
             # Cálculo de TP/SL (Bybit usa preços absolutos, não percentuais)
-            tp_price = entry_price * 1.10  # +10% = +100% de margem (alavancagem 10x)
-            sl_price = entry_price * 0.97  # -3% = Stop Loss Institucional
+            normalized_side = str(side or '').strip().lower()
+            is_sell = normalized_side in {"sell", "vender"}
+            tp_price = entry_price * (0.90 if is_sell else 1.10)  # 10% move = 100% lucro com 10x
+            sl_price = entry_price * (1.03 if is_sell else 0.97)  # SELL: SL acima (1.03x), BUY: SL abaixo (0.97x)
             
             print(f"🛡️  [PROTEÇÃO SNIPER] {symbol}")
             print(f"   📍 Entrada: ${entry_price:.2f}")

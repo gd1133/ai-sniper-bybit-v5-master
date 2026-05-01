@@ -16,7 +16,10 @@ import {
   Save,
   CheckCircle2,
   Trash2,
-  Settings
+  Settings,
+  Pencil,
+  ChevronUp,
+  ChevronDown
 } from 'lucide-react';
 
 const getApiBase = () => {
@@ -61,6 +64,19 @@ const normalizeAccountMode = (value) => {
   if (value === false || value === 0 || value === '0' || value === 'false') return 'real';
   return 'testnet';
 };
+
+const parseBalanceInput = (value) => {
+  const raw = String(value ?? '').trim();
+  if (!raw) return NaN;
+  const cleaned = raw.replace(/\s+/g, '');
+  const hasComma = cleaned.includes(',');
+  const normalized = hasComma
+    ? cleaned.replace(/\./g, '').replace(',', '.')
+    : cleaned.replace(/,/g, '');
+  return Number(normalized);
+};
+
+const roundMoney = (value) => Math.round(value * 100) / 100;
 
 const normalizeInvestorRecord = (client) => {
   const accountMode = normalizeAccountMode(client?.account_mode ?? client?.is_testnet);
@@ -146,7 +162,8 @@ const getTradeProgressText = (trade) => {
   const pnlPct = Number(trade?.pnl_pct || 0);
   if (!Number.isFinite(pnlPct)) return 'TP 100% • SL 3%';
   if (pnlPct >= 0) return `Faltam ${Math.max(0, 100 - pnlPct).toFixed(2)}% para TP`;
-  return `Faltam ${Math.max(0, 3 - Math.abs(pnlPct)).toFixed(2)}% para SL`;
+  if (Math.abs(pnlPct) >= 3) return `SL ULTRAPASSADO (${Math.abs(pnlPct).toFixed(2)}%)`;
+  return `Faltam ${(3 - Math.abs(pnlPct)).toFixed(2)}% para SL`;
 };
 
 /**
@@ -233,17 +250,22 @@ const App = () => {
         }
         const json = result.json;
         if (mounted) {
-          setData(prev => ({
-            ...prev,
-            ...json,
-            balance: json.balance ?? json.test_balance ?? 0,
-            test_balance: json.test_balance ?? 0,
-            test_mode: json.test_mode ?? false,
-            operation_mode: normalizeOperationMode(json.operation_mode ?? json.mode),
-            operation_mode_label: json.operation_mode_label ?? prev.operation_mode_label,
-            execution_enabled: json.execution_enabled ?? prev.execution_enabled,
-            execution_label: json.execution_label ?? prev.execution_label,
-          }));
+          setData(prev => {
+            const resolvedOperationMode = normalizeOperationMode(
+              json.operation_mode ?? json.mode ?? prev.operation_mode
+            );
+            return {
+              ...prev,
+              ...json,
+              balance: json.balance ?? json.test_balance ?? 0,
+              test_balance: json.test_balance ?? 0,
+              test_mode: json.test_mode ?? false,
+              operation_mode: resolvedOperationMode,
+              operation_mode_label: json.operation_mode_label ?? prev.operation_mode_label,
+              execution_enabled: json.execution_enabled ?? prev.execution_enabled,
+              execution_label: json.execution_label ?? prev.execution_label,
+            };
+          });
         }
       } catch (e) {
         if (isAbortError(e)) return;
@@ -301,6 +323,17 @@ const App = () => {
     } catch (e) { console.error('Erro ao carregar cliente', e); }
   };
 
+  const refreshInvestidores = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/investidores`);
+      if (!res.ok) return;
+      const json = await res.json();
+      setInvestidores((json || []).map(normalizeInvestorRecord));
+    } catch (e) {
+      console.error('Erro fetching /api/investidores', e);
+    }
+  };
+
   const handleDeleteInvestor = async (id) => {
     if (!confirm('Confirmar remoção do investidor? Esta ação é irreversível.')) return;
     try {
@@ -315,22 +348,49 @@ const App = () => {
     } catch (e) { console.error(e); alert('Erro ao remover'); }
   };
 
+  const handleSaveBalance = async (id) => {
+    const saldoParsed = parseBalanceInput(balanceEditValue);
+    if (!Number.isFinite(saldoParsed) || saldoParsed < 0) { alert('Valor inválido'); return; }
+    const saldo = roundMoney(saldoParsed);
+    try {
+      const res = await fetch(`${API_BASE}/api/cliente/${id}/saldo`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ saldo_base: saldo }),
+      });
+      const json = await res.json();
+      if (res.ok) {
+        setInvestidores(prev => prev.map(i => i.id === id ? { ...i, banca: saldo, saldo_real: saldo, saldo_base: saldo, saldo_configurado: saldo } : i));
+        setBalanceEditId(null);
+        setBalanceEditValue('');
+        await refreshInvestidores();
+      } else {
+        alert(json.error || 'Erro ao salvar saldo');
+      }
+    } catch (e) { console.error(e); alert('Erro ao salvar saldo'); }
+  };
+
   const refreshStatusSnapshot = async () => {
     try {
       const res = await fetch(`${API_BASE}/api/status`);
       if (!res.ok) return;
       const json = await res.json();
-      setData(prev => ({
-        ...prev,
-        ...json,
-        balance: json.balance ?? json.test_balance ?? 0,
-        test_balance: json.test_balance ?? 0,
-        test_mode: json.test_mode ?? false,
-        operation_mode: normalizeOperationMode(json.operation_mode ?? json.mode),
-        operation_mode_label: json.operation_mode_label ?? prev.operation_mode_label,
-        execution_enabled: json.execution_enabled ?? prev.execution_enabled,
-        execution_label: json.execution_label ?? prev.execution_label,
-      }));
+      setData(prev => {
+        const resolvedOperationMode = normalizeOperationMode(
+          json.operation_mode ?? json.mode ?? prev.operation_mode
+        );
+        return {
+          ...prev,
+          ...json,
+          balance: json.balance ?? json.test_balance ?? 0,
+          test_balance: json.test_balance ?? 0,
+          test_mode: json.test_mode ?? false,
+          operation_mode: resolvedOperationMode,
+          operation_mode_label: json.operation_mode_label ?? prev.operation_mode_label,
+          execution_enabled: json.execution_enabled ?? prev.execution_enabled,
+          execution_label: json.execution_label ?? prev.execution_label,
+        };
+      });
     } catch (e) {
       console.error('Erro ao atualizar status', e);
     }
@@ -400,6 +460,15 @@ const App = () => {
 
   // Lista de pessoas (será alimentada pelo banco local futuramente)
   const [investidores, setInvestidores] = useState([]);
+  const [balanceEditId, setBalanceEditId] = useState(null);
+  const [balanceEditValue, setBalanceEditValue] = useState('');
+  const balanceStep = 1;
+  const adjustBalanceValue = (delta) => {
+    const current = parseBalanceInput(balanceEditValue);
+    const base = Number.isFinite(current) ? current : 0;
+    const next = Math.max(0, roundMoney(base + delta));
+    setBalanceEditValue(String(next));
+  };
   const currentOperationMode = normalizeOperationMode(data.operation_mode);
   const currentOperationMeta = OPERATION_MODE_META[currentOperationMode] || OPERATION_MODE_META.paper;
   const formAccountMode = normalizeAccountMode(addFormFields.account_mode);
@@ -866,7 +935,55 @@ const App = () => {
                           </span>
                         </div>
                       </td>
-                      <td className="p-8 font-mono text-zinc-400 font-bold">${Number(inv.saldo_real ?? inv.banca ?? 0).toLocaleString()}</td>
+                      <td className="p-8">
+                        {balanceEditId === inv.id ? (
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="text"
+                              inputMode="decimal"
+                              value={balanceEditValue}
+                              onChange={e => setBalanceEditValue(e.target.value)}
+                              onKeyDown={e => {
+                                if (e.key === 'Enter') handleSaveBalance(inv.id);
+                                if (e.key === 'Escape') { setBalanceEditId(null); setBalanceEditValue(''); }
+                                if (e.key === 'ArrowUp') { e.preventDefault(); adjustBalanceValue(balanceStep); }
+                                if (e.key === 'ArrowDown') { e.preventDefault(); adjustBalanceValue(-balanceStep); }
+                              }}
+                              className="w-28 bg-zinc-900 border border-green-500/40 text-white font-mono font-bold text-sm rounded-xl px-3 py-2 focus:outline-none focus:border-green-400"
+                              autoFocus
+                            />
+                            <div className="flex flex-col">
+                              <button
+                                type="button"
+                                onClick={() => adjustBalanceValue(balanceStep)}
+                                className="text-zinc-500 hover:text-green-300 transition-colors"
+                                title="Aumentar saldo"
+                              >
+                                <ChevronUp size={16} />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => adjustBalanceValue(-balanceStep)}
+                                className="text-zinc-500 hover:text-red-300 transition-colors"
+                                title="Diminuir saldo"
+                              >
+                                <ChevronDown size={16} />
+                              </button>
+                            </div>
+                            <button onClick={() => handleSaveBalance(inv.id)} className="text-green-400 hover:text-green-300 transition-colors"><CheckCircle2 size={18}/></button>
+                            <button onClick={() => { setBalanceEditId(null); setBalanceEditValue(''); }} className="text-zinc-600 hover:text-white transition-colors"><X size={16}/></button>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-3 group">
+                            <span className="font-mono text-zinc-400 font-bold">${Number(inv.saldo_real ?? inv.banca ?? 0).toLocaleString()}</span>
+                            <button
+                              onClick={() => { setBalanceEditId(inv.id); setBalanceEditValue(String(Number(inv.saldo_real ?? inv.banca ?? 0))); }}
+                              className="text-zinc-700 hover:text-yellow-400 transition-colors opacity-0 group-hover:opacity-100"
+                              title="Definir saldo manualmente"
+                            ><Pencil size={14}/></button>
+                          </div>
+                        )}
+                      </td>
                       <td className="p-8 font-black text-green-500 italic text-lg">{inv.pnl}</td>
                       <td className="p-8">
                         <div className="flex items-center gap-2">

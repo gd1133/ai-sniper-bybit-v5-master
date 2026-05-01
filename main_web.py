@@ -53,6 +53,9 @@ print(f"[SISTEMA] Iniciando em modo: {ENVIRONMENT}")
 
 VALID_OPERATION_MODES = {'paper', 'testnet', 'real'}
 VALID_ACCOUNT_MODES = {'testnet', 'real'}
+AUTH_10003_ALERT = (
+    "⚠️ ERRO 10003: chave expirada/inválida, 2FA desativado ou ambiente incorreto (testnet/real)."
+)
 
 
 def _normalize_operation_mode(value):
@@ -152,6 +155,7 @@ db.init_db()
 
 # 🧪 CARREGA CONFIGURAÇÕES DE TESTE
 TEST_BALANCE = db.get_test_balance()  # Saldo fictício para treinar
+TESTNET_DEFAULT_BALANCE = 1000.0     # Saldo fictício aplicado a contas testnet com saldo zero
 APP_MODE = _normalize_operation_mode(db.get_operation_mode())
 TEST_MODE_ENABLED = APP_MODE == 'paper'
 ALLOW_ORDER_EXECUTION = ENV_CONFIG.allow_order_execution
@@ -227,7 +231,7 @@ def start_runtime_services():
 
         threading.Thread(target=sniper_worker_loop, daemon=True).start()
         threading.Thread(target=_monitor_sl_tp_automatico, daemon=True).start()
-        print("   Monitor SL/TP: ATIVO (-3% SL / +6% TP)")
+        print("   Monitor SL/TP: ATIVO (-3% SL / +100% lucro)")
 
         if cloud_db:
             print("☁️ Iniciando Sincronização com Supabase Cloud em background...")
@@ -248,16 +252,28 @@ SNIPER_POSICAO_UNICA = False     # Multi-ativo: permite até 5 moedas simultâne
 # Trava atômica para bloquear corrida entre validação e gravação de sinal
 SNIPER_SIGNAL_LOCK = threading.Lock()
 SNIPER_SIGNAL_RESERVATIONS = set()
-PAPER_TRADE_TP_PCT = 100.0       # Fecha somente quando dobrar a margem projetada
+PAPER_TRADE_TP_PCT = 10.0        # 10% de preço = 100% lucro com 10x
 PAPER_TRADE_SL_PCT = -3.0        # Stop de perda em 3% da entrada
 ENABLE_RANDOM_TEST_TRADES = False
 
+# Parâmetros do modo Caçador (V60.7)
+HUNTER_FIB_MAX_PCT = 1.5          # distância máxima da fib para entrada válida
+HUNTER_VOL_MIN_RATIO = 1.0        # volume acima da média
+HUNTER_SR_TOLERANCE_PCT = 0.3     # tolerância (%) para validar suporte/resistência
+
 # Anti-loop de ativo único (evita ficar preso na mesma moeda por muitos ciclos)
-BLOQUEIO_REPETICAO_MOEDA_SECS = 60       # 1 min para girar moedas rápido
-PENALIDADE_MOEDA_JA_ABERTA = 25           # Reduz score de ativo já aberto
-PENALIDADE_STREAK_MESMA_MOEDA = 10      # Penalidade por repetição consecutiva
-SCAN_TOP_COINS = 8                       # Menos ativos por ciclo para responder mais rápido
-SCAN_INTER_SYMBOL_DELAY_SECS = 0.25      # Respiro curto sem travar o radar
+BLOQUEIO_REPETICAO_MOEDA_SECS = 300      # 5 min de bloqueio duro por moeda repetida
+PENALIDADE_MOEDA_JA_ABERTA = 25          # Reduz score de ativo já aberto
+PENALIDADE_STREAK_MESMA_MOEDA = 10       # Penalidade por repetição consecutiva
+SCAN_TOP_COINS = 150                     # Universo: top 150 moedas por volume na Bybit
+SCAN_DEEP_ANALYSIS_TOP = 25             # Top N (por score local) enviados à IA cloud
+SCAN_INTER_SYMBOL_DELAY_SECS = 0.15      # Respiro curto na fase 1 (sem chamadas IA)
+RECENT_SIGNAL_WINDOW_SECS = 1800         # Janela para penalizar sinais repetidos (30 min)
+PENALIDADE_SINAL_RECENTE = 18            # Penalidade por repetição recente no histórico
+MAX_RECENT_SIGNAL_PENALTY = 70           # Limite máximo da penalidade por repetição
+PENALIDADE_BLOQUEIO_TOTAL = 1000         # Penalidade dura para bloquear repetição imediata
+ROTATION_WINDOW_SIZE = 10                # Quantas escolhas recentes rastrear para forçar rotação
+PENALIDADE_ROTACAO_WINDOW = 30           # Penalidade por aparecer na janela de rotação recente
 
 
 def _frontend_index_path():
@@ -391,6 +407,170 @@ def _coerce_float(*values, default=0.0):
 
 def _clamp(value, minimum=0.0, maximum=100.0):
     return max(minimum, min(maximum, float(value)))
+
+
+def _parse_iso_timestamp(value):
+    """Converte timestamp ISO em epoch (segundos) ou retorna None se inválido."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value)).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _get_recent_signal_stats(symbol, window_secs=RECENT_SIGNAL_WINDOW_SECS):
+    """Retorna (hits, idade_do_ultimo) de sinais recentes de um símbolo."""
+    normalized_symbol = _normalize_symbol_key(_canonicalize_symbol(symbol) or symbol)
+    now = time.time()
+    hits = 0
+    latest_age = None
+
+    for signal in central_state.get('recent_sniper_signals', []):
+        if not isinstance(signal, dict):
+            continue
+        raw_symbol = signal.get('raw_symbol') or signal.get('symbol')
+        if not raw_symbol:
+            continue
+        if _normalize_symbol_key(_canonicalize_symbol(raw_symbol) or raw_symbol) != normalized_symbol:
+            continue
+        ts = _parse_iso_timestamp(signal.get('received_at') or signal.get('created_at'))
+        if ts is None:
+            continue
+        age = now - ts
+        if age <= window_secs:
+            hits += 1
+            if latest_age is None or age < latest_age:
+                latest_age = age
+
+    return hits, latest_age
+
+
+def _directional_momentum_bonus(recent_return_pct, decision):
+    """Premia momentum alinhado com BUY/SELL e penaliza divergência de direção."""
+    try:
+        recent_return_pct = float(recent_return_pct or 0)
+    except (TypeError, ValueError):
+        recent_return_pct = 0.0
+    decision = str(decision or '').upper()
+    magnitude = abs(recent_return_pct)
+
+    if decision in {'COMPRAR', 'BUY'} and recent_return_pct > 0:
+        return min(12.0, magnitude * 2.0)
+    if decision in {'VENDER', 'SELL'} and recent_return_pct < 0:
+        return min(12.0, magnitude * 2.0)
+    if magnitude <= 0:
+        return 0.0
+    return -min(8.0, magnitude * 1.5)
+
+
+def _normalize_trade_decision(decision):
+    value = str(decision or '').strip().upper()
+    mapping = {
+        "COMPRAR": "BUY",
+        "BUY": "BUY",
+        "LONG": "BUY",
+        "VENDER": "SELL",
+        "SELL": "SELL",
+        "SHORT": "SELL",
+    }
+    return mapping.get(value, value)
+
+
+def _calculate_tp_sl_prices(entry_price, side, tp_pct=10.0, sl_pct=3.0):
+    normalized_side = _normalize_trade_decision(side)
+    is_sell = normalized_side == "SELL"
+    tp_price = entry_price * (1 - tp_pct / 100) if is_sell else entry_price * (1 + tp_pct / 100)
+    sl_price = entry_price * (1 + sl_pct / 100) if is_sell else entry_price * (1 - sl_pct / 100)
+    return tp_price, sl_price
+
+
+def _resolve_client_bankroll(client, broker, account_mode):
+    fallback_balance = _coerce_float(client.get('saldo_base'), default=0.0)
+    if broker is None:
+        return fallback_balance
+
+    live_balance = None
+    try:
+        live_balance = broker.get_balance()
+    except Exception:
+        live_balance = None
+
+    if live_balance is None or float(live_balance) <= 0.0:
+        if _is_testnet_account(account_mode) and fallback_balance <= 0:
+            return TESTNET_DEFAULT_BALANCE
+        return fallback_balance
+
+    return float(live_balance)
+
+
+def _evaluate_hunter_filters(signals, decision):
+    normalized_side = _normalize_trade_decision(decision)
+    trend = str(signals.get('trend', '')).upper()
+    price = _coerce_float(signals.get('price'), default=0.0)
+    sma = _coerce_float(signals.get('sma_200'), default=0.0)
+
+    sma_ok = trend in {"ALTA", "BAIXA"}
+    if normalized_side == "BUY":
+        sma_ok = sma_ok and trend == "ALTA" and price >= sma
+    elif normalized_side == "SELL":
+        sma_ok = sma_ok and trend == "BAIXA" and price <= sma
+    else:
+        sma_ok = False
+
+    pivot_dir = str(signals.get('pivot_direction', '')).upper()
+    st_signal = int(signals.get('supertrend_signal') or 0)
+    st_dir = "ALTA" if st_signal == 1 else "BAIXA" if st_signal == -1 else "NEUTRO"
+    pivot_ok = pivot_dir in {"ALTA", "BAIXA"} and st_dir == pivot_dir
+    if normalized_side == "BUY":
+        pivot_ok = pivot_ok and pivot_dir == "ALTA"
+    elif normalized_side == "SELL":
+        pivot_ok = pivot_ok and pivot_dir == "BAIXA"
+    else:
+        pivot_ok = False
+
+    fib_distance = None
+    try:
+        fib_distance = float(signals.get('fib_distance_pct'))
+    except Exception:
+        fib_distance = None
+    fib_ok = fib_distance is not None and fib_distance <= HUNTER_FIB_MAX_PCT
+    volume_ok = _coerce_float(signals.get('volume_ratio'), default=0.0) >= HUNTER_VOL_MIN_RATIO
+
+    support = _coerce_float(signals.get('support'), default=0.0)
+    resistance = _coerce_float(signals.get('resistance'), default=0.0)
+    tolerance = HUNTER_SR_TOLERANCE_PCT / 100
+    near_support = support > 0 and price > 0 and abs(price - support) / price <= tolerance
+    near_resistance = resistance > 0 and price > 0 and abs(price - resistance) / price <= tolerance
+    break_support = support > 0 and price > 0 and price <= support * (1 - tolerance)
+    break_resistance = resistance > 0 and price > 0 and price >= resistance * (1 + tolerance)
+
+    if normalized_side == "BUY":
+        sr_ok = break_resistance or near_support
+    elif normalized_side == "SELL":
+        sr_ok = break_support or near_resistance
+    else:
+        sr_ok = False
+
+    return {
+        "sma": sma_ok,
+        "supertrend": pivot_ok,
+        "fib": fib_ok,
+        "volume": volume_ok,
+        "sr": sr_ok,
+    }
+
+
+def _log_hunter_filter_status(statuses):
+    print(
+        "[CAÇADOR] SMA: {sma} | SuperTrend: {st} | Fib: {fib} | Vol: {vol} | S/R: {sr}".format(
+            sma="OK" if statuses.get("sma") else "FAIL",
+            st="OK" if statuses.get("supertrend") else "FAIL",
+            fib="OK" if statuses.get("fib") else "FAIL",
+            vol="OK" if statuses.get("volume") else "FAIL",
+            sr="OK" if statuses.get("sr") else "FAIL",
+        )
+    )
 
 
 def _get_symbol_trade_edge(symbol, side, limit=300):
@@ -720,10 +900,6 @@ def _resolve_client_balance_payload(raw_data, broker, account_mode, existing_cli
     return payload
 
 
-def _get_bybit_v5_base_url(is_testnet):
-    return get_bybit_base_url(is_testnet)
-
-
 def _get_bybit_server_time_ms(base_url, timeout=10):
     started_at = int(time.time() * 1000)
     response = requests.get(f'{base_url}/v5/market/time', timeout=timeout)
@@ -766,8 +942,33 @@ def _compute_safe_recv_window(base_url):
         return 20000
 
 
+def _format_bybit_validation_error(exc):
+    """Extrai mensagem amigável de exceções pybit.
+
+    Exceções pybit têm o formato:
+        (ErrCode: 33004) (ErrMsg: api key is invalid.) (timestamp: ...). REQUEST → GET https://...
+    Extraímos somente o ErrMsg; se ausente, retornamos mensagem genérica sem expor a URL.
+    """
+    msg = str(exc)
+    errmsg_match = re.search(r'\(ErrMsg:\s*([^)]+)\)', msg, re.IGNORECASE)
+    if errmsg_match:
+        return errmsg_match.group(1).strip().rstrip('.')
+    errcode_match = re.search(r'\(ErrCode:\s*(\d+)\)', msg, re.IGNORECASE)
+    if errcode_match:
+        return f"Erro Bybit #{errcode_match.group(1)}: verifique as chaves API"
+    if re.search(r'REQUEST\s*[→>]', msg):
+        return "Falha ao conectar à Bybit. Verifique as chaves API e a conexão."
+    return msg
+
+
+def _emit_bybit_auth_alert():
+    print(AUTH_10003_ALERT)
+
+
 def _extract_unified_usdt_balance(wallet_payload):
     ret_code = wallet_payload.get('retCode')
+    if ret_code == 10003:
+        _emit_bybit_auth_alert()
     if ret_code != 0:
         raise RuntimeError(
             f"Bybit get_wallet_balance falhou: retCode={ret_code} retMsg={wallet_payload.get('retMsg', 'desconhecido')}"
@@ -820,27 +1021,34 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
     if existing_client is not None and 'nome' not in payload:
         payload['nome'] = existing_client.get('nome')
 
-    base_url = _get_bybit_v5_base_url(resolved_testnet)
+    base_url = get_bybit_base_url(resolved_testnet)
     recv_window = None
     validation_message = None
     valid = False
 
     try:
-        recv_window = _compute_safe_recv_window(base_url)
+        print("Aguardando validação da API...")
+        recv_window = 20000
         session = _ensure_pybit_http_class()(
             testnet=resolved_testnet,
             api_key=api_key,
             api_secret=api_secret,
             recv_window=recv_window,
         )
-        wallet_payload = session.get_wallet_balance(accountType='UNIFIED', coin='USDT')
+        wallet_payload = session.get_wallet_balance(
+            accountType='UNIFIED',
+            coin='USDT',
+            category='linear',
+        )
         balance = _extract_unified_usdt_balance(wallet_payload)
+        if resolved_testnet and float(balance) == 0.0:
+            balance = TESTNET_DEFAULT_BALANCE
         payload['saldo_base'] = round(float(balance), 2)
         payload['status'] = 'ativo'
         valid = True
         validation_message = f'Conta {account_mode.upper()} validada via Bybit V5'
     except Exception as e:
-        validation_message = str(e)
+        validation_message = _format_bybit_validation_error(e)
         payload['status'] = 'erro_api'
         if existing_client is not None:
             try:
@@ -903,22 +1111,36 @@ def _fetch_active_client_balances(force=False):
 
     try:
         active_clients = _get_registered_clients(active_only=True)
+        include_inactive = False
+        if not active_clients:
+            active_clients = _get_registered_clients(active_only=False)
+            include_inactive = True
+
         for client in active_clients:
             balance = None
             error = None
             account_mode = _normalize_account_mode(client.get('account_mode', client.get('is_testnet')))
-            try:
-                broker = broker_cls(
-                    client.get('bybit_key'),
-                    client.get('bybit_secret'),
-                    testnet=_is_testnet_account(account_mode),
-                )
-                balance = broker.get_balance()
+            should_query = not include_inactive or str(client.get('status') or '').lower() == 'ativo'
+            if should_query:
+                try:
+                    broker = broker_cls(
+                        client.get('bybit_key'),
+                        client.get('bybit_secret'),
+                        testnet=_is_testnet_account(account_mode),
+                    )
+                    balance = broker.get_balance()
+                    if balance is not None:
+                        balance = round(float(balance), 2)
+                except Exception as e:
+                    error = str(e)
+                if _is_testnet_account(account_mode):
+                    fallback_base = float(client.get('saldo_base', 0) or 0)
+                    if balance is None or balance == 0.0:
+                        balance = fallback_base if fallback_base > 0 else TESTNET_DEFAULT_BALANCE
                 if balance is not None:
-                    balance = round(float(balance), 2)
                     total += balance
-            except Exception as e:
-                error = str(e)
+            elif include_inactive:
+                error = "cliente inativo"
 
             items.append({
                 "id": client.get('id'),
@@ -965,8 +1187,13 @@ def _refresh_real_balance_state(force=False):
         central_state['balance'] = round(sum(float(item.get("saldo_real") or 0.0) for item in valid_items), 2)
         central_state['status'] = f"💼 {_mode_display_label(APP_MODE)}: saldo sincronizado de {len(valid_items)} cliente(s)"
     elif mode_items:
-        central_state['balance'] = 0.0
-        central_state['status'] = f"💼 {_mode_display_label(APP_MODE)}: aguardando saldo válido dos clientes"
+        items_with_base = [item for item in mode_items if float(item.get('saldo_base', 0) or 0) > 0]
+        if items_with_base:
+            central_state['balance'] = round(sum(float(item.get('saldo_base') or 0) for item in items_with_base), 2)
+            central_state['status'] = f"💼 {_mode_display_label(APP_MODE)}: saldo configurado de {len(items_with_base)} cliente(s)"
+        else:
+            central_state['balance'] = 0.0
+            central_state['status'] = f"💼 {_mode_display_label(APP_MODE)}: aguardando saldo válido dos clientes"
     else:
         account_label = 'REAL' if _get_synced_account_mode_for_operation(APP_MODE) == 'real' else 'TESTNET'
         central_state['balance'] = 0.0
@@ -1225,11 +1452,11 @@ def _monitor_sl_tp_automatico():
     """
     Monitora trades abertos e fecha automaticamente quando atingem:
     - Stop Loss: -3% (perda maxima institucional)
-    - Take Profit: +6% (lucro alvo)
+    - Take Profit: +100% de lucro (10% preço com alavancagem 10x)
     Executa em background a cada 10 segundos.
     """
     SL_PCT = -3.0
-    TP_PCT =  6.0
+    TP_PCT = 10.0
 
     while True:
         try:
@@ -1250,7 +1477,7 @@ def _monitor_sl_tp_automatico():
                 if pnl_pct <= SL_PCT:
                     motivo = f"SL_AUTO -3% (real: {pnl_pct:.2f}%)"
                 elif pnl_pct >= TP_PCT:
-                    motivo = f"TP_AUTO +6% (real: {pnl_pct:.2f}%)"
+                    motivo = f"TP_AUTO +100% (real: {pnl_pct:.2f}%)"
 
                 if motivo:
                     try:
@@ -1393,6 +1620,15 @@ def _close_stale_open_trades(max_age_minutes=180):
                 )
                 closed_count += 1
                 print(f"🧹 [STALE CLOSE] trade_id={trade_id} pair={pair} fechado por idade > {max_age_minutes}min")
+                try:
+                    from src.ai_brain.learning import TradeLearner
+                    TradeLearner().record_trade(
+                        pair, t.get('side') or 'UNKNOWN', 0.0,
+                        'AUTO_CLOSE_STALE',
+                        f"Fechado por inatividade após {max_age_minutes}min."
+                    )
+                except Exception:
+                    pass
 
         conn.commit()
         conn.close()
@@ -1418,13 +1654,16 @@ def _settle_paper_trades():
             margin = float(trade.get('profit', 0) or 0)
             entry_price = _extract_entry_price(trade)
 
-            if margin <= 0 or entry_price <= 0 or not symbol:
+            # Skip only if we can't compute a live price (no entry_price or symbol)
+            if entry_price <= 0 or not symbol:
                 continue
 
             live = _get_live_price_snapshot(symbol, entry_price, side)
             pnl_pct = float(live.get('pnl_pct', 0) or 0)
             current_price = float(live.get('current_price', 0) or 0)
-            pnl_value = round(margin * (pnl_pct / 100), 2)
+            # margin may be 0 (trade was recorded without a committed balance);
+            # we still honour SL/TP so the card doesn't freeze on the dashboard.
+            pnl_value = round(margin * (pnl_pct / 100), 2) if margin > 0 else 0.0
 
             if pnl_pct >= PAPER_TRADE_TP_PCT or pnl_pct <= PAPER_TRADE_SL_PCT:
                 reason = 'PAPER_TP_100' if pnl_pct >= PAPER_TRADE_TP_PCT else 'PAPER_SL_3'
@@ -1436,6 +1675,12 @@ def _settle_paper_trades():
                     closed_at=time.strftime("%d/%m %H:%M", time.localtime()),
                     notes=notes,
                 )
+                try:
+                    from src.ai_brain.learning import TradeLearner
+                    licao = f"{reason}: {pnl_pct:.2f}% em {symbol}."
+                    TradeLearner().record_trade(symbol, side or 'UNKNOWN', round(pnl_pct, 4), reason, licao)
+                except Exception:
+                    pass
                 print(f"📘 [PAPER CLOSE] {symbol} {side} {pnl_pct:.2f}% => ${pnl_value:.2f} ({reason})")
                 continue
 
@@ -1501,6 +1746,15 @@ def _manual_close_open_trades(symbol, requested_by="dashboard"):
             total_pnl_value += pnl_value
             current_price_reference = current_price
             closed_count += 1
+            try:
+                from src.ai_brain.learning import TradeLearner
+                licao = f"MANUAL_CLOSE por {requested_by}: {pnl_pct:.2f}% em {canonical_symbol}."
+                TradeLearner().record_trade(
+                    canonical_symbol, side or 'UNKNOWN', pnl_pct,
+                    f'MANUAL_CLOSE_{str(requested_by).upper()}', licao
+                )
+            except Exception:
+                pass
 
     if closed_count and cloud_db and getattr(cloud_db, "is_available", lambda: False)():
         try:
@@ -1558,23 +1812,39 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                           json={"chat_id": master_chat, "text": m_msg, "parse_mode": "Markdown"})
 
         # 2. Loop de Execução para Clientes Cadastrados
-        clientes = _get_registered_clients(active_only=True)
+        exec_enabled = _is_order_execution_enabled(APP_MODE)
+        clientes = _get_registered_clients(active_only=exec_enabled)
         for cliente in clientes:
             def task_cliente(c):
                 try:
                     account_mode = _normalize_account_mode(c.get('account_mode', c.get('is_testnet')))
-                    broker = _ensure_broker_class()(
-                        c.get('bybit_key'),
-                        c.get('bybit_secret'),
-                        testnet=_is_testnet_account(account_mode),
-                    )
+                    broker = None
+                    execution_note = "SIMULATED"
+                    if exec_enabled:
+                        broker = _ensure_broker_class()(
+                            c.get('bybit_key'),
+                            c.get('bybit_secret'),
+                            testnet=_is_testnet_account(account_mode),
+                        )
                     
-                    # Gestão Dinâmica: 5% Banca (GAIN) / 3% (RECOVERY)
-                    margem = float(c.get('saldo_base', 1000.0)) * 0.05
+                    # Gestão Dinâmica: 5% da banca UTA (Gain) / 3% SL fixo
+                    bankroll = _resolve_client_bankroll(c, broker, account_mode)
+                    margem = float(bankroll) * 0.05
+                    if margem <= 0:
+                        print(f"⚠️ [CAÇADOR] Banca inválida para {c.get('nome')}. Entrada ignorada.")
+                        return
                     qty = margem / entry_price
+                    tp_price, sl_price = _calculate_tp_sl_prices(entry_price, side)
 
                     # --- EXECUÇÃO REAL NA EXCHANGE (PROTOCOLO SNIPER) ---
-                    if _is_order_execution_enabled(APP_MODE):
+                    exec_ready = exec_enabled and broker is not None
+                    if exec_ready:
+                        leverage_ok = broker.ensure_cross_margin_leverage(symbol, leverage=10)
+                        if not leverage_ok:
+                            exec_ready = False
+                            print(f"⚠️ [MARGEM] Falha ao confirmar cross 10x para {c.get('nome')}.")
+
+                    if exec_ready:
                         exec_label = 'TESTNET' if APP_MODE == 'testnet' else 'REAL'
                         print(f"🚀 [EXECUÇÃO {exec_label}] {c.get('nome')} - {side} {qty:.4f} {symbol}")
                         order_result = broker.execute_market_order(symbol, side.lower(), qty)
@@ -1583,8 +1853,10 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                             # ✅ Executa Proteção: TP +100% / SL -3%
                             broker.set_tp_sl_sniper(symbol, side.lower(), entry_price, qty)
                             print(f"✅ [ORDEM EXECUTADA] ID: {order_result.get('id', 'N/A')}")
+                            execution_note = "EXEC_OK"
                         else:
                             print(f"⚠️  [ORDEM FALHADA] {c.get('nome')} - Fallback para simulação")
+                            execution_note = "EXEC_FAIL_FALLBACK"
                     else:
                         if APP_MODE == 'paper':
                             mode_label = "PAPER TRADING / PREÇO REAL"
@@ -1593,12 +1865,14 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                         else:
                             mode_label = "SALDO REAL / ORDENS BLOQUEADAS"
                         print(f"📊 [{mode_label}] {c.get('nome')} - execução real bloqueada por segurança")
+                        execution_note = "EXEC_BLOCKED_SIMULATED"
 
                     # --- NOTIFICAÇÃO PRIVADA EDUCATIVA (SNIPER PROTOCOL) ---
                     c_msg = (f"🎯 *SNIPER GIVALDO v60.1 - DISPARO CONFIRMADO*\n\n"
                              f"👤 *Trader:* {c.get('nome')}\n"
                              f"📦 *Ativo:* {symbol}\n"
                              f"📈 *Lado:* {side.upper()}\n"
+                             f"💰 *Banca UTA:* ${bankroll:.2f}\n"
                              f"💰 *Margem:* ${margem:.2f} (5% da banca)\n"
                              f"🎯 *Quantidade:* {qty:.4f}\n"
                              f"📍 *Entrada:* ${entry_price:.2f}\n\n"
@@ -1607,8 +1881,8 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                              f"🔐 *Modo:* {_mode_display_label(APP_MODE)} • {_execution_status_label(APP_MODE)}\n"
                              f"👤 *Conta:* {account_mode.upper()}\n\n"
                              f"🛡️  *PROTEÇÃO ATIVA:*\n"
-                             f"✅ TP: ${entry_price * 1.10:.2f} (+100% lucro)\n"
-                             f"❌ SL: ${entry_price * 0.97:.2f} (-3% trava)\n\n"
+                             f"✅ TP: ${tp_price:.2f} (+100% lucro)\n"
+                             f"❌ SL: ${sl_price:.2f} (-3% trava)\n\n"
                              f"⏱️ *Cooldown Institucional:* 10 min após fechamento")
                     
                     client_tg_token = str(c.get('tg_token') or '').strip()
@@ -1619,8 +1893,30 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
 
                     # Regista no histórico do cliente (com status OPEN)
                     closed_at = time.strftime("%d/%m %H:%M", time.localtime())
-                    db.record_trade(c.get('id'), symbol, side, 0.0, round(margem, 2), closed_at, 
-                                  notes=f"SNIPER v60.1 - Conf: {res_ia.get('probabilidade')}% | Entrada: {entry_price:.8f}", status="open", entry_price=entry_price)
+                    db.record_trade(
+                        c.get('id'),
+                        symbol,
+                        side,
+                        0.0,
+                        round(margem, 2),
+                        closed_at,
+                        notes=(
+                            f"SNIPER v60.1 - Conf: {res_ia.get('probabilidade')}% | "
+                            f"Entrada: {entry_price:.8f} | {execution_note}"
+                        ),
+                        status="open",
+                        entry_price=entry_price,
+                    )
+
+                    # --- MEMÓRIA NEURAL: registra entrada para treinamento ---
+                    try:
+                        from src.ai_brain.learning import TradeLearner
+                        TradeLearner().record_entry(
+                            symbol, side.upper(), 'SNIPER',
+                            str(res_ia.get('motivo', ''))[:200]
+                        )
+                    except Exception:
+                        pass
 
                     # --- SINCRONIZAÇÃO NUVEM (SUPABASE) ---
                     if cloud_db:
@@ -1633,7 +1929,10 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                                 "profit": round(margem, 2),
                                 "entry_price": round(entry_price, 8),
                                 "closed_at": closed_at,
-                                "notes": f"SNIPER v60.1 - Conf: {res_ia.get('probabilidade')}%",
+                                "notes": (
+                                    f"SNIPER v60.1 - Conf: {res_ia.get('probabilidade')}% | "
+                                    f"{execution_note}"
+                                ),
                                 "status": "open",
                                 "nome_cliente": c.get('nome') # Campo extra para facilitar análise na nuvem
                             })
@@ -1680,7 +1979,13 @@ def sniper_worker_loop():
     )
     validator = GroqValidator(os.getenv("GEMINI_API_KEY"), os.getenv("GROQ_API_KEY"))
 
-    print(f"🚀 Motor Sniper v60.1 Operante. Rigor: {THRESHOLD_ENTRADA}%")
+    # Memória Neural e rotação de ativos
+    from src.ai_brain.learning import TradeLearner
+    from collections import deque
+    learner = TradeLearner()
+    recent_signal_rotation = deque(maxlen=ROTATION_WINDOW_SIZE)
+
+    print(f"🚀 Motor Sniper v60.1 Operante. Rigor: {THRESHOLD_ENTRADA}% | Universo: {SCAN_TOP_COINS} moedas")
     
     if TEST_MODE_ENABLED:
         print(f"🧪 {_mode_display_label(APP_MODE)} ATIVO - Saldo base: {TEST_BALANCE} USDT")
@@ -1689,7 +1994,7 @@ def sniper_worker_loop():
     
     # Cache de tickers com TTL
     tickers_cache = {"data": [], "timestamp": 0}
-    TICKERS_CACHE_TTL = 60
+    TICKERS_CACHE_TTL = 120
     
     # Memória de seleção para evitar repetição excessiva da mesma moeda
     last_signal_symbol = None
@@ -1731,46 +2036,64 @@ def sniper_worker_loop():
                         tickers_cache['data'] = top_coins
                         tickers_cache['timestamp'] = current_time
                     top_coins = tickers_cache['data']
-                    oportunidades = []
 
+                    # ── FASE 1: filtro local para todo o universo ────────────────
+                    phase1_candidates = []
                     for idx_loop, t in enumerate(top_coins):
                         sym = t['symbol']
                         clean_sym = _limpar_simbolo(sym)
-                        central_state['status'] = f'🔍 Radar: {clean_sym} ({idx_loop+1}/{len(top_coins)})'
+                        central_state['status'] = f'🔍 Varredura: {clean_sym} ({idx_loop+1}/{len(top_coins)})'
                         try:
                             df = master_broker.fetch_ohlcv(sym, timeframe='15m')
                             if df is None or len(df) < 200:
                                 continue
-
                             engine = IndicatorEngine(df)
                             signals = engine.get_signals()
                             local_score = validator.local_signal(signals)
-                            
-                            print(f"DEBUG {clean_sym}: Trend {signals['trend']} | Price {signals['price']} | SMA {signals['sma_200']}")
-
-                            # Filtro rápido local: não chama cloud em ativo sem confluência mínima.
                             if local_score < 25:
                                 continue
+                            phase1_candidates.append({
+                                'ticker': t,
+                                'signals': signals,
+                                'local_score': local_score,
+                            })
+                        except Exception:
+                            continue
+                        time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
 
+                    print(f"🔍 [FASE 1] {len(phase1_candidates)}/{len(top_coins)} passaram no filtro local.")
+
+                    # ── FASE 2: análise IA para top N candidatos ─────────────────
+                    top_for_ai = sorted(phase1_candidates, key=lambda x: x['local_score'], reverse=True)[:SCAN_DEEP_ANALYSIS_TOP]
+                    oportunidades = []
+                    for ai_idx, item in enumerate(top_for_ai):
+                        t = item['ticker']
+                        signals = item['signals']
+                        sym = t['symbol']
+                        clean_sym = _limpar_simbolo(sym)
+                        central_state['status'] = f'🧠 IA: {clean_sym} ({ai_idx+1}/{len(top_for_ai)})'
+                        try:
                             res = validator.consensus_predict(
                                 signals,
                                 sym,
                                 force_local_only=USE_LOCAL_BRAIN_ONLY
                             )
-
                             prob = float(res.get('probabilidade', 0))
                             decisao = str(res.get('decisao', 'ABORTAR')).upper()
                             volume = float(t.get('quoteVolume', 0) or 0)
-
                             if prob >= THRESHOLD_ENTRADA and decisao in ['COMPRAR', 'VENDER', 'BUY', 'SELL']:
                                 money_flow = _build_money_flow_metrics(signals, t, decisao)
                                 edge = _get_symbol_trade_edge(sym, decisao)
-                                # Score final: confiança + fluxo de dinheiro + liquidez + histórico
+                                directional_bonus = _directional_momentum_bonus(signals.get('recent_return_pct'), decisao)
+                                lesson_score = learner.get_symbol_lesson_score(sym)
+                                # Score final: confiança + fluxo de dinheiro + liquidez + histórico + aprendizado
                                 score = (
                                     prob
                                     + min(20.0, volume / 1_000_000)
                                     + (money_flow['money_flow_score'] * 0.35)
                                     + edge['edge_score']
+                                    + directional_bonus
+                                    + lesson_score
                                 )
                                 oportunidades.append({
                                     'symbol': sym,
@@ -1778,6 +2101,7 @@ def sniper_worker_loop():
                                     'score': score,
                                     'probabilidade': prob,
                                     'res': res,
+                                    'signals': signals,
                                     'money_flow_score': money_flow['money_flow_score'],
                                     'money_flow_side': money_flow['money_flow_side'],
                                     'institutional_pressure': money_flow['institutional_pressure'],
@@ -1787,11 +2111,11 @@ def sniper_worker_loop():
                                     'profit_total': edge['profit_total'],
                                     'win_rate': edge['win_rate'],
                                     'sample_size': edge['sample_size'],
+                                    'directional_bonus': directional_bonus,
+                                    'lesson_score': lesson_score,
                                 })
                         except Exception:
                             continue
-
-                        time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
 
                     # Publica o ranking para o dashboard (Top 5)
                     oportunidades_ordenadas = sorted(oportunidades, key=lambda x: x['score'], reverse=True)
@@ -1824,6 +2148,7 @@ def sniper_worker_loop():
                         for cand in oportunidades_ordenadas:
                             adjusted = float(cand['score'])
                             clean_upper = str(cand['clean_symbol']).upper()
+                            recent_hits, recent_age = _get_recent_signal_stats(cand['symbol'])
 
                             if clean_upper in open_symbols:
                                 adjusted -= PENALIDADE_MOEDA_JA_ABERTA
@@ -1831,9 +2156,19 @@ def sniper_worker_loop():
                             if cand['clean_symbol'] == last_signal_symbol:
                                 # Bloqueio duro por janela de tempo
                                 if (agora - last_signal_at) < BLOQUEIO_REPETICAO_MOEDA_SECS:
-                                    adjusted -= 1000
+                                    adjusted -= PENALIDADE_BLOQUEIO_TOTAL
                                 # Penalidade por repetição sequencial
                                 adjusted -= (same_symbol_streak * PENALIDADE_STREAK_MESMA_MOEDA)
+
+                            if recent_hits:
+                                adjusted -= min(MAX_RECENT_SIGNAL_PENALTY, recent_hits * PENALIDADE_SINAL_RECENTE)
+                                if recent_age is not None and recent_age < BLOQUEIO_REPETICAO_MOEDA_SECS:
+                                    adjusted -= PENALIDADE_BLOQUEIO_TOTAL
+
+                            # Penalidade por janela de rotação (força diversificação entre os últimos N ativos)
+                            rotation_hits = sum(1 for s in recent_signal_rotation if s == cand['clean_symbol'])
+                            if rotation_hits > 0:
+                                adjusted -= rotation_hits * PENALIDADE_ROTACAO_WINDOW
 
                             cand['adjusted_score'] = adjusted
                             if adjusted > best_adjusted:
@@ -1855,6 +2190,7 @@ def sniper_worker_loop():
                                 'profit_total': round(float(o.get('profit_total', 0)), 2),
                                 'win_rate': round(float(o.get('win_rate', 0)), 2),
                                 'sample_size': int(o.get('sample_size', 0) or 0),
+                                'lesson_score': round(float(o.get('lesson_score', 0)), 2),
                             }
                             for o in sorted(oportunidades_ordenadas, key=lambda x: x.get('adjusted_score', x['score']), reverse=True)[:5]
                         ]
@@ -1867,6 +2203,18 @@ def sniper_worker_loop():
                         central_state['symbol'] = melhor['clean_symbol']
                         central_state['confidence'] = melhor['probabilidade']
                         central_state['ia2_decision']['motivo'] = melhor['res'].get('motivo', 'Confluência detectada')
+
+                        hunter_status = _evaluate_hunter_filters(
+                            melhor.get('signals', {}),
+                            melhor['res'].get('decisao', 'ABORTAR'),
+                        )
+                        _log_hunter_filter_status(hunter_status)
+                        if not all(hunter_status.values()):
+                            print("[CAÇADOR] Condição não atingida - Aguardando próximo candle.")
+                            central_state['status'] = '🧭 [CAÇADOR] Condição não atingida - Aguardando próximo candle.'
+                            time.sleep(30)
+                            continue
+
                         broadcast_ordem_global(
                             melhor['symbol'],
                             melhor['res'].get('decisao', 'ABORTAR'),
@@ -1875,13 +2223,14 @@ def sniper_worker_loop():
                         )
                         central_state['status'] = f"📊 SINAL ABERTO: {melhor['clean_symbol']} ({melhor['probabilidade']:.0f}%)"
 
-                        # Atualiza memória anti-repetição
+                        # Atualiza memória anti-repetição e janela de rotação
                         if melhor['clean_symbol'] == last_signal_symbol:
                             same_symbol_streak += 1
                         else:
                             last_signal_symbol = melhor['clean_symbol']
                             same_symbol_streak = 1
                         last_signal_at = agora
+                        recent_signal_rotation.append(melhor['clean_symbol'])
 
                         time.sleep(COOLDOWN_INSTITUCIONAL_SECS)
                     else:
@@ -1917,8 +2266,12 @@ def get_investidores():
         return jsonify([{
             "id": r.get('id'),
             "nome": r.get('nome'),
-            "banca": (balance_map.get(r.get('id')) or {}).get('saldo_real', r.get('saldo_base', 0)),
+            "banca": (lambda live, base: live if live is not None else base)(
+                (balance_map.get(r.get('id')) or {}).get('saldo_real'),
+                r.get('saldo_base', 0) or 0,
+            ),
             "saldo_real": (balance_map.get(r.get('id')) or {}).get('saldo_real'),
+            "saldo_base": r.get('saldo_base', 0) or 0,
             "saldo_configurado": r.get('saldo_base', 0),
             "status": r.get('status'),
             "mode": _normalize_account_mode(r.get('account_mode', r.get('is_testnet'))).upper(),
@@ -1997,6 +2350,34 @@ def api_delete_cliente(client_id):
         return jsonify({"error": "Falha ao remover cliente"}), 500
     except Exception as e:
         return jsonify({"error": str(e)}), 400
+
+@app.route('/api/cliente/<int:client_id>/saldo', methods=['PATCH'])
+def api_patch_cliente_saldo(client_id):
+    """Atualiza apenas o saldo_base de um cliente sem revalidar credenciais."""
+    data = request.json or {}
+    try:
+        novo_saldo = float(data.get('saldo_base', 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "saldo_base inválido"}), 400
+
+    novo_saldo = round(novo_saldo, 2)
+    existing = _get_registered_client_by_id(client_id)
+    if existing is None:
+        return jsonify({"error": "Cliente não encontrado"}), 404
+
+    payload = dict(existing)
+    payload['saldo_base'] = novo_saldo
+
+    record, cloud_synced, local_synced = _save_client_everywhere(payload)
+    if record:
+        return jsonify({
+            "success": True,
+            "saldo_base": novo_saldo,
+            "synced_to_cloud": cloud_synced,
+            "synced_to_local": local_synced,
+        })
+    return jsonify({"error": "Falha ao atualizar saldo"}), 500
+
 
 @app.route('/api/vincular_cliente', methods=['POST'])
 def add_cliente():
@@ -2274,10 +2655,10 @@ def learn_from_history():
         learner = TradeLearner()
         
         for trade in winning_trades:
-            learner.record_win(trade.get('symbol', 'UNKNOWN'), trade.get('pnl_pct', 0))
+            learner.record_win(trade.get('pair', trade.get('symbol', 'UNKNOWN')), trade.get('pnl_pct', 0))
         
         for trade in losing_trades:
-            learner.record_loss(trade.get('symbol', 'UNKNOWN'), trade.get('pnl_pct', 0))
+            learner.record_loss(trade.get('pair', trade.get('symbol', 'UNKNOWN')), trade.get('pnl_pct', 0))
         
         # Salva contexto
         learner.save_memory()
@@ -2296,6 +2677,30 @@ def learn_from_history():
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 400
+
+@app.route('/api/brain/training-report', methods=['GET'])
+def get_brain_training_report():
+    """📊 RELATÓRIO DE TREINAMENTO: mostra histórico de desempenho por moeda.
+
+    GET /api/brain/training-report?limit=50
+    Retorna estatísticas por moeda (total de operações, wins, losses, win_rate, pnl_total).
+    Use isso para entender quais moedas a IA aprendeu a operar bem ou mal.
+    """
+    try:
+        limit = int(request.args.get('limit', 50))
+        from src.ai_brain.learning import TradeLearner
+        learner = TradeLearner()
+        report = learner.get_training_report(limit=limit)
+        context = learner.get_context()
+        return jsonify({
+            "success": True,
+            "count": len(report),
+            "context_resumo": context,
+            "report": report,
+        })
+    except Exception as e:
+        print(f"⚠️ [training-report] {e}")
+        return jsonify({"error": "Erro ao gerar relatório de treinamento."}), 400
 
 @app.route('/api/mode/toggle', methods=['POST'])
 def toggle_test_mode():
@@ -2344,9 +2749,8 @@ def toggle_test_mode():
             "message": f"✅ Sistema alternado para {mode_name}!"
         })
     except Exception as e:
-        return jsonify({"error": str(e)}), 400
-
-@app.route('/api/mode/current', methods=['GET'])
+        print(f"⚠️ [mode/toggle] {e}")
+        return jsonify({"error": "Erro ao alternar modo operacional."}), 400
 def get_current_mode():
     """📊 RETORNA MODO ATUAL (PAPER, TESTNET OU REAL)"""
     try:
@@ -2457,4 +2861,3 @@ if __name__ == "__main__":
     print(f"📊 Dashboard: http://0.0.0.0:{render_port}")
     print("🧠 Cérebro Triplo: ATIVO (Rigor 50%)")
     app.run(host='0.0.0.0', port=render_port, debug=False, use_reloader=False)
-

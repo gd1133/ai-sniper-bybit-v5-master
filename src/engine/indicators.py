@@ -68,6 +68,11 @@ class IndicatorEngine:
         high_price = self.df['high'].rolling(window=20).max()
         low_price = self.df['low'].rolling(window=20).min()
         self.df['fib_618'] = high_price - (high_price - low_price) * 0.618
+
+        # Pivot e zonas de suporte/resistência
+        self.df['pivot'] = (self.df['high'] + self.df['low'] + self.df['close']) / 3
+        self.df['support'] = self.df['low'].rolling(window=20, min_periods=1).min()
+        self.df['resistance'] = self.df['high'].rolling(window=20, min_periods=1).max()
         
         # Volume Trend
         self.df['vol_ma'] = self.df['vol'].rolling(window=20, min_periods=1).mean()
@@ -128,6 +133,11 @@ class IndicatorEngine:
         candle_body_ratio = (abs(float(last['close'] - last['open'])) / candle_range) * 100
         range_expansion = float(candle_range / (float(last['atr']) + 1e-9))
         distance_from_sma_pct = (abs(current_price - sma) / sma * 100) if sma else 0
+        pivot_value = float(last.get('pivot', 0) or 0)
+        if pivot_value <= 0 or current_price <= 0:
+            pivot_direction = "NEUTRO"
+        else:
+            pivot_direction = "ALTA" if current_price >= pivot_value else "BAIXA"
 
         money_flow_side = "WAIT"
         if trend == "ALTA" and recent_return_pct > 0 and float(last['volume_ratio']) >= 1.3:
@@ -146,6 +156,10 @@ class IndicatorEngine:
             'fib_distance_pct': float(fib_distance_pct),
             'supertrend_signal': st_signal,
             'atr': float(last['atr']),
+            'pivot': pivot_value,
+            'pivot_direction': pivot_direction,
+            'support': float(last.get('support', 0) or 0),
+            'resistance': float(last.get('resistance', 0) or 0),
             'recent_return_pct': float(recent_return_pct),
             'candle_body_ratio': float(candle_body_ratio),
             'range_expansion': float(range_expansion),
