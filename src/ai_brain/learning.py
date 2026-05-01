@@ -147,6 +147,93 @@ class TradeLearner:
         finally:
             conn.close()
 
+    def record_win(self, symbol, pnl_pct):
+        """Atalho para registrar vitória no sistema de treinamento."""
+        licao = f"WIN +{float(pnl_pct):.2f}%: padrão positivo – replicar nas mesmas condições."
+        self.record_trade(symbol, 'LONG', float(pnl_pct), 'WIN_HISTORY', licao)
+
+    def record_loss(self, symbol, pnl_pct):
+        """Atalho para registrar derrota no sistema de treinamento."""
+        licao = f"LOSS {float(pnl_pct):.2f}%: evitar padrão ou aguardar confirmação adicional."
+        self.record_trade(symbol, 'LONG', float(pnl_pct), 'LOSS_HISTORY', licao)
+
+    def save_memory(self):
+        """Estado já é persistido automaticamente no SQLite. Método de compatibilidade."""
+        pass
+
+    def get_symbol_lesson_score(self, symbol, limit=20):
+        """
+        Retorna ajuste de score para uma moeda com base em seu histórico de lições.
+        Positivo se a moeda tem bom desempenho, negativo se tem mau desempenho.
+        """
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''SELECT pnl_pct FROM neural_memory
+                   WHERE symbol = ? AND status = 'CLOSED'
+                   ORDER BY timestamp DESC LIMIT ?''',
+                (symbol, limit)
+            )
+            rows = cursor.fetchall()
+            if not rows:
+                return 0.0
+            pnl_list = [float(r['pnl_pct'] or 0) for r in rows]
+            avg_pnl = sum(pnl_list) / len(pnl_list)
+            wins = sum(1 for p in pnl_list if p > 0)
+            win_rate = (wins / len(pnl_list)) * 100 if pnl_list else 50.0
+            score = ((win_rate - 50.0) * 0.25) + min(10.0, avg_pnl * 0.5)
+            return round(max(-20.0, min(20.0, score)), 2)
+        except Exception as e:
+            print(f"❌ [SQLite] Erro get_symbol_lesson_score: {e}")
+            return 0.0
+        finally:
+            conn.close()
+
+    def get_training_report(self, limit=50):
+        """
+        Relatório de treinamento agregado por moeda para o endpoint
+        /api/brain/training-report.
+        """
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''SELECT symbol,
+                          COUNT(*) AS total,
+                          SUM(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) AS wins,
+                          ROUND(SUM(pnl_pct), 4) AS pnl_total,
+                          ROUND(AVG(pnl_pct), 4) AS pnl_avg,
+                          MAX(timestamp) AS last_trade
+                   FROM neural_memory
+                   WHERE status = 'CLOSED'
+                   GROUP BY symbol
+                   ORDER BY pnl_total DESC
+                   LIMIT ?''',
+                (limit,)
+            )
+            rows = cursor.fetchall()
+            result = []
+            for r in rows:
+                total = int(r['total'] or 0)
+                wins = int(r['wins'] or 0)
+                result.append({
+                    'symbol': r['symbol'],
+                    'total': total,
+                    'wins': wins,
+                    'losses': total - wins,
+                    'win_rate': round((wins / total * 100) if total > 0 else 0.0, 2),
+                    'pnl_total': float(r['pnl_total'] or 0),
+                    'pnl_avg': float(r['pnl_avg'] or 0),
+                    'last_trade': r['last_trade'],
+                })
+            return result
+        except Exception as e:
+            print(f"❌ [SQLite] Erro get_training_report: {e}")
+            return []
+        finally:
+            conn.close()
+
     def get_performance_report(self):
         """Relatório para o Telegram do Givaldo."""
         conn = self._get_conn()

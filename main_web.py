@@ -262,15 +262,18 @@ HUNTER_VOL_MIN_RATIO = 1.0        # volume acima da média
 HUNTER_SR_TOLERANCE_PCT = 0.3     # tolerância (%) para validar suporte/resistência
 
 # Anti-loop de ativo único (evita ficar preso na mesma moeda por muitos ciclos)
-BLOQUEIO_REPETICAO_MOEDA_SECS = 60       # 1 min para girar moedas rápido
-PENALIDADE_MOEDA_JA_ABERTA = 25           # Reduz score de ativo já aberto
-PENALIDADE_STREAK_MESMA_MOEDA = 10      # Penalidade por repetição consecutiva
-SCAN_TOP_COINS = 8                       # Menos ativos por ciclo para responder mais rápido
-SCAN_INTER_SYMBOL_DELAY_SECS = 0.25      # Respiro curto sem travar o radar
-RECENT_SIGNAL_WINDOW_SECS = 900          # Janela para penalizar sinais repetidos (15 min)
+BLOQUEIO_REPETICAO_MOEDA_SECS = 300      # 5 min de bloqueio duro por moeda repetida
+PENALIDADE_MOEDA_JA_ABERTA = 25          # Reduz score de ativo já aberto
+PENALIDADE_STREAK_MESMA_MOEDA = 10       # Penalidade por repetição consecutiva
+SCAN_TOP_COINS = 150                     # Universo: top 150 moedas por volume na Bybit
+SCAN_DEEP_ANALYSIS_TOP = 25             # Top N (por score local) enviados à IA cloud
+SCAN_INTER_SYMBOL_DELAY_SECS = 0.15      # Respiro curto na fase 1 (sem chamadas IA)
+RECENT_SIGNAL_WINDOW_SECS = 1800         # Janela para penalizar sinais repetidos (30 min)
 PENALIDADE_SINAL_RECENTE = 18            # Penalidade por repetição recente no histórico
 MAX_RECENT_SIGNAL_PENALTY = 70           # Limite máximo da penalidade por repetição
 PENALIDADE_BLOQUEIO_TOTAL = 1000         # Penalidade dura para bloquear repetição imediata
+ROTATION_WINDOW_SIZE = 10                # Quantas escolhas recentes rastrear para forçar rotação
+PENALIDADE_ROTACAO_WINDOW = 30           # Penalidade por aparecer na janela de rotação recente
 
 
 def _frontend_index_path():
@@ -1617,6 +1620,15 @@ def _close_stale_open_trades(max_age_minutes=180):
                 )
                 closed_count += 1
                 print(f"🧹 [STALE CLOSE] trade_id={trade_id} pair={pair} fechado por idade > {max_age_minutes}min")
+                try:
+                    from src.ai_brain.learning import TradeLearner
+                    TradeLearner().record_trade(
+                        pair, t.get('side') or 'UNKNOWN', 0.0,
+                        'AUTO_CLOSE_STALE',
+                        f"Fechado por inatividade após {max_age_minutes}min."
+                    )
+                except Exception:
+                    pass
 
         conn.commit()
         conn.close()
@@ -1660,6 +1672,12 @@ def _settle_paper_trades():
                     closed_at=time.strftime("%d/%m %H:%M", time.localtime()),
                     notes=notes,
                 )
+                try:
+                    from src.ai_brain.learning import TradeLearner
+                    licao = f"{reason}: {pnl_pct:.2f}% em {symbol}."
+                    TradeLearner().record_trade(symbol, side or 'UNKNOWN', round(pnl_pct, 4), reason, licao)
+                except Exception:
+                    pass
                 print(f"📘 [PAPER CLOSE] {symbol} {side} {pnl_pct:.2f}% => ${pnl_value:.2f} ({reason})")
                 continue
 
@@ -1725,6 +1743,15 @@ def _manual_close_open_trades(symbol, requested_by="dashboard"):
             total_pnl_value += pnl_value
             current_price_reference = current_price
             closed_count += 1
+            try:
+                from src.ai_brain.learning import TradeLearner
+                licao = f"MANUAL_CLOSE por {requested_by}: {pnl_pct:.2f}% em {canonical_symbol}."
+                TradeLearner().record_trade(
+                    canonical_symbol, side or 'UNKNOWN', pnl_pct,
+                    f'MANUAL_CLOSE_{str(requested_by).upper()}', licao
+                )
+            except Exception:
+                pass
 
     if closed_count and cloud_db and getattr(cloud_db, "is_available", lambda: False)():
         try:
@@ -1878,6 +1905,16 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                         entry_price=entry_price,
                     )
 
+                    # --- MEMÓRIA NEURAL: registra entrada para treinamento ---
+                    try:
+                        from src.ai_brain.learning import TradeLearner
+                        TradeLearner().record_entry(
+                            symbol, side.upper(), 'SNIPER',
+                            str(res_ia.get('motivo', ''))[:200]
+                        )
+                    except Exception:
+                        pass
+
                     # --- SINCRONIZAÇÃO NUVEM (SUPABASE) ---
                     if cloud_db:
                         try:
@@ -1939,7 +1976,13 @@ def sniper_worker_loop():
     )
     validator = GroqValidator(os.getenv("GEMINI_API_KEY"), os.getenv("GROQ_API_KEY"))
 
-    print(f"🚀 Motor Sniper v60.1 Operante. Rigor: {THRESHOLD_ENTRADA}%")
+    # Memória Neural e rotação de ativos
+    from src.ai_brain.learning import TradeLearner
+    from collections import deque
+    learner = TradeLearner()
+    recent_signal_rotation = deque(maxlen=ROTATION_WINDOW_SIZE)
+
+    print(f"🚀 Motor Sniper v60.1 Operante. Rigor: {THRESHOLD_ENTRADA}% | Universo: {SCAN_TOP_COINS} moedas")
     
     if TEST_MODE_ENABLED:
         print(f"🧪 {_mode_display_label(APP_MODE)} ATIVO - Saldo base: {TEST_BALANCE} USDT")
@@ -1948,7 +1991,7 @@ def sniper_worker_loop():
     
     # Cache de tickers com TTL
     tickers_cache = {"data": [], "timestamp": 0}
-    TICKERS_CACHE_TTL = 60
+    TICKERS_CACHE_TTL = 120
     
     # Memória de seleção para evitar repetição excessiva da mesma moeda
     last_signal_symbol = None
@@ -1990,48 +2033,64 @@ def sniper_worker_loop():
                         tickers_cache['data'] = top_coins
                         tickers_cache['timestamp'] = current_time
                     top_coins = tickers_cache['data']
-                    oportunidades = []
 
+                    # ── FASE 1: filtro local para todo o universo ────────────────
+                    phase1_candidates = []
                     for idx_loop, t in enumerate(top_coins):
                         sym = t['symbol']
                         clean_sym = _limpar_simbolo(sym)
-                        central_state['status'] = f'🔍 Radar: {clean_sym} ({idx_loop+1}/{len(top_coins)})'
+                        central_state['status'] = f'🔍 Varredura: {clean_sym} ({idx_loop+1}/{len(top_coins)})'
                         try:
                             df = master_broker.fetch_ohlcv(sym, timeframe='15m')
                             if df is None or len(df) < 200:
                                 continue
-
                             engine = IndicatorEngine(df)
                             signals = engine.get_signals()
                             local_score = validator.local_signal(signals)
-                            
-                            print(f"DEBUG {clean_sym}: Trend {signals['trend']} | Price {signals['price']} | SMA {signals['sma_200']}")
-
-                            # Filtro rápido local: não chama cloud em ativo sem confluência mínima.
                             if local_score < 25:
                                 continue
+                            phase1_candidates.append({
+                                'ticker': t,
+                                'signals': signals,
+                                'local_score': local_score,
+                            })
+                        except Exception:
+                            continue
+                        time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
 
+                    print(f"🔍 [FASE 1] {len(phase1_candidates)}/{len(top_coins)} passaram no filtro local.")
+
+                    # ── FASE 2: análise IA para top N candidatos ─────────────────
+                    top_for_ai = sorted(phase1_candidates, key=lambda x: x['local_score'], reverse=True)[:SCAN_DEEP_ANALYSIS_TOP]
+                    oportunidades = []
+                    for ai_idx, item in enumerate(top_for_ai):
+                        t = item['ticker']
+                        signals = item['signals']
+                        sym = t['symbol']
+                        clean_sym = _limpar_simbolo(sym)
+                        central_state['status'] = f'🧠 IA: {clean_sym} ({ai_idx+1}/{len(top_for_ai)})'
+                        try:
                             res = validator.consensus_predict(
                                 signals,
                                 sym,
                                 force_local_only=USE_LOCAL_BRAIN_ONLY
                             )
-
                             prob = float(res.get('probabilidade', 0))
                             decisao = str(res.get('decisao', 'ABORTAR')).upper()
                             volume = float(t.get('quoteVolume', 0) or 0)
-
                             if prob >= THRESHOLD_ENTRADA and decisao in ['COMPRAR', 'VENDER', 'BUY', 'SELL']:
                                 money_flow = _build_money_flow_metrics(signals, t, decisao)
                                 edge = _get_symbol_trade_edge(sym, decisao)
                                 directional_bonus = _directional_momentum_bonus(signals.get('recent_return_pct'), decisao)
-                                # Score final: confiança + fluxo de dinheiro + liquidez + histórico
+                                lesson_score = learner.get_symbol_lesson_score(sym)
+                                # Score final: confiança + fluxo de dinheiro + liquidez + histórico + aprendizado
                                 score = (
                                     prob
                                     + min(20.0, volume / 1_000_000)
                                     + (money_flow['money_flow_score'] * 0.35)
                                     + edge['edge_score']
                                     + directional_bonus
+                                    + lesson_score
                                 )
                                 oportunidades.append({
                                     'symbol': sym,
@@ -2050,11 +2109,10 @@ def sniper_worker_loop():
                                     'win_rate': edge['win_rate'],
                                     'sample_size': edge['sample_size'],
                                     'directional_bonus': directional_bonus,
+                                    'lesson_score': lesson_score,
                                 })
                         except Exception:
                             continue
-
-                        time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
 
                     # Publica o ranking para o dashboard (Top 5)
                     oportunidades_ordenadas = sorted(oportunidades, key=lambda x: x['score'], reverse=True)
@@ -2104,6 +2162,11 @@ def sniper_worker_loop():
                                 if recent_age is not None and recent_age < BLOQUEIO_REPETICAO_MOEDA_SECS:
                                     adjusted -= PENALIDADE_BLOQUEIO_TOTAL
 
+                            # Penalidade por janela de rotação (força diversificação entre os últimos N ativos)
+                            rotation_hits = sum(1 for s in recent_signal_rotation if s == cand['clean_symbol'])
+                            if rotation_hits > 0:
+                                adjusted -= rotation_hits * PENALIDADE_ROTACAO_WINDOW
+
                             cand['adjusted_score'] = adjusted
                             if adjusted > best_adjusted:
                                 best_adjusted = adjusted
@@ -2124,6 +2187,7 @@ def sniper_worker_loop():
                                 'profit_total': round(float(o.get('profit_total', 0)), 2),
                                 'win_rate': round(float(o.get('win_rate', 0)), 2),
                                 'sample_size': int(o.get('sample_size', 0) or 0),
+                                'lesson_score': round(float(o.get('lesson_score', 0)), 2),
                             }
                             for o in sorted(oportunidades_ordenadas, key=lambda x: x.get('adjusted_score', x['score']), reverse=True)[:5]
                         ]
@@ -2156,13 +2220,14 @@ def sniper_worker_loop():
                         )
                         central_state['status'] = f"📊 SINAL ABERTO: {melhor['clean_symbol']} ({melhor['probabilidade']:.0f}%)"
 
-                        # Atualiza memória anti-repetição
+                        # Atualiza memória anti-repetição e janela de rotação
                         if melhor['clean_symbol'] == last_signal_symbol:
                             same_symbol_streak += 1
                         else:
                             last_signal_symbol = melhor['clean_symbol']
                             same_symbol_streak = 1
                         last_signal_at = agora
+                        recent_signal_rotation.append(melhor['clean_symbol'])
 
                         time.sleep(COOLDOWN_INSTITUCIONAL_SECS)
                     else:
@@ -2587,10 +2652,10 @@ def learn_from_history():
         learner = TradeLearner()
         
         for trade in winning_trades:
-            learner.record_win(trade.get('symbol', 'UNKNOWN'), trade.get('pnl_pct', 0))
+            learner.record_win(trade.get('pair', trade.get('symbol', 'UNKNOWN')), trade.get('pnl_pct', 0))
         
         for trade in losing_trades:
-            learner.record_loss(trade.get('symbol', 'UNKNOWN'), trade.get('pnl_pct', 0))
+            learner.record_loss(trade.get('pair', trade.get('symbol', 'UNKNOWN')), trade.get('pnl_pct', 0))
         
         # Salva contexto
         learner.save_memory()
@@ -2606,6 +2671,29 @@ def learn_from_history():
             "win_rate": f"{(len(winning_trades)/max(1, last_n))*100:.1f}%",
             "stats": stats,
             "msg": "✅ 3º Cérebro aprendeu com o histórico!"
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+@app.route('/api/brain/training-report', methods=['GET'])
+def get_brain_training_report():
+    """📊 RELATÓRIO DE TREINAMENTO: mostra histórico de desempenho por moeda.
+
+    GET /api/brain/training-report?limit=50
+    Retorna estatísticas por moeda (total de operações, wins, losses, win_rate, pnl_total).
+    Use isso para entender quais moedas a IA aprendeu a operar bem ou mal.
+    """
+    try:
+        limit = int(request.args.get('limit', 50))
+        from src.ai_brain.learning import TradeLearner
+        learner = TradeLearner()
+        report = learner.get_training_report(limit=limit)
+        context = learner.get_context()
+        return jsonify({
+            "success": True,
+            "count": len(report),
+            "context_resumo": context,
+            "report": report,
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 400
