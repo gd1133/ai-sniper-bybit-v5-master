@@ -2746,9 +2746,8 @@ def toggle_test_mode():
             "message": f"✅ Sistema alternado para {mode_name}!"
         })
     except Exception as e:
-        return jsonify({"error": str(e)}), 400
-
-@app.route('/api/mode/current', methods=['GET'])
+        print(f"⚠️ [mode/toggle] {e}")
+        return jsonify({"error": "Erro ao alternar modo operacional."}), 400
 def get_current_mode():
     """📊 RETORNA MODO ATUAL (PAPER, TESTNET OU REAL)"""
     try:

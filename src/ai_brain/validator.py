@@ -14,9 +14,18 @@ class GroqValidator:
     Lógica: Consenso Ponderado (Gemini 40% | Groq 35% | Local 25%)
     Rigor: 60% Mínimo para autorizar o Ponto Zero.
     """
+    # Modelos Gemini em ordem de preferência (fallback automático)
+    GEMINI_MODELS = [
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+    ]
+
     def __init__(self, api_key_gemini, api_key_groq):
-        self.gemini_key = api_key_gemini
+        self.gemini_key = api_key_gemini or ""
         self.groq_client = None
+        if not self.gemini_key:
+            print("⚠️ [GEMINI] GEMINI_API_KEY não configurada – usando fallback local.")
         if Groq is not None and api_key_groq:
             try:
                 self.groq_client = Groq(api_key=api_key_groq)
@@ -28,11 +37,24 @@ class GroqValidator:
         else:
             print("⚠️ [GROQ INIT] SDK indisponivel ou chave ausente; usando fallback local.")
         self.memory = TradeLearner()
-        self.model = "gemini-2.5-flash"
-        self.gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.gemini_key}"
+        self._gemini_model_index = 0   # índice atual no GEMINI_MODELS
+        self.gemini_min_confidence = 60
         self.global_cooldown_until = 0
         self.groq_cooldown_until = 0
-        self.gemini_min_confidence = 60
+        # Throttle do log de AUTO-FALLBACK (evita spam nos logs)
+        self._last_fallback_log = 0
+        self._FALLBACK_LOG_INTERVAL = 60   # no mínimo 60s entre mensagens de fallback
+
+    @property
+    def model(self):
+        return self.GEMINI_MODELS[self._gemini_model_index]
+
+    @property
+    def gemini_url(self):
+        return (
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{self.model}:generateContent?key={self.gemini_key}"
+        )
 
     def _limpar_json(self, texto):
         """Limpa marcações de markdown e espaços para evitar erros de parsing."""
@@ -130,13 +152,13 @@ class GroqValidator:
         """
         🟡 CÉREBRO 2: RADAR TÁTICO (GROQ)
         Focado em risco e velocidade do candle.
-        Com retry logic e rate limit handling.
+        Retorna (score, action, is_fallback).
         """
         if self.groq_client is None:
-            return 45, "WAIT"
+            return 45, "WAIT", True
 
         if time.time() < self.groq_cooldown_until:
-            return 45, "WAIT"
+            return 45, "WAIT", True
 
         max_retries = 2
         retry_delay = 1
@@ -153,32 +175,32 @@ class GroqValidator:
                 )
                 data = json.loads(res.choices[0].message.content)
                 action = self._normalize_side(data.get('action', 'WAIT'))
-                return int(data.get('score', 45)), action
+                return int(data.get('score', 45)), action, False
             except Exception as e:
                 error_str = str(e)
                 if '429' in error_str or 'rate' in error_str.lower():
                     if attempt == 0:
-                        wait_time = retry_delay
-                        print(f"⏸️ [GROQ RATE LIMIT] Aguardando {wait_time}s antes de retry...")
-                        time.sleep(wait_time)
+                        time.sleep(retry_delay)
                         continue
-
                     self.groq_cooldown_until = time.time() + 90
                     print("⚠️ [GROQ] Rate limit. Cooldown 90s")
-                    return 45, 'WAIT'
+                    return 45, 'WAIT', True
                 else:
-                    # Outro erro - usar fallback
-                    print(f"⚠️ [GROQ] Fallback (tentativa {attempt+1}/{max_retries})")
-                    return 45, 'WAIT'
+                    if attempt == 0:
+                        continue
+                    return 45, 'WAIT', True
         
-        return 45, 'WAIT'  # Fallback final
+        return 45, 'WAIT', True
 
     def get_strategic_signal(self, tech_data, symbol):
         """
         🔵 CÉREBRO 3: ESTRATEGISTA CLOUD (GEMINI)
         Analisa contexto histórico e Smart Money.
-        Com rate limit detection e cooldown automático.
+        Tenta os modelos em GEMINI_MODELS em cascata se o modelo atual não existe.
         """
+        if not self.gemini_key:
+            return self.gemini_min_confidence, "Sem chave Gemini", "WAIT", True
+
         if time.time() < self.global_cooldown_until:
             return self.gemini_min_confidence, "⏸️ Gemini em cooldown...", "WAIT", True
 
@@ -205,14 +227,19 @@ class GroqValidator:
                 print(f"⚠️ [GEMINI] Rate limit 429. Cooldown 120s")
                 self.global_cooldown_until = time.time() + 120
                 return self.gemini_min_confidence, "Rate limit", "WAIT", True
+            elif res.status_code == 404:
+                # Modelo não existe – tenta próximo na cadeia
+                if self._gemini_model_index < len(self.GEMINI_MODELS) - 1:
+                    self._gemini_model_index += 1
+                    print(f"⚠️ [GEMINI] Modelo não encontrado. Tentando: {self.model}")
+                    return self.get_strategic_signal(tech_data, symbol)
+                print(f"⚠️ [GEMINI] Nenhum modelo disponível na cadeia.")
+                return self.gemini_min_confidence, "Modelo indisponível", "WAIT", True
             else:
-                print(f"⚠️ [GEMINI] Status {res.status_code}")
                 return self.gemini_min_confidence, f"Erro {res.status_code}", "WAIT", True
         except requests.Timeout:
-            print(f"⏱️ [GEMINI] Timeout 5s")
             return self.gemini_min_confidence, "Timeout", "WAIT", True
         except Exception as e:
-            print(f"⚠️ [GEMINI] {type(e).__name__}: {str(e)[:30]}")
             return self.gemini_min_confidence, "Erro", "WAIT", True
 
     def consensus_predict(self, tech_data, symbol, force_local_only=False):
@@ -250,12 +277,15 @@ class GroqValidator:
             local_fallback_side = self._resolve_local_fallback_side(tech_data)
         else:
             # ⚙️ MODO NORMAL: Tenta usar Groq + Gemini
-            tactical_score, tactical_action = self.get_tactical_signal(tech_data, symbol)
+            tactical_score, tactical_action, tactical_fallback = self.get_tactical_signal(tech_data, symbol)
             strategic_score, strategic_motivo, strategic_action, strategic_fallback = self.get_strategic_signal(tech_data, symbol)
             
-            # Se ambos falharem (rate limit), ativa fallback automático
-            if tactical_score <= 45 and strategic_fallback:
-                print(f"🚨 [AUTO-FALLBACK] Ambos APIs retornaram fallback. Ativando 3º Cérebro...")
+            # Se ambos falharem, ativa fallback automático (log throttled)
+            if tactical_fallback and strategic_fallback:
+                now = time.time()
+                if now - self._last_fallback_log >= self._FALLBACK_LOG_INTERVAL:
+                    print(f"🚨 [AUTO-FALLBACK] APIs indisponíveis. 3º Cérebro ativado.")
+                    self._last_fallback_log = now
                 tactical_score = local_score
                 strategic_score = local_score
                 tactical_action = 'WAIT'
