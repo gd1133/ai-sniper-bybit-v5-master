@@ -2696,7 +2696,8 @@ def get_brain_training_report():
             "report": report,
         })
     except Exception as e:
-        return jsonify({"error": str(e)}), 400
+        print(f"⚠️ [training-report] {e}")
+        return jsonify({"error": "Erro ao gerar relatório de treinamento."}), 400
 
 @app.route('/api/mode/toggle', methods=['POST'])
 def toggle_test_mode():
