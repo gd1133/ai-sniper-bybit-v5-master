@@ -965,8 +965,10 @@ def _refresh_real_balance_state(force=False):
         central_state['balance'] = round(sum(float(item.get("saldo_real") or 0.0) for item in valid_items), 2)
         central_state['status'] = f"💼 {_mode_display_label(APP_MODE)}: saldo sincronizado de {len(valid_items)} cliente(s)"
     elif mode_items:
-        central_state['balance'] = 0.0
-        central_state['status'] = f"💼 {_mode_display_label(APP_MODE)}: aguardando saldo válido dos clientes"
+        # Fallback: usa saldo_base configurado quando o broker está temporariamente indisponível
+        fallback_balance = round(sum(float(item.get("saldo_base") or 0.0) for item in mode_items), 2)
+        central_state['balance'] = fallback_balance
+        central_state['status'] = f"💼 {_mode_display_label(APP_MODE)}: saldo configurado (broker indisponível)"
     else:
         account_label = 'REAL' if _get_synced_account_mode_for_operation(APP_MODE) == 'real' else 'TESTNET'
         central_state['balance'] = 0.0
@@ -1529,8 +1531,10 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
     """
     DISPARO EM MASSA: 
     Lê todos os investidores do SQLite e replica a ordem e o sinal.
+    Envia simultaneamente ao Telegram e atualiza o estado do frontend.
     """
     slot_reserved = False
+    client_threads = []
     try:
         can_open, reason = _reserve_signal_slot(symbol)
         if not can_open:
@@ -1547,6 +1551,7 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
         )
         central_state['last_sniper_signal'] = signal_snapshot
         _push_recent_sniper_signal(signal_snapshot)
+        print(f"[WEBHOOK] Sinal enviado ao frontend")
 
         # 1. Notificação Master (Para o seu Grupo VIP ou seu Bot de Controle)
         master_tk, master_chat = _get_master_telegram_config()
@@ -1554,8 +1559,14 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
             m_msg = (f"🚀 *SINAL SNIPER BROADCAST*\n\n"
                      f"📦 *Ativo:* {symbol}\n📈 *Lado:* {side}\n"
                      f"🎯 *Entrada:* ${entry_price}\n🧠 *Confiança:* {res_ia.get('probabilidade')}%")
-            requests.post(f"https://api.telegram.org/bot{master_tk}/sendMessage", 
-                          json={"chat_id": master_chat, "text": m_msg, "parse_mode": "Markdown"})
+            try:
+                requests.post(
+                    f"https://api.telegram.org/bot{master_tk}/sendMessage",
+                    json={"chat_id": master_chat, "text": m_msg, "parse_mode": "Markdown"},
+                    timeout=5,
+                )
+            except Exception as tg_err:
+                print(f"⚠️ [TELEGRAM MASTER] {tg_err}")
 
         # 2. Loop de Execução para Clientes Cadastrados
         clientes = _get_registered_clients(active_only=True)
@@ -1615,7 +1626,10 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                     client_chat_id = str(c.get('chat_id') or '').strip()
                     if client_tg_token and client_chat_id:
                         url_tg = f"https://api.telegram.org/bot{client_tg_token}/sendMessage"
-                        requests.post(url_tg, json={"chat_id": client_chat_id, "text": c_msg, "parse_mode": "Markdown"})
+                        try:
+                            requests.post(url_tg, json={"chat_id": client_chat_id, "text": c_msg, "parse_mode": "Markdown"}, timeout=5)
+                        except Exception as tg_err:
+                            print(f"⚠️ [TELEGRAM CLIENT] {c.get('nome')}: {tg_err}")
 
                     # Regista no histórico do cliente (com status OPEN)
                     closed_at = time.strftime("%d/%m %H:%M", time.localtime())
@@ -1643,11 +1657,18 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                 except Exception as e:
                     print(f"❌ Falha na conta de {c.get('nome')}: {e}")
 
-            threading.Thread(target=task_cliente, args=(cliente,)).start()
+            t = threading.Thread(target=task_cliente, args=(cliente,))
+            t.start()
+            client_threads.append(t)
 
     except Exception as e:
         print(f"⚠️ Erro Crítico no Broadcast: {e}")
     finally:
+        # Aguarda as threads de clientes (máx. 10s) para então sincronizar
+        # os trades abertos com o frontend imediatamente após o broadcast.
+        for t in client_threads:
+            t.join(timeout=10)
+        _sync_active_trades_from_db()
         if slot_reserved:
             _release_signal_slot(symbol)
 
