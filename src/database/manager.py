@@ -344,29 +344,37 @@ def delete_client(client_id: int) -> bool:
 
 
 def get_open_trades(limit: int = 50) -> List[Dict[str, Any]]:
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT t.*, c.nome FROM trades t "
-        "LEFT JOIN clientes_sniper c ON c.id = t.client_id "
-        "WHERE LOWER(COALESCE(t.status, 'closed')) = 'open' "
-        "ORDER BY t.id DESC LIMIT ?",
-        (limit,),
-    )
-    rows = cur.fetchall()
-    trades = [dict(r) for r in rows]
-    conn.close()
-    return trades
+    try:
+        conn = _connect()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT t.*, c.nome FROM trades t "
+            "LEFT JOIN clientes_sniper c ON c.id = t.client_id "
+            "WHERE LOWER(COALESCE(t.status, 'closed')) = 'open' "
+            "ORDER BY t.id DESC LIMIT ?",
+            (limit,),
+        )
+        rows = cur.fetchall()
+        trades = [dict(r) for r in rows]
+        conn.close()
+        return trades
+    except Exception as e:
+        print(f"⚠️ [get_open_trades] erro: {e}")
+        return []
 
 
 def get_recent_trades(limit: int = 50) -> List[Dict[str, Any]]:
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute('SELECT t.*, c.nome FROM trades t LEFT JOIN clientes_sniper c ON c.id = t.client_id ORDER BY t.id DESC LIMIT ?', (limit,))
-    rows = cur.fetchall()
-    trades = [dict(r) for r in rows]
-    conn.close()
-    return trades
+    try:
+        conn = _connect()
+        cur = conn.cursor()
+        cur.execute('SELECT t.*, c.nome FROM trades t LEFT JOIN clientes_sniper c ON c.id = t.client_id ORDER BY t.id DESC LIMIT ?', (limit,))
+        rows = cur.fetchall()
+        trades = [dict(r) for r in rows]
+        conn.close()
+        return trades
+    except Exception as e:
+        print(f"⚠️ [get_recent_trades] erro: {e}")
+        return []
 
 
 def get_last_closed_trade(client_id: int) -> Dict[str, Any]:
