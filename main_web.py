@@ -259,6 +259,10 @@ PENALIDADE_STREAK_MESMA_MOEDA = 10      # Penalidade por repetição consecutiva
 SCAN_TOP_COINS = 8                       # Menos ativos por ciclo para responder mais rápido
 SCAN_INTER_SYMBOL_DELAY_SECS = 0.25      # Respiro curto sem travar o radar
 
+# Configurações de cache e timeouts
+BALANCE_CACHE_TTL_SECONDS = 5  # TTL do cache de saldo para melhor responsividade
+TELEGRAM_REQUEST_TIMEOUT_SECONDS = 5  # Timeout para requisições Telegram
+
 
 def _frontend_index_path():
     return os.path.join(app.static_folder or "", 'index.html')
@@ -893,8 +897,8 @@ def _fetch_active_client_balances(force=False):
     global client_balance_cache
 
     now = time.time()
-    # Reduzido para 5s para melhor responsividade
-    if not force and (now - client_balance_cache["timestamp"]) < 5:
+    # Cache com TTL configurável para melhor responsividade
+    if not force and (now - client_balance_cache["timestamp"]) < BALANCE_CACHE_TTL_SECONDS:
         return client_balance_cache
 
     broker_cls = _ensure_broker_class()
@@ -1652,7 +1656,7 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                     if client_tg_token and client_chat_id:
                         try:
                             url_tg = f"https://api.telegram.org/bot{client_tg_token}/sendMessage"
-                            requests.post(url_tg, json={"chat_id": client_chat_id, "text": c_msg, "parse_mode": "Markdown"}, timeout=5)
+                            requests.post(url_tg, json={"chat_id": client_chat_id, "text": c_msg, "parse_mode": "Markdown"}, timeout=TELEGRAM_REQUEST_TIMEOUT_SECONDS)
                         except Exception as tg_err:
                             print(f"⚠️ [TELEGRAM ERROR] {c.get('nome')}: {tg_err}")
 

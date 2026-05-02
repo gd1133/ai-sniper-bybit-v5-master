@@ -374,18 +374,27 @@ def get_recent_trades(limit: int = 50) -> List[Dict[str, Any]]:
         return trades
     except Exception as e:
         print(f"⚠️ [get_recent_trades] erro: {e}")
+        import traceback
+        traceback.print_exc()
         return []
 
 
 def get_last_closed_trade(client_id: int) -> Dict[str, Any]:
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT * FROM trades WHERE client_id = ? AND LOWER(COALESCE(status, 'closed')) = 'closed' ORDER BY id DESC LIMIT 1",
-        (client_id,),
-    )
-    row = cur.fetchone()
-    conn.close()
+    try:
+        conn = _connect()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT * FROM trades WHERE client_id = ? AND LOWER(COALESCE(status, 'closed')) = 'closed' ORDER BY id DESC LIMIT 1",
+            (client_id,),
+        )
+        row = cur.fetchone()
+        conn.close()
+        return dict(row) if row else None
+    except Exception as e:
+        print(f"⚠️ [get_last_closed_trade] erro: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
     return dict(row) if row else None
 
 
