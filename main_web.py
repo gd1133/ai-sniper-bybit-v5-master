@@ -1551,7 +1551,6 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
         )
         central_state['last_sniper_signal'] = signal_snapshot
         _push_recent_sniper_signal(signal_snapshot)
-        print(f"[WEBHOOK] Sinal enviado ao frontend")
 
         # 1. Notificação Master (Para o seu Grupo VIP ou seu Bot de Controle)
         master_tk, master_chat = _get_master_telegram_config()
@@ -1664,11 +1663,14 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
     except Exception as e:
         print(f"⚠️ Erro Crítico no Broadcast: {e}")
     finally:
-        # Aguarda as threads de clientes (máx. 10s) para então sincronizar
-        # os trades abertos com o frontend imediatamente após o broadcast.
+        # Aguarda as threads de clientes com deadline fixo de 10s no total,
+        # depois sincroniza os trades abertos com o estado do frontend.
+        deadline = time.time() + 10
         for t in client_threads:
-            t.join(timeout=10)
+            remaining = max(0.0, deadline - time.time())
+            t.join(timeout=remaining)
         _sync_active_trades_from_db()
+        print(f"[WEBHOOK] Sinal enviado ao frontend")
         if slot_reserved:
             _release_signal_slot(symbol)
 
