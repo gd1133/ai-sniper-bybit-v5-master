@@ -893,7 +893,8 @@ def _fetch_active_client_balances(force=False):
     global client_balance_cache
 
     now = time.time()
-    if not force and (now - client_balance_cache["timestamp"]) < 10:
+    # Reduzido para 5s para melhor responsividade
+    if not force and (now - client_balance_cache["timestamp"]) < 5:
         return client_balance_cache
 
     broker_cls = _ensure_broker_class()
@@ -903,6 +904,8 @@ def _fetch_active_client_balances(force=False):
 
     try:
         active_clients = _get_registered_clients(active_only=True)
+        print(f"🔄 [BALANCE SYNC] Atualizando saldo de {len(active_clients)} cliente(s)")
+        
         for client in active_clients:
             balance = None
             error = None
@@ -917,8 +920,10 @@ def _fetch_active_client_balances(force=False):
                 if balance is not None:
                     balance = round(float(balance), 2)
                     total += balance
+                    print(f"✅ [BALANCE] {client.get('nome')} ({account_mode.upper()}): ${balance:.2f}")
             except Exception as e:
                 error = str(e)
+                print(f"⚠️ [BALANCE ERROR] {client.get('nome')}: {error}")
 
             items.append({
                 "id": client.get('id'),
@@ -931,7 +936,9 @@ def _fetch_active_client_balances(force=False):
                 "error": error,
             })
     except Exception as e:
-        print(f"⚠️ [_fetch_active_client_balances] erro: {e}")
+        print(f"⚠️ [_fetch_active_client_balances] erro crítico: {e}")
+        import traceback
+        traceback.print_exc()
 
     client_balance_cache = {
         "items": items,
@@ -1341,14 +1348,26 @@ def _sync_active_trades_from_db():
 
         central_state['active_trades'] = sorted(grouped.values(), key=lambda trade: trade.get('latest_trade_id', 0), reverse=True)
 
+        # Atualizar preços ao vivo para cada trade
         for trade in central_state['active_trades']:
-            live = _get_live_price_snapshot(trade.get('raw_symbol') or trade.get('symbol'), trade.get('entry_price'), trade.get('side'))
-            trade.update(live)
-            entry_margin = float(trade.get('entry', 0) or 0)
-            pnl_pct = float(trade.get('pnl_pct', 0) or 0)
-            trade['open_pnl_value'] = round((entry_margin * pnl_pct) / 100, 2) if entry_margin else 0.0
+            try:
+                live = _get_live_price_snapshot(trade.get('raw_symbol') or trade.get('symbol'), trade.get('entry_price'), trade.get('side'))
+                trade.update(live)
+                entry_margin = float(trade.get('entry', 0) or 0)
+                pnl_pct = float(trade.get('pnl_pct', 0) or 0)
+                trade['open_pnl_value'] = round((entry_margin * pnl_pct) / 100, 2) if entry_margin else 0.0
+            except Exception as price_err:
+                print(f"⚠️ [PRICE UPDATE ERROR] {trade.get('symbol')}: {price_err}")
+                # Mantém trade sem preço atualizado mas não falha
+                trade['current_price'] = 0.0
+                trade['pnl_pct'] = 0.0
+                trade['open_pnl_value'] = 0.0
+                
+        print(f"✅ [SYNC TRADES] {len(central_state['active_trades'])} posição(ões) ativa(s)")
     except Exception as e:
-        print(f"⚠️ [_sync_active_trades_from_db] erro: {e}")
+        print(f"⚠️ [_sync_active_trades_from_db] erro crítico: {e}")
+        import traceback
+        traceback.print_exc()
         central_state['active_trades'] = []
 
 
@@ -1563,11 +1582,18 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
             def task_cliente(c):
                 try:
                     account_mode = _normalize_account_mode(c.get('account_mode', c.get('is_testnet')))
-                    broker = _ensure_broker_class()(
-                        c.get('bybit_key'),
-                        c.get('bybit_secret'),
-                        testnet=_is_testnet_account(account_mode),
-                    )
+                    print(f"🔄 [CLIENTE] Processando {c.get('nome')} - Modo: {account_mode.upper()}")
+                    
+                    broker = None
+                    try:
+                        broker = _ensure_broker_class()(
+                            c.get('bybit_key'),
+                            c.get('bybit_secret'),
+                            testnet=_is_testnet_account(account_mode),
+                        )
+                    except Exception as broker_err:
+                        print(f"❌ [BROKER INIT ERROR] {c.get('nome')}: {broker_err}")
+                        raise
                     
                     # Gestão Dinâmica: 5% Banca (GAIN) / 3% (RECOVERY)
                     margem = float(c.get('saldo_base', 1000.0)) * 0.05
@@ -1577,14 +1603,24 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                     if _is_order_execution_enabled(APP_MODE):
                         exec_label = 'TESTNET' if APP_MODE == 'testnet' else 'REAL'
                         print(f"🚀 [EXECUÇÃO {exec_label}] {c.get('nome')} - {side} {qty:.4f} {symbol}")
-                        order_result = broker.execute_market_order(symbol, side.lower(), qty)
                         
-                        if order_result:
-                            # ✅ Executa Proteção: TP +100% / SL -3%
-                            broker.set_tp_sl_sniper(symbol, side.lower(), entry_price, qty)
-                            print(f"✅ [ORDEM EXECUTADA] ID: {order_result.get('id', 'N/A')}")
-                        else:
-                            print(f"⚠️  [ORDEM FALHADA] {c.get('nome')} - Fallback para simulação")
+                        try:
+                            order_result = broker.execute_market_order(symbol, side.lower(), qty)
+                            
+                            if order_result:
+                                # ✅ Executa Proteção: TP +100% / SL -3%
+                                try:
+                                    broker.set_tp_sl_sniper(symbol, side.lower(), entry_price, qty)
+                                    print(f"✅ [ORDEM EXECUTADA] {c.get('nome')} - ID: {order_result.get('id', 'N/A')}")
+                                except Exception as tp_sl_err:
+                                    print(f"⚠️ [TP/SL ERROR] {c.get('nome')}: {tp_sl_err}")
+                            else:
+                                print(f"⚠️ [ORDEM FALHADA] {c.get('nome')} - Resposta vazia do broker")
+                        except Exception as order_err:
+                            print(f"❌ [ORDER EXECUTION ERROR] {c.get('nome')}: {order_err}")
+                            import traceback
+                            traceback.print_exc()
+                            raise
                     else:
                         if APP_MODE == 'paper':
                             mode_label = "PAPER TRADING / PREÇO REAL"
@@ -1614,13 +1650,19 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                     client_tg_token = str(c.get('tg_token') or '').strip()
                     client_chat_id = str(c.get('chat_id') or '').strip()
                     if client_tg_token and client_chat_id:
-                        url_tg = f"https://api.telegram.org/bot{client_tg_token}/sendMessage"
-                        requests.post(url_tg, json={"chat_id": client_chat_id, "text": c_msg, "parse_mode": "Markdown"})
+                        try:
+                            url_tg = f"https://api.telegram.org/bot{client_tg_token}/sendMessage"
+                            requests.post(url_tg, json={"chat_id": client_chat_id, "text": c_msg, "parse_mode": "Markdown"}, timeout=5)
+                        except Exception as tg_err:
+                            print(f"⚠️ [TELEGRAM ERROR] {c.get('nome')}: {tg_err}")
 
                     # Regista no histórico do cliente (com status OPEN)
                     closed_at = time.strftime("%d/%m %H:%M", time.localtime())
-                    db.record_trade(c.get('id'), symbol, side, 0.0, round(margem, 2), closed_at, 
-                                  notes=f"SNIPER v60.1 - Conf: {res_ia.get('probabilidade')}% | Entrada: {entry_price:.8f}", status="open", entry_price=entry_price)
+                    try:
+                        db.record_trade(c.get('id'), symbol, side, 0.0, round(margem, 2), closed_at, 
+                                      notes=f"SNIPER v60.1 - Conf: {res_ia.get('probabilidade')}% | Entrada: {entry_price:.8f}", status="open", entry_price=entry_price)
+                    except Exception as db_err:
+                        print(f"❌ [DB RECORD ERROR] {c.get('nome')}: {db_err}")
 
                     # --- SINCRONIZAÇÃO NUVEM (SUPABASE) ---
                     if cloud_db:
@@ -1641,12 +1683,17 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                             print(f"⚠️ [SUPABASE] Falha sync trade {c.get('nome')}: {cloud_err}")
 
                 except Exception as e:
-                    print(f"❌ Falha na conta de {c.get('nome')}: {e}")
+                    print(f"❌ [TASK_CLIENTE ERROR] {c.get('nome')}: {e}")
+                    import traceback
+                    traceback.print_exc()
 
             threading.Thread(target=task_cliente, args=(cliente,)).start()
 
     except Exception as e:
-        print(f"⚠️ Erro Crítico no Broadcast: {e}")
+        print(f"⚠️ [BROADCAST ERROR] {e}")
+        import traceback
+        traceback.print_exc()
+        central_state['status'] = f'⚠️ Erro no broadcast: {str(e)[:50]}...'
     finally:
         if slot_reserved:
             _release_signal_slot(symbol)
@@ -1788,7 +1835,8 @@ def sniper_worker_loop():
                                     'win_rate': edge['win_rate'],
                                     'sample_size': edge['sample_size'],
                                 })
-                        except Exception:
+                        except Exception as scan_err:
+                            print(f"⚠️ [SCAN ERROR] {clean_sym}: {scan_err}")
                             continue
 
                         time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
@@ -1889,10 +1937,17 @@ def sniper_worker_loop():
                         central_state['status'] = f'✅ Analisados {len(top_coins)} ativos. Sem confluência no rigor atual.'
 
                     time.sleep(60)
-                except Exception:
+                except Exception as inner_err:
+                    print(f"⚠️ [INNER LOOP ERROR] {inner_err}")
+                    import traceback
+                    traceback.print_exc()
+                    central_state['status'] = f'⚠️ Erro no radar: {str(inner_err)[:50]}...'
                     time.sleep(15)
         except Exception as e:
-            print(f'⚠️ [LOOP ERRO] {e}')
+            print(f'⚠️ [OUTER LOOP ERROR] {e}')
+            import traceback
+            traceback.print_exc()
+            central_state['status'] = f'⚠️ Erro crítico: {str(e)[:50]}...'
             time.sleep(15)
 
 def health_check():
@@ -2051,7 +2106,12 @@ def get_status():
         _refresh_last_sniper_signal()
         central_state['trades'] = db.get_recent_trades(20)
         return jsonify(central_state)
-    except:
+    except Exception as e:
+        print(f"⚠️ [/api/status ERROR] {e}")
+        import traceback
+        traceback.print_exc()
+        # Retorna estado atual mesmo com erro
+        central_state['status'] = f'⚠️ Erro na sincronização: {str(e)[:50]}...'
         return jsonify(central_state)
 
 
