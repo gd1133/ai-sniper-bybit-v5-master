@@ -239,6 +239,10 @@ def start_runtime_services():
 # Modo Fallback: Se True, usa APENAS o 3º Cérebro (Local Brain)
 USE_LOCAL_BRAIN_ONLY = False
 
+# Janela de recepção (recv_window) para sessões pybit — aumentada para tolerar
+# rate-limits e diferenças de clock com a Bybit (pode ser ajustada via env var).
+BYBIT_RECV_WINDOW = int(os.getenv('BYBIT_RECV_WINDOW', '20000'))
+
 # --- PROTOCOLO SNIPER RIGOROSO v60.1 ---
 THRESHOLD_ENTRADA = 60           # 🎯 Teste Provisório: 50% (Restaurar 60% depois)
 COOLDOWN_INSTITUCIONAL_SECS = 15  # Reduzido para ver entradas rápido igual na foto 4
@@ -720,10 +724,6 @@ def _resolve_client_balance_payload(raw_data, broker, account_mode, existing_cli
     return payload
 
 
-def _get_bybit_v5_base_url(is_testnet):
-    return get_bybit_base_url(is_testnet)
-
-
 def _get_bybit_server_time_ms(base_url, timeout=10):
     started_at = int(time.time() * 1000)
     response = requests.get(f'{base_url}/v5/market/time', timeout=timeout)
@@ -820,13 +820,14 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
     if existing_client is not None and 'nome' not in payload:
         payload['nome'] = existing_client.get('nome')
 
-    base_url = _get_bybit_v5_base_url(resolved_testnet)
-    recv_window = None
+    base_url = get_bybit_base_url(resolved_testnet)
+    recv_window = BYBIT_RECV_WINDOW
     validation_message = None
     valid = False
 
+    print(f"[VERIFICAÇÃO DE AMBIENTE] Testnet Status: {resolved_testnet}")
+
     try:
-        recv_window = _compute_safe_recv_window(base_url)
         session = _ensure_pybit_http_class()(
             testnet=resolved_testnet,
             api_key=api_key,
