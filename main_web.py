@@ -7,13 +7,15 @@ import requests
 import re
 import sys
 import io
+import json
+import queue
 from datetime import datetime, timedelta
 
 # Força UTF-8 no stdout do Windows
 if sys.platform == 'win32':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, Response, stream_with_context
 from flask_cors import CORS
 from dotenv import load_dotenv
 from src.config import get_bybit_base_url, get_bybit_credentials, get_environment_config, resolve_use_testnet
@@ -191,6 +193,27 @@ client_balance_cache = {
     "timestamp": 0,
 }
 
+# --- SSE (Server-Sent Events) real-time subscriber registry ---
+_sse_subscribers: list[queue.Queue] = []
+_sse_lock = threading.Lock()
+
+
+def _sse_broadcast(event_type: str, data: dict):
+    """Envia um evento SSE para todos os clientes conectados ao /api/events."""
+    payload = f"event: {event_type}\ndata: {json.dumps(data, default=str)}\n\n"
+    with _sse_lock:
+        dead = []
+        for q in _sse_subscribers:
+            try:
+                q.put_nowait(payload)
+            except queue.Full:
+                dead.append(q)
+        for q in dead:
+            try:
+                _sse_subscribers.remove(q)
+            except ValueError:
+                pass
+
 
 def _sync_runtime_mode_state(persist=False):
     global APP_MODE, TEST_MODE_ENABLED
@@ -217,6 +240,25 @@ def _sync_runtime_mode_state(persist=False):
 _sync_runtime_mode_state()
 
 
+def _balance_sync_loop():
+    """Força leitura do saldo da UTA a cada 5 segundos e transmite via SSE."""
+    print("[WEBSOCKET] Sincronizado em tempo real com o frontend")
+    while True:
+        try:
+            _refresh_real_balance_state(force=True)
+            _sse_broadcast('balance', {
+                'balance': central_state.get('balance', 0),
+                'test_balance': central_state.get('test_balance', 0),
+                'test_mode': central_state.get('test_mode'),
+                'operation_mode': central_state.get('operation_mode'),
+                'operation_mode_label': central_state.get('operation_mode_label'),
+                'status': central_state.get('status', ''),
+            })
+        except Exception as e:
+            print(f"⚠️ [_balance_sync_loop] erro: {e}")
+        time.sleep(5)
+
+
 def start_runtime_services():
     """Inicia as threads do robô uma única vez, inclusive sob gunicorn/wsgi."""
     global RUNTIME_STARTED
@@ -228,6 +270,8 @@ def start_runtime_services():
         threading.Thread(target=sniper_worker_loop, daemon=True).start()
         threading.Thread(target=_monitor_sl_tp_automatico, daemon=True).start()
         print("   Monitor SL/TP: ATIVO (-3% SL / +6% TP)")
+        threading.Thread(target=_balance_sync_loop, daemon=True).start()
+        print("   Sincronização de Saldo UTA: ATIVA (intervalo 5s via SSE)")
 
         if cloud_db:
             print("☁️ Iniciando Sincronização com Supabase Cloud em background...")
@@ -1347,6 +1391,11 @@ def _sync_active_trades_from_db():
             entry_margin = float(trade.get('entry', 0) or 0)
             pnl_pct = float(trade.get('pnl_pct', 0) or 0)
             trade['open_pnl_value'] = round((entry_margin * pnl_pct) / 100, 2) if entry_margin else 0.0
+
+        _sse_broadcast('active_trades', {
+            'active_trades': central_state['active_trades'],
+            'status': central_state.get('status', ''),
+        })
     except Exception as e:
         print(f"⚠️ [_sync_active_trades_from_db] erro: {e}")
         central_state['active_trades'] = []
@@ -2053,6 +2102,44 @@ def get_status():
         return jsonify(central_state)
     except:
         return jsonify(central_state)
+
+
+@app.route('/api/events', methods=['GET'])
+def sse_stream():
+    """Endpoint SSE: transmite atualizações de estado em tempo real ao frontend."""
+    def generate(client_queue):
+        try:
+            # Envia o estado completo imediatamente na conexão
+            yield f"event: state\ndata: {json.dumps(central_state, default=str)}\n\n"
+            while True:
+                try:
+                    msg = client_queue.get(timeout=30)
+                    yield msg
+                except queue.Empty:
+                    # Keepalive para manter a conexão aberta
+                    yield ": keepalive\n\n"
+        finally:
+            with _sse_lock:
+                try:
+                    _sse_subscribers.remove(client_queue)
+                except ValueError:
+                    pass
+
+    # maxsize=50: buffer até 50 eventos por cliente; quando cheio o cliente atrasado
+    # é removido automaticamente em _sse_broadcast para não bloquear as demais threads.
+    client_queue = queue.Queue(maxsize=50)
+    with _sse_lock:
+        _sse_subscribers.append(client_queue)
+
+    return Response(
+        stream_with_context(generate(client_queue)),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no',
+            'Connection': 'keep-alive',
+        },
+    )
 
 
 @app.route('/api/trade/manual-close', methods=['POST'])
