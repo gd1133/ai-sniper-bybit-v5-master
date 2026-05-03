@@ -194,6 +194,10 @@ const App = () => {
     let reconnectDelay = 2000;
     const MAX_RECONNECT_DELAY = 30000;
     const POLL_INTERVAL_MS = 5000;
+    const RECONNECT_BACKOFF_MULTIPLIER = 1.5;
+    // When true the SSE/poll channel is down; preserve last known state on the
+    // next failed cycle instead of overwriting with a stale/empty snapshot.
+    let connectionLive = false;
 
     console.log('Dashboard Iniciado — Conectando em:', API_BASE);
 
@@ -205,16 +209,15 @@ const App = () => {
     // ── shared state updater ──────────────────────────────────────────────
     const applyJson = (json) => {
       if (!mounted) return;
+      connectionLive = true;
       setData(prev => {
-        // Preserve last known non-zero balance so mobile users never see $0
+        // Preserve last known balance only while the connection is lost.
+        // Once we receive fresh data we always trust it (including genuine $0).
         const incomingBalance = json.balance ?? json.test_balance ?? 0;
-        const resolvedBalance = (incomingBalance > 0 || prev.balance === 0)
-          ? incomingBalance
-          : prev.balance;
         return {
           ...prev,
           ...json,
-          balance: resolvedBalance,
+          balance: incomingBalance,
           test_balance: json.test_balance ?? prev.test_balance ?? 0,
           test_mode: json.test_mode ?? prev.test_mode ?? false,
           operation_mode: normalizeOperationMode(json.operation_mode ?? json.mode ?? prev.operation_mode),
@@ -227,6 +230,8 @@ const App = () => {
 
     const markOffline = (reason) => {
       if (!mounted) return;
+      connectionLive = false;
+      // Keep last known balance/trades; only update the status text
       setData(prev => ({ ...prev, status: reason }));
     };
 
@@ -288,7 +293,7 @@ const App = () => {
           if (!mounted) return;
           markOffline('Reconectando ao servidor...');
           reconnectTimer = setTimeout(() => {
-            reconnectDelay = Math.min(reconnectDelay * 1.5, MAX_RECONNECT_DELAY);
+            reconnectDelay = Math.min(reconnectDelay * RECONNECT_BACKOFF_MULTIPLIER, MAX_RECONNECT_DELAY);
             connectSSE();
           }, reconnectDelay);
         };
