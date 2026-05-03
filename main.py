@@ -44,7 +44,7 @@ FIB_DISTANCE_THRESHOLD_PCT = 2.0    # Preço deve estar a ≤ 2 % do nível 0.61
 VOLUME_RATIO_MIN = 1.0              # Volume acima da média de 20 períodos
 SR_DISTANCE_THRESHOLD_PCT = 1.5     # Zona de S/R ≤ 1.5 % do preço atual
 
-# Universo de símbolos escaneados (pares USDT-Linear perpetuos)
+# Universo de símbolos escaneados (pares USDT-Linear perpétuos)
 SYMBOLS = [
     "BTC/USDT:USDT",
     "ETH/USDT:USDT",
@@ -190,19 +190,27 @@ def _set_cross_leverage(client: BybitClient, raw_symbol: str) -> bool:
 
 def _detect_pivot(df) -> bool:
     """
-    Detecta um pivô relevante nas últimas 3 velas.
-    Pivô de Alta : mínima[i-1] < mínima[i-2] e mínima[i-1] < mínima[i]  (suporte)
-    Pivô de Baixa: máxima[i-1] > máxima[i-2] e máxima[i-1] > máxima[i]  (resistência)
-    Retorna True se qualquer pivô foi detectado nas últimas 5 candles.
+    Detecta um pivô relevante nas últimas 5 candles (varredura retroativa).
+
+    Para cada posição i (candle do meio), verifica se:
+      • Pivô de máxima: high[i] é maior que o anterior (i-1) e o seguinte (i+1)
+      • Pivô de mínima: low[i]  é menor que o anterior (i-1) e o seguinte (i+1)
+
+    Percorre de trás para frente até 5 posições, exigindo ao menos 3 candles.
+    Retorna True assim que qualquer pivô for encontrado.
     """
     if len(df) < 3:
         return False
-    for i in range(len(df) - 1, max(len(df) - 6, 1), -1):
-        h_prev, h_cur, h_next = df['high'].iloc[i - 2], df['high'].iloc[i - 1], df['high'].iloc[i]
-        l_prev, l_cur, l_next = df['low'].iloc[i - 2], df['low'].iloc[i - 1], df['low'].iloc[i]
-        if h_cur > h_prev and h_cur > h_next:   # Pivô de máxima
+    # O candle do meio (pivot candidate) precisa de um anterior e um posterior,
+    # portanto i varia de 1 até len(df) - 2.
+    start = len(df) - 2          # último candidato a pivô com posterior válido
+    stop = max(len(df) - 6, 1)   # não retrocede mais de 5 posições
+    for i in range(start, stop - 1, -1):
+        h_left, h_mid, h_right = df['high'].iloc[i - 1], df['high'].iloc[i], df['high'].iloc[i + 1]
+        l_left, l_mid, l_right = df['low'].iloc[i - 1], df['low'].iloc[i], df['low'].iloc[i + 1]
+        if h_mid > h_left and h_mid > h_right:   # Pivô de máxima (topo)
             return True
-        if l_cur < l_prev and l_cur < l_next:   # Pivô de mínima
+        if l_mid < l_left and l_mid < l_right:   # Pivô de mínima (fundo)
             return True
     return False
 
@@ -400,8 +408,12 @@ def _scan_symbol(client: BybitClient, symbol: str, balance: float):
     if not all_pass:
         return  # Aguarda próximo ciclo
 
-    # 4. Determina o lado da operação
+    # 4. Determina o lado da operação (F1 já garante ALTA ou BAIXA, mas verificamos
+    #    explicitamente para evitar qualquer caminho onde trend seja NEUTRO)
     trend = signals.get('trend')
+    if trend not in ("ALTA", "BAIXA"):
+        print(f"⚠️  [SCAN] {symbol}: tendência '{trend}' não operável, pulando.", flush=True)
+        return
     side = trend  # "ALTA" → buy | "BAIXA" → sell
 
     # 5. Calcula tamanho da posição
