@@ -724,6 +724,41 @@ def _get_bybit_v5_base_url(is_testnet):
     return get_bybit_base_url(is_testnet)
 
 
+_BYBIT_ERRCODE_MESSAGES = {
+    '10003': 'Chave API inválida ou expirada. Verifique a API Key no painel da Bybit.',
+    '10004': 'Assinatura inválida. Verifique a API Secret e sincronize o relógio do servidor.',
+    '10010': (
+        'IP do servidor não está na whitelist da chave API (ERRCODE 10010). '
+        'Acesse a Bybit → API Management → sua chave → adicione o IP do servidor '
+        'à lista de IPs permitidos, ou remova a restrição de IP.'
+    ),
+    '33004': 'Chave API sem permissão para esta operação. Verifique as permissões da chave na Bybit.',
+}
+
+
+def _friendly_bybit_error(exc):
+    """Traduz erros comuns da API Bybit para mensagens claras em português."""
+    raw = str(exc)
+    import re as _re
+    m = _re.search(r'ERRCODE[:\s]*(\d+)', raw, _re.IGNORECASE)
+    if m:
+        code = m.group(1)
+        if code in _BYBIT_ERRCODE_MESSAGES:
+            return _BYBIT_ERRCODE_MESSAGES[code]
+        return f'Erro Bybit (ERRCODE {code}). Verifique as credenciais e permissões da chave API.'
+    if 'retCode' in raw:
+        m2 = _re.search(r'retCode[=:\s]*(\d+)', raw, _re.IGNORECASE)
+        if m2:
+            code = m2.group(1)
+            if code in _BYBIT_ERRCODE_MESSAGES:
+                return _BYBIT_ERRCODE_MESSAGES[code]
+            if code != '0':
+                m3 = _re.search(r'retMsg[=:\s]*([^\|]+)', raw)
+                msg_detail = m3.group(1).strip() if m3 else ''
+                return f'Erro Bybit (código {code}){": " + msg_detail if msg_detail else ""}.'
+    return raw
+
+
 def _get_bybit_server_time_ms(base_url, timeout=10):
     started_at = int(time.time() * 1000)
     response = requests.get(f'{base_url}/v5/market/time', timeout=timeout)
@@ -840,7 +875,7 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
         valid = True
         validation_message = f'Conta {account_mode.upper()} validada via Bybit V5'
     except Exception as e:
-        validation_message = str(e)
+        validation_message = _friendly_bybit_error(e)
         payload['status'] = 'erro_api'
         if existing_client is not None:
             try:
@@ -907,6 +942,18 @@ def _fetch_active_client_balances(force=False):
             balance = None
             error = None
             account_mode = _normalize_account_mode(client.get('account_mode', client.get('is_testnet')))
+            if client.get('status') == 'erro_api':
+                items.append({
+                    "id": client.get('id'),
+                    "nome": client.get('nome'),
+                    "saldo_real": None,
+                    "saldo_base": float(client.get('saldo_base', 0) or 0),
+                    "is_testnet": _is_testnet_account(account_mode),
+                    "account_mode": account_mode,
+                    "status": 'erro_api',
+                    "error": "Credenciais com erro — revalide as chaves na aba Gestão",
+                })
+                continue
             try:
                 broker = broker_cls(
                     client.get('bybit_key'),
