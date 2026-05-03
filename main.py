@@ -53,9 +53,11 @@ TP_PRICE_PCT    = 1.0 / LEVERAGE  # 0.10 → +10 % (Long) / −10 % (Short)
 # =============================================================================
 # CONFIGURAÇÃO DOS ATIVOS E CICLO
 # =============================================================================
-TIMEFRAME       = "15"   # Velas de 15 minutos (parâmetro nativo Bybit V5)
-SYMBOLS         = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
-LOOP_INTERVAL   = 60     # Segundos entre ciclos de varredura
+TIMEFRAME           = "15m"  # Velas de 15 minutos (formato CCXT: "1m","5m","15m","1h"…)
+SYMBOLS             = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+LOOP_INTERVAL       = 60     # Segundos entre ciclos de varredura
+MIN_CANDLES         = 250    # Mínimo de candles históricos para cálculo dos indicadores
+ORDER_FILL_DELAY    = 1      # Segundos de espera para preço de preenchimento atualizar
 
 # =============================================================================
 # THRESHOLDS DOS FILTROS TÉCNICOS
@@ -69,6 +71,22 @@ PIVOT_WINDOW     = 5     # Períodos para identificação de pivôs locais
 # =============================================================================
 # FUNÇÕES AUXILIARES — Indicadores Adicionais
 # =============================================================================
+
+def _is_pivot_high(arr, idx, window):
+    """Retorna True se arr[idx] é um máximo local num raio de ``window`` candles."""
+    return (
+        all(arr[idx] >= arr[idx - window : idx]) and
+        all(arr[idx] >= arr[idx + 1 : idx + window + 1])
+    )
+
+
+def _is_pivot_low(arr, idx, window):
+    """Retorna True se arr[idx] é um mínimo local num raio de ``window`` candles."""
+    return (
+        all(arr[idx] <= arr[idx - window : idx]) and
+        all(arr[idx] <= arr[idx + 1 : idx + window + 1])
+    )
+
 
 def _detect_pivot(df, window=PIVOT_WINDOW):
     """
@@ -84,20 +102,11 @@ def _detect_pivot(df, window=PIVOT_WINDOW):
     if len(df) < 2 * window + 1:
         return False, False
 
-    idx    = len(df) - window - 1   # candle "congelado" com janela à direita
-    highs  = df["high"].values
-    lows   = df["low"].values
+    idx   = len(df) - window - 1   # candle "congelado" com janela à direita
+    highs = df["high"].values
+    lows  = df["low"].values
 
-    pivot_high = (
-        all(highs[idx] >= highs[idx - window : idx]) and
-        all(highs[idx] >= highs[idx + 1 : idx + window + 1])
-    )
-    pivot_low = (
-        all(lows[idx] <= lows[idx - window : idx]) and
-        all(lows[idx] <= lows[idx + 1 : idx + window + 1])
-    )
-
-    return pivot_high, pivot_low
+    return _is_pivot_high(highs, idx, window), _is_pivot_low(lows, idx, window)
 
 
 def _detect_sr_zone(df, current_price, tolerance_pct=SR_ZONE_MAX_PCT, window=PIVOT_WINDOW):
@@ -112,14 +121,14 @@ def _detect_sr_zone(df, current_price, tolerance_pct=SR_ZONE_MAX_PCT, window=PIV
     if len(df) < 2 * window + 1:
         return False, "dados insuficientes"
 
-    highs = df["high"].values
-    lows  = df["low"].values
+    highs     = df["high"].values
+    lows      = df["low"].values
     sr_levels = []
 
     for i in range(window, len(df) - window):
-        if all(highs[i] >= highs[i - window : i]) and all(highs[i] >= highs[i + 1 : i + window + 1]):
+        if _is_pivot_high(highs, i, window):
             sr_levels.append(("R", highs[i]))
-        if all(lows[i] <= lows[i - window : i]) and all(lows[i] <= lows[i + 1 : i + window + 1]):
+        if _is_pivot_low(lows, i, window):
             sr_levels.append(("S", lows[i]))
 
     # Verifica os 10 níveis mais recentes (mais relevantes)
@@ -380,9 +389,9 @@ def run_sniper_cycle(client):
         log.info(f"\n{'─'*55}")
         log.info(f"🔍 Analisando: {symbol}")
 
-        # Dados OHLCV (250 candles de 15 min)
+        # Dados OHLCV (MIN_CANDLES candles de 15 min)
         df = client.fetch_ohlcv(symbol, timeframe=TIMEFRAME)
-        if df is None or len(df) < 250:
+        if df is None or len(df) < MIN_CANDLES:
             log.warning(f"[{symbol}] Dados insuficientes ({len(df) if df is not None else 0} candles). Pulando.")
             continue
 
@@ -429,8 +438,8 @@ def run_sniper_cycle(client):
         order_id = order.get("id") or order.get("orderId") or "—"
         log.info(f"✅ [ORDEM] ID={order_id} | {symbol} | {direction.upper()} | Qty={qty}")
 
-        # Aguarda 1 s para preço de preenchimento ser atualizado
-        time.sleep(1)
+        # Aguarda ORDER_FILL_DELAY s para preço de preenchimento ser atualizado
+        time.sleep(ORDER_FILL_DELAY)
         fill_price = client.get_last_price(symbol) or price
 
         # ── Take Profit e Stop Loss ────────────────────────────────────
