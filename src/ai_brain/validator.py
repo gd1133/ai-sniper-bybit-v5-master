@@ -290,7 +290,7 @@ class GroqValidator:
         decisao = "SCANNER"
         motivo_soberano = ""
 
-        required_confidence = 80 if fallback_local_active else 60
+        required_confidence = 70 if fallback_local_active else 60
 
         # Só autoriza se bater o mínimo exigido
         if final_prob >= required_confidence:
@@ -313,7 +313,7 @@ class GroqValidator:
                     "Trava Soberana: IAs cloud sem consenso de direção explícita."
                 )
         elif fallback_local_active:
-            motivo_soberano = "Fallback local ativo, mas abaixo da confiança mínima de 80%."
+            motivo_soberano = "Fallback local ativo, mas abaixo da confiança mínima de 70%."
 
         # 4. Formata Motivo Educativo
         motivo_consensuado = (f"Confluência de {final_prob}% detectada. "
@@ -324,7 +324,7 @@ class GroqValidator:
         if fallback_local_active:
             motivo_consensuado = (
                 f"{motivo_consensuado} | Fallback soberano do 3º cérebro: "
-                f"direção {local_fallback_side} com mínimo de 80%."
+                f"direção {local_fallback_side} com mínimo de 70%."
             )
 
         if motivo_soberano:

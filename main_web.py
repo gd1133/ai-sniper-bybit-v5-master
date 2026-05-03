@@ -225,6 +225,16 @@ def start_runtime_services():
         if RUNTIME_STARTED:
             return False
 
+        print(f"✅ DuoIA Maestro v60.1 Iniciando...")
+        print(f"🌍 Ambiente: {ENVIRONMENT}")
+        print(f"🧭 Modo operacional: {_mode_display_label(APP_MODE)}")
+        print(f"⚡ Execução: {_execution_status_label(APP_MODE)}")
+        print(f"🔐 ALLOW_ORDER_EXECUTION={ALLOW_ORDER_EXECUTION} | ALLOW_REAL_TRADING={ALLOW_REAL_TRADING}")
+        if TEST_MODE_ENABLED:
+            print(f"🧪 Paper ativo - preço real, saldo fictício, sem ordens reais")
+        else:
+            print(f"💰 Saldo base carregado: {TEST_BALANCE} USDT")
+
         threading.Thread(target=sniper_worker_loop, daemon=True).start()
         threading.Thread(target=_monitor_sl_tp_automatico, daemon=True).start()
         print("   Monitor SL/TP: ATIVO (-3% SL / +6% TP)")
@@ -1749,7 +1759,8 @@ def sniper_worker_loop():
                             print(f"DEBUG {clean_sym}: Trend {signals['trend']} | Price {signals['price']} | SMA {signals['sma_200']}")
 
                             # Filtro rápido local: não chama cloud em ativo sem confluência mínima.
-                            if local_score < 25:
+                            # Threshold 50 reduz chamadas às APIs cloud e evita rate limits.
+                            if local_score < 50:
                                 continue
 
                             res = validator.consensus_predict(
