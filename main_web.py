@@ -1645,8 +1645,11 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
         })
 
         # 1. Notificação Master (Grupo VIP / Bot de Controle)
-        sl_price = round(entry_price * 0.97, 2)
-        tp_price = round(entry_price * 1.06, 2)
+        _is_short = str(side or '').upper() in {'VENDER', 'SELL'}
+        sl_price = round(entry_price * (1.03 if _is_short else 0.97), 2)
+        tp_price = round(entry_price * (0.94 if _is_short else 1.06), 2)
+        sl_label = "+3%" if _is_short else "-3%"
+        tp_label = "-6%" if _is_short else "+6%"
         master_tk, master_chat = _get_master_telegram_config()
         if master_tk and master_chat:
             m_msg = (
@@ -1655,7 +1658,7 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                 f"📈 *Lado:* {side}\n"
                 f"🎯 *Entrada:* ${entry_price:.2f}\n"
                 f"🧠 *Confiança:* {probabilidade}%\n\n"
-                f"🛡️ *Proteção:* TP ${tp_price} (+6%) | SL ${sl_price} (-3%)"
+                f"🛡️ *Proteção:* TP ${tp_price} ({tp_label}) | SL ${sl_price} ({sl_label})"
             )
             try:
                 requests.post(
@@ -1683,9 +1686,12 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                     margem = round(saldo_base * 0.05, 2)          # 5% da banca
                     qty = margem / entry_price if entry_price > 0 else 0.0
 
-                    # Preços de proteção
-                    tp_price_c = round(entry_price * 1.06, 2)     # +6% TP
-                    sl_price_c = round(entry_price * 0.97, 2)     # -3% SL
+                    # Preços de proteção ajustados por direção (LONG ou SHORT)
+                    is_short_trade = str(side or '').upper() in {'VENDER', 'SELL'}
+                    tp_price_c = round(entry_price * (0.94 if is_short_trade else 1.06), 2)
+                    sl_price_c = round(entry_price * (1.03 if is_short_trade else 0.97), 2)
+                    tp_label_c = "-6%" if is_short_trade else "+6%"
+                    sl_label_c = "+3%" if is_short_trade else "-3%"
 
                     # Execução real na exchange
                     if _is_order_execution_enabled(APP_MODE):
@@ -1720,8 +1726,8 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                         f"🔐 *Modo:* {_mode_display_label(APP_MODE)} • {_execution_status_label(APP_MODE)}\n"
                         f"👤 *Conta:* {account_mode.upper()}\n\n"
                         f"🛡️  *PROTEÇÃO ATIVA:*\n"
-                        f"✅ TP: ${tp_price_c} (+6% lucro)\n"
-                        f"❌ SL: ${sl_price_c} (-3% trava)\n\n"
+                        f"✅ TP: ${tp_price_c} ({tp_label_c} lucro)\n"
+                        f"❌ SL: ${sl_price_c} ({sl_label_c} trava)\n\n"
                         f"⏱️ *Cooldown Institucional:* {COOLDOWN_INSTITUCIONAL_SECS}s após fechamento"
                     )
                     client_tg_token = str(c.get('tg_token') or '').strip()
