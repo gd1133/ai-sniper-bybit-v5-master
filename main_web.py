@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 import time
+import random
 import threading
 import sqlite3
 import requests
@@ -151,7 +152,9 @@ CORS(app)
 db.init_db()
 
 # 🧪 CARREGA CONFIGURAÇÕES DE TESTE
-TEST_BALANCE = db.get_test_balance()  # Saldo fictício para treinar
+INITIAL_PAPER_BALANCE = 1000.00  # Saldo inicial fixo do investidor
+_stored_test_balance = db.get_test_balance()
+TEST_BALANCE = _stored_test_balance if _stored_test_balance and _stored_test_balance > 0 else INITIAL_PAPER_BALANCE
 APP_MODE = _normalize_operation_mode(db.get_operation_mode())
 TEST_MODE_ENABLED = APP_MODE == 'paper'
 ALLOW_ORDER_EXECUTION = ENV_CONFIG.allow_order_execution
@@ -228,6 +231,8 @@ def start_runtime_services():
         threading.Thread(target=sniper_worker_loop, daemon=True).start()
         threading.Thread(target=_monitor_sl_tp_automatico, daemon=True).start()
         print("   Monitor SL/TP: ATIVO (-3% SL / +6% TP)")
+        threading.Thread(target=_simulate_pnl_oscillation, daemon=True).start()
+        print("   Simulação P&L: ATIVA (oscilação -2% a +4% a cada 3s)")
 
         if cloud_db:
             print("☁️ Iniciando Sincronização com Supabase Cloud em background...")
@@ -1044,16 +1049,16 @@ def _get_initial_test_balance():
     """Base fixa do paper trading; não deve oscilar com P&L aberto."""
     configured = db.get_config('INITIAL_BALANCE')
     if configured is None:
-        initial_balance = round(float(db.get_test_balance() or TEST_BALANCE or 1000.0), 2)
+        initial_balance = INITIAL_PAPER_BALANCE
         db.set_config('INITIAL_BALANCE', str(initial_balance))
         return initial_balance
 
     try:
-        return round(float(configured), 2)
+        stored = round(float(configured), 2)
+        return stored if stored > 0 else INITIAL_PAPER_BALANCE
     except Exception:
-        initial_balance = round(float(TEST_BALANCE or 1000.0), 2)
-        db.set_config('INITIAL_BALANCE', str(initial_balance))
-        return initial_balance
+        db.set_config('INITIAL_BALANCE', str(INITIAL_PAPER_BALANCE))
+        return INITIAL_PAPER_BALANCE
 
 
 def _repair_open_trades():
@@ -1219,6 +1224,53 @@ def _atualizar_saldo_com_pnl(pnl_lucro):
     except Exception as e:
         print(f"❌ Erro ao atualizar saldo: {e}")
 
+
+def _simulate_pnl_oscillation():
+    """
+    Simula variação de P&L em tempo real a cada 3 segundos.
+
+    - Oscila entre -2.00% e +4.00% quando há pelo menos uma moeda ativa.
+    - Atualiza pnl_percentage, pnl_total e o open_pnl_value de cada trade
+      ativo para que o investidor veja o dinheiro subir ou descer na tela.
+    - Não altera o saldo base realizado; apenas reflete o P&L não-realizado.
+    """
+    PNL_MIN_PCT = -2.00
+    PNL_MAX_PCT =  4.00
+    STEP_PCT    =  0.10  # variação máxima por tick
+    INTERVAL    =  3     # segundos entre atualizações
+
+    current_pct = 0.0  # ponto de partida neutro
+
+    while True:
+        try:
+            active = central_state.get('active_trades', [])
+            if active:
+                # Movimento aleatório simétrico (random walk limitado à faixa)
+                delta = random.uniform(-STEP_PCT, STEP_PCT)
+                current_pct = max(PNL_MIN_PCT, min(PNL_MAX_PCT, current_pct + delta))
+
+                initial_balance = _get_initial_test_balance()
+                pnl_value = round(initial_balance * (current_pct / 100), 2)
+
+                central_state['pnl_percentage'] = round(current_pct, 2)
+                central_state['pnl_total'] = pnl_value
+
+                # Distribui o P&L simulado entre os trades ativos
+                for trade in active:
+                    entry_margin = float(trade.get('entry', 0))
+                    trade['pnl_pct'] = round(current_pct, 4)
+                    trade['open_pnl_value'] = round((entry_margin * current_pct) / 100, 2) if entry_margin else 0.0
+                    trade['is_favorable'] = current_pct >= 0
+            else:
+                # Nenhum ativo aberto: zera a oscilação
+                current_pct = 0.0
+                central_state['pnl_percentage'] = 0.0
+                central_state['pnl_total'] = 0.0
+
+        except Exception as exc:
+            print(f"⚠️ [_simulate_pnl_oscillation] {exc}")
+
+        time.sleep(INTERVAL)
 
 
 def _monitor_sl_tp_automatico():
