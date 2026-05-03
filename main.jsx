@@ -185,94 +185,144 @@ const App = () => {
     }
   });
 
-  // Polling do backend para manter o dashboard atualizado
+  // ── Real-time connection: SSE primary, HTTP-polling fallback ──────────────
   useEffect(() => {
     let mounted = true;
-    let lastApiErrorLogAt = 0;
-    console.log('Dashboard Iniciado - Conectando em:', API_BASE);
+    let eventSource = null;
+    let pollIntervalId = null;
+    let reconnectTimer = null;
+    let reconnectDelay = 2000;
+    const MAX_RECONNECT_DELAY = 30000;
+    const POLL_INTERVAL_MS = 5000;
+    const RECONNECT_BACKOFF_MULTIPLIER = 1.5;
+    // When true the SSE/poll channel is down; preserve last known state on the
+    // next failed cycle instead of overwriting with a stale/empty snapshot.
+    let connectionLive = false;
+
+    console.log('Dashboard Iniciado — Conectando em:', API_BASE);
 
     const isAbortError = (err) => {
-      const message = String(err?.message || '').toLowerCase();
-      return err?.name === 'AbortError' || message.includes('aborted');
+      const msg = String(err?.message || '').toLowerCase();
+      return err?.name === 'AbortError' || msg.includes('aborted');
     };
 
-    const logApiError = (label, err) => {
-      const now = Date.now();
-      if (now - lastApiErrorLogAt > 8000) {
-        console.error(label, err);
-        lastApiErrorLogAt = now;
-      }
+    // ── shared state updater ──────────────────────────────────────────────
+    const applyJson = (json) => {
+      if (!mounted) return;
+      connectionLive = true;
+      setData(prev => {
+        // Preserve last known balance only while the connection is lost.
+        // Once we receive fresh data we always trust it (including genuine $0).
+        const incomingBalance = json.balance ?? json.test_balance ?? 0;
+        return {
+          ...prev,
+          ...json,
+          balance: incomingBalance,
+          test_balance: json.test_balance ?? prev.test_balance ?? 0,
+          test_mode: json.test_mode ?? prev.test_mode ?? false,
+          operation_mode: normalizeOperationMode(json.operation_mode ?? json.mode ?? prev.operation_mode),
+          operation_mode_label: json.operation_mode_label ?? prev.operation_mode_label,
+          execution_enabled: json.execution_enabled ?? prev.execution_enabled,
+          execution_label: json.execution_label ?? prev.execution_label,
+        };
+      });
     };
 
+    const markOffline = (reason) => {
+      if (!mounted) return;
+      connectionLive = false;
+      // Keep last known balance/trades; only update the status text
+      setData(prev => ({ ...prev, status: reason }));
+    };
+
+    // ── HTTP polling (fallback / coexists with SSE for investidores) ──────
     const fetchJson = async (path, timeoutMs = 12000) => {
       const ctrl = new AbortController();
-      const timeoutId = setTimeout(() => ctrl.abort('timeout'), timeoutMs);
+      const tid = setTimeout(() => ctrl.abort('timeout'), timeoutMs);
       try {
         const res = await fetch(`${API_BASE}${path}`, { signal: ctrl.signal });
-        if (!res.ok) {
-          return { ok: false, status: res.status, json: null };
-        }
+        if (!res.ok) return { ok: false, status: res.status, json: null };
         const json = await res.json();
         return { ok: true, status: res.status, json };
       } finally {
-        clearTimeout(timeoutId);
+        clearTimeout(tid);
       }
     };
 
-    const fetchStatus = async () => {
+    const pollStatus = async () => {
       try {
         const result = await fetchJson('/api/status');
         if (!result.ok) {
-          if (mounted) {
-            setData(prev => ({
-              ...prev,
-              status: `Backend offline (${result.status || 'sem resposta'})`
-            }));
-          }
+          markOffline(`Backend offline (${result.status || 'sem resposta'})`);
           return;
         }
-        const json = result.json;
-        if (mounted) {
-          setData(prev => ({
-            ...prev,
-            ...json,
-            balance: json.balance ?? json.test_balance ?? 0,
-            test_balance: json.test_balance ?? 0,
-            test_mode: json.test_mode ?? false,
-            operation_mode: normalizeOperationMode(json.operation_mode ?? json.mode),
-            operation_mode_label: json.operation_mode_label ?? prev.operation_mode_label,
-            execution_enabled: json.execution_enabled ?? prev.execution_enabled,
-            execution_label: json.execution_label ?? prev.execution_label,
-          }));
-        }
+        applyJson(result.json);
       } catch (e) {
         if (isAbortError(e)) return;
-        logApiError('Erro Total na API:', e);
-        if (mounted) {
-          setData(prev => ({
-            ...prev,
-            status: 'Backend offline (conexão recusada)'
-          }));
-        }
+        markOffline('Backend offline (conexão recusada)');
       }
     };
 
-  const fetchInvestidores = async () => {
+    const pollInvestidores = async () => {
       try {
         const result = await fetchJson('/api/investidores');
         if (!result.ok) return;
         if (mounted) setInvestidores((result.json || []).map(normalizeInvestorRecord));
       } catch (e) {
         if (isAbortError(e)) return;
-        logApiError('Erro fetching /api/investidores', e);
       }
     };
 
-    fetchStatus();
-    fetchInvestidores();
-    const iv = setInterval(fetchStatus, 3000);
-    const iv2 = setInterval(fetchInvestidores, 30000);
-    return () => { mounted = false; clearInterval(iv); clearInterval(iv2); };
+    // ── SSE connection ────────────────────────────────────────────────────
+    const connectSSE = () => {
+      if (!mounted) return;
+
+      try {
+        eventSource = new EventSource(`${API_BASE}/api/stream`);
+
+        eventSource.onmessage = (e) => {
+          reconnectDelay = 2000; // reset backoff on success
+          try {
+            const json = JSON.parse(e.data);
+            if (json && Object.keys(json).length > 0) applyJson(json);
+          } catch (_) { /* ignore malformed frames */ }
+        };
+
+        eventSource.onerror = () => {
+          if (eventSource) { eventSource.close(); eventSource = null; }
+          if (!mounted) return;
+          markOffline('Reconectando ao servidor...');
+          reconnectTimer = setTimeout(() => {
+            reconnectDelay = Math.min(reconnectDelay * RECONNECT_BACKOFF_MULTIPLIER, MAX_RECONNECT_DELAY);
+            connectSSE();
+          }, reconnectDelay);
+        };
+
+        eventSource.onopen = () => {
+          reconnectDelay = 2000;
+        };
+
+      } catch (_) {
+        // EventSource not available (very old browser) — fall back to polling only
+        pollStatus();
+        pollIntervalId = setInterval(pollStatus, POLL_INTERVAL_MS);
+      }
+    };
+
+    // Start SSE
+    connectSSE();
+
+    // Keep investidores and initial status fresh even with SSE
+    pollStatus();
+    pollInvestidores();
+    pollIntervalId = setInterval(pollInvestidores, 30000);
+
+    return () => {
+      mounted = false;
+      if (eventSource) { eventSource.close(); eventSource = null; }
+      if (pollIntervalId) clearInterval(pollIntervalId);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+    };
   }, []);
 
   const openNewInvestorModal = () => {
@@ -468,42 +518,42 @@ const App = () => {
   return (
     <div className="min-h-screen bg-[#050505] text-white font-sans selection:bg-green-500/30">
       
-      {/* HEADER INTEGRADO (Dashboard | Evidência | Gestão) */}
-      <header className="border-b border-white/5 bg-[#0a0b0d] px-8 py-4 flex items-center justify-between sticky top-0 z-50">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-green-500 rounded-lg flex items-center justify-center shadow-lg shadow-green-500/40">
-            <Zap size={24} className="text-black fill-current" />
+      {/* HEADER INTEGRADO — Mobile-first */}
+      <header className="border-b border-white/5 bg-[#0a0b0d] px-4 md:px-8 py-3 md:py-4 flex items-center justify-between sticky top-0 z-50 gap-3">
+        <div className="flex items-center gap-2 md:gap-3 shrink-0">
+          <div className="w-8 h-8 md:w-10 md:h-10 bg-green-500 rounded-lg flex items-center justify-center shadow-lg shadow-green-500/40">
+            <Zap size={18} className="text-black fill-current" />
           </div>
-          <div>
-            <h1 className="text-xl font-black tracking-tighter italic">
+          <div className="hidden sm:block">
+            <h1 className="text-base md:text-xl font-black tracking-tighter italic">
               MOTOR <span className="text-green-500 uppercase">SNIPER v60.7</span>
             </h1>
-            <p className="text-[8px] text-zinc-500 font-bold tracking-[0.3em] uppercase">Triplo Cérebro • Cloud Brain Active</p>
+            <p className="text-[8px] text-zinc-500 font-bold tracking-[0.3em] uppercase hidden md:block">Triplo Cérebro • Cloud Brain Active</p>
           </div>
         </div>
 
-        <nav className="flex bg-black p-1 rounded-xl border border-white/10">
-          <TabButton active={activeTab === 'dashboard'} onClick={() => setActiveTab('dashboard')} icon={<LayoutDashboard size={16}/>} label="DASHBOARD" />
-          <TabButton active={activeTab === 'evidence'} onClick={() => setActiveTab('evidence')} icon={<FileSearch size={16}/>} label="EVIDÊNCIA" />
-          <TabButton active={activeTab === 'gestao'} onClick={() => setActiveTab('gestao')} icon={<Users size={16}/>} label="GESTÃO" />
+        <nav className="flex bg-black p-1 rounded-xl border border-white/10 shrink-0">
+          <TabButton active={activeTab === 'dashboard'} onClick={() => setActiveTab('dashboard')} icon={<LayoutDashboard size={14}/>} label="DASH" />
+          <TabButton active={activeTab === 'evidence'} onClick={() => setActiveTab('evidence')} icon={<FileSearch size={14}/>} label="RADAR" />
+          <TabButton active={activeTab === 'gestao'} onClick={() => setActiveTab('gestao')} icon={<Users size={14}/>} label="GESTÃO" />
         </nav>
 
-        <div className="hidden md:flex items-center gap-4">
-           <div className={`px-4 py-1.5 rounded-full border flex items-center gap-2 ${currentOperationMeta.shell}`}>
+        <div className="flex items-center gap-2 md:gap-4 overflow-x-auto max-w-full">
+           <div className={`px-2 md:px-4 py-1 md:py-1.5 rounded-full border flex items-center gap-1 md:gap-2 shrink-0 ${currentOperationMeta.shell}`}>
               <div className={`w-1.5 h-1.5 rounded-full animate-pulse ${currentOperationMeta.dot}`} />
-              <span className="text-[10px] font-black uppercase italic">
+              <span className="text-[9px] md:text-[10px] font-black uppercase italic whitespace-nowrap">
                 {currentOperationMeta.badge}
               </span>
            </div>
 
-           <div className="flex bg-black p-1 rounded-xl border border-white/10">
+           <div className="hidden md:flex bg-black p-1 rounded-xl border border-white/10 shrink-0">
              {['paper', 'testnet', 'real'].map((mode) => (
                <button
                  key={mode}
                  type="button"
                  disabled={modeUpdating}
                  onClick={() => handleOperationModeChange(mode)}
-                 className={`px-4 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${
+                 className={`px-3 md:px-4 py-2 rounded-lg text-[9px] md:text-[10px] font-black uppercase tracking-widest transition-all ${
                    currentOperationMode === mode
                      ? 'bg-green-500 text-black'
                      : 'text-zinc-500 hover:text-white hover:bg-white/5'
@@ -514,19 +564,19 @@ const App = () => {
              ))}
            </div>
            
-           <div className="bg-zinc-900/50 px-4 py-1.5 rounded-full border border-green-500/20 flex items-center gap-2">
+           <div className="bg-zinc-900/50 px-2 md:px-4 py-1 md:py-1.5 rounded-full border border-green-500/20 flex items-center gap-1 md:gap-2 shrink-0">
               <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" />
-              <span className="text-[10px] font-black text-green-500 uppercase italic">{data.execution_label || data.status || 'Conectando...'}</span>
+              <span className="text-[9px] md:text-[10px] font-black text-green-500 uppercase italic truncate max-w-[120px] md:max-w-none">{data.execution_label || data.status || 'Conectando...'}</span>
            </div>
         </div>
       </header>
 
-      <main className="p-8 max-w-[1800px] mx-auto">
+      <main className="p-4 md:p-8 max-w-[1800px] mx-auto pb-20">
         
         {/* ABA 1: DASHBOARD (Igual ao seu print) */}
         {activeTab === 'dashboard' && (
-          <div className="animate-in fade-in duration-500 space-y-8">
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+          <div className="animate-in fade-in duration-500 space-y-4 md:space-y-8">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-6">
               <KpiCard 
                 label={currentOperationMode === 'paper' ? "🧪 SALDO PAPER (USDT)" : `💰 SALDO ${currentOperationMode === 'testnet' ? 'TESTNET' : 'REAL'} (USDT)`} 
                 value={`$${(currentOperationMode === 'paper' ? currentBalanceLive : syncedBalance).toLocaleString('pt-PT', { maximumFractionDigits: 2 })}`}
@@ -542,7 +592,7 @@ const App = () => {
             </div>
 
             {/* 📊 CARDS DE P&L */}
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-6">
               <KpiCard 
                 label="📈 P&L TOTAL (USDT)" 
                 value={`${totalPnlLive >= 0 ? '+' : ''}$${totalPnlLive.toLocaleString('pt-PT', { maximumFractionDigits: 2 })}`}
@@ -571,9 +621,9 @@ const App = () => {
               />
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-              <div className="lg:col-span-2 bg-[#0d0e12] rounded-[2.5rem] border border-white/5 p-10">
-                <div className="flex justify-between items-center mb-8">
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-8">
+              <div className="lg:col-span-2 bg-[#0d0e12] rounded-2xl md:rounded-[2.5rem] border border-white/5 p-4 md:p-10">
+                <div className="flex justify-between items-center mb-4 md:mb-8">
                    <h3 className="text-xs font-black text-zinc-500 uppercase tracking-[0.3em] italic flex items-center gap-3">
                       <TrendingUp size={16} className="text-green-500" /> Monitor Sniper Multi-Ativo
                    </h3>
@@ -660,25 +710,26 @@ const App = () => {
                  </div>
               </div>
 
-              <div className="bg-[#0d0e12] rounded-[2.5rem] border border-white/5 p-10 flex flex-col items-center justify-center text-center relative overflow-hidden">
-                <div className="absolute top-6 right-6 text-[8px] font-black text-zinc-600 tracking-widest uppercase">Escada: 60/70/80</div>
-                <div className="w-48 h-48 rounded-full border-[6px] border-zinc-900 flex items-center justify-center relative mb-8">
-                   <div className="absolute inset-0 rounded-full border-[6px] border-green-500 border-t-transparent animate-spin-slow opacity-20" />
-                    <Zap size={60} className="text-green-500 fill-current drop-shadow-[0_0_20px_rgba(34,197,94,0.5)]" />
+              <div className="bg-[#0d0e12] rounded-2xl md:rounded-[2.5rem] border border-white/5 p-6 md:p-10 flex flex-col items-center justify-center text-center relative overflow-hidden">
+                <div className="absolute top-4 right-4 md:top-6 md:right-6 text-[8px] font-black text-zinc-600 tracking-widest uppercase">Escada: 60/70/80</div>
+                <div className="w-28 h-28 md:w-48 md:h-48 rounded-full border-[6px] border-zinc-900 flex items-center justify-center relative mb-4 md:mb-8">
+                   <div className="absolute inset-0 rounded-full border-[6px] border-green-500/20 border-t-transparent" style={{animation: 'spin 8s linear infinite'}} />
+                    <Zap size={40} className="text-green-500 fill-current md:hidden" />
+                    <Zap size={60} className="text-green-500 fill-current hidden md:block" />
                 </div>
                 <h3 className="text-xl font-black italic mb-2 uppercase">{statusHeadline}</h3>
                 <p className="text-[8px] text-zinc-600 font-bold uppercase tracking-widest leading-loose">{statusSubline}</p>
               </div>
             </div>
 
-            <div className="bg-[#0d0e12] p-10 rounded-[3rem] border border-white/5">
+            <div className="bg-[#0d0e12] p-4 md:p-10 rounded-2xl md:rounded-[3rem] border border-white/5">
                <h4 className="text-[10px] font-black text-zinc-600 uppercase tracking-[0.5em] mb-4 flex items-center gap-3">
                   <Search size={14} /> Veredito Institucional (Cloud Mode)
                </h4>
-               <p className="text-2xl font-medium italic text-zinc-300">"{data.ia2_decision.motivo}"</p>
+               <p className="text-base md:text-2xl font-medium italic text-zinc-300">"{data.ia2_decision.motivo}"</p>
             </div>
 
-            <div className="bg-[#0d0e12] p-10 rounded-[3rem] border border-white/5">
+            <div className="bg-[#0d0e12] p-4 md:p-10 rounded-2xl md:rounded-[3rem] border border-white/5">
               <div className="flex items-center justify-between mb-6">
                 <h4 className="text-[10px] font-black text-zinc-600 uppercase tracking-[0.5em] flex items-center gap-3">
                   <Target size={14} /> Top Oportunidades do Ciclo
@@ -721,9 +772,9 @@ const App = () => {
 
         {/* ABA 2: EVIDÊNCIA (Igual ao seu print) */}
         {activeTab === 'evidence' && (
-          <div className="animate-in fade-in duration-500 grid grid-cols-1 lg:grid-cols-4 gap-8">
-            <div className="lg:col-span-3 space-y-6">
-              <div className="bg-[#0d0e12] min-h-[550px] rounded-[3rem] border border-zinc-800 border-dashed p-10 flex flex-col">
+          <div className="animate-in fade-in duration-500 grid grid-cols-1 lg:grid-cols-4 gap-4 md:gap-8">
+            <div className="lg:col-span-3 space-y-4 md:space-y-6">
+              <div className="bg-[#0d0e12] min-h-[400px] md:min-h-[550px] rounded-2xl md:rounded-[3rem] border border-zinc-800 border-dashed p-4 md:p-10 flex flex-col">
                  <div className="flex items-start justify-between gap-6">
                    <div className="text-[10px] font-black text-zinc-600 uppercase tracking-[0.4em] italic">Raio-X Triplo Cérebro</div>
                    <div className="px-4 py-2 rounded-full border border-green-500/20 bg-green-500/5 text-[10px] font-black text-green-500 uppercase tracking-widest">
@@ -794,12 +845,12 @@ const App = () => {
                    </div>
                  </div>
               </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="bg-[#0d0e12] p-8 rounded-[2.5rem] border border-white/5">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
+                <div className="bg-[#0d0e12] p-4 md:p-8 rounded-2xl md:rounded-[2.5rem] border border-white/5">
                   <span className="text-[10px] font-black text-zinc-600 uppercase tracking-widest flex items-center gap-3 mb-4"><TrendingUp size={14} className="text-green-500" /> Logica Neural</span>
                   <p className="text-xs text-zinc-400 italic leading-relaxed">{evidence.local_reason || 'Aguardando leitura do Motor Matemático.'}</p>
                 </div>
-                <div className="bg-[#0d0e12] p-8 rounded-[2.5rem] border border-white/5">
+                <div className="bg-[#0d0e12] p-4 md:p-8 rounded-2xl md:rounded-[2.5rem] border border-white/5">
                   <span className="text-[10px] font-black text-zinc-600 uppercase tracking-widest flex items-center gap-3 mb-4"><ShieldCheck size={14} className="text-blue-500" /> Critica de Risco</span>
                   <p className="text-xs text-zinc-400 italic leading-relaxed">{evidence.tactical_reason || evidence.strategic_reason || 'Aguardando crítica do Radar Tático.'}</p>
                 </div>
@@ -827,21 +878,22 @@ const App = () => {
 
         {/* ABA 3: GESTÃO DE PESSOAS (NOVIDADE SaaS) */}
         {activeTab === 'gestao' && (
-          <div className="animate-in slide-in-from-bottom-6 duration-700">
-            <div className="flex flex-col md:flex-row justify-between items-end mb-12 gap-6">
+          <div className="animate-in fade-in duration-500">
+            <div className="flex flex-col md:flex-row justify-between items-start md:items-end mb-6 md:mb-12 gap-4">
               <div>
-                <h2 className="text-4xl font-black italic tracking-tighter uppercase mb-2">Gestão SaaS de Investidores</h2>
-                <p className="text-zinc-500 text-sm font-bold uppercase tracking-widest">Armazenamento de chaves API e banca dinâmica na nuvem.</p>
+                <h2 className="text-2xl md:text-4xl font-black italic tracking-tighter uppercase mb-2">Gestão SaaS</h2>
+                <p className="text-zinc-500 text-xs md:text-sm font-bold uppercase tracking-widest">Chaves API e banca dinâmica na nuvem.</p>
               </div>
-              <button 
+              <button
                 onClick={openNewInvestorModal}
-                className="bg-green-500 hover:bg-green-400 text-black font-black px-10 py-5 rounded-3xl flex items-center gap-3 transition-all transform active:scale-95 shadow-2xl shadow-green-900/30 uppercase text-xs tracking-widest"
+                className="bg-green-500 hover:bg-green-400 text-black font-black px-6 md:px-10 py-3 md:py-5 rounded-2xl md:rounded-3xl flex items-center gap-3 transition-all active:scale-95 shadow-xl shadow-green-900/30 uppercase text-xs tracking-widest"
               >
                 + Novo Investidor
               </button>
             </div>
 
-            <div className="bg-[#0d0e12] rounded-[3rem] border border-white/5 overflow-hidden shadow-2xl">
+            {/* Desktop table */}
+            <div className="hidden md:block bg-[#0d0e12] rounded-[3rem] border border-white/5 overflow-hidden shadow-2xl">
               <table className="w-full text-left">
                 <thead className="bg-zinc-950 text-zinc-600 text-[9px] font-black uppercase tracking-[0.3em] border-b border-white/5">
                   <tr>
@@ -885,34 +937,81 @@ const App = () => {
                 </tbody>
               </table>
             </div>
+
+            {/* Mobile cards */}
+            <div className="md:hidden space-y-3">
+              {investidores.map(inv => (
+                <div key={inv.id} className="bg-[#0d0e12] rounded-2xl border border-white/5 p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="font-black italic text-base uppercase">{inv.nome}</div>
+                      <div className="flex items-center gap-2 mt-2 flex-wrap">
+                        <span className={`px-2 py-0.5 rounded-full border text-[9px] font-black uppercase ${String(inv.account_mode || inv.mode || 'TESTNET').toUpperCase() === 'REAL' ? 'bg-green-500/10 border-green-500/30 text-green-400' : 'bg-blue-500/10 border-blue-500/30 text-blue-300'}`}>
+                          {String(inv.account_mode || inv.mode || 'TESTNET').toUpperCase() === 'REAL' ? 'Real' : 'Testnet'}
+                        </span>
+                        <span className={`px-2 py-0.5 rounded-full border text-[9px] font-black uppercase ${String(inv.storage_source || 'LOCAL').toUpperCase() === 'SUPABASE' ? 'bg-blue-500/10 border-blue-500/30 text-blue-300' : 'bg-zinc-800 border-white/10 text-zinc-300'}`}>
+                          {String(inv.storage_source || 'LOCAL').toUpperCase()}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="flex gap-3 text-zinc-600 shrink-0">
+                      <button onClick={() => openEditInvestor(inv.id)} className="hover:text-white transition-colors p-1"><Settings size={16}/></button>
+                      <button onClick={() => handleDeleteInvestor(inv.id)} className="hover:text-red-500 transition-colors p-1"><Trash2 size={16}/></button>
+                    </div>
+                  </div>
+                  <div className="mt-3 grid grid-cols-3 gap-2 text-center">
+                    <div className="bg-black/30 rounded-xl p-2">
+                      <div className="text-[9px] text-zinc-600 font-bold uppercase">Saldo</div>
+                      <div className="text-sm font-black font-mono text-zinc-300">${Number(inv.saldo_real ?? inv.banca ?? 0).toLocaleString()}</div>
+                    </div>
+                    <div className="bg-black/30 rounded-xl p-2">
+                      <div className="text-[9px] text-zinc-600 font-bold uppercase">PNL</div>
+                      <div className="text-sm font-black text-green-500">{inv.pnl}</div>
+                    </div>
+                    <div className="bg-black/30 rounded-xl p-2">
+                      <div className="text-[9px] text-zinc-600 font-bold uppercase">Status</div>
+                      <div className="flex items-center justify-center gap-1 mt-0.5">
+                        <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" />
+                        <span className="text-[9px] font-black uppercase text-zinc-400">{inv.status || 'ativo'}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+              {investidores.length === 0 && (
+                <div className="text-center py-12 text-zinc-600">
+                  <p className="text-sm italic">Nenhum investidor cadastrado</p>
+                </div>
+              )}
+            </div>
           </div>
         )}
       </main>
 
       {/* FORMULÁRIO MODAL (Gestão de Pessoas) */}
       {showAddForm && (
-        <div className="fixed inset-0 bg-black/95 backdrop-blur-xl z-[100] flex items-center justify-center p-6 animate-in fade-in duration-300">
-          <div className="bg-[#0d0e12] w-full max-w-2xl rounded-[4rem] border border-zinc-800 shadow-2xl relative overflow-hidden">
-            <div className="p-10 border-b border-white/5 flex justify-between items-center bg-zinc-900/20">
-               <div className="flex items-center gap-5">
-                  <div className="w-14 h-14 bg-green-500/10 rounded-2xl flex items-center justify-center text-green-500 border border-green-500/20">
-                     <Users size={28}/>
+        <div className="fixed inset-0 bg-black/95 backdrop-blur-xl z-[100] flex items-end sm:items-center justify-center p-0 sm:p-6 animate-in fade-in duration-300">
+          <div className="bg-[#0d0e12] w-full max-w-2xl rounded-t-[2.5rem] sm:rounded-[4rem] border border-zinc-800 shadow-2xl relative overflow-hidden max-h-[95vh] flex flex-col">
+            <div className="p-4 md:p-10 border-b border-white/5 flex justify-between items-center bg-zinc-900/20 shrink-0">
+               <div className="flex items-center gap-3 md:gap-5">
+                  <div className="w-10 h-10 md:w-14 md:h-14 bg-green-500/10 rounded-xl md:rounded-2xl flex items-center justify-center text-green-500 border border-green-500/20">
+                     <Users size={20}/>
                   </div>
                   <div>
-                    <h3 className="text-2xl font-black italic uppercase tracking-tighter">Vincular Investidor</h3>
-                    <p className="text-[9px] text-zinc-500 font-bold uppercase tracking-widest">Setup de Chaves e Banca Institucional</p>
+                    <h3 className="text-lg md:text-2xl font-black italic uppercase tracking-tighter">Vincular Investidor</h3>
+                    <p className="text-[9px] text-zinc-500 font-bold uppercase tracking-widest hidden md:block">Setup de Chaves e Banca Institucional</p>
                   </div>
                </div>
-               <div className="flex items-center gap-3">
+               <div className="flex items-center gap-2 md:gap-3">
                  {addFormMsg && (
-                   <div className={`px-4 py-2 rounded-lg ${addFormMsg.type === 'success' ? 'bg-green-500/10 border border-green-500/20 text-green-300' : 'bg-red-500/10 border border-red-500/20 text-red-300'}`}>
-                     <small className="text-xs font-black uppercase">{addFormMsg.text}</small>
+                   <div className={`px-2 md:px-4 py-1 md:py-2 rounded-lg max-w-[160px] md:max-w-none ${addFormMsg.type === 'success' ? 'bg-green-500/10 border border-green-500/20 text-green-300' : 'bg-red-500/10 border border-red-500/20 text-red-300'}`}>
+                     <small className="text-[9px] md:text-xs font-black uppercase line-clamp-2">{addFormMsg.text}</small>
                    </div>
                  )}
-                 <button onClick={() => { setShowAddForm(false); setAddFormMsg(null); }} className="p-4 hover:bg-zinc-800 rounded-full transition-all text-zinc-500 hover:text-white"><X size={28}/></button>
+                 <button onClick={() => { setShowAddForm(false); setAddFormMsg(null); }} className="p-2 md:p-4 hover:bg-zinc-800 rounded-full transition-all text-zinc-500 hover:text-white shrink-0"><X size={22}/></button>
                </div>
             </div>
-            <form className="p-12 space-y-8" onSubmit={async (e) => {
+            <form className="p-4 md:p-12 space-y-5 md:space-y-8 overflow-y-auto" onSubmit={async (e) => {
                 e.preventDefault();
                 setAddFormSaving(true);
                 setAddFormMsg(null);
@@ -1051,18 +1150,18 @@ const App = () => {
       )}
 
       {/* FOOTER ELITE */}
-      <footer className="fixed bottom-0 left-0 right-0 bg-[#0a0b0d]/90 backdrop-blur-md border-t border-white/5 px-10 py-4 flex justify-between items-center z-40">
-        <div className="flex gap-10">
-          <div className="flex items-center gap-3 text-[10px] font-black text-green-500 uppercase tracking-widest italic">
-             <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse shadow-[0_0_10px_rgba(34,197,94,0.8)]"/>
-             Motor Sniper Ativo
+      <footer className="fixed bottom-0 left-0 right-0 bg-[#0a0b0d]/90 backdrop-blur-md border-t border-white/5 px-4 md:px-10 py-3 md:py-4 flex justify-between items-center z-40">
+        <div className="flex gap-4 md:gap-10">
+          <div className="flex items-center gap-2 text-[9px] md:text-[10px] font-black text-green-500 uppercase tracking-widest italic">
+             <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"/>
+             Sniper Ativo
           </div>
-          <div className="flex items-center gap-3 text-[10px] font-black text-zinc-500 uppercase tracking-widest italic">
+          <div className="hidden md:flex items-center gap-3 text-[10px] font-black text-zinc-500 uppercase tracking-widest italic">
              <ShieldCheck size={14} className="text-zinc-600"/>
              Protocolo 100/3 Verificado
            </div>
          </div>
-         <p className="text-[9px] font-black text-zinc-700 uppercase tracking-[0.5em] italic">Motor Sniper v60.7 &copy; 2026</p>
+         <p className="text-[9px] font-black text-zinc-700 uppercase tracking-[0.3em] md:tracking-[0.5em] italic">Sniper v60.7 &copy; 2026</p>
        </footer>
     </div>
   );
@@ -1071,24 +1170,24 @@ const App = () => {
 // --- SUB-COMPONENTES DE DESIGN ---
 
 const TabButton = ({ active, onClick, icon, label }) => (
-  <button 
-    onClick={onClick} 
-    className={`flex items-center gap-3 px-8 py-3 rounded-xl transition-all uppercase text-[10px] font-black italic tracking-widest ${active ? 'bg-green-500 text-black shadow-lg shadow-green-900/20' : 'text-zinc-600 hover:bg-white/5 hover:text-zinc-300'}`}
+  <button
+    onClick={onClick}
+    className={`flex items-center gap-1 md:gap-3 px-3 md:px-8 py-2 md:py-3 rounded-xl transition-all uppercase text-[9px] md:text-[10px] font-black italic tracking-widest ${active ? 'bg-green-500 text-black shadow-lg shadow-green-900/20' : 'text-zinc-600 hover:bg-white/5 hover:text-zinc-300'}`}
   >
     {icon} {label}
   </button>
 );
 
 const KpiCard = ({ label, value, sub, icon, emerald, progress, highlight }) => (
-  <div className={`bg-[#0d0e12] p-8 rounded-[2.5rem] border transition-all shadow-xl relative overflow-hidden group hover:border-green-500/20 transition-all ${highlight ? 'border-green-500/50 shadow-[0_0_25px_rgba(34,197,94,0.3)]' : 'border-white/5'}`}>
-    <div className="flex justify-between items-start mb-6">
-      <span className="text-[10px] font-black text-zinc-600 uppercase tracking-widest italic leading-none">{label}</span>
-      <div className={`p-3 bg-zinc-900 rounded-2xl group-hover:scale-110 transition-transform ${highlight ? 'text-green-500' : ''}`}>{icon}</div>
+  <div className={`bg-[#0d0e12] p-4 md:p-8 rounded-2xl md:rounded-[2.5rem] border transition-all shadow-xl relative overflow-hidden group hover:border-green-500/20 ${highlight ? 'border-green-500/50 shadow-[0_0_25px_rgba(34,197,94,0.3)]' : 'border-white/5'}`}>
+    <div className="flex justify-between items-start mb-3 md:mb-6">
+      <span className="text-[9px] md:text-[10px] font-black text-zinc-600 uppercase tracking-widest italic leading-none">{label}</span>
+      <div className={`p-2 md:p-3 bg-zinc-900 rounded-xl md:rounded-2xl group-hover:scale-110 transition-transform ${highlight ? 'text-green-500' : ''}`}>{icon}</div>
     </div>
-    <h2 className={`text-4xl font-black italic tracking-tighter ${emerald || highlight ? 'text-green-500' : 'text-white'}`}>{value}</h2>
-    {sub && <p className="text-[8px] font-black text-zinc-700 uppercase mt-3 tracking-widest">{sub}</p>}
+    <h2 className={`text-2xl md:text-4xl font-black italic tracking-tighter ${emerald || highlight ? 'text-green-500' : 'text-white'}`}>{value}</h2>
+    {sub && <p className="text-[7px] md:text-[8px] font-black text-zinc-700 uppercase mt-2 md:mt-3 tracking-widest leading-relaxed">{sub}</p>}
     {progress !== undefined && (
-      <div className="mt-6 w-full h-1 bg-zinc-900 rounded-full overflow-hidden">
+      <div className="mt-3 md:mt-6 w-full h-1 bg-zinc-900 rounded-full overflow-hidden">
         <div className="h-full bg-green-500 transition-all duration-1000" style={{ width: `${progress}%` }} />
       </div>
     )}
@@ -1096,9 +1195,9 @@ const KpiCard = ({ label, value, sub, icon, emerald, progress, highlight }) => (
 );
 
 const CheckItem = ({ label, active }) => (
-  <div className={`flex items-center justify-between p-6 rounded-[1.8rem] border transition-all duration-500 ${active ? 'bg-green-500/5 border-green-500/30 shadow-[0_0_15px_rgba(34,197,94,0.05)]' : 'bg-zinc-900/20 border-white/5 opacity-40'}`}>
-    <span className={`text-[10px] font-black uppercase italic ${active ? 'text-green-500' : 'text-zinc-600'}`}>{label}</span>
-    {active ? <CheckCircle2 size={18} className="text-green-500" /> : <div className="w-4 h-4 rounded-full border-2 border-zinc-800" />}
+  <div className={`flex items-center justify-between p-4 md:p-6 rounded-2xl md:rounded-[1.8rem] border transition-all duration-500 ${active ? 'bg-green-500/5 border-green-500/30' : 'bg-zinc-900/20 border-white/5 opacity-40'}`}>
+    <span className={`text-[9px] md:text-[10px] font-black uppercase italic ${active ? 'text-green-500' : 'text-zinc-600'}`}>{label}</span>
+    {active ? <CheckCircle2 size={16} className="text-green-500 shrink-0" /> : <div className="w-4 h-4 rounded-full border-2 border-zinc-800 shrink-0" />}
   </div>
 );
 

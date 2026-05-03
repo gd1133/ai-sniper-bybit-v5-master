@@ -7,13 +7,14 @@ import requests
 import re
 import sys
 import io
+import json
 from datetime import datetime, timedelta
 
 # Força UTF-8 no stdout do Windows
 if sys.platform == 'win32':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, Response, stream_with_context
 from flask_cors import CORS
 from dotenv import load_dotenv
 from src.config import get_bybit_base_url, get_bybit_credentials, get_environment_config, resolve_use_testnet
@@ -2441,6 +2442,69 @@ def sniper_broadcast_signal():
     finally:
         if slot_reserved:
             _release_signal_slot(symbol)
+
+@app.route('/api/stream')
+def sse_stream():
+    """Server-Sent Events — push de estado ao frontend a cada 3 s.
+
+    Usa o estado global já mantido pelo sniper_worker_loop, portanto não gera
+    carga extra de CPU ou de rede na Bybit.
+    """
+    def _safe_snapshot():
+        try:
+            return {
+                "balance":              central_state.get('balance', 0),
+                "status":               central_state.get('status', ''),
+                "symbol":               central_state.get('symbol', '---'),
+                "confidence":           central_state.get('confidence', 0),
+                "opportunities":        central_state.get('opportunities', []),
+                "active_trades":        central_state.get('active_trades', []),
+                "trades":               central_state.get('trades', []),
+                "test_balance":         central_state.get('test_balance', 0),
+                "test_mode":            central_state.get('test_mode', False),
+                "operation_mode":       central_state.get('operation_mode', 'paper'),
+                "operation_mode_label": central_state.get('operation_mode_label', 'PAPER TRADING'),
+                "execution_enabled":    central_state.get('execution_enabled', False),
+                "execution_label":      central_state.get('execution_label', ''),
+                "last_sniper_signal":   central_state.get('last_sniper_signal'),
+                "evidence":             central_state.get('evidence'),
+                "ia2_decision":         central_state.get('ia2_decision', {}),
+                "pnl_total":            central_state.get('pnl_total', 0),
+                "pnl_percentage":       central_state.get('pnl_percentage', 0),
+                "winning_trades":       central_state.get('winning_trades', 0),
+                "losing_trades":        central_state.get('losing_trades', 0),
+                "win_rate":             central_state.get('win_rate', 0),
+            }
+        except Exception:
+            return {}
+
+    def generate():
+        # Send an initial snapshot immediately so the client does not wait 3 s
+        try:
+            yield f"data: {json.dumps(_safe_snapshot())}\n\n"
+        except Exception:
+            yield "data: {}\n\n"
+
+        while True:
+            time.sleep(3)
+            try:
+                yield f"data: {json.dumps(_safe_snapshot())}\n\n"
+            except GeneratorExit:
+                break
+            except Exception:
+                yield "data: {}\n\n"
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no',
+            'Connection': 'keep-alive',
+            'Access-Control-Allow-Origin': '*',
+        },
+    )
+
 
 if __name__ == "__main__":
     render_port = int(os.getenv("PORT", "5000"))
