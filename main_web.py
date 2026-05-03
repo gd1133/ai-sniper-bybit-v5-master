@@ -1225,11 +1225,11 @@ def _monitor_sl_tp_automatico():
     """
     Monitora trades abertos e fecha automaticamente quando atingem:
     - Stop Loss: -3% (perda maxima institucional)
-    - Take Profit: +6% (lucro alvo)
+    - Take Profit: +10% (= +100% lucro sobre margem de 5% com alavancagem 10x)
     Executa em background a cada 10 segundos.
     """
     SL_PCT = -3.0
-    TP_PCT =  6.0
+    TP_PCT = 10.0  # +10% preço = +100% sobre margem de 5% com alavancagem 10x
 
     while True:
         try:
@@ -1250,7 +1250,7 @@ def _monitor_sl_tp_automatico():
                 if pnl_pct <= SL_PCT:
                     motivo = f"SL_AUTO -3% (real: {pnl_pct:.2f}%)"
                 elif pnl_pct >= TP_PCT:
-                    motivo = f"TP_AUTO +6% (real: {pnl_pct:.2f}%)"
+                    motivo = f"TP_AUTO +10% (real: {pnl_pct:.2f}%)"
 
                 if motivo:
                     try:
