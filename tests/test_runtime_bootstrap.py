@@ -42,7 +42,7 @@ if __name__ == '__main__':
             raise SystemExit(1)
 
         started = [item[0] for item in _FakeThread.started_targets]
-        expected = ['sniper_worker_loop', '_monitor_sl_tp_automatico', 'sync_clients']
+        expected = ['sniper_worker_loop', '_monitor_sl_tp_automatico', '_background_uta_balance_sync', 'sync_clients']
         if started != expected:
             print(f"❌ Threads iniciadas incorretamente: {started}")
             raise SystemExit(2)

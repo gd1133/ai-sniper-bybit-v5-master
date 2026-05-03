@@ -7,13 +7,15 @@ import requests
 import re
 import sys
 import io
+import json
+import queue
 from datetime import datetime, timedelta
 
 # Força UTF-8 no stdout do Windows
 if sys.platform == 'win32':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, Response
 from flask_cors import CORS
 from dotenv import load_dotenv
 from src.config import get_bybit_base_url, get_bybit_credentials, get_environment_config, resolve_use_testnet
@@ -191,6 +193,25 @@ client_balance_cache = {
     "timestamp": 0,
 }
 
+# ── SSE client registry ───────────────────────────────────────────────────────
+# Each connected /api/events client gets its own Queue.
+_sse_clients: list[queue.Queue] = []
+_sse_clients_lock = threading.Lock()
+
+
+def _broadcast_sse_event(event_type: str, data: dict) -> None:
+    """Push a JSON event to all active SSE subscribers."""
+    payload = json.dumps({"type": event_type, "data": data})
+    with _sse_clients_lock:
+        dead = []
+        for q in _sse_clients:
+            try:
+                q.put_nowait(payload)
+            except queue.Full:
+                dead.append(q)
+        for q in dead:
+            _sse_clients.remove(q)
+
 
 def _sync_runtime_mode_state(persist=False):
     global APP_MODE, TEST_MODE_ENABLED
@@ -228,6 +249,9 @@ def start_runtime_services():
         threading.Thread(target=sniper_worker_loop, daemon=True).start()
         threading.Thread(target=_monitor_sl_tp_automatico, daemon=True).start()
         print("   Monitor SL/TP: ATIVO (-3% SL / +6% TP)")
+
+        threading.Thread(target=_background_uta_balance_sync, daemon=True).start()
+        print("   Sync UTA: ATIVO (leitura a cada 5s)")
 
         if cloud_db:
             print("☁️ Iniciando Sincronização com Supabase Cloud em background...")
@@ -973,6 +997,55 @@ def _refresh_real_balance_state(force=False):
         central_state['status'] = f"💼 {_mode_display_label(APP_MODE)}: nenhum cliente {account_label} ativo"
 
 
+def _background_uta_balance_sync():
+    """
+    Lê o saldo da Conta Unificada (UTA) via Bybit V5 a cada 5 segundos
+    usando as credenciais master do .env e atualiza o central_state.
+    Funciona em paper/testnet/real; em paper, mantém o saldo de teste.
+    """
+    SYNC_INTERVAL = 5
+
+    while True:
+        try:
+            if TEST_MODE_ENABLED:
+                # Paper trading: saldo já gerenciado pelo loop principal
+                time.sleep(SYNC_INTERVAL)
+                continue
+
+            api_key, api_secret = get_bybit_credentials()
+            if not api_key or not api_secret:
+                time.sleep(SYNC_INTERVAL)
+                continue
+
+            session = _ensure_pybit_http_class()(
+                testnet=_mode_uses_testnet(APP_MODE),
+                api_key=api_key,
+                api_secret=api_secret,
+                recv_window=20000,
+            )
+            wallet_payload = session.get_wallet_balance(accountType='UNIFIED', coin='USDT')
+            balance = _extract_unified_usdt_balance(wallet_payload)
+
+            if balance > 0:
+                central_state['balance'] = round(balance, 2)
+                central_state['status'] = (
+                    f"💼 {_mode_display_label(APP_MODE)}: "
+                    f"${balance:,.2f} USDT (UTA sincronizado)"
+                )
+                _broadcast_sse_event('balance', {
+                    'balance': round(balance, 2),
+                    'operation_mode': APP_MODE,
+                    'operation_mode_label': _mode_display_label(APP_MODE),
+                })
+        except Exception as exc:
+            print(f"⚠️ [UTA_BALANCE_SYNC] {exc}")
+
+        time.sleep(SYNC_INTERVAL)
+
+
+
+
+
 def _calculate_live_trade_metrics(entry_price, current_price, side):
     """Calcula direção do mercado e performance considerando o lado da operação."""
     try:
@@ -1527,8 +1600,10 @@ def _manual_close_open_trades(symbol, requested_by="dashboard"):
 
 def broadcast_ordem_global(symbol, side, entry_price, res_ia):
     """
-    DISPARO EM MASSA: 
+    DISPARO EM MASSA:
     Lê todos os investidores do SQLite e replica a ordem e o sinal.
+    Envia ao Telegram (master + clientes) e transmite via SSE para o frontend.
+    Entrada: 5% da banca | Stop Loss: -3% | Take Profit: +6%
     """
     slot_reserved = False
     try:
@@ -1538,26 +1613,60 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
             return
         slot_reserved = True
 
+        probabilidade = res_ia.get('probabilidade', 0)
+        motivo = res_ia.get('motivo', 'Confluência detectada')
+        symbol_limpo = _limpar_simbolo(symbol)
+
         signal_snapshot = _build_last_sniper_signal(
-            symbol,
-            side,
-            entry_price,
-            res_ia.get('probabilidade'),
-            res_ia.get('motivo'),
+            symbol, side, entry_price, probabilidade, motivo,
         )
         central_state['last_sniper_signal'] = signal_snapshot
         _push_recent_sniper_signal(signal_snapshot)
 
-        # 1. Notificação Master (Para o seu Grupo VIP ou seu Bot de Controle)
+        # Atualiza status e decisão da IA visível no dashboard
+        central_state['symbol'] = symbol_limpo
+        central_state['confidence'] = float(probabilidade)
+        central_state['status'] = f"🎯 SINAL RECEBIDO: {side} {symbol_limpo} @ ${entry_price:.2f} ({probabilidade}%)"
+        central_state['ia2_decision']['motivo'] = (
+            f"✅ Sinal Recebido – {side} {symbol_limpo} @ ${entry_price:.2f} | "
+            f"Confiança: {probabilidade}% | {motivo}"
+        )
+
+        # Transmite sinal em tempo real para todos os clientes SSE
+        _broadcast_sse_event('signal', {
+            'symbol': symbol_limpo,
+            'raw_symbol': symbol,
+            'side': side,
+            'entry_price': round(float(entry_price), 8),
+            'confidence': float(probabilidade),
+            'reason': motivo,
+            'status': central_state['status'],
+            'received_at': datetime.now().isoformat(timespec='seconds'),
+        })
+
+        # 1. Notificação Master (Grupo VIP / Bot de Controle)
+        sl_price = round(entry_price * 0.97, 2)
+        tp_price = round(entry_price * 1.06, 2)
         master_tk, master_chat = _get_master_telegram_config()
         if master_tk and master_chat:
-            m_msg = (f"🚀 *SINAL SNIPER BROADCAST*\n\n"
-                     f"📦 *Ativo:* {symbol}\n📈 *Lado:* {side}\n"
-                     f"🎯 *Entrada:* ${entry_price}\n🧠 *Confiança:* {res_ia.get('probabilidade')}%")
-            requests.post(f"https://api.telegram.org/bot{master_tk}/sendMessage", 
-                          json={"chat_id": master_chat, "text": m_msg, "parse_mode": "Markdown"})
+            m_msg = (
+                f"🚀 *SINAL SNIPER BROADCAST*\n\n"
+                f"📦 *Ativo:* {symbol_limpo}\n"
+                f"📈 *Lado:* {side}\n"
+                f"🎯 *Entrada:* ${entry_price:.2f}\n"
+                f"🧠 *Confiança:* {probabilidade}%\n\n"
+                f"🛡️ *Proteção:* TP ${tp_price} (+6%) | SL ${sl_price} (-3%)"
+            )
+            try:
+                requests.post(
+                    f"https://api.telegram.org/bot{master_tk}/sendMessage",
+                    json={"chat_id": master_chat, "text": m_msg, "parse_mode": "Markdown"},
+                    timeout=5,
+                )
+            except Exception as tg_err:
+                print(f"⚠️ [TELEGRAM MASTER] {tg_err}")
 
-        # 2. Loop de Execução para Clientes Cadastrados
+        # 2. Loop de execução para clientes cadastrados
         clientes = _get_registered_clients(active_only=True)
         for cliente in clientes:
             def task_cliente(c):
@@ -1568,19 +1677,22 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                         c.get('bybit_secret'),
                         testnet=_is_testnet_account(account_mode),
                     )
-                    
-                    # Gestão Dinâmica: 5% Banca (GAIN) / 3% (RECOVERY)
-                    margem = float(c.get('saldo_base', 1000.0)) * 0.05
-                    qty = margem / entry_price
 
-                    # --- EXECUÇÃO REAL NA EXCHANGE (PROTOCOLO SNIPER) ---
+                    # Gestão de risco: entrada fixa em 5% da banca, SL em 3%
+                    saldo_base = float(c.get('saldo_base') or 1000.0)
+                    margem = round(saldo_base * 0.05, 2)          # 5% da banca
+                    qty = margem / entry_price if entry_price > 0 else 0.0
+
+                    # Preços de proteção
+                    tp_price_c = round(entry_price * 1.06, 2)     # +6% TP
+                    sl_price_c = round(entry_price * 0.97, 2)     # -3% SL
+
+                    # Execução real na exchange
                     if _is_order_execution_enabled(APP_MODE):
                         exec_label = 'TESTNET' if APP_MODE == 'testnet' else 'REAL'
                         print(f"🚀 [EXECUÇÃO {exec_label}] {c.get('nome')} - {side} {qty:.4f} {symbol}")
                         order_result = broker.execute_market_order(symbol, side.lower(), qty)
-                        
                         if order_result:
-                            # ✅ Executa Proteção: TP +100% / SL -3%
                             broker.set_tp_sl_sniper(symbol, side.lower(), entry_price, qty)
                             print(f"✅ [ORDEM EXECUTADA] ID: {order_result.get('id', 'N/A')}")
                         else:
@@ -1594,35 +1706,46 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                             mode_label = "SALDO REAL / ORDENS BLOQUEADAS"
                         print(f"📊 [{mode_label}] {c.get('nome')} - execução real bloqueada por segurança")
 
-                    # --- NOTIFICAÇÃO PRIVADA EDUCATIVA (SNIPER PROTOCOL) ---
-                    c_msg = (f"🎯 *SNIPER GIVALDO v60.1 - DISPARO CONFIRMADO*\n\n"
-                             f"👤 *Trader:* {c.get('nome')}\n"
-                             f"📦 *Ativo:* {symbol}\n"
-                             f"📈 *Lado:* {side.upper()}\n"
-                             f"💰 *Margem:* ${margem:.2f} (5% da banca)\n"
-                             f"🎯 *Quantidade:* {qty:.4f}\n"
-                             f"📍 *Entrada:* ${entry_price:.2f}\n\n"
-                             f"🧠 *Confiança Cérebro Triplo:* {res_ia.get('probabilidade')}%\n"
-                             f"📝 *Motivo:* {res_ia.get('motivo')}\n"
-                             f"🔐 *Modo:* {_mode_display_label(APP_MODE)} • {_execution_status_label(APP_MODE)}\n"
-                             f"👤 *Conta:* {account_mode.upper()}\n\n"
-                             f"🛡️  *PROTEÇÃO ATIVA:*\n"
-                             f"✅ TP: ${entry_price * 1.10:.2f} (+100% lucro)\n"
-                             f"❌ SL: ${entry_price * 0.97:.2f} (-3% trava)\n\n"
-                             f"⏱️ *Cooldown Institucional:* 10 min após fechamento")
-                    
+                    # Notificação privada ao cliente via Telegram
+                    c_msg = (
+                        f"🎯 *SNIPER v60.7 - DISPARO CONFIRMADO*\n\n"
+                        f"👤 *Trader:* {c.get('nome')}\n"
+                        f"📦 *Ativo:* {symbol_limpo}\n"
+                        f"📈 *Lado:* {side.upper()}\n"
+                        f"💰 *Margem:* ${margem:.2f} (5% da banca)\n"
+                        f"🎯 *Quantidade:* {qty:.4f}\n"
+                        f"📍 *Entrada:* ${entry_price:.2f}\n\n"
+                        f"🧠 *Confiança Cérebro Triplo:* {probabilidade}%\n"
+                        f"📝 *Motivo:* {motivo}\n"
+                        f"🔐 *Modo:* {_mode_display_label(APP_MODE)} • {_execution_status_label(APP_MODE)}\n"
+                        f"👤 *Conta:* {account_mode.upper()}\n\n"
+                        f"🛡️  *PROTEÇÃO ATIVA:*\n"
+                        f"✅ TP: ${tp_price_c} (+6% lucro)\n"
+                        f"❌ SL: ${sl_price_c} (-3% trava)\n\n"
+                        f"⏱️ *Cooldown Institucional:* {COOLDOWN_INSTITUCIONAL_SECS}s após fechamento"
+                    )
                     client_tg_token = str(c.get('tg_token') or '').strip()
                     client_chat_id = str(c.get('chat_id') or '').strip()
                     if client_tg_token and client_chat_id:
-                        url_tg = f"https://api.telegram.org/bot{client_tg_token}/sendMessage"
-                        requests.post(url_tg, json={"chat_id": client_chat_id, "text": c_msg, "parse_mode": "Markdown"})
+                        try:
+                            requests.post(
+                                f"https://api.telegram.org/bot{client_tg_token}/sendMessage",
+                                json={"chat_id": client_chat_id, "text": c_msg, "parse_mode": "Markdown"},
+                                timeout=5,
+                            )
+                        except Exception as tg_err:
+                            print(f"⚠️ [TELEGRAM CLIENT {c.get('nome')}] {tg_err}")
 
-                    # Regista no histórico do cliente (com status OPEN)
+                    # Regista no histórico (status OPEN)
                     closed_at = time.strftime("%d/%m %H:%M", time.localtime())
-                    db.record_trade(c.get('id'), symbol, side, 0.0, round(margem, 2), closed_at, 
-                                  notes=f"SNIPER v60.1 - Conf: {res_ia.get('probabilidade')}% | Entrada: {entry_price:.8f}", status="open", entry_price=entry_price)
+                    db.record_trade(
+                        c.get('id'), symbol, side, 0.0, margem, closed_at,
+                        notes=f"SNIPER v60.7 - Conf: {probabilidade}% | Entrada: {entry_price:.8f}",
+                        status="open",
+                        entry_price=entry_price,
+                    )
 
-                    # --- SINCRONIZAÇÃO NUVEM (SUPABASE) ---
+                    # Sincronização na nuvem (Supabase)
                     if cloud_db:
                         try:
                             cloud_db.record_trade({
@@ -1630,12 +1753,12 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                                 "pair": symbol,
                                 "side": side,
                                 "pnl_pct": 0.0,
-                                "profit": round(margem, 2),
+                                "profit": margem,
                                 "entry_price": round(entry_price, 8),
                                 "closed_at": closed_at,
-                                "notes": f"SNIPER v60.1 - Conf: {res_ia.get('probabilidade')}%",
+                                "notes": f"SNIPER v60.7 - Conf: {probabilidade}%",
                                 "status": "open",
-                                "nome_cliente": c.get('nome') # Campo extra para facilitar análise na nuvem
+                                "nome_cliente": c.get('nome'),
                             })
                         except Exception as cloud_err:
                             print(f"⚠️ [SUPABASE] Falha sync trade {c.get('nome')}: {cloud_err}")
@@ -2367,7 +2490,7 @@ def get_current_mode():
 @app.route('/api/sniper/broadcast', methods=['POST'])
 def sniper_broadcast_signal():
     """🚀 RECEBE SINAL SNIPER BROADCAST E EXECUTA OPERAÇÃO
-    
+
     POST /api/sniper/broadcast
     {
         "symbol": "BTC/USDT",
@@ -2376,6 +2499,7 @@ def sniper_broadcast_signal():
         "confidence": 70,
         "reason": "Confluência 70% detectada"
     }
+    Entrada: 5% da banca | Stop Loss: -3%
     """
     slot_reserved = False
     try:
@@ -2390,23 +2514,39 @@ def sniper_broadcast_signal():
             return jsonify({"error": block_reason}), 409
         slot_reserved = True
         signal_snapshot = _build_last_sniper_signal(symbol, side, entry_price, confidence, reason)
-        
+
         # Atualiza central_state
         symbol_limpo = _limpar_simbolo(symbol)
         central_state['symbol'] = symbol_limpo
         central_state['confidence'] = confidence
-        central_state['status'] = f"🎯 SINAL BROADCAST: {side} {symbol_limpo} @ ${entry_price:.2f}"
+        central_state['status'] = f"🎯 SINAL RECEBIDO: {side} {symbol_limpo} @ ${entry_price:.2f}"
         central_state['last_sniper_signal'] = signal_snapshot
         _push_recent_sniper_signal(signal_snapshot)
-        central_state['ia2_decision']['motivo'] = reason
-        
-        # Registra operação no banco
+        central_state['ia2_decision']['motivo'] = (
+            f"✅ Sinal Recebido – {side} {symbol_limpo} @ ${entry_price:.2f} | "
+            f"Confiança: {confidence}% | {reason}"
+        )
+
+        # Transmite sinal em tempo real via SSE para o frontend
+        _broadcast_sse_event('signal', {
+            'symbol': symbol_limpo,
+            'raw_symbol': symbol,
+            'side': side,
+            'entry_price': entry_price,
+            'confidence': confidence,
+            'reason': reason,
+            'status': central_state['status'],
+            'received_at': datetime.now().isoformat(timespec='seconds'),
+        })
+
+        # Registra operação no banco (entrada = 5% do saldo inicial)
+        margem = round(_get_initial_test_balance() * 0.05, 2)
         db.record_trade(
             client_id=1,
             pair=symbol,
             side=side,
             pnl_pct=0,
-            profit=round(_get_initial_test_balance() * 0.05, 2),
+            profit=margem,
             closed_at=time.strftime("%d/%m %H:%M", time.localtime()),
             notes=f"BROADCAST: {side} {symbol} @ {entry_price:.2f} | Conf: {confidence}% | {reason}",
             status="open",
@@ -2415,17 +2555,18 @@ def sniper_broadcast_signal():
 
         # Atualiza ativo em aberto imediatamente para aparecer no frontend sem esperar o loop.
         _sync_active_trades_from_db()
-        
+
         print(f"\n{'='*60}")
         print(f"🚀 SINAL SNIPER BROADCAST RECEBIDO")
         print(f"{'='*60}")
         print(f"   📦 Ativo: {symbol}")
         print(f"   📈 Lado: {side}")
         print(f"   🎯 Entrada: ${entry_price:.2f}")
+        print(f"   💰 Margem: ${margem:.2f} (5% da banca)")
         print(f"   🧠 Confiança: {confidence}%")
         print(f"   📝 Motivo: {reason}")
         print(f"{'='*60}\n")
-        
+
         return jsonify({
             "success": True,
             "status": "✅ Sinal Broadcast Executado!",
@@ -2433,6 +2574,7 @@ def sniper_broadcast_signal():
             "side": side,
             "entry_price": entry_price,
             "confidence": confidence,
+            "margem": margem,
             "message": f"Operação {side} {symbol} registrada com sucesso"
         })
     except Exception as e:
@@ -2442,12 +2584,73 @@ def sniper_broadcast_signal():
         if slot_reserved:
             _release_signal_slot(symbol)
 
+
+@app.route('/api/events')
+def sse_stream():
+    """
+    Server-Sent Events (SSE) – transmissão em tempo real para o frontend.
+
+    O frontend conecta-se via:
+        const evtSource = new EventSource('/api/events');
+        evtSource.onmessage = (e) => { const event = JSON.parse(e.data); ... };
+
+    Tipos de evento emitidos:
+        • 'signal'  – novo sinal sniper (symbol, side, entry_price, confidence, reason)
+        • 'balance' – saldo UTA atualizado
+        • 'ping'    – keepalive a cada 25s
+    """
+    def generate():
+        q: queue.Queue = queue.Queue(maxsize=50)
+        with _sse_clients_lock:
+            _sse_clients.append(q)
+        try:
+            # Snapshot inicial do estado atual
+            initial = {
+                "type": "status",
+                "data": {
+                    "balance": central_state.get('balance', 0),
+                    "status": central_state.get('status', ''),
+                    "symbol": central_state.get('symbol', '---'),
+                    "confidence": central_state.get('confidence', 0),
+                    "ia2_decision": central_state.get('ia2_decision', {}),
+                    "operation_mode": APP_MODE,
+                    "operation_mode_label": _mode_display_label(APP_MODE),
+                },
+            }
+            yield f"data: {json.dumps(initial)}\n\n"
+
+            while True:
+                try:
+                    payload = q.get(timeout=25)
+                    yield f"data: {payload}\n\n"
+                except queue.Empty:
+                    # Keepalive para evitar que proxies fechem a conexão
+                    yield f"data: {json.dumps({'type': 'ping'})}\n\n"
+        except GeneratorExit:
+            pass
+        finally:
+            with _sse_clients_lock:
+                try:
+                    _sse_clients.remove(q)
+                except ValueError:
+                    pass
+
+    return Response(
+        generate(),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no',
+        },
+    )
+
+
 if __name__ == "__main__":
     render_port = int(os.getenv("PORT", "5000"))
 
     start_runtime_services()
 
-    print(f"✅ DuoIA Maestro v60.1 Online na Porta {render_port}")
+    print(f"✅ DuoIA Maestro v60.7 Online na Porta {render_port}")
 
     print(f"💰 Saldo Carregado: {TEST_BALANCE} USDT")
     print(f"🧭 Modo operacional: {_mode_display_label(APP_MODE)}")
@@ -2457,4 +2660,3 @@ if __name__ == "__main__":
     print(f"📊 Dashboard: http://0.0.0.0:{render_port}")
     print("🧠 Cérebro Triplo: ATIVO (Rigor 50%)")
     app.run(host='0.0.0.0', port=render_port, debug=False, use_reloader=False)
-

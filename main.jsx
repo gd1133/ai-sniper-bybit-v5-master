@@ -272,7 +272,77 @@ const App = () => {
     fetchInvestidores();
     const iv = setInterval(fetchStatus, 3000);
     const iv2 = setInterval(fetchInvestidores, 30000);
-    return () => { mounted = false; clearInterval(iv); clearInterval(iv2); };
+
+    // SSE – recebe sinais e atualizações de saldo em tempo real
+    let evtSource = null;
+    const connectSSE = () => {
+      try {
+        evtSource = new EventSource(`${API_BASE}/api/events`);
+        evtSource.onmessage = (e) => {
+          if (!mounted) return;
+          try {
+            const event = JSON.parse(e.data);
+            if (event.type === 'signal') {
+              const d = event.data || {};
+              setData(prev => ({
+                ...prev,
+                symbol: d.symbol ?? prev.symbol,
+                confidence: d.confidence ?? prev.confidence,
+                status: d.status ?? prev.status,
+                ia2_decision: {
+                  ...prev.ia2_decision,
+                  motivo: `✅ Sinal Recebido – ${d.side ?? ''} ${d.symbol ?? ''} @ $${d.entry_price ?? ''} | ${d.reason ?? ''}`,
+                },
+                last_sniper_signal: {
+                  ...prev.last_sniper_signal,
+                  symbol: d.symbol,
+                  side: d.side,
+                  entry_price: d.entry_price,
+                  confidence: d.confidence,
+                  reason: d.reason,
+                  received_at: d.received_at,
+                },
+              }));
+            } else if (event.type === 'balance') {
+              const d = event.data || {};
+              if (d.balance > 0) {
+                setData(prev => ({
+                  ...prev,
+                  balance: d.balance,
+                  operation_mode: normalizeOperationMode(d.operation_mode ?? prev.operation_mode),
+                  operation_mode_label: d.operation_mode_label ?? prev.operation_mode_label,
+                }));
+              }
+            } else if (event.type === 'status') {
+              const d = event.data || {};
+              setData(prev => ({
+                ...prev,
+                balance: d.balance ?? prev.balance,
+                status: d.status ?? prev.status,
+                symbol: d.symbol ?? prev.symbol,
+                confidence: d.confidence ?? prev.confidence,
+                ia2_decision: d.ia2_decision ?? prev.ia2_decision,
+                operation_mode: normalizeOperationMode(d.operation_mode ?? prev.operation_mode),
+                operation_mode_label: d.operation_mode_label ?? prev.operation_mode_label,
+              }));
+            }
+          } catch (_) {}
+        };
+        evtSource.onerror = () => {
+          if (evtSource) { evtSource.close(); evtSource = null; }
+          // Reconecta após 5 s em caso de falha
+          if (mounted) setTimeout(connectSSE, 5000);
+        };
+      } catch (_) {}
+    };
+    connectSSE();
+
+    return () => {
+      mounted = false;
+      clearInterval(iv);
+      clearInterval(iv2);
+      if (evtSource) evtSource.close();
+    };
   }, []);
 
   const openNewInvestorModal = () => {
