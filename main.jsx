@@ -43,8 +43,8 @@ const OPERATION_MODE_META = {
   real: {
     badge: '💼 REAL',
     label: 'CONTA REAL',
-    dot: 'bg-red-500',
-    shell: 'bg-red-500/10 border-red-500/30 text-red-400',
+    dot: 'bg-green-500',
+    shell: 'bg-green-500/10 border-green-500/30 text-green-400',
   },
 };
 

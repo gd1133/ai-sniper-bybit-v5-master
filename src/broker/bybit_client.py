@@ -76,10 +76,10 @@ class BybitClient:
         self.pybit_api_version = 'v5'
         self.pybit_sdk_module = ''
 
+        print(f"🔍 [BYBIT ENDPOINT] testnet={self.testnet} endpoint={self.active_endpoint}")
+
         if api_key and api_secret:
             self._init_pybit_session(api_key, api_secret)
-
-        print(f"🔍 [BYBIT ENDPOINT] testnet={self.testnet} endpoint={self.active_endpoint}")
 
         # Indica se esta instância tem credenciais de escrita/autenticação
         self.authenticated = bool(api_key and api_secret)
