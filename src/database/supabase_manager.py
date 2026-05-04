@@ -145,6 +145,9 @@ class SupabaseManager:
         client_id = client.get("id")
         if client_id is not None:
             payload["id"] = int(client_id)
+        organization_id = client.get("organization_id")
+        if organization_id is not None:
+            payload["organization_id"] = str(organization_id)
         return self._protect_client_payload(payload)
 
     def _normalize_client_row(self, row: Dict[str, Any]) -> Dict[str, Any]:
@@ -167,6 +170,9 @@ class SupabaseManager:
             normalized["balance_source"] = (
                 "broker_testnet_balance" if normalized["account_mode"] == "testnet" else "broker_real_balance"
             )
+        # Preserve organization_id as a plain string when present
+        if normalized.get("organization_id") is not None:
+            normalized["organization_id"] = str(normalized["organization_id"])
         return normalized
 
     def get_clients(self, active_only: bool = False) -> Optional[List[Dict[str, Any]]]:
