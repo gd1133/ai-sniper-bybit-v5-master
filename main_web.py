@@ -128,9 +128,13 @@ def _is_order_execution_enabled(mode):
     mode = _normalize_operation_mode(mode)
     if mode == 'paper':
         return False
+    if mode == 'testnet':
+        # Testnet orders use virtual funds — always allow execution
+        return True
+    # Real mode requires explicit permission via env vars
     if not ALLOW_ORDER_EXECUTION:
         return False
-    if mode == 'real' and not ALLOW_REAL_TRADING:
+    if not ALLOW_REAL_TRADING:
         return False
     return True
 
@@ -182,7 +186,8 @@ central_state = {
     "ia2_decision": {
         "motivo": "Varrendo o mercado em busca de confluência 60%...",
         "brains": {"local": "online", "groq": "online", "gemini": "online"}
-    }
+    },
+    "evidence": {},
 }
 
 client_balance_cache = {
@@ -1778,6 +1783,12 @@ def sniper_worker_loop():
                                     'score': score,
                                     'probabilidade': prob,
                                     'res': res,
+                                    'signals_snapshot': {
+                                        'trend': signals.get('trend', '---'),
+                                        'rsi': signals.get('rsi', 50),
+                                        'volume_ratio': signals.get('volume_ratio', 0),
+                                        'fib_distance_pct': signals.get('fib_distance_pct', 999),
+                                    },
                                     'money_flow_score': money_flow['money_flow_score'],
                                     'money_flow_side': money_flow['money_flow_side'],
                                     'institutional_pressure': money_flow['institutional_pressure'],
@@ -1867,6 +1878,74 @@ def sniper_worker_loop():
                         central_state['symbol'] = melhor['clean_symbol']
                         central_state['confidence'] = melhor['probabilidade']
                         central_state['ia2_decision']['motivo'] = melhor['res'].get('motivo', 'Confluência detectada')
+
+                        # Popula a aba EVIDÊNCIA com dados do melhor sinal
+                        try:
+                            _res = melhor['res']
+                            _sig = melhor.get('signals_snapshot', {})
+                            _bd = _res.get('breakdown', {})
+                            _wt = _res.get('weights', {})
+                            _lc = _res.get('local_checks', {})
+                            central_state['evidence'] = {
+                                'symbol': melhor['clean_symbol'],
+                                'side': str(_res.get('decisao', 'SCANNER')),
+                                'confidence': int(_res.get('probabilidade', 0)),
+                                'threshold': THRESHOLD_ENTRADA,
+                                'max_positions': MAX_MOEDAS_ATIVAS,
+                                'position_mode': f'{MAX_MOEDAS_ATIVAS} moedas diferentes',
+                                'checks': [
+                                    {
+                                        'label': 'Macro Trend (SMA 200)',
+                                        'detail': _sig.get('trend', '---'),
+                                        'active': bool(_lc.get('macro_trend', False)),
+                                    },
+                                    {
+                                        'label': 'Fibonacci 0.618 (Golden Zone)',
+                                        'detail': f"{float(_sig.get('fib_distance_pct', 0)):.1f}% dist",
+                                        'active': bool(_lc.get('fib_zone', False)),
+                                    },
+                                    {
+                                        'label': 'Volume Institucional',
+                                        'detail': f"x{float(_sig.get('volume_ratio', 0)):.1f}",
+                                        'active': bool(_lc.get('institutional_volume', False)),
+                                    },
+                                    {
+                                        'label': 'RSI Seguro (20-80)',
+                                        'detail': f"RSI {float(_sig.get('rsi', 0)):.0f}",
+                                        'active': bool(_lc.get('rsi_safe', False)),
+                                    },
+                                ],
+                                'brains': {
+                                    'local': {
+                                        'label': '🟢 Motor Local',
+                                        'score': int(_bd.get('local', 0)),
+                                        'weight': int(_wt.get('local', 25)),
+                                    },
+                                    'groq': {
+                                        'label': '🟡 Radar Groq',
+                                        'score': int(_bd.get('groq', 0)),
+                                        'weight': int(_wt.get('groq', 35)),
+                                    },
+                                    'gemini': {
+                                        'label': '🔵 Gemini Cloud',
+                                        'score': int(_bd.get('gemini', 0)),
+                                        'weight': int(_wt.get('gemini', 40)),
+                                    },
+                                },
+                                'strategic_reason': str(_res.get('strategic_reason', '')),
+                                'tactical_reason': (
+                                    f"Groq: {_res.get('tactical_action', 'WAIT')} | "
+                                    f"Cloud: {_res.get('cloud_side', 'WAIT')}"
+                                ),
+                                'local_reason': (
+                                    f"Tendência: {_sig.get('trend', '---')} | "
+                                    f"RSI: {float(_sig.get('rsi', 0)):.0f} | "
+                                    f"Vol: x{float(_sig.get('volume_ratio', 0)):.1f}"
+                                ),
+                            }
+                        except Exception:
+                            pass
+
                         broadcast_ordem_global(
                             melhor['symbol'],
                             melhor['res'].get('decisao', 'ABORTAR'),
@@ -1895,6 +1974,7 @@ def sniper_worker_loop():
             print(f'⚠️ [LOOP ERRO] {e}')
             time.sleep(15)
 
+@app.route('/health')
 def health_check():
     """Health check para monitorar worker thread."""
     try:
