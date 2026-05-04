@@ -228,6 +228,7 @@ def start_runtime_services():
         threading.Thread(target=sniper_worker_loop, daemon=True).start()
         threading.Thread(target=_monitor_sl_tp_automatico, daemon=True).start()
         print("   Monitor SL/TP: ATIVO (-3% SL / +6% TP)")
+        threading.Thread(target=_state_poller_loop, daemon=True).start()
 
         if cloud_db:
             print("☁️ Iniciando Sincronização com Supabase Cloud em background...")
@@ -1703,6 +1704,21 @@ def _executar_trade_teste():
         print("⚠️ ENABLE_RANDOM_TEST_TRADES está ativo, mas esse modo não é recomendado.")
     return False
 
+
+def _state_poller_loop():
+    """Atualiza central_state em background a cada 15 s para não bloquear /api/status."""
+    while True:
+        try:
+            _repair_open_trades()
+            _refresh_real_balance_state()
+            _sync_active_trades_from_db()
+            _refresh_last_sniper_signal()
+            central_state['trades'] = db.get_recent_trades(20)
+        except Exception as e:
+            print(f"⚠️ [STATE POLLER] {e}")
+        time.sleep(15)
+
+
 def sniper_worker_loop():
     """Motor Sniper que varre o mercado e atualiza o Dashboard sem travar."""
     global central_state, BybitClient, IndicatorEngine, GroqValidator
@@ -2091,11 +2107,6 @@ def get_server_ip():
 @app.route('/api/status', methods=['GET'])
 def get_status():
     try:
-        _repair_open_trades()
-        _refresh_real_balance_state()
-        _sync_active_trades_from_db()
-        _refresh_last_sniper_signal()
-        central_state['trades'] = db.get_recent_trades(20)
         return jsonify(central_state)
     except:
         return jsonify(central_state)
