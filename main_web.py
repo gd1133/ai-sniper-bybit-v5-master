@@ -950,7 +950,7 @@ def _fetch_active_client_balances(force=False):
                     "is_testnet": _is_testnet_account(account_mode),
                     "account_mode": account_mode,
                     "status": 'erro_api',
-                    "error": "Credenciais com erro - revalide as chaves na aba Gestao",
+                    "error": "Credenciais com erro - revalide as chaves na aba Gestão",
                 })
                 continue
             try:
