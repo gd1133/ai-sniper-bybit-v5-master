@@ -1707,6 +1707,7 @@ def _executar_trade_teste():
 
 def _state_poller_loop():
     """Atualiza central_state em background a cada 15 s para não bloquear /api/status."""
+    import traceback as _tb
     while True:
         try:
             _repair_open_trades()
@@ -1715,7 +1716,7 @@ def _state_poller_loop():
             _refresh_last_sniper_signal()
             central_state['trades'] = db.get_recent_trades(20)
         except Exception as e:
-            print(f"⚠️ [STATE POLLER] {e}")
+            print(f"⚠️ [STATE POLLER] {e}\n{_tb.format_exc()}")
         time.sleep(15)
 
 

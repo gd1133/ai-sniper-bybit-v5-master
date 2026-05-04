@@ -877,8 +877,7 @@ const App = () => {
                       <td className="p-8 font-black text-green-500 italic text-lg">{inv.pnl}</td>
                       <td className="p-8">
                         <div className="flex items-center gap-2">
-                           <div className={`w-1.5 h-1.5 rounded-full ${(CLIENT_STATUS_STYLE[inv.status] || CLIENT_STATUS_STYLE_DEFAULT).dot}`} />
-                           <span className={`text-[10px] font-black uppercase tracking-widest ${(CLIENT_STATUS_STYLE[inv.status] || CLIENT_STATUS_STYLE_DEFAULT).text}`}>{inv.status}</span>
+                           {(() => { const s = CLIENT_STATUS_STYLE[inv.status] || CLIENT_STATUS_STYLE_DEFAULT; return (<><div className={`w-1.5 h-1.5 rounded-full ${s.dot}`} /><span className={`text-[10px] font-black uppercase tracking-widest ${s.text}`}>{inv.status}</span></>); })()}
                         </div>
                       </td>
                       <td className="p-8 text-right">
