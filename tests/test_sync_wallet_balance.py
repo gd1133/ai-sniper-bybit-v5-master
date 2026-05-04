@@ -174,9 +174,6 @@ def test_fallback_unified_to_contract():
 
 
 def test_auth_error_10003_no_retry():
-    session = _AuthError10003()
-    calls_before = 0
-
     class _Counting:
         def __init__(self):
             self._calls = 0
@@ -229,14 +226,15 @@ def test_retry_on_transient_error():
 def test_timeout_respected():
     client = _make_client(_AlwaysFail())
     start = time.time()
+    total_timeout = 0.3
     ok, balance, err = client.sync_wallet_balance(
-        max_retries=10, retry_delay=0.05, total_timeout=0.3
+        max_retries=10, retry_delay=0.05, total_timeout=total_timeout
     )
     elapsed = time.time() - start
     assert not ok, "Esperava falha por timeout"
     assert balance is None
-    assert elapsed < 2.0, f"Não respeitou o timeout: {elapsed:.2f}s"
-    print(f"✅ [7] Timeout respeitado ({elapsed:.2f}s para total_timeout=0.3s)")
+    assert elapsed < total_timeout * 4, f"Não respeitou o timeout: {elapsed:.2f}s"
+    print(f"✅ [7] Timeout respeitado ({elapsed:.2f}s para total_timeout={total_timeout}s)")
 
 
 def test_supabase_sync_success():

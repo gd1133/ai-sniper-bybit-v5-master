@@ -469,8 +469,12 @@ class BybitClient:
             print(f"⚠️  [TP/SL FALHOU] {e}")
             return False
 
-    # Retry-skipping codes: auth/signing failures from Bybit V5
+    # Bybit V5 retCodes that indicate permanent auth/signing failures — no retry.
+    # 10003: Invalid API Key  |  10004: Invalid signature / timestamp mismatch
     _WALLET_AUTH_CODES = {'10003', '10004'}
+
+    # HTTP-level keywords that also indicate auth failure — no retry.
+    _WALLET_HTTP_AUTH_KEYWORDS = ('401', '403', 'Forbidden', 'Unauthorized', 'API key is invalid')
 
     def sync_wallet_balance(self, max_retries=3, retry_delay=2.0, total_timeout=30.0):
         """Sincroniza saldo USDT via Bybit V5 com retry e timeout.
@@ -517,7 +521,7 @@ class BybitClient:
 
                 except Exception as exc:
                     msg = str(exc)
-                    if any(k in msg for k in ('401', '403', 'Forbidden', 'Unauthorized', 'API key is invalid')):
+                    if any(k in msg for k in self._WALLET_HTTP_AUTH_KEYWORDS):
                         self.authenticated = False
                         self._emit_authentication_alert()
                         return False, None, f"Erro de autenticação (HTTP): {msg[:200]}"
