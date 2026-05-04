@@ -469,6 +469,96 @@ class BybitClient:
             print(f"⚠️  [TP/SL FALHOU] {e}")
             return False
 
+    # Retry-skipping codes: auth/signing failures from Bybit V5
+    _WALLET_AUTH_CODES = {'10003', '10004'}
+
+    def sync_wallet_balance(self, max_retries=3, retry_delay=2.0, total_timeout=30.0):
+        """Sincroniza saldo USDT via Bybit V5 com retry e timeout.
+
+        Tenta tipos de conta UNIFIED → CONTRACT com até ``max_retries``
+        tentativas por tipo.  Erros de autenticação (retCode 10003/10004,
+        HTTP 401/403) encerram imediatamente sem retry.
+
+        Retorna uma tupla ``(success: bool, balance: float | None, error_msg: str)``.
+        """
+        if not self.authenticated or self.pybit_session is None:
+            return False, None, "Cliente sem credenciais de autenticação"
+
+        deadline = time.time() + total_timeout
+        last_error = "Falha desconhecida"
+
+        for account_type in ('UNIFIED', 'CONTRACT'):
+            for attempt in range(max_retries):
+                if time.time() >= deadline:
+                    return False, None, f"Timeout ({total_timeout}s) ao sincronizar saldo"
+
+                try:
+                    rsp = self.pybit_session.get_wallet_balance(
+                        accountType=account_type, coin='USDT'
+                    )
+                    ret_code = (rsp or {}).get('retCode')
+
+                    if str(ret_code) in self._WALLET_AUTH_CODES:
+                        self.authenticated = False
+                        self._emit_authentication_alert()
+                        return False, None, (
+                            f"Erro de autenticação Bybit: retCode={ret_code} "
+                            f"retMsg={rsp.get('retMsg', '')}"
+                        )
+
+                    if ret_code == 0:
+                        balance = self._extract_wallet_balance(rsp)
+                        return True, round(balance, 2), ''
+
+                    last_error = (
+                        f"{account_type} retCode={ret_code} "
+                        f"retMsg={(rsp or {}).get('retMsg', 'desconhecido')}"
+                    )
+
+                except Exception as exc:
+                    msg = str(exc)
+                    if any(k in msg for k in ('401', '403', 'Forbidden', 'Unauthorized', 'API key is invalid')):
+                        self.authenticated = False
+                        self._emit_authentication_alert()
+                        return False, None, f"Erro de autenticação (HTTP): {msg[:200]}"
+                    last_error = msg[:200]
+
+                if attempt < max_retries - 1:
+                    sleep_time = min(retry_delay * (2 ** attempt), max(0.0, deadline - time.time()))
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
+
+        return False, None, last_error
+
+    def _extract_wallet_balance(self, wallet_payload):
+        """Extrai saldo USDT de uma resposta bem-sucedida do wallet-balance V5."""
+        result = (wallet_payload or {}).get('result') or {}
+        rows = result.get('list') or []
+        if not rows:
+            return 0.0
+
+        account = rows[0] or {}
+        for field in ('totalWalletBalance', 'totalEquity'):
+            raw = account.get(field)
+            if raw not in (None, ''):
+                try:
+                    return float(raw)
+                except Exception:
+                    continue
+
+        for coin in account.get('coin') or []:
+            if str(coin.get('coin') or '').upper() != 'USDT':
+                continue
+            for field in ('walletBalance', 'equity', 'usdValue'):
+                raw = coin.get(field)
+                if raw not in (None, ''):
+                    try:
+                        return float(raw)
+                    except Exception:
+                        continue
+
+        return 0.0
+
     def close_position_with_sl(self, symbol, position_side):
         """
         Encerra posição se Stop Loss for acionado (Fallback se TP/SL falhar).

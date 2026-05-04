@@ -273,6 +273,38 @@ class SupabaseManager:
 
         return True
 
+    def sync_client_wallet_balance(self, client_id: int, bybit_client) -> Dict[str, Any]:
+        """Sincroniza saldo da Bybit V5 e atualiza status no Supabase.
+
+        Chama ``bybit_client.sync_wallet_balance()`` e persiste o resultado:
+        - Sucesso → ``status='ativo'``, ``saldo_base=balance``
+        - Falha   → ``status='erro_api'``
+
+        Retorna ``{'success': bool, 'balance': float | None, 'error': str}``.
+        """
+        success, balance, error_msg = bybit_client.sync_wallet_balance()
+        timestamp = datetime.now(timezone.utc).isoformat()
+
+        if success:
+            update_payload: Dict[str, Any] = {
+                'status': 'ativo',
+                'saldo_base': balance,
+                'updated_at': timestamp,
+            }
+        else:
+            update_payload = {
+                'status': 'erro_api',
+                'updated_at': timestamp,
+            }
+
+        if self.is_available():
+            try:
+                self.client.table('clientes').update(update_payload).eq('id', int(client_id)).execute()
+            except Exception as e:
+                self._handle_cloud_error(f"sincronizar saldo do cliente {client_id}", e)
+
+        return {'success': success, 'balance': balance, 'error': error_msg}
+
     def sync_clients(self, local_db_manager):
         """Sincroniza clientes locais para o Supabase."""
         if not self.is_available():
