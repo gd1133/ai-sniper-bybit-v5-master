@@ -191,6 +191,11 @@ client_balance_cache = {
     "timestamp": 0,
 }
 
+_status_cache = {
+    "data": None,
+    "timestamp": 0,
+}
+
 
 def _sync_runtime_mode_state(persist=False):
     global APP_MODE, TEST_MODE_ENABLED
@@ -893,7 +898,7 @@ def _fetch_active_client_balances(force=False):
     global client_balance_cache
 
     now = time.time()
-    if not force and (now - client_balance_cache["timestamp"]) < 10:
+    if not force and (now - client_balance_cache["timestamp"]) < 30:
         return client_balance_cache
 
     broker_cls = _ensure_broker_class()
@@ -2044,12 +2049,18 @@ def get_server_ip():
 
 @app.route('/api/status', methods=['GET'])
 def get_status():
+    global _status_cache
+    now = time.time()
+    if _status_cache["data"] is not None and (now - _status_cache["timestamp"]) < 8:
+        return jsonify(_status_cache["data"])
     try:
         _repair_open_trades()
         _refresh_real_balance_state()
         _sync_active_trades_from_db()
         _refresh_last_sniper_signal()
         central_state['trades'] = db.get_recent_trades(20)
+        _status_cache["data"] = dict(central_state)
+        _status_cache["timestamp"] = now
         return jsonify(central_state)
     except:
         return jsonify(central_state)
