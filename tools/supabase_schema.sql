@@ -21,6 +21,7 @@ alter table public.clientes add column if not exists tg_api_key text;
 alter table public.clientes add column if not exists account_mode text;
 alter table public.clientes add column if not exists balance_source text;
 alter table public.clientes add column if not exists updated_at timestamptz not null default timezone('utc', now());
+alter table public.clientes add column if not exists organization_id uuid default gen_random_uuid();
 
 update public.clientes
 set account_mode = case
