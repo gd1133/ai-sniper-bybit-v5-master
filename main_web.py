@@ -1554,8 +1554,12 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
             m_msg = (f"🚀 *SINAL SNIPER BROADCAST*\n\n"
                      f"📦 *Ativo:* {symbol}\n📈 *Lado:* {side}\n"
                      f"🎯 *Entrada:* ${entry_price}\n🧠 *Confiança:* {res_ia.get('probabilidade')}%")
-            requests.post(f"https://api.telegram.org/bot{master_tk}/sendMessage", 
-                          json={"chat_id": master_chat, "text": m_msg, "parse_mode": "Markdown"})
+            try:
+                requests.post(f"https://api.telegram.org/bot{master_tk}/sendMessage",
+                              json={"chat_id": master_chat, "text": m_msg, "parse_mode": "Markdown"},
+                              timeout=(3, 5))
+            except Exception as tg_err:
+                print(f"⚠️ [TELEGRAM MASTER] Falha ao enviar notificação: {tg_err}")
 
         # 2. Loop de Execução para Clientes Cadastrados
         clientes = _get_registered_clients(active_only=True)
@@ -1615,7 +1619,10 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                     client_chat_id = str(c.get('chat_id') or '').strip()
                     if client_tg_token and client_chat_id:
                         url_tg = f"https://api.telegram.org/bot{client_tg_token}/sendMessage"
-                        requests.post(url_tg, json={"chat_id": client_chat_id, "text": c_msg, "parse_mode": "Markdown"})
+                        try:
+                            requests.post(url_tg, json={"chat_id": client_chat_id, "text": c_msg, "parse_mode": "Markdown"}, timeout=(3, 5))
+                        except Exception as tg_err:
+                            print(f"⚠️ [TELEGRAM CLIENTE] {c.get('nome')}: {tg_err}")
 
                     # Regista no histórico do cliente (com status OPEN)
                     closed_at = time.strftime("%d/%m %H:%M", time.localtime())

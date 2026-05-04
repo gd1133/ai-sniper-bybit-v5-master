@@ -59,7 +59,28 @@
   </head>
   <body>
     <!-- Onde o Dashboard v13.0 será injetado pelo React -->
-    <div id="root"></div>
+    <div id="root">
+      <!-- Tela de carregamento exibida enquanto o React inicializa -->
+      <div id="app-loading" style="
+        min-height:100vh;
+        display:flex;
+        flex-direction:column;
+        align-items:center;
+        justify-content:center;
+        background:#020617;
+        color:#94a3b8;
+        font-family:Inter,system-ui,-apple-system,sans-serif;
+        gap:16px;
+      ">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="animation:spin 1s linear infinite;">
+          <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+        </svg>
+        <span style="font-size:0.95rem;letter-spacing:0.05em;">Iniciando Duo-IA Master...</span>
+      </div>
+      <style>
+        @keyframes spin { to { transform: rotate(360deg); } }
+      </style>
+    </div>
 
     <!-- 
       PONTO DE ENTRADA CRÍTICO: 
