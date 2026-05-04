@@ -739,21 +739,20 @@ _BYBIT_ERRCODE_MESSAGES = {
 def _friendly_bybit_error(exc):
     """Traduz erros comuns da API Bybit para mensagens claras em português."""
     raw = str(exc)
-    import re as _re
-    m = _re.search(r'ERRCODE[:\s]*(\d+)', raw, _re.IGNORECASE)
+    m = re.search(r'ERRCODE[:\s]*(\d+)', raw, re.IGNORECASE)
     if m:
         code = m.group(1)
         if code in _BYBIT_ERRCODE_MESSAGES:
             return _BYBIT_ERRCODE_MESSAGES[code]
         return f'Erro Bybit (ERRCODE {code}). Verifique as credenciais e permissões da chave API.'
     if 'retCode' in raw:
-        m2 = _re.search(r'retCode[=:\s]*(\d+)', raw, _re.IGNORECASE)
+        m2 = re.search(r'retCode[=:\s]*(\d+)', raw, re.IGNORECASE)
         if m2:
             code = m2.group(1)
             if code in _BYBIT_ERRCODE_MESSAGES:
                 return _BYBIT_ERRCODE_MESSAGES[code]
             if code != '0':
-                m3 = _re.search(r'retMsg[=:\s]*([^\|]+)', raw)
+                m3 = re.search(r'retMsg[=:\s]*([^\|]+)', raw)
                 msg_detail = m3.group(1).strip() if m3 else ''
                 return f'Erro Bybit (código {code}){": " + msg_detail if msg_detail else ""}.'
     return raw
@@ -951,7 +950,7 @@ def _fetch_active_client_balances(force=False):
                     "is_testnet": _is_testnet_account(account_mode),
                     "account_mode": account_mode,
                     "status": 'erro_api',
-                    "error": "Credenciais com erro — revalide as chaves na aba Gestão",
+                    "error": "Credenciais com erro - revalide as chaves na aba Gestao",
                 })
                 continue
             try:

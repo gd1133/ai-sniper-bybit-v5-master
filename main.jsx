@@ -27,6 +27,13 @@ const getApiBase = () => {
 };
 
 const API_BASE = getApiBase();
+
+const CLIENT_STATUS_STYLE = {
+  ativo:     { dot: 'bg-green-500 animate-pulse', text: 'text-green-500' },
+  erro_api:  { dot: 'bg-red-500',                 text: 'text-red-400'   },
+};
+const CLIENT_STATUS_STYLE_DEFAULT = { dot: 'bg-zinc-500', text: 'text-zinc-500' };
+
 const OPERATION_MODE_META = {
   paper: {
     badge: '🧪 PAPER',
@@ -870,8 +877,8 @@ const App = () => {
                       <td className="p-8 font-black text-green-500 italic text-lg">{inv.pnl}</td>
                       <td className="p-8">
                         <div className="flex items-center gap-2">
-                           <div className={`w-1.5 h-1.5 rounded-full ${inv.status === 'ativo' ? 'bg-green-500 animate-pulse' : inv.status === 'erro_api' ? 'bg-red-500' : 'bg-zinc-500'}`} />
-                           <span className={`text-[10px] font-black uppercase tracking-widest ${inv.status === 'ativo' ? 'text-green-500' : inv.status === 'erro_api' ? 'text-red-400' : 'text-zinc-500'}`}>{inv.status}</span>
+                           <div className={`w-1.5 h-1.5 rounded-full ${(CLIENT_STATUS_STYLE[inv.status] || CLIENT_STATUS_STYLE_DEFAULT).dot}`} />
+                           <span className={`text-[10px] font-black uppercase tracking-widest ${(CLIENT_STATUS_STYLE[inv.status] || CLIENT_STATUS_STYLE_DEFAULT).text}`}>{inv.status}</span>
                         </div>
                       </td>
                       <td className="p-8 text-right">
