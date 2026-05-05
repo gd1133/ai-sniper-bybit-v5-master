@@ -332,8 +332,8 @@ def place_order_with_protection(
     Executa a ordem a mercado e imediatamente define TP/SL via pybit V5.
 
     TP/SL Sniper:
-      - Take Profit: +10 % sobre entrada (= +100 % de margem com 10× alavancagem)
-      - Stop Loss:   -3 % sobre entrada  (trava institucional)
+      - Take Profit: +10 % sobre o preço de entrada (= +100 % de margem com 10× alavancagem)
+      - Stop Loss:    -5 % sobre o preço de entrada (=  -50 % de margem com 10× alavancagem)
     """
     v5_symbol = client._normalize_v5_symbol(symbol)
     v5_side = "Buy" if side.upper() == "BUY" else "Sell"
@@ -345,7 +345,7 @@ def place_order_with_protection(
     print(f"\n🚀 [PONTO ZERO] {v5_symbol} | {v5_side} | Qty={qty}")
     print(f"   📍 Entrada : ${price:.4f}")
     print(f"   🎯 TP       : ${tp_price:.4f}  (+{TAKE_PROFIT_PCT*100:.0f}% preço = +100% margem)")
-    print(f"   🛡️  SL       : ${sl_price:.4f}  (-{STOP_LOSS_PCT*100:.0f}% preço = -50% entrada)")
+    print(f"   🛡️  SL       : ${sl_price:.4f}  (-{STOP_LOSS_PCT*100:.0f}% preço = -50% margem)")
     print(f"   🧠 Motivo   : {consensus.get('motivo', '')[:120]}")
 
     if client.pybit_session is None:
