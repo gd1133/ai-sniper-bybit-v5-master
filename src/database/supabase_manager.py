@@ -65,8 +65,20 @@ class SupabaseManager:
     def _handle_cloud_error(self, action: str, error: Exception):
         message = str(error)
         normalized = message.lower()
-        if "pgrst205" in normalized or "could not find the table" in normalized or "schema cache" in normalized:
-            self._disable_cloud("tabela ausente ou schema cache inválido")
+        # Schema cache errors are TRANSIENT (e.g. column added to table → stale cache).
+        # Reconnect to refresh the schema rather than permanently disabling cloud.
+        if "pgrst205" in normalized or "schema cache" in normalized:
+            try:
+                if self.url and self.key:
+                    self.client = create_client(self.url, self.key)
+                    print("⚠️ [Supabase] Schema cache desatualizado — reconectando para atualizar.")
+            except Exception as reconnect_err:
+                print(f"⚠️ [Supabase] Falha ao reconectar após schema cache error: {reconnect_err}")
+            return
+
+        # Table truly does not exist → disable cloud for this session.
+        if "could not find the table" in normalized:
+            self._disable_cloud("tabela ausente no banco de dados")
             return
 
         # Erros de conexão SSL/HTTP2 são transitórios — reconecta silenciosamente

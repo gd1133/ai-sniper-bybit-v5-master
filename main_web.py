@@ -658,9 +658,17 @@ def _get_registered_clients(active_only=False):
                 normalized_cloud_clients.append(client_with_source)
             return normalized_cloud_clients
         if cloud_clients is not None and len(cloud_clients) == 0:
-            # Supabase acessível mas retornou vazio — pode ser RLS bloqueando
-            # com chave anon. Tenta SQLite local como fallback defensivo.
-            print("⚠️ [Supabase] Nenhum cliente retornado (RLS bloqueado?). Usando SQLite local.")
+            # Supabase acessível mas retornou vazio — provavelmente RLS bloqueando
+            # a chave anon ou tabela realmente vazia.
+            # Se o SQLite local também estiver vazio, os clientes ficam invisíveis.
+            # SOLUÇÃO: defina SUPABASE_SERVICE_KEY no Railway (chave service_role
+            # bypassa RLS completamente) ou desative RLS na tabela "clientes".
+            print(
+                "⚠️ [Supabase] Nenhum cliente retornado do Supabase. "
+                "Possíveis causas: (1) RLS ativo bloqueando a chave anon — "
+                "configure SUPABASE_SERVICE_KEY no Railway para resolver; "
+                "(2) tabela realmente vazia. Tentando SQLite local..."
+            )
 
     local_clients = db.get_active_clients() if active_only else db.get_all_clients()
     return [{**dict(client), "storage_source": "local"} for client in local_clients]
@@ -2063,7 +2071,9 @@ def get_investidores():
             "balance_source": r.get('balance_source'),
             "storage_source": r.get('storage_source', 'local'),
         } for r in rows])
-    except: return jsonify([])
+    except Exception as e:
+        print(f"❌ [get_investidores] erro inesperado: {e}")
+        return jsonify([])
 
 
 @app.route('/api/cliente/<int:client_id>', methods=['GET'])
