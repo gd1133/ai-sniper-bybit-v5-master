@@ -17,6 +17,7 @@ Regras de Negócio:
 """
 
 import os
+import re
 import time
 import sys
 
@@ -56,6 +57,26 @@ from src.broker.bybit_client import BybitClient
 from src.engine.indicators import IndicatorEngine
 from src.ai_brain.validator import GroqValidator
 from src.ai_brain.learning import TradeLearner
+
+
+# ─── Utilitário de segurança para logs ────────────────────────────────────────
+
+# Padrão para redactar valores que se parecem com chaves ou tokens
+_REDACT_PATTERN = re.compile(
+    r'(apikey|api_key|apiKey|secret|password|token|key)\s*[=:]\s*\S+',
+    re.IGNORECASE,
+)
+
+
+def _safe_log(msg: str, max_len: int = 300) -> str:
+    """Sanitiza mensagens de erro antes de imprimir no console.
+
+    - Substitui padrões semelhantes a credenciais por '[REDACTED]'.
+    - Trunca para max_len caracteres para evitar exposição acidental de dados
+      sensíveis que possam vir embutidos em mensagens de exceção HTTP.
+    """
+    cleaned = _REDACT_PATTERN.sub(r'\1=[REDACTED]', str(msg))
+    return cleaned[:max_len]
 
 
 # ─── Conexão Centralizada com a Bybit (UTA / pybit V5) ────────────────────────
@@ -104,7 +125,7 @@ def configure_leverage_and_margin(client: BybitClient, symbol: str) -> bool:
         )
         ok, err = client._handle_v5_ret_code(rsp_margin, "set_leverage")
         if not ok and "leverage not modified" not in err.lower():
-            print(f"⚠️  [LEVERAGE] {err}")
+            print(f"⚠️  [LEVERAGE] {_safe_log(err)}")
             return False
 
         # Ativa modo Cross Margin
@@ -117,7 +138,7 @@ def configure_leverage_and_margin(client: BybitClient, symbol: str) -> bool:
         )
         ok, err = client._handle_v5_ret_code(rsp_mode, "switch_margin_mode")
         if not ok and "margin mode is not modified" not in err.lower():
-            print(f"⚠️  [MARGIN MODE] {err}")
+            print(f"⚠️  [MARGIN MODE] {_safe_log(err)}")
             return False
 
         print(f"✅ [CONFIGURAÇÃO] {v5_symbol} → {LEVERAGE}× alavancagem | Cross Margin")
@@ -130,7 +151,7 @@ def configure_leverage_and_margin(client: BybitClient, symbol: str) -> bool:
             print("   → Verifique BYBIT_API_KEY e BYBIT_API_SECRET no arquivo .env")
             print("   → Certifique-se de que a chave tem permissão de 'Futuros' ativada na Bybit.")
             return False
-        print(f"⚠️  [LEVERAGE] Exceção: {e}")
+        print(f"⚠️  [LEVERAGE] Exceção: {_safe_log(e)}")
         return False
 
 
@@ -189,7 +210,7 @@ def check_five_confluences(tech_data: dict, consensus: dict) -> tuple[bool, list
         "1_macro_trend (SMA200)":       checks.get("macro_trend", False),
         "2_fibonacci_618":              checks.get("fib_zone", False),
         "3_volume_institucional":       checks.get("institutional_volume", False),
-        "4_rsi_seguro (20<RSI<80)":     checks.get("rsi_safe", 20 < rsi < 80),
+        "4_rsi_seguro (20<RSI<80)":     checks["rsi_safe"] if "rsi_safe" in checks else (20 < rsi < 80),
         "5_supertrend_alinhado":        st_ok,
     }
 
@@ -267,7 +288,7 @@ def place_order_with_protection(
                 print("   → A chave precisa ter permissão 'Contratos' (Futuros) habilitada.")
                 client.authenticated = False
             else:
-                print(f"❌ [ORDEM FALHOU] {err}")
+                print(f"❌ [ORDEM FALHOU] {_safe_log(err)}")
             return False
 
         result = (rsp or {}).get("result", {})
@@ -291,7 +312,7 @@ def place_order_with_protection(
             print("   → Certifique-se de que a chave não está expirada e tem permissão Futuros.")
             client.authenticated = False
         else:
-            print(f"❌ [ORDEM EXCEÇÃO] {err_str}")
+            print(f"❌ [ORDEM EXCEÇÃO] {_safe_log(err_str)}")
         return False
 
 
@@ -443,7 +464,7 @@ def run_sniper(symbol: str = SYMBOL):
                 print("   → Gerenciar chaves: Bybit → Conta → Segurança da conta → Chaves API")
                 client.authenticated = False
                 sys.exit(1)
-            print(f"⚠️  [CICLO #{cycle}] Erro inesperado: {err_str[:200]}")
+            print(f"⚠️  [CICLO #{cycle}] Erro inesperado: {_safe_log(err_str)}")
             time.sleep(SCAN_INTERVAL)
 
 
