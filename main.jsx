@@ -259,12 +259,23 @@ const App = () => {
 
   const fetchInvestidores = async () => {
       try {
-        const result = await fetchJson('/api/investidores');
-        if (!result.ok) return;
-        if (mounted) setInvestidores((result.json || []).map(normalizeInvestorRecord));
+        const result = await fetchJson('/api/investidores', 15000);
+        if (!result.ok) {
+          if (mounted) setInvestidoresLoading(false);
+          return;
+        }
+        if (mounted) {
+          setInvestidores((result.json || []).map(normalizeInvestorRecord));
+          setInvestidoresLoading(false);
+        }
       } catch (e) {
-        if (isAbortError(e)) return;
+        if (isAbortError(e)) {
+          // Timeout: mantém a lista anterior (não limpa) e sinaliza carregado
+          if (mounted) setInvestidoresLoading(false);
+          return;
+        }
         logApiError('Erro fetching /api/investidores', e);
+        if (mounted) setInvestidoresLoading(false);
       }
     };
 
@@ -400,6 +411,7 @@ const App = () => {
 
   // Lista de pessoas (será alimentada pelo banco local futuramente)
   const [investidores, setInvestidores] = useState([]);
+  const [investidoresLoading, setInvestidoresLoading] = useState(true);
   const currentOperationMode = normalizeOperationMode(data.operation_mode);
   const currentOperationMeta = OPERATION_MODE_META[currentOperationMode] || OPERATION_MODE_META.paper;
   const formAccountMode = normalizeAccountMode(addFormFields.account_mode);
@@ -853,7 +865,23 @@ const App = () => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/5">
-                  {investidores.map(inv => (
+                  {investidoresLoading ? (
+                    [1, 2].map(i => (
+                      <tr key={i} className="animate-pulse">
+                        <td className="p-8"><div className="h-5 w-40 bg-zinc-800 rounded-lg mb-2"/><div className="h-3 w-24 bg-zinc-900 rounded-lg"/></td>
+                        <td className="p-8"><div className="h-5 w-24 bg-zinc-800 rounded-lg"/></td>
+                        <td className="p-8"><div className="h-5 w-16 bg-zinc-800 rounded-lg"/></td>
+                        <td className="p-8"><div className="h-3 w-12 bg-zinc-800 rounded-lg"/></td>
+                        <td className="p-8 text-right"><div className="h-5 w-16 bg-zinc-800 rounded-lg ml-auto"/></td>
+                      </tr>
+                    ))
+                  ) : investidores.length === 0 ? (
+                    <tr>
+                      <td colSpan="5" className="p-12 text-center text-zinc-600 text-xs font-black uppercase tracking-widest">
+                        Nenhum investidor cadastrado. Clique em + Novo Investidor para começar.
+                      </td>
+                    </tr>
+                  ) : investidores.map(inv => (
                     <tr key={inv.id} className="hover:bg-green-500/[0.02] transition-all">
                       <td className="p-8">
                         <div className="font-black italic text-xl uppercase">{inv.nome}</div>

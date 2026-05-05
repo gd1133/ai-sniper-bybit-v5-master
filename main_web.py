@@ -196,6 +196,9 @@ _status_cache = {
     "timestamp": 0,
 }
 
+# Flag para evitar múltiplas threads de refresh simultâneas
+_balance_refresh_in_progress = False
+
 
 def _sync_runtime_mode_state(persist=False):
     global APP_MODE, TEST_MODE_ENABLED
@@ -233,6 +236,11 @@ def start_runtime_services():
         threading.Thread(target=sniper_worker_loop, daemon=True).start()
         threading.Thread(target=_monitor_sl_tp_automatico, daemon=True).start()
         print("   Monitor SL/TP: ATIVO (-3% SL / +6% TP)")
+
+        # Aquece o cache de saldo em background imediatamente para que o
+        # primeiro poll do dashboard não precise esperar.
+        threading.Thread(target=_fetch_active_client_balances, kwargs={'force': True}, daemon=True).start()
+        print("⚡ Cache de saldo: aquecendo em background...")
 
         if cloud_db:
             print("☁️ Iniciando Sincronização com Supabase Cloud em background...")
@@ -894,13 +902,38 @@ def _validate_client_broker_credentials(client_data, account_mode):
 
 
 def _fetch_active_client_balances(force=False):
-    """Busca o saldo real/testnet dos clientes ativos com cache curto."""
-    global client_balance_cache
+    """Busca o saldo real/testnet dos clientes ativos com cache.
+
+    Quando force=False (chamada HTTP):
+      - Se o cache ainda é válido (< 30s): retorna imediatamente sem bloquear.
+      - Se o cache está vencido: agenda refresh em background e retorna o cache
+        atual (possivelmente vazio no cold start) sem bloquear o worker HTTP.
+
+    Quando force=True (background thread):
+      - Sempre executa a busca bloqueante e atualiza o cache.
+    """
+    global client_balance_cache, _balance_refresh_in_progress
 
     now = time.time()
-    if not force and (now - client_balance_cache["timestamp"]) < 30:
+    cache_fresh = (now - client_balance_cache["timestamp"]) < 30
+
+    if not force and cache_fresh:
         return client_balance_cache
 
+    if not force and not cache_fresh:
+        # Cache vencido — agenda refresh em background e retorna imediatamente
+        if not _balance_refresh_in_progress:
+            def _bg_refresh():
+                global _balance_refresh_in_progress
+                try:
+                    _fetch_active_client_balances(force=True)
+                finally:
+                    _balance_refresh_in_progress = False
+            _balance_refresh_in_progress = True
+            threading.Thread(target=_bg_refresh, daemon=True).start()
+        return client_balance_cache
+
+    # force=True: executa a busca bloqueante (background thread ou warm-up)
     broker_cls = _ensure_broker_class()
 
     items = []
@@ -941,7 +974,7 @@ def _fetch_active_client_balances(force=False):
     client_balance_cache = {
         "items": items,
         "total": round(total, 2),
-        "timestamp": now,
+        "timestamp": time.time(),
     }
     return client_balance_cache
 
@@ -1918,6 +1951,7 @@ def get_investidores():
     """Lista investidores do Supabase quando disponível, com fallback local."""
     try:
         rows = _get_registered_clients(active_only=False)
+        # _fetch_active_client_balances é não-bloqueante: retorna cache imediatamente
         balance_map = {item.get('id'): item for item in _fetch_active_client_balances().get('items', [])}
         return jsonify([{
             "id": r.get('id'),
@@ -1929,6 +1963,7 @@ def get_investidores():
             "mode": _normalize_account_mode(r.get('account_mode', r.get('is_testnet'))).upper(),
             "account_mode": _normalize_account_mode(r.get('account_mode', r.get('is_testnet'))),
             "balance_source": r.get('balance_source'),
+            "storage_source": r.get('storage_source', 'local'),
         } for r in rows])
     except: return jsonify([])
 
