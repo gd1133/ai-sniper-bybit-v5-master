@@ -151,7 +151,13 @@ CORS(app)
 db.init_db()
 
 # 🧪 CARREGA CONFIGURAÇÕES DE TESTE
-TEST_BALANCE = db.get_test_balance()  # Saldo fictício para treinar
+_raw_test_balance = db.get_test_balance()  # Saldo fictício para treinar
+# Garante que o saldo paper nunca inicie zerado (pode acontecer se sessão anterior
+# esgotou o saldo por perdas e persistiu TEST_BALANCE=0 no banco).
+TEST_BALANCE = _raw_test_balance if _raw_test_balance > 0 else 1000.0
+if _raw_test_balance <= 0:
+    db.set_test_balance(TEST_BALANCE)
+    print(f"⚠️ TEST_BALANCE restaurado para {TEST_BALANCE} USDT (estava zerado/inválido).")
 APP_MODE = _normalize_operation_mode(db.get_operation_mode())
 TEST_MODE_ENABLED = APP_MODE == 'paper'
 ALLOW_ORDER_EXECUTION = ENV_CONFIG.allow_order_execution
@@ -632,10 +638,15 @@ def _is_supabase_ready():
 
 
 def _get_registered_clients(active_only=False):
-    """Fonte de verdade SaaS: Supabase quando disponível; SQLite como fallback."""
+    """Fonte de verdade SaaS: Supabase quando disponível; SQLite como fallback.
+
+    Se Supabase retorna lista vazia (possível bloqueio por RLS com chave anon),
+    faz fallback para SQLite local para garantir que clientes cadastrados sempre
+    apareçam no robô e no dashboard.
+    """
     if _is_supabase_ready():
         cloud_clients = cloud_db.get_clients(active_only=active_only)
-        if cloud_clients is not None:
+        if cloud_clients is not None and len(cloud_clients) > 0:
             normalized_cloud_clients = []
             for client in cloud_clients:
                 client_with_source = dict(client)
@@ -646,6 +657,10 @@ def _get_registered_clients(active_only=False):
                     print(f"⚠️ [LOCAL MIRROR] cliente {client.get('id')}: {e}")
                 normalized_cloud_clients.append(client_with_source)
             return normalized_cloud_clients
+        if cloud_clients is not None and len(cloud_clients) == 0:
+            # Supabase acessível mas retornou vazio — pode ser RLS bloqueando
+            # com chave anon. Tenta SQLite local como fallback defensivo.
+            print("⚠️ [Supabase] Nenhum cliente retornado (RLS bloqueado?). Usando SQLite local.")
 
     local_clients = db.get_active_clients() if active_only else db.get_all_clients()
     return [{**dict(client), "storage_source": "local"} for client in local_clients]
@@ -1090,17 +1105,30 @@ def _refresh_last_sniper_signal():
 
 
 def _get_initial_test_balance():
-    """Base fixa do paper trading; não deve oscilar com P&L aberto."""
+    """Base fixa do paper trading; não deve oscilar com P&L aberto.
+
+    Garante que o valor seja sempre positivo (≥ 1.0 USDT). Se o saldo ficou
+    zerado por perdas acumuladas, restaura ao valor padrão de 1000 USDT.
+    """
+    _DEFAULT_BALANCE = 1000.0
     configured = db.get_config('INITIAL_BALANCE')
     if configured is None:
-        initial_balance = round(float(db.get_test_balance() or TEST_BALANCE or 1000.0), 2)
+        candidate = float(db.get_test_balance() or TEST_BALANCE or _DEFAULT_BALANCE)
+        initial_balance = round(candidate if candidate > 0 else _DEFAULT_BALANCE, 2)
         db.set_config('INITIAL_BALANCE', str(initial_balance))
         return initial_balance
 
     try:
-        return round(float(configured), 2)
+        value = round(float(configured), 2)
+        if value <= 0:
+            # Saldo esgotado em sessão anterior — reinicia com o padrão.
+            initial_balance = _DEFAULT_BALANCE
+            db.set_config('INITIAL_BALANCE', str(initial_balance))
+            db.set_test_balance(initial_balance)
+            return initial_balance
+        return value
     except Exception:
-        initial_balance = round(float(TEST_BALANCE or 1000.0), 2)
+        initial_balance = round(float(TEST_BALANCE or _DEFAULT_BALANCE), 2)
         db.set_config('INITIAL_BALANCE', str(initial_balance))
         return initial_balance
 

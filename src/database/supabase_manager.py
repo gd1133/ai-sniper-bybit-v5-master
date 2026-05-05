@@ -29,7 +29,11 @@ def _normalize_account_mode(value: Any) -> str:
 class SupabaseManager:
     def __init__(self):
         self.url = os.getenv("SUPABASE_URL")
-        self.key = os.getenv("SUPABASE_KEY")
+        # Prefer service_role key (bypasses RLS) when available; fall back to anon key.
+        service_key = os.getenv("SUPABASE_SERVICE_KEY", "").strip()
+        anon_key = os.getenv("SUPABASE_KEY", "").strip()
+        self.key = service_key or anon_key
+        self._using_service_key = bool(service_key)
         self.crypto_secret = os.getenv("SUPABASE_CLIENTS_SECRET") or self.key
         self.cipher = self._build_cipher()
         self.cloud_enabled = False
@@ -37,7 +41,8 @@ class SupabaseManager:
         if self.url and self.key:
             self.client: Optional[Client] = create_client(self.url, self.key)
             self.cloud_enabled = True
-            print("☁️ Supabase conectado com sucesso!")
+            key_type = "service_role (RLS bypass)" if self._using_service_key else "anon"
+            print(f"☁️ Supabase conectado com sucesso! (chave: {key_type})")
         else:
             self.client = None
             print("⚠️ Supabase não configurado no .env")
@@ -274,16 +279,42 @@ class SupabaseManager:
         return True
 
     def sync_clients(self, local_db_manager):
-        """Sincroniza clientes locais para o Supabase."""
+        """Sincroniza clientes: Supabase → local e local → Supabase.
+
+        Na inicialização do serviço (especialmente em plataformas com armazenamento
+        efêmero como Railway), o SQLite local começa vazio.  Este método:
+        1. Puxa todos os clientes do Supabase para o SQLite local (seed inicial).
+        2. Envia os clientes locais que porventura não existam em nuvem.
+        """
         if not self.is_available():
             return
 
-        clients = local_db_manager.get_all_clients()
-        for client in clients:
+        # 1. Supabase → Local: garante que o cache local reflete a nuvem.
+        cloud_clients = self.get_clients(active_only=False)
+        if cloud_clients:
+            pulled = 0
+            for client in cloud_clients:
+                if not self.is_available():
+                    break
+                try:
+                    local_db_manager.upsert_client_local(client)
+                    pulled += 1
+                except Exception as e:
+                    print(f"⚠️ [Supabase→Local] cliente {client.get('id')}: {e}")
+            if pulled:
+                print(f"✅ {pulled} cliente(s) sincronizado(s) Supabase→Local.")
+
+        # 2. Local → Supabase: envia novos clientes locais para a nuvem.
+        local_clients = local_db_manager.get_all_clients()
+        pushed = 0
+        for client in local_clients:
             if not self.is_available():
                 break
             self.save_client(client)
-        print("✅ Sincronização em background finalizada.")
+            pushed += 1
+        if pushed:
+            print(f"✅ {pushed} cliente(s) sincronizado(s) Local→Supabase.")
+        print("✅ Sincronização bidirecional em background finalizada.")
 
     def record_trade(self, trade_data):
         """Registra um trade diretamente no Supabase."""
