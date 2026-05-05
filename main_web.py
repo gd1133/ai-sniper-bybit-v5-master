@@ -829,6 +829,66 @@ def _extract_unified_usdt_balance(wallet_payload):
     return 0.0
 
 
+def _friendly_bybit_error(raw_error: str, account_mode: str) -> str:
+    """Converte mensagens de erro cruas do pybit em mensagens amigáveis em português.
+
+    Erros comuns:
+      401  → chave inválida / sem permissão IP (pybit expõe via HTTP 401 ou retMsg)
+      10003 → invalid api_key
+      10004 → invalid sign / secret incorreto
+      33004 → apikey is expired
+    """
+    msg = str(raw_error)
+    is_testnet = account_mode == 'testnet'
+    source_hint = (
+        'Use chaves criadas em testnet.bybit.com (⚙️ API Management → Create New Key).'
+        if is_testnet
+        else 'Use chaves criadas em bybit.com (⚙️ API Management → Create New Key).'
+    )
+
+    lowered = msg.lower()
+
+    # HTTP 401 or Bybit retCode 401
+    if '401' in msg or 'errcode: 401' in lowered or 'http 401' in lowered:
+        return (
+            f'Chave API inválida ou sem permissão (erro 401). '
+            f'As chaves inseridas não são aceitas pelo servidor {"Testnet" if is_testnet else "Real"} da Bybit. '
+            f'{source_hint}'
+        )
+
+    # Invalid api_key (retCode 10003)
+    if '10003' in msg or 'invalid api_key' in lowered or 'invalid api key' in lowered:
+        return (
+            f'Chave API não reconhecida (código 10003). '
+            f'Verifique se copiou corretamente a API Key. {source_hint}'
+        )
+
+    # Invalid signature / wrong secret (retCode 10004)
+    if '10004' in msg or 'invalid sign' in lowered:
+        return (
+            f'Assinatura inválida (código 10004). '
+            f'Verifique se copiou corretamente o API Secret. {source_hint}'
+        )
+
+    # Expired key (retCode 33004)
+    if '33004' in msg or 'expired' in lowered:
+        return (
+            f'Chave API expirada (código 33004). '
+            f'Crie uma nova chave em {"testnet.bybit.com" if is_testnet else "bybit.com"}.'
+        )
+
+    # IP not whitelisted
+    if 'ip' in lowered and ('not allow' in lowered or 'whitelist' in lowered or 'forbidden' in lowered or '403' in msg):
+        return (
+            f'IP do servidor não autorizado pela chave API. '
+            f'No painel da Bybit, adicione o IP do servidor à lista de IPs permitidos da chave, '
+            f'ou crie uma chave sem restrição de IP.'
+        )
+
+    # Generic fallback – keep original but add hint
+    return f'Erro ao validar chaves Bybit: {msg}'
+
+
 def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=None, client_id=None, existing_client=None):
     """Valida credenciais Bybit V5 com pybit e persiste o cliente no fluxo atual do projeto."""
     payload = dict(client_payload or {})
@@ -869,7 +929,7 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
         valid = True
         validation_message = f'Conta {account_mode.upper()} validada via Bybit V5'
     except Exception as e:
-        validation_message = str(e)
+        validation_message = _friendly_bybit_error(str(e), account_mode)
         payload['status'] = 'erro_api'
         if existing_client is not None:
             try:
