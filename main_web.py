@@ -17,20 +17,37 @@ from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
 from src.config import get_bybit_base_url, get_bybit_credentials, get_environment_config, resolve_use_testnet
+from src.utils.cache import http_session
 
 # --- IMPORTAÇÕES DAS PASTAS INTERNAS (SRC) - LAZY LOADING ---
 try:
     from src.database import manager as db
-    try:
-        from src.database.supabase_manager import SupabaseManager
-        cloud_db = SupabaseManager()
-    except Exception as e:
-        print(f"⚠️ Erro ao inicializar Supabase: {e}")
-        cloud_db = None
 except Exception as e:
     print(f"❌ Erro Crítico ao importar Database Manager: {e}")
     db = None
-    cloud_db = None
+
+# Supabase é carregado de forma lazy em background para não bloquear o boot
+cloud_db = None
+_supabase_init_done = False
+_supabase_init_lock = threading.Lock()
+
+
+def _ensure_supabase():
+    """Inicializa o Supabase de forma lazy e thread-safe."""
+    global cloud_db, _supabase_init_done
+    if _supabase_init_done:
+        return cloud_db
+    with _supabase_init_lock:
+        if _supabase_init_done:
+            return cloud_db
+        try:
+            from src.database.supabase_manager import SupabaseManager
+            cloud_db = SupabaseManager()
+        except Exception as e:
+            print(f"⚠️ Erro ao inicializar Supabase: {e}")
+            cloud_db = None
+        _supabase_init_done = True
+    return cloud_db
 
 # Importações pesadas (CCXT, TensorFlow, etc.) carregadas sob demanda
 BybitClient = None
@@ -217,6 +234,14 @@ def _sync_runtime_mode_state(persist=False):
 _sync_runtime_mode_state()
 
 
+def _init_supabase_background():
+    """Inicializa Supabase em background e dispara sync de clientes."""
+    supa = _ensure_supabase()
+    if supa:
+        print("☁️ Iniciando Sincronização com Supabase Cloud em background...")
+        supa.sync_clients(db)
+
+
 def start_runtime_services():
     """Inicia as threads do robô uma única vez, inclusive sob gunicorn/wsgi."""
     global RUNTIME_STARTED
@@ -229,9 +254,8 @@ def start_runtime_services():
         threading.Thread(target=_monitor_sl_tp_automatico, daemon=True).start()
         print("   Monitor SL/TP: ATIVO (-3% SL / +6% TP)")
 
-        if cloud_db:
-            print("☁️ Iniciando Sincronização com Supabase Cloud em background...")
-            threading.Thread(target=cloud_db.sync_clients, args=(db,), daemon=True).start()
+        # Supabase inicializado em background para não atrasar o boot
+        threading.Thread(target=_init_supabase_background, daemon=True).start()
 
         RUNTIME_STARTED = True
         return True
@@ -614,13 +638,14 @@ def _get_master_telegram_config():
 
 
 def _is_supabase_ready():
-    return bool(cloud_db and getattr(cloud_db, "is_available", lambda: False)())
+    supa = _ensure_supabase()
+    return bool(supa and getattr(supa, "is_available", lambda: False)())
 
 
 def _get_registered_clients(active_only=False):
     """Fonte de verdade SaaS: Supabase quando disponível; SQLite como fallback."""
     if _is_supabase_ready():
-        cloud_clients = cloud_db.get_clients(active_only=active_only)
+        cloud_clients = _ensure_supabase().get_clients(active_only=active_only)
         if cloud_clients is not None:
             normalized_cloud_clients = []
             for client in cloud_clients:
@@ -639,7 +664,7 @@ def _get_registered_clients(active_only=False):
 
 def _get_registered_client_by_id(client_id):
     if _is_supabase_ready():
-        cloud_client = cloud_db.get_client_by_id(client_id)
+        cloud_client = _ensure_supabase().get_client_by_id(client_id)
         if cloud_client is not None:
             cloud_client = dict(cloud_client)
             cloud_client['storage_source'] = 'supabase'
@@ -665,7 +690,7 @@ def _save_client_everywhere(client_data):
     cloud_synced = False
 
     if _is_supabase_ready():
-        remote_record = cloud_db.save_client(payload)
+        remote_record = _ensure_supabase().save_client(payload)
         if remote_record is not None:
             payload.update(remote_record)
             cloud_synced = True
@@ -692,7 +717,7 @@ def _save_client_everywhere(client_data):
 
 def _delete_client_everywhere(client_id):
     """Remove o cliente da nuvem e do fallback local."""
-    cloud_deleted = (not _is_supabase_ready()) or cloud_db.delete_client(client_id)
+    cloud_deleted = (not _is_supabase_ready()) or _ensure_supabase().delete_client(client_id)
     local_deleted = db.delete_client(client_id)
     client_balance_cache["timestamp"] = 0
     return cloud_deleted, local_deleted
@@ -726,7 +751,7 @@ def _get_bybit_v5_base_url(is_testnet):
 
 def _get_bybit_server_time_ms(base_url, timeout=10):
     started_at = int(time.time() * 1000)
-    response = requests.get(f'{base_url}/v5/market/time', timeout=timeout)
+    response = http_session.get(f'{base_url}/v5/market/time', timeout=timeout)
     finished_at = int(time.time() * 1000)
 
     if response.status_code == 403:
@@ -1270,7 +1295,7 @@ def _monitor_sl_tp_automatico():
                             emoji = "OK" if pnl_pct >= TP_PCT else "STOP"
                             msg = (f"[{emoji}] FECHAMENTO AUTOMATICO\nAtivo: {symbol}\nPnL: {pnl_pct:.2f}%\nMotivo: {motivo}")
                             try:
-                                requests.post(
+                                http_session.post(
                                     f"https://api.telegram.org/bot{tg_token}/sendMessage",
                                     json={"chat_id": tg_chat, "text": msg},
                                     timeout=5
@@ -1502,9 +1527,9 @@ def _manual_close_open_trades(symbol, requested_by="dashboard"):
             current_price_reference = current_price
             closed_count += 1
 
-    if closed_count and cloud_db and getattr(cloud_db, "is_available", lambda: False)():
+    if closed_count and _is_supabase_ready():
         try:
-            cloud_db.close_open_trades_by_symbol(
+            _ensure_supabase().close_open_trades_by_symbol(
                 canonical_symbol,
                 current_price=current_price_reference,
                 closed_at=closed_at,
@@ -1554,8 +1579,9 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
             m_msg = (f"🚀 *SINAL SNIPER BROADCAST*\n\n"
                      f"📦 *Ativo:* {symbol}\n📈 *Lado:* {side}\n"
                      f"🎯 *Entrada:* ${entry_price}\n🧠 *Confiança:* {res_ia.get('probabilidade')}%")
-            requests.post(f"https://api.telegram.org/bot{master_tk}/sendMessage", 
-                          json={"chat_id": master_chat, "text": m_msg, "parse_mode": "Markdown"})
+            http_session.post(f"https://api.telegram.org/bot{master_tk}/sendMessage",
+                              json={"chat_id": master_chat, "text": m_msg, "parse_mode": "Markdown"},
+                              timeout=5)
 
         # 2. Loop de Execução para Clientes Cadastrados
         clientes = _get_registered_clients(active_only=True)
@@ -1615,7 +1641,7 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                     client_chat_id = str(c.get('chat_id') or '').strip()
                     if client_tg_token and client_chat_id:
                         url_tg = f"https://api.telegram.org/bot{client_tg_token}/sendMessage"
-                        requests.post(url_tg, json={"chat_id": client_chat_id, "text": c_msg, "parse_mode": "Markdown"})
+                        http_session.post(url_tg, json={"chat_id": client_chat_id, "text": c_msg, "parse_mode": "Markdown"}, timeout=5)
 
                     # Regista no histórico do cliente (com status OPEN)
                     closed_at = time.strftime("%d/%m %H:%M", time.localtime())
@@ -1623,9 +1649,9 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                                   notes=f"SNIPER v60.1 - Conf: {res_ia.get('probabilidade')}% | Entrada: {entry_price:.8f}", status="open", entry_price=entry_price)
 
                     # --- SINCRONIZAÇÃO NUVEM (SUPABASE) ---
-                    if cloud_db:
+                    if _is_supabase_ready():
                         try:
-                            cloud_db.record_trade({
+                            _ensure_supabase().record_trade({
                                 "client_id": c.get('id'),
                                 "pair": symbol,
                                 "side": side,
@@ -1908,6 +1934,22 @@ def health_check():
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
 
+
+@app.route('/api/health', methods=['GET'])
+def api_health():
+    """
+    Endpoint de health check ultra-rápido — responde em < 5 ms sem I/O.
+    Usado pelo Railway health check e pelo frontend para verificar se o
+    serviço está online antes de carregar dados pesados.
+    """
+    return jsonify({
+        "ok": True,
+        "status": "online",
+        "mode": APP_MODE,
+        "runtime_started": RUNTIME_STARTED,
+        "ts": int(time.time()),
+    })
+
 @app.route('/api/investidores', methods=['GET'])
 def get_investidores():
     """Lista investidores do Supabase quando disponível, com fallback local."""
@@ -2042,16 +2084,32 @@ def get_server_ip():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+_status_last_heavy_refresh: float = 0
+_STATUS_HEAVY_INTERVAL: float = 5.0  # segundos entre refreshes pesados
+
+
 @app.route('/api/status', methods=['GET'])
 def get_status():
+    """
+    Retorna o estado central do robô.
+
+    Operações pesadas (repair, sync DB, balance) são executadas no máximo
+    a cada 5 s para evitar latência em polling rápido do frontend.
+    Leituras subsequentes dentro da janela retornam o estado em memória
+    imediatamente, sem I/O adicional.
+    """
+    global _status_last_heavy_refresh
     try:
-        _repair_open_trades()
-        _refresh_real_balance_state()
-        _sync_active_trades_from_db()
-        _refresh_last_sniper_signal()
-        central_state['trades'] = db.get_recent_trades(20)
+        now = time.time()
+        if now - _status_last_heavy_refresh >= _STATUS_HEAVY_INTERVAL:
+            _repair_open_trades()
+            _refresh_real_balance_state()
+            _sync_active_trades_from_db()
+            _refresh_last_sniper_signal()
+            central_state['trades'] = db.get_recent_trades(20)
+            _status_last_heavy_refresh = now
         return jsonify(central_state)
-    except:
+    except Exception:
         return jsonify(central_state)
 
 

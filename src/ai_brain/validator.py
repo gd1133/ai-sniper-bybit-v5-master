@@ -1,12 +1,15 @@
 import os
 import json
-import requests
 import time
+import hashlib
+
 try:
     from groq import Groq
 except Exception:
     Groq = None
+
 from src.ai_brain.learning import TradeLearner
+from src.utils.cache import ai_response_cache, http_session
 
 class GroqValidator:
     """
@@ -33,6 +36,9 @@ class GroqValidator:
         self.global_cooldown_until = 0
         self.groq_cooldown_until = 0
         self.gemini_min_confidence = 60
+        # Backoff exponencial para rate limits
+        self.gemini_backoff_secs = 30
+        self.groq_backoff_secs = 30
 
     def _limpar_json(self, texto):
         """Limpa marcações de markdown e espaços para evitar erros de parsing."""
@@ -126,11 +132,18 @@ class GroqValidator:
         
         return min(100, score)
 
+    def _cache_key(self, prefix: str, symbol: str, tech_data: dict) -> str:
+        """Gera chave de cache determinística baseada no símbolo e tendência."""
+        trend = str(tech_data.get('trend', ''))
+        rsi_bucket = int(float(tech_data.get('rsi', 50) or 50) // 5) * 5
+        raw = f"{prefix}:{symbol}:{trend}:{rsi_bucket}"
+        return hashlib.md5(raw.encode()).hexdigest()
+
     def get_tactical_signal(self, tech_data, symbol):
         """
         🟡 CÉREBRO 2: RADAR TÁTICO (GROQ)
         Focado em risco e velocidade do candle.
-        Com retry logic e rate limit handling.
+        Com cache de 60 s, retry e backoff exponencial para rate limits.
         """
         if self.groq_client is None:
             return 45, "WAIT"
@@ -138,49 +151,60 @@ class GroqValidator:
         if time.time() < self.groq_cooldown_until:
             return 45, "WAIT"
 
+        # Verifica cache antes de chamar a API
+        cache_key = self._cache_key("groq", symbol, tech_data)
+        hit, cached = ai_response_cache.get(cache_key)
+        if hit:
+            return cached
+
         max_retries = 2
-        retry_delay = 1
-        
         for attempt in range(max_retries):
             try:
                 prompt = (f"Analise {symbol}: {tech_data}. JSON: {{\"score\": 0-100, \"action\": \"BUY|SELL|WAIT\"}}")
-                
+
                 res = self.groq_client.chat.completions.create(
                     messages=[{"role": "user", "content": prompt}],
                     model="llama-3.3-70b-versatile",
                     response_format={"type": "json_object"},
-                    timeout=5
+                    timeout=5,
                 )
                 data = json.loads(res.choices[0].message.content)
                 action = self._normalize_side(data.get('action', 'WAIT'))
-                return int(data.get('score', 45)), action
+                result = (int(data.get('score', 45)), action)
+                ai_response_cache.set(cache_key, result, ttl=60.0)
+                return result
             except Exception as e:
                 error_str = str(e)
                 if '429' in error_str or 'rate' in error_str.lower():
                     if attempt == 0:
-                        wait_time = retry_delay
-                        print(f"⏸️ [GROQ RATE LIMIT] Aguardando {wait_time}s antes de retry...")
-                        time.sleep(wait_time)
+                        # Backoff curto antes do primeiro retry
+                        time.sleep(1)
                         continue
-
-                    self.groq_cooldown_until = time.time() + 90
-                    print("⚠️ [GROQ] Rate limit. Cooldown 90s")
+                    # Backoff exponencial: 30 s → 60 s → 120 s
+                    self.groq_cooldown_until = time.time() + self.groq_backoff_secs
+                    self.groq_backoff_secs = min(self.groq_backoff_secs * 2, 300)
+                    print(f"⚠️ [GROQ] Rate limit. Cooldown {self.groq_backoff_secs}s")
                     return 45, 'WAIT'
                 else:
-                    # Outro erro - usar fallback
-                    print(f"⚠️ [GROQ] Fallback (tentativa {attempt+1}/{max_retries})")
+                    print(f"⚠️ [GROQ] Fallback (tentativa {attempt + 1}/{max_retries}): {error_str[:60]}")
                     return 45, 'WAIT'
-        
+
         return 45, 'WAIT'  # Fallback final
 
     def get_strategic_signal(self, tech_data, symbol):
         """
         🔵 CÉREBRO 3: ESTRATEGISTA CLOUD (GEMINI)
         Analisa contexto histórico e Smart Money.
-        Com rate limit detection e cooldown automático.
+        Com cache de 60 s, pool HTTP reutilizável e backoff exponencial.
         """
         if time.time() < self.global_cooldown_until:
             return self.gemini_min_confidence, "⏸️ Gemini em cooldown...", "WAIT", True
+
+        # Verifica cache antes de chamar a API
+        cache_key = self._cache_key("gemini", symbol, tech_data)
+        hit, cached = ai_response_cache.get(cache_key)
+        if hit:
+            return cached
 
         try:
             history = self.memory.get_context()
@@ -188,31 +212,40 @@ class GroqValidator:
                 f"Trader: {symbol} | Trend: {tech_data.get('trend')} | Data: {tech_data} | History: {history} | "
                 f"JSON: {{\"probabilidade\": 0-100, \"lado\": \"BUY|SELL|WAIT\", \"motivo\": \"string\"}}"
             )
-            
+
             payload = {"contents": [{"parts": [{"text": prompt}]}]}
-            res = requests.post(self.gemini_url, json=payload, timeout=5)
-            
+            # Usa sessão compartilhada com connection pooling (timeout padrão = 8 s)
+            res = http_session.post(self.gemini_url, json=payload, timeout=8)
+
             if res.status_code == 200:
                 try:
                     raw = self._limpar_json(res.json()['candidates'][0]['content']['parts'][0]['text'])
                     data = json.loads(raw)
                     lado = self._normalize_side(data.get('lado', data.get('action', 'WAIT')))
                     score = self._normalize_gemini_score(data.get('probabilidade', self.gemini_min_confidence))
-                    return score, data.get('motivo', '✅ Processado'), lado, False
+                    result = (score, data.get('motivo', '✅ Processado'), lado, False)
+                    ai_response_cache.set(cache_key, result, ttl=60.0)
+                    # Reset backoff em caso de sucesso
+                    self.gemini_backoff_secs = 30
+                    return result
                 except Exception as parse_err:
                     return self.gemini_min_confidence, f"Resposta inválida: {str(parse_err)[:20]}", "WAIT", True
             elif res.status_code == 429:
-                print(f"⚠️ [GEMINI] Rate limit 429. Cooldown 120s")
-                self.global_cooldown_until = time.time() + 120
+                # Backoff exponencial: 30 s → 60 s → 120 s → 300 s
+                self.global_cooldown_until = time.time() + self.gemini_backoff_secs
+                self.gemini_backoff_secs = min(self.gemini_backoff_secs * 2, 300)
+                print(f"⚠️ [GEMINI] Rate limit 429. Cooldown {self.gemini_backoff_secs}s")
                 return self.gemini_min_confidence, "Rate limit", "WAIT", True
             else:
                 print(f"⚠️ [GEMINI] Status {res.status_code}")
                 return self.gemini_min_confidence, f"Erro {res.status_code}", "WAIT", True
-        except requests.Timeout:
-            print(f"⏱️ [GEMINI] Timeout 5s")
-            return self.gemini_min_confidence, "Timeout", "WAIT", True
         except Exception as e:
-            print(f"⚠️ [GEMINI] {type(e).__name__}: {str(e)[:30]}")
+            err_type = type(e).__name__
+            err_msg = str(e)[:60]
+            if 'Timeout' in err_type or 'timeout' in err_msg.lower():
+                print(f"⏱️ [GEMINI] Timeout")
+            else:
+                print(f"⚠️ [GEMINI] {err_type}: {err_msg}")
             return self.gemini_min_confidence, "Erro", "WAIT", True
 
     def consensus_predict(self, tech_data, symbol, force_local_only=False):
