@@ -196,7 +196,8 @@ _status_cache = {
     "timestamp": 0,
 }
 
-# Flag para evitar múltiplas threads de refresh simultâneas
+# Lock + flag para evitar múltiplas threads de refresh simultâneas
+_balance_refresh_lock = threading.Lock()
 _balance_refresh_in_progress = False
 
 
@@ -920,17 +921,22 @@ def _fetch_active_client_balances(force=False):
     if not force and cache_fresh:
         return client_balance_cache
 
-    if not force and not cache_fresh:
-        # Cache vencido — agenda refresh em background e retorna imediatamente
-        if not _balance_refresh_in_progress:
-            def _bg_refresh():
-                global _balance_refresh_in_progress
-                try:
-                    _fetch_active_client_balances(force=True)
-                finally:
-                    _balance_refresh_in_progress = False
-            _balance_refresh_in_progress = True
-            threading.Thread(target=_bg_refresh, daemon=True).start()
+    if not force:
+        # Cache vencido — agenda refresh em background e retorna imediatamente.
+        # Usa lock para evitar race condition entre múltiplos workers HTTP.
+        with _balance_refresh_lock:
+            if not _balance_refresh_in_progress:
+                _balance_refresh_in_progress = True
+
+                def _bg_refresh():
+                    global _balance_refresh_in_progress
+                    try:
+                        _fetch_active_client_balances(force=True)
+                    finally:
+                        with _balance_refresh_lock:
+                            _balance_refresh_in_progress = False
+
+                threading.Thread(target=_bg_refresh, daemon=True).start()
         return client_balance_cache
 
     # force=True: executa a busca bloqueante (background thread ou warm-up)
@@ -938,6 +944,7 @@ def _fetch_active_client_balances(force=False):
 
     items = []
     total = 0.0
+    fetch_timestamp = time.time()
 
     try:
         active_clients = _get_registered_clients(active_only=True)
@@ -970,11 +977,15 @@ def _fetch_active_client_balances(force=False):
             })
     except Exception as e:
         print(f"⚠️ [_fetch_active_client_balances] erro: {e}")
+        # Mesmo em caso de erro, atualiza o timestamp para evitar storm de threads
+        # (aguarda 30s antes de tentar novamente)
+        client_balance_cache = {**client_balance_cache, "timestamp": fetch_timestamp}
+        return client_balance_cache
 
     client_balance_cache = {
         "items": items,
         "total": round(total, 2),
-        "timestamp": time.time(),
+        "timestamp": fetch_timestamp,
     }
     return client_balance_cache
 
