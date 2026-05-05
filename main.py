@@ -6,9 +6,13 @@
 
 Regras de Negócio:
   - API: pybit.unified_trading.HTTP com recv_window=20000
-  - Entrada:  5 % do saldo USDT disponível
-  - Stop Loss: 3 % sobre o preço de entrada  (trava institucional)
-  - Take Profit: +10 % de preço = +100 % de margem (10× alavancagem)
+  - Timeframe de varredura: 30 minutos (30m) — exclusivo
+  - Máximo de operações simultâneas: 1 (uma)
+  - Entrada padrão: 5 % do saldo USDT
+  - Entrada reduzida (após Stop Loss): 3 % do saldo USDT
+  - Retorno ao padrão: na primeira operação com Gain
+  - Stop Loss: 50 % da entrada (≡ 5 % de preço com 10× alavancagem)
+  - Take Profit: 100 % de lucro sobre a entrada (≡ 10 % de preço)
   - Alavancagem: 10× | Modo de Margem: Cross
   - Sinal autorizado somente quando:
       ① Confiança combinada ≥ 60 %
@@ -33,14 +37,16 @@ USE_TESTNET: bool = str(os.getenv("USE_TESTNET", "true")).strip().lower() in {"1
 # Par monitorado (pode ser sobrescrito via variável de ambiente)
 SYMBOL: str = os.getenv("SYMBOL", "ETHUSDT")
 
-# Intervalo de tempo dos candles
-TIMEFRAME: str = os.getenv("TIMEFRAME", "15m")
+# Intervalo de tempo dos candles — fixado em 30 minutos
+TIMEFRAME: str = "30m"
 
 # Parâmetros de risco
-ENTRY_PCT: float = 0.05        # 5 % do saldo por entrada
-STOP_LOSS_PCT: float = 0.03    # 3 % de stop loss
-# Com 10× de alavancagem, +10 % de preço = +100 % de margem
-TAKE_PROFIT_PCT: float = 0.10  # +10 % = 100 % de lucro sobre margem
+ENTRY_PCT_DEFAULT: float = 0.05        # 5 % do saldo — entrada padrão
+ENTRY_PCT_AFTER_STOP: float = 0.03     # 3 % do saldo — após Stop Loss
+# Com 10× de alavancagem, 5 % de preço = 50 % de perda sobre margem (Stop Loss)
+# Com 10× de alavancagem, 10 % de preço = 100 % de lucro sobre margem (Take Profit)
+STOP_LOSS_PCT: float = 0.05    # 5 % de preço → 50 % da margem (entrada)
+TAKE_PROFIT_PCT: float = 0.10  # 10 % de preço → 100 % de lucro sobre margem
 LEVERAGE: int = 10             # 10× alavancagem
 MARGIN_MODE: str = "CROSSED"   # Cross Margin
 
@@ -56,6 +62,110 @@ from src.broker.bybit_client import BybitClient
 from src.engine.indicators import IndicatorEngine
 from src.ai_brain.validator import GroqValidator
 from src.ai_brain.learning import TradeLearner
+
+
+# ─── Gestão de Risco Dinâmica ─────────────────────────────────────────────────
+
+class RiskManager:
+    """
+    Controla o percentual de entrada de forma dinâmica:
+
+      - Padrão  : 5 % do saldo (ENTRY_PCT_DEFAULT)
+      - Após SL : 3 % do saldo (ENTRY_PCT_AFTER_STOP)
+      - Após Gain: retorna ao padrão de 5 %
+
+    Uso:
+        rm = RiskManager()
+        pct = rm.current_entry_pct   # percentual ativo
+        rm.register_stop()           # chamado quando trade fecha no SL
+        rm.register_gain()           # chamado quando trade fecha no TP
+    """
+
+    def __init__(self) -> None:
+        self._last_result: str = "NONE"  # "NONE" | "STOP" | "GAIN"
+
+    @property
+    def current_entry_pct(self) -> float:
+        """Retorna o percentual de entrada do próximo trade."""
+        return ENTRY_PCT_AFTER_STOP if self._last_result == "STOP" else ENTRY_PCT_DEFAULT
+
+    def register_stop(self) -> None:
+        """Registra que o último trade encerrou em Stop Loss."""
+        self._last_result = "STOP"
+        print(
+            f"⚠️  [RISCO] Último trade: STOP LOSS. "
+            f"Próxima entrada reduzida para {ENTRY_PCT_AFTER_STOP * 100:.0f}% do saldo."
+        )
+
+    def register_gain(self) -> None:
+        """Registra que o último trade encerrou em lucro (Take Profit)."""
+        self._last_result = "GAIN"
+        print(
+            f"✅ [RISCO] Último trade: GAIN. "
+            f"Entrada retorna ao padrão de {ENTRY_PCT_DEFAULT * 100:.0f}% do saldo."
+        )
+
+    def status(self) -> str:
+        return (
+            f"Último resultado={self._last_result} | "
+            f"Próxima entrada={self.current_entry_pct * 100:.0f}%"
+        )
+
+
+# ─── Consulta de Posições Abertas ────────────────────────────────────────────
+
+def get_active_position(client: BybitClient, symbol: str) -> "dict | None":
+    """
+    Retorna o dict da posição aberta na Bybit V5 para *symbol*, ou None se não
+    houver posição ativa.
+
+    Garante a regra de no máximo 1 operação simultânea: o loop principal só
+    autoriza nova entrada quando esta função retorna None.
+    """
+    if client.pybit_session is None or not client.authenticated:
+        return None
+
+    v5_symbol = client._normalize_v5_symbol(symbol)
+    try:
+        rsp = client.pybit_session.get_positions(category="linear", symbol=v5_symbol)
+        ok, _ = client._handle_v5_ret_code(rsp, "get_positions")
+        if not ok:
+            return None
+        for item in (rsp.get("result") or {}).get("list", []):
+            if float(item.get("size", 0) or 0) > 0:
+                return item
+        return None
+    except Exception as e:
+        print(f"⚠️  [POSIÇÃO] Erro ao consultar posição aberta: {e}")
+        return None
+
+
+def get_last_closed_pnl(client: BybitClient, symbol: str) -> "float | None":
+    """
+    Retorna o PnL realizado do último trade fechado para *symbol*.
+
+    Valor positivo  → trade encerrado com lucro  (Take Profit / GAIN)
+    Valor negativo  → trade encerrado com perda   (Stop Loss)
+    None            → sem histórico ou API indisponível
+    """
+    if client.pybit_session is None or not client.authenticated:
+        return None
+
+    v5_symbol = client._normalize_v5_symbol(symbol)
+    try:
+        rsp = client.pybit_session.get_closed_pnl(
+            category="linear", symbol=v5_symbol, limit=1
+        )
+        ok, _ = client._handle_v5_ret_code(rsp, "get_closed_pnl")
+        if not ok:
+            return None
+        items = (rsp.get("result") or {}).get("list", [])
+        if items:
+            return float(items[0].get("closedPnl", 0) or 0)
+        return None
+    except Exception as e:
+        print(f"⚠️  [PNL] Erro ao consultar PnL fechado: {e}")
+        return None
 
 
 # ─── Conexão Centralizada com a Bybit (UTA / pybit V5) ────────────────────────
@@ -136,12 +246,12 @@ def configure_leverage_and_margin(client: BybitClient, symbol: str) -> bool:
 
 # ─── Gestão de Risco: Tamanho da Entrada ──────────────────────────────────────
 
-def calculate_entry_qty(client: BybitClient, price: float) -> float:
+def calculate_entry_qty(client: BybitClient, price: float, entry_pct: float) -> float:
     """
     Calcula a quantidade de contratos para a entrada.
 
     Regras:
-      - Valor de entrada = 5 % do saldo USDT
+      - Valor de entrada = entry_pct do saldo USDT (5 % padrão ou 3 % após SL)
       - Quantidade = valor_entrada / preço_atual
       - Se saldo ≤ 0 → operação abortada (retorna 0.0)
     """
@@ -152,10 +262,10 @@ def calculate_entry_qty(client: BybitClient, price: float) -> float:
         print("🚫 [SEGURANÇA] Saldo USDT inválido ou zero. Operação ABORTADA.")
         return 0.0
 
-    entry_value = balance * ENTRY_PCT
+    entry_value = balance * entry_pct
     qty = entry_value / price if price > 0 else 0.0
 
-    print(f"💰 [RISCO] Saldo={balance:.2f} USDT | Entrada={entry_value:.2f} USDT ({ENTRY_PCT*100:.0f}%) | Qty≈{qty:.4f}")
+    print(f"💰 [RISCO] Saldo={balance:.2f} USDT | Entrada={entry_value:.2f} USDT ({entry_pct*100:.0f}%) | Qty≈{qty:.4f}")
     return round(qty, 4)
 
 
@@ -235,7 +345,7 @@ def place_order_with_protection(
     print(f"\n🚀 [PONTO ZERO] {v5_symbol} | {v5_side} | Qty={qty}")
     print(f"   📍 Entrada : ${price:.4f}")
     print(f"   🎯 TP       : ${tp_price:.4f}  (+{TAKE_PROFIT_PCT*100:.0f}% preço = +100% margem)")
-    print(f"   🛡️  SL       : ${sl_price:.4f}  (-{STOP_LOSS_PCT*100:.0f}% trava)")
+    print(f"   🛡️  SL       : ${sl_price:.4f}  (-{STOP_LOSS_PCT*100:.0f}% preço = -50% entrada)")
     print(f"   🧠 Motivo   : {consensus.get('motivo', '')[:120]}")
 
     if client.pybit_session is None:
@@ -301,22 +411,31 @@ def run_sniper(symbol: str = SYMBOL):
     """
     Loop principal do Motor Sniper V60.7.
 
+    Regras de execução:
+      - Varredura exclusiva no timeframe de 30 minutos (30m)
+      - Máximo de 1 operação ativa simultaneamente
+      - Gestão de risco dinâmica via RiskManager (5% padrão → 3% após SL → 5% após Gain)
+
     Fluxo por ciclo:
-      1. Busca OHLCV e calcula indicadores (Cérebro 1 — Local/Matemático)
-      2. Consulta Groq/LLaMA (Cérebro 2 — Tático)
-      3. Consulta Gemini (Cérebro 3 — Estratégico / Histórico)
-      4. Gera consenso ponderado (Gemini 40% | Groq 35% | Local 25%)
-      5. Valida 5 confluências simultâneas
-      6. Se confiança ≥ 60 % e todas as confluências OK → executa Ponto Zero
+      1. Verifica posição ativa → bloqueia nova entrada se já houver 1 aberta
+      2. Detecta fechamento de posição → atualiza RiskManager com resultado (SL/Gain)
+      3. Busca OHLCV 30m e calcula indicadores (Cérebro 1 — Local/Matemático)
+      4. Consulta Groq/LLaMA (Cérebro 2 — Tático)
+      5. Consulta Gemini (Cérebro 3 — Estratégico / Histórico)
+      6. Gera consenso ponderado (Gemini 40% | Groq 35% | Local 25%)
+      7. Valida 5 confluências simultâneas
+      8. Se confiança ≥ 60 % e todas as confluências OK → executa Ponto Zero
     """
     print("═" * 60)
     print(f"  MOTOR SNIPER V60.7 — iniciando em {'TESTNET' if USE_TESTNET else 'PRODUÇÃO'}")
     print(f"  Par: {symbol} | Timeframe: {TIMEFRAME} | Intervalo: {SCAN_INTERVAL}s")
+    print(f"  Regras: 1 trade ativo | SL=50% entrada | TP=100% lucro | Entrada=5%/3%")
     print("═" * 60)
 
     # ── Inicialização dos componentes ──────────────────────────────────────────
     client = build_client()
     learner = TradeLearner()
+    risk_manager = RiskManager()
 
     gemini_key = str(os.getenv("GEMINI_API_KEY", "")).strip()
     groq_key = str(os.getenv("GROQ_API_KEY", "")).strip()
@@ -337,23 +456,52 @@ def run_sniper(symbol: str = SYMBOL):
     if client.authenticated:
         configure_leverage_and_margin(client, symbol)
 
-    # ── Loop de varredura ──────────────────────────────────────────────────────
+    # ── Estado de controle do ciclo ────────────────────────────────────────────
     cycle = 0
+    _had_position_last_cycle: bool = False
+
+    # ── Loop de varredura ──────────────────────────────────────────────────────
     while True:
         cycle += 1
         ts = time.strftime("%H:%M:%S")
         print(f"\n{'─'*60}")
-        print(f"[{ts}] Ciclo #{cycle} — {symbol}")
+        print(f"[{ts}] Ciclo #{cycle} — {symbol} | Risco: {risk_manager.status()}")
 
         try:
-            # ── ETAPA 1: Dados de Mercado ──────────────────────────────────────
+            # ── ETAPA 1: Verificação de Posição Ativa (1 trade por vez) ────────
+            active_pos = get_active_position(client, symbol)
+
+            if active_pos is not None:
+                unrealised = float(active_pos.get("unrealisedPnl", 0) or 0)
+                side_open = active_pos.get("side", "?")
+                size_open = active_pos.get("size", "?")
+                print(
+                    f"🔒 [1 TRADE] Posição ativa: {side_open} | Size={size_open} "
+                    f"| P&L não realizado=${unrealised:.2f}. Aguardando fechamento."
+                )
+                _had_position_last_cycle = True
+                time.sleep(SCAN_INTERVAL)
+                continue
+
+            # ── ETAPA 2: Detecção de Fechamento → Atualização do RiskManager ──
+            if _had_position_last_cycle:
+                pnl = get_last_closed_pnl(client, symbol)
+                if pnl is not None:
+                    print(f"📋 [RESULTADO] PnL do último trade: ${pnl:.4f}")
+                    if pnl < 0:
+                        risk_manager.register_stop()
+                    else:
+                        risk_manager.register_gain()
+                _had_position_last_cycle = False
+
+            # ── ETAPA 3: Dados de Mercado (30m) ───────────────────────────────
             df = client.fetch_ohlcv(symbol, TIMEFRAME)
             if df is None or df.empty:
                 print("⚠️  Dados OHLCV indisponíveis; aguardando próximo ciclo.")
                 time.sleep(SCAN_INTERVAL)
                 continue
 
-            # ── ETAPA 2: Cérebro 1 — Indicadores Locais/Matemáticos ───────────
+            # ── ETAPA 4: Cérebro 1 — Indicadores Locais/Matemáticos ───────────
             engine = IndicatorEngine(df)
             tech_data = engine.get_signals()
 
@@ -369,7 +517,7 @@ def run_sniper(symbol: str = SYMBOL):
                 f"| SuperTrend={'▲' if tech_data['supertrend_signal'] == 1 else '▼'}"
             )
 
-            # ── ETAPA 3: Cérebro 2 + 3 — Groq e Gemini → Consenso Triplo ─────
+            # ── ETAPA 5: Cérebro 2 + 3 — Groq e Gemini → Consenso Triplo ─────
             consensus = validator.consensus_predict(tech_data, symbol)
             confidence = consensus.get("probabilidade", 0)
             decisao = consensus.get("decisao", "SCANNER")
@@ -381,7 +529,7 @@ def run_sniper(symbol: str = SYMBOL):
                 f"| Gemini={consensus.get('breakdown',{}).get('gemini',0)}%"
             )
 
-            # ── ETAPA 4: Filtro de Confiança Mínima ──────────────────────────
+            # ── ETAPA 6: Filtro de Confiança Mínima ──────────────────────────
             if confidence < MIN_CONFIDENCE:
                 print(f"⏸️  Confiança {confidence}% < {MIN_CONFIDENCE}%. Aguardando sinal mais forte.")
                 time.sleep(SCAN_INTERVAL)
@@ -392,27 +540,28 @@ def run_sniper(symbol: str = SYMBOL):
                 time.sleep(SCAN_INTERVAL)
                 continue
 
-            # ── ETAPA 5: Verificação das 5 Confluências Simultâneas ──────────
+            # ── ETAPA 7: Verificação das 5 Confluências Simultâneas ──────────
             all_confluences_ok, failed = check_five_confluences(tech_data, consensus)
             if not all_confluences_ok:
                 print(f"🔒 [BLOQUEADO] {len(failed)} confluência(s) ausente(s): {failed}")
                 time.sleep(SCAN_INTERVAL)
                 continue
 
-            # ── ETAPA 6: Autorização de Execução ─────────────────────────────
+            # ── ETAPA 8: Autorização de Execução ─────────────────────────────
             if not client.authenticated:
                 print("⚠️  Modo leitura: ordem NÃO executada (sem credenciais válidas).")
                 time.sleep(SCAN_INTERVAL)
                 continue
 
-            # ── ETAPA 7: Cálculo de Tamanho da Entrada (Gestão de Risco) ─────
+            # ── ETAPA 9: Cálculo de Tamanho da Entrada (Risco Dinâmico) ──────
             side = "BUY" if decisao == "COMPRAR" else "SELL"
-            qty = calculate_entry_qty(client, price)
+            entry_pct = risk_manager.current_entry_pct
+            qty = calculate_entry_qty(client, price, entry_pct)
             if qty <= 0:
                 time.sleep(SCAN_INTERVAL)
                 continue
 
-            # ── ETAPA 8: Execução do Ponto Zero ──────────────────────────────
+            # ── ETAPA 10: Execução do Ponto Zero ─────────────────────────────
             executed = place_order_with_protection(
                 client=client,
                 learner=learner,
@@ -424,6 +573,7 @@ def run_sniper(symbol: str = SYMBOL):
             )
 
             if executed:
+                _had_position_last_cycle = True
                 # Pausa após execução para evitar entradas duplicadas
                 print(f"✅ [PONTO ZERO ATIVADO] Aguardando 60s antes do próximo ciclo...")
                 time.sleep(60)
