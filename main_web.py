@@ -1128,9 +1128,8 @@ def _get_initial_test_balance():
             return initial_balance
         return value
     except Exception:
-        initial_balance = round(float(TEST_BALANCE or _DEFAULT_BALANCE), 2)
-        db.set_config('INITIAL_BALANCE', str(initial_balance))
-        return initial_balance
+        db.set_config('INITIAL_BALANCE', str(_DEFAULT_BALANCE))
+        return _DEFAULT_BALANCE
 
 
 def _repair_open_trades():
