@@ -15,6 +15,7 @@ if sys.platform == 'win32':
 
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
+from werkzeug.security import safe_join
 from dotenv import load_dotenv
 from src.config import get_bybit_base_url, get_bybit_credentials, get_environment_config, resolve_use_testnet
 
@@ -150,56 +151,62 @@ CORS(app)
 # =============================================================================
 # INICIALIZAÇÃO LAZY: Banco e configurações carregados sob demanda
 # =============================================================================
+DEFAULT_TEST_BALANCE = 1000.0  # Saldo padrão para paper trading
 _db_initialized = False
 _db_init_failed = False
-TEST_BALANCE = 1000.0  # Default inicial, carregado sob demanda
-APP_MODE = 'paper'     # Default inicial, carregado sob demanda
+_db_init_lock = threading.Lock()
+TEST_BALANCE = DEFAULT_TEST_BALANCE
+APP_MODE = 'paper'
 TEST_MODE_ENABLED = True
 ALLOW_ORDER_EXECUTION = ENV_CONFIG.allow_order_execution
 ALLOW_REAL_TRADING = ENV_CONFIG.allow_real_trading
 
 def _ensure_db_initialized():
-    """Inicializa o banco de dados sob demanda (lazy loading)."""
+    """Inicializa o banco de dados sob demanda (lazy loading) com thread safety."""
     global _db_initialized, _db_init_failed, TEST_BALANCE, APP_MODE, TEST_MODE_ENABLED
     
     if _db_initialized:
         return True
     
-    if _db_init_failed:
-        # Já tentamos e falhou, não tenta novamente nesta sessão
-        return False
-    
-    if db is None:
-        print("⚠️ Database manager não disponível")
-        _db_init_failed = True
-        return False
-    
-    try:
-        db.init_db()
+    with _db_init_lock:
+        # Double-check após adquirir o lock
+        if _db_initialized:
+            return True
         
-        # 🧪 CARREGA CONFIGURAÇÕES DE TESTE
-        _raw_test_balance = db.get_test_balance()
-        TEST_BALANCE = _raw_test_balance if _raw_test_balance > 0 else 1000.0
-        if _raw_test_balance <= 0:
-            db.set_test_balance(TEST_BALANCE)
-            print(f"⚠️ TEST_BALANCE restaurado para {TEST_BALANCE} USDT (estava zerado/inválido).")
+        if _db_init_failed:
+            return False
         
-        APP_MODE = _normalize_operation_mode(db.get_operation_mode())
-        TEST_MODE_ENABLED = APP_MODE == 'paper'
+        if db is None:
+            print("⚠️ Database manager não disponível")
+            _db_init_failed = True
+            return False
         
-        _db_initialized = True
-        print("✅ Database inicializado com sucesso")
-        return True
-    except Exception as e:
-        print(f"⚠️ Erro ao inicializar database: {e}")
-        _db_init_failed = True
-        return False
+        try:
+            db.init_db()
+            
+            # 🧪 CARREGA CONFIGURAÇÕES DE TESTE
+            _raw_test_balance = db.get_test_balance()
+            TEST_BALANCE = _raw_test_balance if _raw_test_balance > 0 else DEFAULT_TEST_BALANCE
+            if _raw_test_balance <= 0:
+                db.set_test_balance(TEST_BALANCE)
+                print(f"⚠️ TEST_BALANCE restaurado para {TEST_BALANCE} USDT (estava zerado/inválido).")
+            
+            APP_MODE = _normalize_operation_mode(db.get_operation_mode())
+            TEST_MODE_ENABLED = APP_MODE == 'paper'
+            
+            _db_initialized = True
+            print("✅ Database inicializado com sucesso")
+            return True
+        except Exception as e:
+            print(f"⚠️ Erro ao inicializar database: {e}")
+            _db_init_failed = True
+            return False
 
 
 # Estado Global de Sincronização (O que o Dashboard React consome)
 # Inicializado com valores padrão, será populado quando DB for carregado
 central_state = {
-    "balance": 1000.0,
+    "balance": DEFAULT_TEST_BALANCE,
     "status": "INICIANDO SISTEMA...",
     "symbol": "---",
     "confidence": 0,
@@ -208,7 +215,7 @@ central_state = {
     "trades": [],
     "last_sniper_signal": None,
     "recent_sniper_signals": [],
-    "test_balance": 1000.0,
+    "test_balance": DEFAULT_TEST_BALANCE,
     "test_mode": True,
     "operation_mode": 'paper',
     "operation_mode_label": 'PAPER TRADING',
@@ -288,20 +295,20 @@ def _sync_runtime_mode_state(persist=False):
 
 
 def _load_saved_config():
-    """Carrega configurações salvas do banco (lazy loading)."""
+    """Carrega configurações salvas do banco (lazy loading) com thread safety."""
     global RISK_MODE, MAX_MOEDAS_ATIVAS
     
-    _ensure_db_initialized()
-    if not db:
+    if not _ensure_db_initialized():
         return
     
-    # Restaura RISK_MODE persistido (se existir no banco)
-    _saved_risk_mode = db.get_config('RISK_MODE')
-    if _saved_risk_mode in ('conservative', 'aggressive'):
-        RISK_MODE = _saved_risk_mode
-        MAX_MOEDAS_ATIVAS = 1 if RISK_MODE == 'conservative' else 5
-        central_state['risk_mode'] = RISK_MODE
-        central_state['max_moedas_ativas'] = MAX_MOEDAS_ATIVAS
+    with _db_init_lock:
+        # Restaura RISK_MODE persistido (se existir no banco)
+        _saved_risk_mode = db.get_config('RISK_MODE')
+        if _saved_risk_mode in ('conservative', 'aggressive'):
+            RISK_MODE = _saved_risk_mode
+            MAX_MOEDAS_ATIVAS = 1 if RISK_MODE == 'conservative' else 5
+            central_state['risk_mode'] = RISK_MODE
+            central_state['max_moedas_ativas'] = MAX_MOEDAS_ATIVAS
 
 
 def start_runtime_services():
@@ -371,17 +378,10 @@ def _frontend_asset_exists(path):
     if not path or not app.static_folder:
         return False
     
-    # Previne path traversal removendo ../ e /
-    safe_path = path.lstrip('/')
-    if '..' in safe_path or safe_path.startswith('/'):
-        return False
-    
     try:
-        full_path = os.path.join(app.static_folder, safe_path)
-        # Garante que o caminho final está dentro de static_folder
-        real_static = os.path.realpath(app.static_folder)
-        real_file = os.path.realpath(full_path)
-        if not real_file.startswith(real_static):
+        # safe_join previne path traversal automaticamente
+        full_path = safe_join(app.static_folder, path)
+        if full_path is None:
             return False
         return os.path.isfile(full_path)
     except (OSError, ValueError):
@@ -2180,6 +2180,7 @@ def root_status():
 # AUTO-START: Inicializa serviços na primeira requisição API
 # =============================================================================
 _runtime_auto_started = False
+_runtime_auto_start_lock = threading.Lock()
 
 @app.before_request
 def _auto_start_runtime_services():
@@ -2191,9 +2192,12 @@ def _auto_start_runtime_services():
         return
     
     if request.path.startswith('/api/'):
-        # Inicia serviços apenas uma vez
-        if start_runtime_services():
-            _runtime_auto_started = True
+        with _runtime_auto_start_lock:
+            # Double-check após adquirir o lock
+            if not _runtime_auto_started:
+                # Inicia serviços apenas uma vez
+                if start_runtime_services():
+                    _runtime_auto_started = True
 
 
 # =============================================================================
@@ -2208,7 +2212,11 @@ def serve_frontend(path):
         return jsonify({"error": "Endpoint não encontrado"}), 404
 
     if _frontend_asset_exists(path):
-        return send_from_directory(app.static_folder, path)
+        # send_from_directory já usa safe_join internamente
+        try:
+            return send_from_directory(app.static_folder, path)
+        except (OSError, ValueError):
+            pass  # Fallback para index.html
 
     if _frontend_is_built():
         return send_from_directory(app.static_folder, 'index.html')
