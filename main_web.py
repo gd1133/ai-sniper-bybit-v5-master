@@ -193,16 +193,36 @@ central_state = {
     "risk_mode": RISK_MODE,
 }
 
-client_balance_cache = {
-    "items": [],
-    "total": 0.0,
-    "timestamp": 0,
-}
+class CachedValue:
+    """Cache com TTL (time-to-live) automático"""
+    def __init__(self, ttl_seconds=300):
+        self.value = None
+        self.timestamp = 0
+        self.ttl = ttl_seconds
 
-_status_cache = {
-    "data": None,
-    "timestamp": 0,
-}
+    def get(self):
+        """Retorna valor se não expirou, senão None"""
+        if time.time() - self.timestamp > self.ttl:
+            return None
+        return self.value
+
+    def set(self, value):
+        """Armazena valor e atualiza timestamp"""
+        self.value = value
+        self.timestamp = time.time()
+
+    def is_expired(self):
+        """Verifica se cache expirou"""
+        return time.time() - self.timestamp > self.ttl
+
+    def clear(self):
+        """Limpa o cache forçando expiração"""
+        self.timestamp = 0
+        self.value = None
+
+
+client_balance_cache = CachedValue(ttl_seconds=60)  # Refresh a cada 60s
+_status_cache = CachedValue(ttl_seconds=30)  # Refresh a cada 30s
 
 # Lock + flag para evitar múltiplas threads de refresh simultâneas
 _balance_refresh_lock = threading.Lock()
@@ -755,7 +775,7 @@ def _save_client_everywhere(client_data):
     if final_record is None and local_synced and final_id is not None:
         local_record = db.get_client_by_id(final_id)
         final_record = {**dict(local_record), "storage_source": "local"} if local_record is not None else None
-    client_balance_cache["timestamp"] = 0
+    client_balance_cache.clear()
     return final_record, cloud_synced, local_synced
 
 
@@ -763,7 +783,7 @@ def _delete_client_everywhere(client_id):
     """Remove o cliente da nuvem e do fallback local."""
     cloud_deleted = (not _is_supabase_ready()) or cloud_db.delete_client(client_id)
     local_deleted = db.delete_client(client_id)
-    client_balance_cache["timestamp"] = 0
+    client_balance_cache.clear()
     return cloud_deleted, local_deleted
 
 
@@ -1052,13 +1072,10 @@ def _fetch_active_client_balances(force=False):
     Quando force=True (background thread):
       - Sempre executa a busca bloqueante e atualiza o cache.
     """
-    global client_balance_cache, _balance_refresh_in_progress
+    global _balance_refresh_in_progress
 
-    now = time.time()
-    cache_fresh = (now - client_balance_cache["timestamp"]) < 30
-
-    if not force and cache_fresh:
-        return client_balance_cache
+    if not force and not client_balance_cache.is_expired():
+        return client_balance_cache.get()
 
     if not force:
         # Cache vencido — agenda refresh em background e retorna imediatamente.
@@ -1076,12 +1093,11 @@ def _fetch_active_client_balances(force=False):
                             _balance_refresh_in_progress = False
 
                 threading.Thread(target=_bg_refresh, daemon=True).start()
-        return client_balance_cache
+        return client_balance_cache.get() or {"items": [], "total": 0.0}
 
     # force=True: executa a busca bloqueante (background thread ou warm-up)
     items = []
     total = 0.0
-    fetch_timestamp = time.time()
 
     try:
         active_clients = _get_registered_clients(active_only=True)
@@ -1112,16 +1128,15 @@ def _fetch_active_client_balances(force=False):
     except Exception as e:
         print(f"⚠️ [_fetch_active_client_balances] erro: {e}")
         # Mesmo em caso de erro, atualiza o timestamp para evitar storm de threads
-        # (aguarda 30s antes de tentar novamente)
-        client_balance_cache = {**client_balance_cache, "timestamp": fetch_timestamp}
-        return client_balance_cache
+        # (aguarda TTL antes de tentar novamente)
+        client_balance_cache.set(client_balance_cache.get() or {"items": [], "total": 0.0})
+        return client_balance_cache.get()
 
-    client_balance_cache = {
+    client_balance_cache.set({
         "items": items,
         "total": round(total, 2),
-        "timestamp": fetch_timestamp,
-    }
-    return client_balance_cache
+    })
+    return client_balance_cache.get()
 
 
 def _refresh_real_balance_state(force=False):
@@ -2330,18 +2345,16 @@ def get_server_ip():
 
 @app.route('/api/status', methods=['GET'])
 def get_status():
-    global _status_cache
-    now = time.time()
-    if _status_cache["data"] is not None and (now - _status_cache["timestamp"]) < 8:
-        return jsonify(_status_cache["data"])
+    cached = _status_cache.get()
+    if cached is not None:
+        return jsonify(cached)
     try:
         _repair_open_trades()
         _refresh_real_balance_state()
         _sync_active_trades_from_db()
         _refresh_last_sniper_signal()
         central_state['trades'] = db.get_recent_trades(20)
-        _status_cache["data"] = dict(central_state)
-        _status_cache["timestamp"] = now
+        _status_cache.set(dict(central_state))
         return jsonify(central_state)
     except:
         return jsonify(central_state)
