@@ -148,20 +148,53 @@ app = Flask(__name__, static_folder='dist', static_url_path='')
 CORS(app)
 
 # Inicializa o Banco de Dados Local (Cria tabelas se não existirem)
-db.init_db()
+# Fault-tolerant: permite que a app inicie mesmo se DB falhar
+try:
+    if db and hasattr(db, 'init_db'):
+        db.init_db()
+        print("✅ Database initialized successfully")
+    else:
+        print("⚠️ Database module not available - running in degraded mode")
+except Exception as e:
+    print(f"⚠️ Database initialization warning: {e}")
+    print("   App will continue in degraded mode")
 
 # 🧪 CARREGA CONFIGURAÇÕES DE TESTE
-_raw_test_balance = db.get_test_balance()  # Saldo fictício para treinar
+_raw_test_balance = 1000.0  # Default fallback
+try:
+    if db and hasattr(db, 'get_test_balance'):
+        _raw_test_balance = db.get_test_balance()  # Saldo fictício para treinar
+except Exception as e:
+    print(f"⚠️ Could not load test balance from DB: {e}. Using default.")
+
 # Garante que o saldo paper nunca inicie zerado (pode acontecer se sessão anterior
 # esgotou o saldo por perdas e persistiu TEST_BALANCE=0 no banco).
 TEST_BALANCE = _raw_test_balance if _raw_test_balance > 0 else 1000.0
 if _raw_test_balance <= 0:
-    db.set_test_balance(TEST_BALANCE)
-    print(f"⚠️ TEST_BALANCE restaurado para {TEST_BALANCE} USDT (estava zerado/inválido).")
-APP_MODE = _normalize_operation_mode(db.get_operation_mode())
+    try:
+        if db and hasattr(db, 'set_test_balance'):
+            db.set_test_balance(TEST_BALANCE)
+            print(f"⚠️ TEST_BALANCE restaurado para {TEST_BALANCE} USDT (estava zerado/inválido).")
+    except Exception as e:
+        print(f"⚠️ Could not restore TEST_BALANCE: {e}")
+
+try:
+    if db and hasattr(db, 'get_operation_mode'):
+        APP_MODE = _normalize_operation_mode(db.get_operation_mode())
+    else:
+        APP_MODE = 'paper'
+except Exception:
+    APP_MODE = 'paper'
+    print("⚠️ Could not load operation mode from DB. Using 'paper' mode.")
+
 TEST_MODE_ENABLED = APP_MODE == 'paper'
 ALLOW_ORDER_EXECUTION = ENV_CONFIG.allow_order_execution
 ALLOW_REAL_TRADING = ENV_CONFIG.allow_real_trading
+
+# --- PROTOCOLO SNIPER RIGOROSO v60.1 ---
+# Define constants needed by central_state
+RISK_MODE = 'conservative'       # 'conservative' = 1 moeda | 'aggressive' = 5 moedas
+MAX_MOEDAS_ATIVAS = 1            # Conservador: 1 moeda por vez (use /api/config/risk-mode para trocar)
 
 # Estado Global de Sincronização (O que o Dashboard React consome)
 central_state = {
@@ -289,11 +322,9 @@ def start_runtime_services():
 # Modo Fallback: Se True, usa APENAS o 3º Cérebro (Local Brain)
 USE_LOCAL_BRAIN_ONLY = False
 
-# --- PROTOCOLO SNIPER RIGOROSO v60.1 ---
+# --- PROTOCOLO SNIPER RIGOROSO v60.1 (continued) ---
 THRESHOLD_ENTRADA = 60           # 🎯 Teste Provisório: 50% (Restaurar 60% depois)
 COOLDOWN_INSTITUCIONAL_SECS = 15  # Reduzido para ver entradas rápido igual na foto 4
-RISK_MODE = 'conservative'       # 'conservative' = 1 moeda | 'aggressive' = 5 moedas
-MAX_MOEDAS_ATIVAS = 1            # Conservador: 1 moeda por vez (use /api/config/risk-mode para trocar)
 SNIPER_POSICAO_UNICA = False     # Multi-ativo: permite até MAX_MOEDAS_ATIVAS simultâneas
 
 # Trava atômica para bloquear corrida entre validação e gravação de sinal
@@ -379,6 +410,16 @@ def _render_frontend_status_page():
         200,
         {"Content-Type": "text/html; charset=utf-8"},
     )
+
+
+@app.route('/health')
+def health_check():
+    """Health check endpoint para Railway/Gunicorn com resposta 200 OK."""
+    return jsonify({
+        "status": "healthy",
+        "service": "DuoIA Maestro v60.1",
+        "timestamp": datetime.now().isoformat()
+    }), 200
 
 
 @app.route('/', defaults={'path': ''})
