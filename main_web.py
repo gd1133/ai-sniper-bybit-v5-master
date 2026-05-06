@@ -174,9 +174,9 @@ if _raw_test_balance <= 0:
     try:
         if db and hasattr(db, 'set_test_balance'):
             db.set_test_balance(TEST_BALANCE)
-        print(f"⚠️ TEST_BALANCE restaurado para {TEST_BALANCE} USDT (estava zerado/inválido).")
-    except Exception:
-        pass
+            print(f"⚠️ TEST_BALANCE restaurado para {TEST_BALANCE} USDT (estava zerado/inválido).")
+    except Exception as e:
+        print(f"⚠️ Could not restore TEST_BALANCE: {e}")
 
 try:
     if db and hasattr(db, 'get_operation_mode'):
