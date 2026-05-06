@@ -381,12 +381,35 @@ def _render_frontend_status_page():
     )
 
 
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check endpoint for Railway deployment."""
+    return jsonify({
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(timespec='seconds')
+    }), 200
+
+
+@app.route('/ping', methods=['GET'])
+def ping():
+    """Simple ping endpoint for monitoring."""
+    return 'pong', 200
+
+
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def serve_frontend(path):
     """Entrega o dashboard React no root sem interferir nas rotas da API."""
     if path.startswith('api/'):
         return jsonify({"error": "Endpoint não encontrado"}), 404
+
+    # Health check for Railway
+    if path == '' or path == '/':
+        return jsonify({
+            "status": "online",
+            "message": "DuoIA Maestro API is running",
+            "timestamp": datetime.now().isoformat(timespec='seconds')
+        }), 200
 
     if _frontend_asset_exists(path):
         return send_from_directory(app.static_folder, path)
