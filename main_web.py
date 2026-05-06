@@ -242,6 +242,7 @@ if _saved_risk_mode in ('conservative', 'aggressive'):
     central_state['max_moedas_ativas'] = MAX_MOEDAS_ATIVAS
 
 
+def start_runtime_services():
     """Inicia as threads do robô uma única vez, inclusive sob gunicorn/wsgi."""
     global RUNTIME_STARTED
 
