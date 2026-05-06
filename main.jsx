@@ -160,6 +160,7 @@ const App = () => {
   const [addFormMsg, setAddFormMsg] = useState(null);
   const [addFormSaving, setAddFormSaving] = useState(false);
   const [modeUpdating, setModeUpdating] = useState(false);
+  const [riskModeUpdating, setRiskModeUpdating] = useState(false);
   const [manualClosingSymbol, setManualClosingSymbol] = useState(null);
   const [addFormFields, setAddFormFields] = useState({
     id: null, nome: '', saldo_base: 0, bybit_key: '', bybit_secret: '', tg_token: '', chat_id: '', account_mode: 'testnet'
@@ -180,6 +181,8 @@ const App = () => {
     execution_label: 'Sem ordens reais',
     last_sniper_signal: null,
     evidence: null,
+    max_moedas_ativas: 1,
+    risk_mode: 'conservative',
     ia2_decision: { 
       motivo: "Aguardando conexão com o servidor..."
     }
@@ -370,6 +373,34 @@ const App = () => {
     }
   };
 
+  const handleRiskModeChange = async (newMode) => {
+    if (riskModeUpdating || newMode === data.risk_mode) return;
+    try {
+      setRiskModeUpdating(true);
+      const res = await fetch(`${API_BASE}/api/config/risk-mode`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: newMode }),
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        alert(json.error || 'Erro ao alternar modo de risco');
+        return;
+      }
+      setData(prev => ({
+        ...prev,
+        risk_mode: json.risk_mode,
+        max_moedas_ativas: json.max_moedas_ativas,
+      }));
+    } catch (e) {
+      console.error('Erro ao alternar modo de risco', e);
+      alert('Erro ao alternar modo de risco');
+    } finally {
+      setRiskModeUpdating(false);
+    }
+  };
+
+
   const handleManualCloseTrade = async (trade) => {
     const symbol = trade?.raw_symbol || trade?.symbol;
     if (!symbol || trade?.isSignalCard) return;
@@ -475,7 +506,7 @@ const App = () => {
       : 'SCANNING MARKETS...';
   const statusSubline = activeTrades.length > 0
     ? `${monitorTrades.map((trade) => trade.symbol).slice(0, 5).join(' • ')}`
-    : `RIGOR ${evidence.threshold || 60}% • ${evidence.position_mode || '5 moedas diferentes'}`;
+    : `RIGOR ${evidence.threshold || 60}% • ${data.risk_mode === 'aggressive' ? '5 moedas simultâneas' : '1 moeda por vez'}`;
 
   return (
     <div className="min-h-screen bg-[#050505] text-white font-sans selection:bg-green-500/30">
@@ -548,7 +579,46 @@ const App = () => {
                 icon={<Database size={18}/>} 
                 emerald 
               />
-              <KpiCard label="TRADES ATIVOS" value={`${Math.min(data.active_trades?.length || 0, 5)}/5`} sub="5 moedas diferentes • Ordem 15% da banca • TP 100% • SL 3%" icon={<Database size={18}/>} />
+              {/* Card TRADES ATIVOS com toggle conservador/agressivo */}
+              <div className="bg-[#0d0e12] p-8 rounded-[2.5rem] border border-white/5 shadow-xl relative overflow-hidden group hover:border-green-500/20 transition-all">
+                <div className="flex justify-between items-start mb-4">
+                  <span className="text-[10px] font-black text-zinc-600 uppercase tracking-widest italic leading-none">TRADES ATIVOS</span>
+                  <div className="p-3 bg-zinc-900 rounded-2xl group-hover:scale-110 transition-transform"><Database size={18}/></div>
+                </div>
+                <h2 className="text-4xl font-black italic tracking-tighter text-white">
+                  {Math.min(data.active_trades?.length || 0, data.max_moedas_ativas || 1)}/{data.max_moedas_ativas || 1}
+                </h2>
+                <p className="text-[8px] font-black text-zinc-700 uppercase mt-2 tracking-widest">
+                  {data.risk_mode === 'aggressive' ? '5 moedas simultâneas' : '1 moeda por vez'} • Ordem 15% da banca • TP 6% • SL 3%
+                </p>
+                {/* Toggle conservador / agressivo */}
+                <div className="mt-4 flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={riskModeUpdating}
+                    onClick={() => handleRiskModeChange('conservative')}
+                    className={`flex-1 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all border ${
+                      data.risk_mode === 'conservative'
+                        ? 'bg-green-500 text-black border-green-500'
+                        : 'bg-transparent text-zinc-500 border-zinc-700 hover:border-zinc-500'
+                    } ${riskModeUpdating ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  >
+                    🛡️ Conserv.
+                  </button>
+                  <button
+                    type="button"
+                    disabled={riskModeUpdating}
+                    onClick={() => handleRiskModeChange('aggressive')}
+                    className={`flex-1 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all border ${
+                      data.risk_mode === 'aggressive'
+                        ? 'bg-orange-500 text-black border-orange-500'
+                        : 'bg-transparent text-zinc-500 border-zinc-700 hover:border-zinc-500'
+                    } ${riskModeUpdating ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  >
+                    ⚡ Agressivo
+                  </button>
+                </div>
+              </div>
               <KpiCard label="RADAR LIVE" value={data.symbol || "---"} sub="TOP VOLUME BYBIT" icon={<Activity size={18}/>} highlight={data.confidence >= 60} />
               <KpiCard label="IA CONFIANÇA" value={`${data.confidence}%`} progress={data.confidence} icon={<ShieldCheck size={18}/>} emerald={data.confidence >= 60} highlight={data.confidence >= 60} />
             </div>

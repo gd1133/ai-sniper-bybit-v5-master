@@ -188,7 +188,9 @@ central_state = {
     "ia2_decision": {
         "motivo": "Varrendo o mercado em busca de confluência 60%...",
         "brains": {"local": "online", "groq": "online", "gemini": "online"}
-    }
+    },
+    "max_moedas_ativas": MAX_MOEDAS_ATIVAS,
+    "risk_mode": RISK_MODE,
 }
 
 client_balance_cache = {
@@ -231,8 +233,15 @@ def _sync_runtime_mode_state(persist=False):
 
 _sync_runtime_mode_state()
 
+# Restaura RISK_MODE persistido (se existir no banco)
+_saved_risk_mode = db.get_config('RISK_MODE')
+if _saved_risk_mode in ('conservative', 'aggressive'):
+    RISK_MODE = _saved_risk_mode
+    MAX_MOEDAS_ATIVAS = 1 if RISK_MODE == 'conservative' else 5
+    central_state['risk_mode'] = RISK_MODE
+    central_state['max_moedas_ativas'] = MAX_MOEDAS_ATIVAS
 
-def start_runtime_services():
+
     """Inicia as threads do robô uma única vez, inclusive sob gunicorn/wsgi."""
     global RUNTIME_STARTED
 
@@ -262,8 +271,9 @@ USE_LOCAL_BRAIN_ONLY = False
 # --- PROTOCOLO SNIPER RIGOROSO v60.1 ---
 THRESHOLD_ENTRADA = 60           # 🎯 Teste Provisório: 50% (Restaurar 60% depois)
 COOLDOWN_INSTITUCIONAL_SECS = 15  # Reduzido para ver entradas rápido igual na foto 4
-MAX_MOEDAS_ATIVAS = 5            # Paper trading com até 5 moedas diferentes
-SNIPER_POSICAO_UNICA = False     # Multi-ativo: permite até 5 moedas simultâneas
+RISK_MODE = 'conservative'       # 'conservative' = 1 moeda | 'aggressive' = 5 moedas
+MAX_MOEDAS_ATIVAS = 1            # Conservador: 1 moeda por vez (use /api/config/risk-mode para trocar)
+SNIPER_POSICAO_UNICA = False     # Multi-ativo: permite até MAX_MOEDAS_ATIVAS simultâneas
 
 # Trava atômica para bloquear corrida entre validação e gravação de sinal
 SNIPER_SIGNAL_LOCK = threading.Lock()
@@ -2518,7 +2528,47 @@ def get_current_mode():
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
-@app.route('/api/sniper/broadcast', methods=['POST'])
+@app.route('/api/config/risk-mode', methods=['GET'])
+def get_risk_mode():
+    """Retorna o modo de risco atual (conservative ou aggressive)."""
+    return jsonify({
+        "risk_mode": RISK_MODE,
+        "max_moedas_ativas": MAX_MOEDAS_ATIVAS,
+        "description": "1 moeda por vez" if RISK_MODE == 'conservative' else "5 moedas simultâneas",
+    })
+
+
+@app.route('/api/config/risk-mode', methods=['POST'])
+def set_risk_mode():
+    """Define o modo de risco: conservative (1 moeda) ou aggressive (5 moedas).
+
+    POST /api/config/risk-mode
+    {"mode": "conservative"} | {"mode": "aggressive"}
+    """
+    global RISK_MODE, MAX_MOEDAS_ATIVAS
+    try:
+        mode = str((request.json or {}).get('mode', 'conservative')).strip().lower()
+        if mode not in ('conservative', 'aggressive'):
+            return jsonify({"error": "mode deve ser 'conservative' ou 'aggressive'"}), 400
+
+        RISK_MODE = mode
+        MAX_MOEDAS_ATIVAS = 1 if mode == 'conservative' else 5
+        central_state['risk_mode'] = RISK_MODE
+        central_state['max_moedas_ativas'] = MAX_MOEDAS_ATIVAS
+
+        db.set_config('RISK_MODE', RISK_MODE)
+        print(f"⚙️ [RISK MODE] Alterado para {RISK_MODE.upper()} — máx {MAX_MOEDAS_ATIVAS} moeda(s)")
+        return jsonify({
+            "success": True,
+            "risk_mode": RISK_MODE,
+            "max_moedas_ativas": MAX_MOEDAS_ATIVAS,
+            "description": "1 moeda por vez" if RISK_MODE == 'conservative' else "5 moedas simultâneas",
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+
 def sniper_broadcast_signal():
     """🚀 RECEBE SINAL SNIPER BROADCAST E EXECUTA OPERAÇÃO
     
