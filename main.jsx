@@ -163,7 +163,7 @@ const App = () => {
   const [riskModeUpdating, setRiskModeUpdating] = useState(false);
   const [manualClosingSymbol, setManualClosingSymbol] = useState(null);
   const [addFormFields, setAddFormFields] = useState({
-    id: null, nome: '', saldo_base: 0, bybit_key: '', bybit_secret: '', tg_token: '', chat_id: '', account_mode: 'testnet'
+    id: null, nome: '', saldo_base: 0, bybit_key: '', bybit_secret: '', tg_token: '', chat_id: '', account_mode: 'testnet', exchange: 'bybit'
   });
   const [data, setData] = useState({
     balance: 0,  // Será atualizado do backend
@@ -290,7 +290,7 @@ const App = () => {
   }, []);
 
   const openNewInvestorModal = () => {
-    setAddFormFields({ id: null, nome: '', saldo_base: 0, bybit_key: '', bybit_secret: '', tg_token: '', chat_id: '', account_mode: 'testnet' });
+    setAddFormFields({ id: null, nome: '', saldo_base: 0, bybit_key: '', bybit_secret: '', tg_token: '', chat_id: '', account_mode: 'testnet', exchange: 'bybit' });
     setAddFormMsg(null);
     setShowAddForm(true);
   };
@@ -308,7 +308,8 @@ const App = () => {
         bybit_secret: c.bybit_secret || '',
         tg_token: c.tg_token || '',
         chat_id: c.chat_id || '',
-        account_mode: normalizeAccountMode(c.account_mode ?? c.is_testnet)
+        account_mode: normalizeAccountMode(c.account_mode ?? c.is_testnet),
+        exchange: String(c.exchange || 'bybit').toLowerCase()
       });
       setAddFormMsg(null);
       setShowAddForm(true);
@@ -472,8 +473,10 @@ const App = () => {
   const currentOperationMode = normalizeOperationMode(data.operation_mode);
   const currentOperationMeta = OPERATION_MODE_META[currentOperationMode] || OPERATION_MODE_META.paper;
   const formAccountMode = normalizeAccountMode(addFormFields.account_mode);
-  const formBalanceLabel = formAccountMode === 'testnet' ? 'Saldo sincronizado da Testnet' : 'Saldo sincronizado da Conta Real';
-  const formBalancePlaceholder = formAccountMode === 'testnet' ? 'Será lido da Bybit Testnet' : 'Será lido da Bybit Real';
+  const formExchange = String(addFormFields.exchange || 'bybit').toLowerCase();
+  const formExchangeLabel = formExchange === 'binance' ? 'Binance' : 'Bybit';
+  const formBalanceLabel = formAccountMode === 'testnet' ? `Saldo sincronizado da Testnet (${formExchangeLabel})` : `Saldo sincronizado da Conta Real (${formExchangeLabel})`;
+  const formBalancePlaceholder = formAccountMode === 'testnet' ? `Será lido da ${formExchangeLabel} Testnet` : `Será lido da ${formExchangeLabel} Real`;
 
   // Métricas live derivadas dos trades abertos (atualiza cards do topo em tempo real)
   const activeTrades = data.active_trades || [];
@@ -1003,6 +1006,9 @@ const App = () => {
                           <span className={`px-3 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest ${String(inv.account_mode || inv.mode || 'TESTNET').toUpperCase() === 'REAL' ? 'bg-green-500/10 border-green-500/30 text-green-400' : 'bg-blue-500/10 border-blue-500/30 text-blue-300'}`}>
                             {String(inv.account_mode || inv.mode || 'TESTNET').toUpperCase() === 'REAL' ? 'Conta Real' : 'Conta Testnet'}
                           </span>
+                          <span className={`px-3 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest ${String(inv.exchange || 'bybit').toLowerCase() === 'binance' ? 'bg-orange-500/10 border-orange-500/30 text-orange-300' : 'bg-yellow-500/10 border-yellow-500/30 text-yellow-300'}`}>
+                            {String(inv.exchange || 'BYBIT').toUpperCase()}
+                          </span>
                           <span className={`px-3 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest ${String(inv.storage_source || 'LOCAL').toUpperCase() === 'SUPABASE' ? 'bg-blue-500/10 border-blue-500/30 text-blue-300' : 'bg-zinc-800 border-white/10 text-zinc-300'}`}>
                             {String(inv.storage_source || 'LOCAL').toUpperCase()}
                           </span>
@@ -1066,7 +1072,8 @@ const App = () => {
                   tg_token: addFormFields.tg_token,
                   chat_id: addFormFields.chat_id,
                   account_mode: formAccountMode,
-                  is_testnet: formAccountMode === 'testnet'
+                  is_testnet: formAccountMode === 'testnet',
+                  exchange: formExchange,
                 };
                 try {
                   // Se id definido, atualiza; caso contrário cria novo
@@ -1109,6 +1116,30 @@ const App = () => {
               }}>
                <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                   <div className="space-y-3 md:col-span-2">
+                     <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">Corretora</label>
+                      <div className="grid grid-cols-2 gap-4">
+                         <button
+                           type="button"
+                           onClick={() => handleFieldChange('exchange', 'bybit')}
+                           className={`px-5 py-4 rounded-[1.5rem] border text-sm font-black uppercase italic transition-all ${formExchange === 'bybit' ? 'bg-yellow-500/15 border-yellow-500/40 text-yellow-300' : 'bg-black border-white/10 text-zinc-500 hover:text-white'}`}
+                         >
+                           🟡 Bybit
+                         </button>
+                         <button
+                           type="button"
+                           onClick={() => handleFieldChange('exchange', 'binance')}
+                           className={`px-5 py-4 rounded-[1.5rem] border text-sm font-black uppercase italic transition-all ${formExchange === 'binance' ? 'bg-orange-500/15 border-orange-500/40 text-orange-300' : 'bg-black border-white/10 text-zinc-500 hover:text-white'}`}
+                         >
+                           🟠 Binance
+                         </button>
+                      </div>
+                      <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest ml-1">
+                        {formExchange === 'binance'
+                          ? 'Use suas chaves da Binance Futures (USDM). Testnet = Binance Futures Testnet.'
+                          : 'Use suas chaves da Bybit Perpetual. Testnet = Bybit Testnet Sandbox.'}
+                      </p>
+                   </div>
+                  <div className="space-y-3 md:col-span-2">
                      <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">Modo da Conta</label>
                       <div className="grid grid-cols-2 gap-4">
                          <button
@@ -1128,8 +1159,8 @@ const App = () => {
                       </div>
                       <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest ml-1">
                         {formAccountMode === 'testnet'
-                          ? 'A conta testnet valida chaves sandbox e sincroniza saldo da Bybit Testnet.'
-                          : 'A conta real valida chaves reais e sincroniza saldo da Bybit Real.'}
+                          ? `A conta testnet valida chaves sandbox e sincroniza saldo da ${formExchangeLabel} Testnet.`
+                          : `A conta real valida chaves reais e sincroniza saldo da ${formExchangeLabel} Real.`}
                       </p>
                    </div>
                   <div className="space-y-3">
@@ -1154,11 +1185,11 @@ const App = () => {
                
                <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                   <div className="space-y-3">
-                     <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">API Key Bybit</label>
+                     <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">API Key {formExchangeLabel}</label>
                     <input value={addFormFields.bybit_key} onChange={(e)=>handleFieldChange('bybit_key', e.target.value)} type="password" autoComplete="new-password" placeholder="••••••••••••" className="w-full bg-black border border-white/10 p-5 rounded-[1.5rem] focus:border-green-500 outline-none transition-all font-mono" required />
                   </div>
                   <div className="space-y-3">
-                     <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">API Secret Bybit</label>
+                     <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">API Secret {formExchangeLabel}</label>
                     <input value={addFormFields.bybit_secret} onChange={(e)=>handleFieldChange('bybit_secret', e.target.value)} type="password" autoComplete="new-password" placeholder="••••••••••••" className="w-full bg-black border border-white/10 p-5 rounded-[1.5rem] focus:border-green-500 outline-none transition-all font-mono" required />
                   </div>
                </div>

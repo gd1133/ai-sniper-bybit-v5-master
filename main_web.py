@@ -620,12 +620,33 @@ def _get_public_price_broker():
     return public_price_broker
 
 
-def _ensure_broker_class():
+def _ensure_broker_class(exchange='bybit'):
+    """Retorna a classe broker correta dependendo da corretora do cliente."""
+    exchange = str(exchange or 'bybit').strip().lower()
+    if exchange == 'binance':
+        global _BinanceClient
+        if '_BinanceClient' not in globals() or _BinanceClient is None:
+            from src.broker.binance_client import BinanceClient as _BC
+            globals()['_BinanceClient'] = _BC
+        return globals()['_BinanceClient']
+    # Padrão: Bybit
     global BybitClient
     if BybitClient is None:
         from src.broker.bybit_client import BybitClient as _BybitClient
         BybitClient = _BybitClient
     return BybitClient
+
+
+def _make_broker(client):
+    """Instancia o broker correto usando as credenciais e exchange do cliente."""
+    exchange = str(client.get('exchange') or 'bybit').strip().lower()
+    broker_cls = _ensure_broker_class(exchange)
+    account_mode = _normalize_account_mode(client.get('account_mode', client.get('is_testnet')))
+    return broker_cls(
+        client.get('bybit_key'),
+        client.get('bybit_secret'),
+        testnet=_is_testnet_account(account_mode),
+    )
 
 
 def _ensure_pybit_http_class():
@@ -909,13 +930,18 @@ def _friendly_bybit_error(raw_error: str, account_mode: str) -> str:
 
 
 def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=None, client_id=None, existing_client=None):
-    """Valida credenciais Bybit V5 com pybit e persiste o cliente no fluxo atual do projeto."""
+    """Valida credenciais da exchange (Bybit ou Binance) e persiste o cliente."""
     payload = dict(client_payload or {})
     resolved_testnet = _resolve_client_testnet_flag(is_testnet)
     account_mode = 'testnet' if resolved_testnet else 'real'
     payload['account_mode'] = account_mode
     payload['is_testnet'] = resolved_testnet
     payload['balance_source'] = _mode_balance_source(account_mode)
+
+    exchange = str(payload.get('exchange') or 'bybit').strip().lower()
+    if exchange not in ('bybit', 'binance'):
+        exchange = 'bybit'
+    payload['exchange'] = exchange
 
     if client_id is not None:
         payload['id'] = client_id
@@ -928,38 +954,61 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
     if existing_client is not None and 'nome' not in payload:
         payload['nome'] = existing_client.get('nome')
 
-    base_url = _get_bybit_v5_base_url(resolved_testnet)
+    base_url = None
     recv_window = None
     validation_message = None
     valid = False
 
-    try:
-        recv_window = _compute_safe_recv_window(base_url)
-        session = _ensure_pybit_http_class()(
-            testnet=resolved_testnet,
-            api_key=api_key,
-            api_secret=api_secret,
-            recv_window=recv_window,
-        )
-        wallet_payload = session.get_wallet_balance(accountType='UNIFIED', coin='USDT')
-        balance = _extract_unified_usdt_balance(wallet_payload)
-        payload['saldo_base'] = round(float(balance), 2)
-        payload['status'] = 'ativo'
-        valid = True
-        validation_message = f'Conta {account_mode.upper()} validada via Bybit V5'
-    except Exception as e:
-        validation_message = _friendly_bybit_error(str(e), account_mode)
-        payload['status'] = 'erro_api'
-        if existing_client is not None:
-            try:
-                payload['saldo_base'] = round(float(existing_client.get('saldo_base') or 0.0), 2)
-            except Exception:
-                payload['saldo_base'] = 0.0
-        else:
-            try:
-                payload['saldo_base'] = round(float(payload.get('saldo_base') or 0.0), 2)
-            except Exception:
-                payload['saldo_base'] = 0.0
+    if exchange == 'binance':
+        # --- Validação via BinanceClient ---
+        try:
+            broker_cls = _ensure_broker_class('binance')
+            broker = broker_cls(api_key, api_secret, testnet=resolved_testnet)
+            ok, msg = broker.test_connection()
+            if ok:
+                balance = broker.get_balance()
+                payload['saldo_base'] = round(float(balance or 0.0), 2)
+                payload['status'] = 'ativo'
+                valid = True
+                validation_message = f'Conta Binance {account_mode.upper()} validada OK'
+            else:
+                validation_message = f'Erro Binance: {msg}'
+                payload['status'] = 'erro_api'
+                payload['saldo_base'] = round(float((existing_client or {}).get('saldo_base') or 0.0), 2)
+        except Exception as e:
+            validation_message = f'Erro ao validar Binance: {str(e)[:200]}'
+            payload['status'] = 'erro_api'
+            payload['saldo_base'] = round(float((existing_client or {}).get('saldo_base') or 0.0), 2)
+    else:
+        # --- Validação via Bybit V5 (comportamento original) ---
+        base_url = _get_bybit_v5_base_url(resolved_testnet)
+        try:
+            recv_window = _compute_safe_recv_window(base_url)
+            session = _ensure_pybit_http_class()(
+                testnet=resolved_testnet,
+                api_key=api_key,
+                api_secret=api_secret,
+                recv_window=recv_window,
+            )
+            wallet_payload = session.get_wallet_balance(accountType='UNIFIED', coin='USDT')
+            balance = _extract_unified_usdt_balance(wallet_payload)
+            payload['saldo_base'] = round(float(balance), 2)
+            payload['status'] = 'ativo'
+            valid = True
+            validation_message = f'Conta {account_mode.upper()} validada via Bybit V5'
+        except Exception as e:
+            validation_message = _friendly_bybit_error(str(e), account_mode)
+            payload['status'] = 'erro_api'
+            if existing_client is not None:
+                try:
+                    payload['saldo_base'] = round(float(existing_client.get('saldo_base') or 0.0), 2)
+                except Exception:
+                    payload['saldo_base'] = 0.0
+            else:
+                try:
+                    payload['saldo_base'] = round(float(payload.get('saldo_base') or 0.0), 2)
+                except Exception:
+                    payload['saldo_base'] = 0.0
 
     record = None
     cloud_synced = False
@@ -977,19 +1026,15 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
         'base_url': base_url,
         'balance': payload.get('saldo_base', 0.0),
         'account_mode': account_mode,
+        'exchange': exchange,
     }
 
 
 def _validate_client_broker_credentials(client_data, account_mode):
-    """Valida o broker no ambiente correto da Bybit."""
+    """Valida o broker no ambiente correto (Bybit ou Binance)."""
     normalized_account_mode = _normalize_account_mode(account_mode)
-    broker = None
     try:
-        broker = _ensure_broker_class()(
-            client_data.get('bybit_key'),
-            client_data.get('bybit_secret'),
-            testnet=_is_testnet_account(normalized_account_mode),
-        )
+        broker = _make_broker({**client_data, 'account_mode': normalized_account_mode})
         ok, msg = broker.test_connection()
         return broker, ok, msg
     except Exception:
@@ -1034,8 +1079,6 @@ def _fetch_active_client_balances(force=False):
         return client_balance_cache
 
     # force=True: executa a busca bloqueante (background thread ou warm-up)
-    broker_cls = _ensure_broker_class()
-
     items = []
     total = 0.0
     fetch_timestamp = time.time()
@@ -1047,11 +1090,7 @@ def _fetch_active_client_balances(force=False):
             error = None
             account_mode = _normalize_account_mode(client.get('account_mode', client.get('is_testnet')))
             try:
-                broker = broker_cls(
-                    client.get('bybit_key'),
-                    client.get('bybit_secret'),
-                    testnet=_is_testnet_account(account_mode),
-                )
+                broker = _make_broker(client)
                 balance = broker.get_balance()
                 if balance is not None:
                     balance = round(float(balance), 2)
@@ -1066,6 +1105,7 @@ def _fetch_active_client_balances(force=False):
                 "saldo_base": float(client.get('saldo_base', 0) or 0),
                 "is_testnet": _is_testnet_account(account_mode),
                 "account_mode": account_mode,
+                "exchange": str(client.get('exchange') or 'bybit').lower(),
                 "status": client.get('status'),
                 "error": error,
             })
@@ -1718,11 +1758,7 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
             def task_cliente(c):
                 try:
                     account_mode = _normalize_account_mode(c.get('account_mode', c.get('is_testnet')))
-                    broker = _ensure_broker_class()(
-                        c.get('bybit_key'),
-                        c.get('bybit_secret'),
-                        testnet=_is_testnet_account(account_mode),
-                    )
+                    broker = _make_broker(c)
                     
                     # Gestão Dinâmica: 5% Banca (GAIN) / 3% (RECOVERY)
                     margem = float(c.get('saldo_base', 1000.0)) * 0.05
@@ -2171,6 +2207,7 @@ def get_investidores():
             "account_mode": _normalize_account_mode(r.get('account_mode', r.get('is_testnet'))),
             "balance_source": r.get('balance_source'),
             "storage_source": r.get('storage_source', 'local'),
+            "exchange": str(r.get('exchange') or 'bybit').lower(),
         } for r in rows])
     except Exception as e:
         print(f"❌ [get_investidores] erro inesperado: {e}")
@@ -2212,7 +2249,7 @@ def api_update_cliente(client_id):
         if record:
             return jsonify({
                 "success": True,
-                "msg": f"Cliente atualizado! Conta {validation.get('account_mode', account_mode).upper()} sincronizada com a Bybit.",
+                "msg": f"Cliente atualizado! Conta {validation.get('account_mode', account_mode).upper()} sincronizada com a {str(validation.get('exchange','bybit')).upper()}.",
                 "valid": ok,
                 "api_error": None if ok else msg,
                 "recv_window": validation.get('recv_window'),
@@ -2267,7 +2304,7 @@ def add_cliente():
         if record:
             return jsonify({
                 "status": "sucesso",
-                "msg": f"Investidor conectado! Conta {validation.get('account_mode', account_mode).upper()} validada na Bybit.",
+                "msg": f"Investidor conectado! Conta {validation.get('account_mode', account_mode).upper()} validada na {str(validation.get('exchange','bybit')).upper()}.",
                 "valid": ok,
                 "api_error": None if ok else msg,
                 "recv_window": validation.get('recv_window'),
