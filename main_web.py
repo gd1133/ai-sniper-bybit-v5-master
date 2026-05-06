@@ -2565,11 +2565,8 @@ def set_risk_mode():
             "description": "1 moeda por vez" if RISK_MODE == 'conservative' else "5 moedas simultâneas",
         })
     except Exception as e:
-        return jsonify({"error": str(e)}), 400
-
-
-
-def sniper_broadcast_signal():
+        print(f"⚠️ [RISK MODE] Erro ao alterar modo: {e}")
+        return jsonify({"error": "Erro ao alterar modo de risco. Verifique os logs."}), 400
     """🚀 RECEBE SINAL SNIPER BROADCAST E EXECUTA OPERAÇÃO
     
     POST /api/sniper/broadcast
