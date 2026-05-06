@@ -2083,8 +2083,8 @@ def get_supabase_status():
                     "Causa provável: RLS bloqueando a chave anon. "
                     "Solução: defina SUPABASE_SERVICE_KEY no Railway."
                 )
-        except Exception as e:
-            cloud_error = str(e)
+        except Exception:
+            cloud_error = "Erro ao consultar Supabase. Verifique os logs do servidor."
 
     local_count = 0
     try:
@@ -2132,19 +2132,19 @@ def supabase_force_sync():
             }), 200
 
         pulled = 0
-        errors = []
+        sync_errors = 0
         for client in cloud_clients:
             try:
                 db.upsert_client_local(dict(client))
                 pulled += 1
-            except Exception as e:
-                errors.append(str(e))
+            except Exception:
+                sync_errors += 1
 
         print(f"✅ [force-sync] {pulled} cliente(s) sincronizados Supabase→Local")
         return jsonify({
             "success": True,
             "pulled": pulled,
-            "errors": errors[:5],
+            "errors": sync_errors,
             "msg": f"✅ {pulled} cliente(s) sincronizado(s) com sucesso!",
         })
     except Exception as e:
