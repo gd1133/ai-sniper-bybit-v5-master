@@ -8,4 +8,4 @@ cmds = [
 ]
 
 [start]
-cmd = "python -m gunicorn main_web:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120"
+cmd = "python -m gunicorn wsgi:app --bind 0.0.0.0:${PORT:-3000} --workers 1 --timeout 60 --access-logfile - --error-logfile -"

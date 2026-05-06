@@ -21,6 +21,6 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY . .
 COPY --from=frontend /app/dist ./dist
 
-EXPOSE 8080
+EXPOSE 3000
 
-CMD python -m gunicorn wsgi:app --bind 0.0.0.0:${PORT:-8080} --workers 1 --timeout 120
+CMD python -m gunicorn wsgi:app --bind 0.0.0.0:${PORT:-3000} --workers 1 --timeout 60 --access-logfile - --error-logfile -
