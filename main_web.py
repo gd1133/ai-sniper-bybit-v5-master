@@ -147,25 +147,51 @@ def _execution_status_label(mode):
 app = Flask(__name__, static_folder='dist', static_url_path='')
 CORS(app)
 
-# Inicializa o Banco de Dados Local (Cria tabelas se não existirem)
-db.init_db()
-
-# 🧪 CARREGA CONFIGURAÇÕES DE TESTE
-_raw_test_balance = db.get_test_balance()  # Saldo fictício para treinar
-# Garante que o saldo paper nunca inicie zerado (pode acontecer se sessão anterior
-# esgotou o saldo por perdas e persistiu TEST_BALANCE=0 no banco).
-TEST_BALANCE = _raw_test_balance if _raw_test_balance > 0 else 1000.0
-if _raw_test_balance <= 0:
-    db.set_test_balance(TEST_BALANCE)
-    print(f"⚠️ TEST_BALANCE restaurado para {TEST_BALANCE} USDT (estava zerado/inválido).")
-APP_MODE = _normalize_operation_mode(db.get_operation_mode())
-TEST_MODE_ENABLED = APP_MODE == 'paper'
+# =============================================================================
+# INICIALIZAÇÃO LAZY: Banco e configurações carregados sob demanda
+# =============================================================================
+_db_initialized = False
+TEST_BALANCE = 1000.0  # Default inicial, carregado sob demanda
+APP_MODE = 'paper'     # Default inicial, carregado sob demanda
+TEST_MODE_ENABLED = True
 ALLOW_ORDER_EXECUTION = ENV_CONFIG.allow_order_execution
 ALLOW_REAL_TRADING = ENV_CONFIG.allow_real_trading
 
+def _ensure_db_initialized():
+    """Inicializa o banco de dados sob demanda (lazy loading)."""
+    global _db_initialized, TEST_BALANCE, APP_MODE, TEST_MODE_ENABLED
+    
+    if _db_initialized:
+        return
+    
+    if db is None:
+        print("⚠️ Database manager não disponível")
+        _db_initialized = True
+        return
+    
+    try:
+        db.init_db()
+        
+        # 🧪 CARREGA CONFIGURAÇÕES DE TESTE
+        _raw_test_balance = db.get_test_balance()
+        TEST_BALANCE = _raw_test_balance if _raw_test_balance > 0 else 1000.0
+        if _raw_test_balance <= 0:
+            db.set_test_balance(TEST_BALANCE)
+            print(f"⚠️ TEST_BALANCE restaurado para {TEST_BALANCE} USDT (estava zerado/inválido).")
+        
+        APP_MODE = _normalize_operation_mode(db.get_operation_mode())
+        TEST_MODE_ENABLED = APP_MODE == 'paper'
+        
+        _db_initialized = True
+        print("✅ Database inicializado com sucesso")
+    except Exception as e:
+        print(f"⚠️ Erro ao inicializar database: {e}")
+        _db_initialized = True  # Marca como inicializado para não tentar novamente
+
 # Estado Global de Sincronização (O que o Dashboard React consome)
+# Inicializado com valores padrão, será populado quando DB for carregado
 central_state = {
-    "balance": TEST_BALANCE,  # Carregado do banco de dados
+    "balance": 1000.0,
     "status": "INICIANDO SISTEMA...",
     "symbol": "---",
     "confidence": 0,
@@ -174,23 +200,23 @@ central_state = {
     "trades": [],
     "last_sniper_signal": None,
     "recent_sniper_signals": [],
-    "test_balance": TEST_BALANCE,  # Novo campo para teste
-    "test_mode": TEST_MODE_ENABLED,  # Novo campo para teste
-    "operation_mode": APP_MODE,
-    "operation_mode_label": _mode_display_label(APP_MODE),
-    "execution_enabled": _is_order_execution_enabled(APP_MODE),
-    "execution_label": _execution_status_label(APP_MODE),
-    "pnl_total": 0.0,  # Lucro/Perda Total
-    "pnl_percentage": 0.0,  # % de lucro/perda
-    "winning_trades": 0,  # Número de trades vencedores
-    "losing_trades": 0,  # Número de trades perdedores
-    "win_rate": 0.0,  # % de trades vencedores
+    "test_balance": 1000.0,
+    "test_mode": True,
+    "operation_mode": 'paper',
+    "operation_mode_label": 'PAPER TRADING',
+    "execution_enabled": False,
+    "execution_label": 'Sem ordens reais',
+    "pnl_total": 0.0,
+    "pnl_percentage": 0.0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "win_rate": 0.0,
     "ia2_decision": {
         "motivo": "Varrendo o mercado em busca de confluência 60%...",
         "brains": {"local": "online", "groq": "online", "gemini": "online"}
     },
-    "max_moedas_ativas": MAX_MOEDAS_ATIVAS,
-    "risk_mode": RISK_MODE,
+    "max_moedas_ativas": 1,
+    "risk_mode": 'conservative',
 }
 
 class CachedValue:
@@ -247,19 +273,27 @@ def _sync_runtime_mode_state(persist=False):
         central_state['status'] = f"💼 {_mode_display_label(APP_MODE)}: sincronizando saldo dos clientes"
 
     if persist:
-        db.set_operation_mode(APP_MODE)
-        db.set_config('TEST_MODE', 'true' if TEST_MODE_ENABLED else 'false')
+        _ensure_db_initialized()
+        if db:
+            db.set_operation_mode(APP_MODE)
+            db.set_config('TEST_MODE', 'true' if TEST_MODE_ENABLED else 'false')
 
 
-_sync_runtime_mode_state()
-
-# Restaura RISK_MODE persistido (se existir no banco)
-_saved_risk_mode = db.get_config('RISK_MODE')
-if _saved_risk_mode in ('conservative', 'aggressive'):
-    RISK_MODE = _saved_risk_mode
-    MAX_MOEDAS_ATIVAS = 1 if RISK_MODE == 'conservative' else 5
-    central_state['risk_mode'] = RISK_MODE
-    central_state['max_moedas_ativas'] = MAX_MOEDAS_ATIVAS
+def _load_saved_config():
+    """Carrega configurações salvas do banco (lazy loading)."""
+    global RISK_MODE, MAX_MOEDAS_ATIVAS
+    
+    _ensure_db_initialized()
+    if not db:
+        return
+    
+    # Restaura RISK_MODE persistido (se existir no banco)
+    _saved_risk_mode = db.get_config('RISK_MODE')
+    if _saved_risk_mode in ('conservative', 'aggressive'):
+        RISK_MODE = _saved_risk_mode
+        MAX_MOEDAS_ATIVAS = 1 if RISK_MODE == 'conservative' else 5
+        central_state['risk_mode'] = RISK_MODE
+        central_state['max_moedas_ativas'] = MAX_MOEDAS_ATIVAS
 
 
 def start_runtime_services():
@@ -269,6 +303,11 @@ def start_runtime_services():
     with RUNTIME_START_LOCK:
         if RUNTIME_STARTED:
             return False
+        
+        # Inicializa DB e configurações antes de iniciar serviços
+        _ensure_db_initialized()
+        _load_saved_config()
+        _sync_runtime_mode_state()
 
         threading.Thread(target=sniper_worker_loop, daemon=True).start()
         threading.Thread(target=_monitor_sl_tp_automatico, daemon=True).start()
@@ -380,21 +419,6 @@ def _render_frontend_status_page():
         {"Content-Type": "text/html; charset=utf-8"},
     )
 
-
-@app.route('/', defaults={'path': ''})
-@app.route('/<path:path>')
-def serve_frontend(path):
-    """Entrega o dashboard React no root sem interferir nas rotas da API."""
-    if path.startswith('api/'):
-        return jsonify({"error": "Endpoint não encontrado"}), 404
-
-    if _frontend_asset_exists(path):
-        return send_from_directory(app.static_folder, path)
-
-    if _frontend_is_built():
-        return send_from_directory(app.static_folder, 'index.html')
-
-    return _render_frontend_status_page()
 
 def _limpar_simbolo(sym):
     """Remove o sufixo da Bybit para limpeza visual no Dashboard."""
@@ -2101,6 +2125,8 @@ def sniper_worker_loop():
             print(f'⚠️ [LOOP ERRO] {e}')
             time.sleep(15)
 
+@app.route('/health')
+@app.route('/api/health')
 def health_check():
     """Health check para monitorar worker thread."""
     try:
@@ -2113,6 +2139,34 @@ def health_check():
         })
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
+
+
+# =============================================================================
+# ROTA RAIZ: Retorna status simples para verificação de boot
+# =============================================================================
+@app.route('/')
+def root_status():
+    """Rota raiz minimalista para health check do Gunicorn/WSGI."""
+    return jsonify({"status": "online"})
+
+
+# =============================================================================
+# ROTAS DO FRONTEND: Servir dashboard React (fallback para todas as outras rotas)
+# =============================================================================
+@app.route('/<path:path>')
+def serve_frontend(path):
+    """Entrega o dashboard React sem interferir nas rotas da API."""
+    if path.startswith('api/'):
+        return jsonify({"error": "Endpoint não encontrado"}), 404
+
+    if _frontend_asset_exists(path):
+        return send_from_directory(app.static_folder, path)
+
+    if _frontend_is_built():
+        return send_from_directory(app.static_folder, 'index.html')
+
+    return _render_frontend_status_page()
+
 
 @app.route('/api/supabase/status', methods=['GET'])
 def get_supabase_status():
