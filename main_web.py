@@ -428,7 +428,6 @@ def serve_frontend(path):
     """Entrega o dashboard React no root sem interferir nas rotas da API."""
     if path.startswith('api/'):
         return jsonify({"error": "Endpoint não encontrado"}), 404
-        return jsonify({"error": "Endpoint não encontrado"}), 404
 
     if _frontend_asset_exists(path):
         return send_from_directory(app.static_folder, path)
