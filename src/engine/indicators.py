@@ -57,12 +57,23 @@ class IndicatorEngine:
             else:
                 self.df.loc[i, 'final_lb'] = self.df['final_lb'].iloc[i-1]
         
+        # SuperTrend: máquina de estados — muda para baixista quando fecha abaixo da
+        # banda inferior; muda para altista quando fecha acima da banda superior.
         self.df['supertrend'] = 1
         for i in range(1, len(self.df)):
-            if self.df['close'].iloc[i] <= self.df['final_ub'].iloc[i]:
-                self.df.loc[i, 'supertrend'] = 1
+            prev_st = int(self.df['supertrend'].iloc[i - 1])
+            if prev_st == 1:
+                # Em tendência de ALTA: continua se fechar acima da banda inferior
+                if self.df['close'].iloc[i] < self.df['final_lb'].iloc[i]:
+                    self.df.loc[i, 'supertrend'] = -1
+                else:
+                    self.df.loc[i, 'supertrend'] = 1
             else:
-                self.df.loc[i, 'supertrend'] = -1
+                # Em tendência de BAIXA: reverte se fechar acima da banda superior
+                if self.df['close'].iloc[i] > self.df['final_ub'].iloc[i]:
+                    self.df.loc[i, 'supertrend'] = 1
+                else:
+                    self.df.loc[i, 'supertrend'] = -1
         
         # Fibonacci Retracement (0.618)
         high_price = self.df['high'].rolling(window=20).max()

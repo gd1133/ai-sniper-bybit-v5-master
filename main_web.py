@@ -151,7 +151,13 @@ CORS(app)
 db.init_db()
 
 # 🧪 CARREGA CONFIGURAÇÕES DE TESTE
-TEST_BALANCE = db.get_test_balance()  # Saldo fictício para treinar
+_raw_test_balance = db.get_test_balance()  # Saldo fictício para treinar
+# Garante que o saldo paper nunca inicie zerado (pode acontecer se sessão anterior
+# esgotou o saldo por perdas e persistiu TEST_BALANCE=0 no banco).
+TEST_BALANCE = _raw_test_balance if _raw_test_balance > 0 else 1000.0
+if _raw_test_balance <= 0:
+    db.set_test_balance(TEST_BALANCE)
+    print(f"⚠️ TEST_BALANCE restaurado para {TEST_BALANCE} USDT (estava zerado/inválido).")
 APP_MODE = _normalize_operation_mode(db.get_operation_mode())
 TEST_MODE_ENABLED = APP_MODE == 'paper'
 ALLOW_ORDER_EXECUTION = ENV_CONFIG.allow_order_execution
@@ -182,7 +188,9 @@ central_state = {
     "ia2_decision": {
         "motivo": "Varrendo o mercado em busca de confluência 60%...",
         "brains": {"local": "online", "groq": "online", "gemini": "online"}
-    }
+    },
+    "max_moedas_ativas": MAX_MOEDAS_ATIVAS,
+    "risk_mode": RISK_MODE,
 }
 
 client_balance_cache = {
@@ -190,6 +198,15 @@ client_balance_cache = {
     "total": 0.0,
     "timestamp": 0,
 }
+
+_status_cache = {
+    "data": None,
+    "timestamp": 0,
+}
+
+# Lock + flag para evitar múltiplas threads de refresh simultâneas
+_balance_refresh_lock = threading.Lock()
+_balance_refresh_in_progress = False
 
 
 def _sync_runtime_mode_state(persist=False):
@@ -216,6 +233,14 @@ def _sync_runtime_mode_state(persist=False):
 
 _sync_runtime_mode_state()
 
+# Restaura RISK_MODE persistido (se existir no banco)
+_saved_risk_mode = db.get_config('RISK_MODE')
+if _saved_risk_mode in ('conservative', 'aggressive'):
+    RISK_MODE = _saved_risk_mode
+    MAX_MOEDAS_ATIVAS = 1 if RISK_MODE == 'conservative' else 5
+    central_state['risk_mode'] = RISK_MODE
+    central_state['max_moedas_ativas'] = MAX_MOEDAS_ATIVAS
+
 
 def start_runtime_services():
     """Inicia as threads do robô uma única vez, inclusive sob gunicorn/wsgi."""
@@ -228,6 +253,11 @@ def start_runtime_services():
         threading.Thread(target=sniper_worker_loop, daemon=True).start()
         threading.Thread(target=_monitor_sl_tp_automatico, daemon=True).start()
         print("   Monitor SL/TP: ATIVO (-3% SL / +6% TP)")
+
+        # Aquece o cache de saldo em background imediatamente para que o
+        # primeiro poll do dashboard não precise esperar.
+        threading.Thread(target=_fetch_active_client_balances, kwargs={'force': True}, daemon=True).start()
+        print("⚡ Cache de saldo: aquecendo em background...")
 
         if cloud_db:
             print("☁️ Iniciando Sincronização com Supabase Cloud em background...")
@@ -242,8 +272,9 @@ USE_LOCAL_BRAIN_ONLY = False
 # --- PROTOCOLO SNIPER RIGOROSO v60.1 ---
 THRESHOLD_ENTRADA = 60           # 🎯 Teste Provisório: 50% (Restaurar 60% depois)
 COOLDOWN_INSTITUCIONAL_SECS = 15  # Reduzido para ver entradas rápido igual na foto 4
-MAX_MOEDAS_ATIVAS = 5            # Paper trading com até 5 moedas diferentes
-SNIPER_POSICAO_UNICA = False     # Multi-ativo: permite até 5 moedas simultâneas
+RISK_MODE = 'conservative'       # 'conservative' = 1 moeda | 'aggressive' = 5 moedas
+MAX_MOEDAS_ATIVAS = 1            # Conservador: 1 moeda por vez (use /api/config/risk-mode para trocar)
+SNIPER_POSICAO_UNICA = False     # Multi-ativo: permite até MAX_MOEDAS_ATIVAS simultâneas
 
 # Trava atômica para bloquear corrida entre validação e gravação de sinal
 SNIPER_SIGNAL_LOCK = threading.Lock()
@@ -589,12 +620,33 @@ def _get_public_price_broker():
     return public_price_broker
 
 
-def _ensure_broker_class():
+def _ensure_broker_class(exchange='bybit'):
+    """Retorna a classe broker correta dependendo da corretora do cliente."""
+    exchange = str(exchange or 'bybit').strip().lower()
+    if exchange == 'binance':
+        global _BinanceClient
+        if '_BinanceClient' not in globals() or _BinanceClient is None:
+            from src.broker.binance_client import BinanceClient as _BC
+            globals()['_BinanceClient'] = _BC
+        return globals()['_BinanceClient']
+    # Padrão: Bybit
     global BybitClient
     if BybitClient is None:
         from src.broker.bybit_client import BybitClient as _BybitClient
         BybitClient = _BybitClient
     return BybitClient
+
+
+def _make_broker(client):
+    """Instancia o broker correto usando as credenciais e exchange do cliente."""
+    exchange = str(client.get('exchange') or 'bybit').strip().lower()
+    broker_cls = _ensure_broker_class(exchange)
+    account_mode = _normalize_account_mode(client.get('account_mode', client.get('is_testnet')))
+    return broker_cls(
+        client.get('bybit_key'),
+        client.get('bybit_secret'),
+        testnet=_is_testnet_account(account_mode),
+    )
 
 
 def _ensure_pybit_http_class():
@@ -618,10 +670,15 @@ def _is_supabase_ready():
 
 
 def _get_registered_clients(active_only=False):
-    """Fonte de verdade SaaS: Supabase quando disponível; SQLite como fallback."""
+    """Fonte de verdade SaaS: Supabase quando disponível; SQLite como fallback.
+
+    Se Supabase retorna lista vazia (possível bloqueio por RLS com chave anon),
+    faz fallback para SQLite local para garantir que clientes cadastrados sempre
+    apareçam no robô e no dashboard.
+    """
     if _is_supabase_ready():
         cloud_clients = cloud_db.get_clients(active_only=active_only)
-        if cloud_clients is not None:
+        if cloud_clients is not None and len(cloud_clients) > 0:
             normalized_cloud_clients = []
             for client in cloud_clients:
                 client_with_source = dict(client)
@@ -632,6 +689,18 @@ def _get_registered_clients(active_only=False):
                     print(f"⚠️ [LOCAL MIRROR] cliente {client.get('id')}: {e}")
                 normalized_cloud_clients.append(client_with_source)
             return normalized_cloud_clients
+        if cloud_clients is not None and len(cloud_clients) == 0:
+            # Supabase acessível mas retornou vazio — provavelmente RLS bloqueando
+            # a chave anon ou tabela realmente vazia.
+            # Se o SQLite local também estiver vazio, os clientes ficam invisíveis.
+            # SOLUÇÃO: defina SUPABASE_SERVICE_KEY no Railway (chave service_role
+            # bypassa RLS completamente) ou desative RLS na tabela "clientes".
+            print(
+                "⚠️ [Supabase] Nenhum cliente retornado do Supabase. "
+                "Possíveis causas: (1) RLS ativo bloqueando a chave anon — "
+                "configure SUPABASE_SERVICE_KEY no Railway para resolver; "
+                "(2) tabela realmente vazia. Tentando SQLite local..."
+            )
 
     local_clients = db.get_active_clients() if active_only else db.get_all_clients()
     return [{**dict(client), "storage_source": "local"} for client in local_clients]
@@ -800,14 +869,79 @@ def _extract_unified_usdt_balance(wallet_payload):
     return 0.0
 
 
+def _friendly_bybit_error(raw_error: str, account_mode: str) -> str:
+    """Converte mensagens de erro cruas do pybit em mensagens amigáveis em português.
+
+    Erros comuns:
+      401  → chave inválida / sem permissão IP (pybit expõe via HTTP 401 ou retMsg)
+      10003 → invalid api_key
+      10004 → invalid sign / secret incorreto
+      33004 → apikey is expired
+    """
+    msg = str(raw_error)
+    is_testnet = account_mode == 'testnet'
+    source_hint = (
+        'Use chaves criadas em testnet.bybit.com (⚙️ API Management → Create New Key).'
+        if is_testnet
+        else 'Use chaves criadas em bybit.com (⚙️ API Management → Create New Key).'
+    )
+
+    lowered = msg.lower()
+
+    # HTTP 401 or Bybit retCode 401
+    if '401' in msg or 'errcode: 401' in lowered or 'http 401' in lowered:
+        return (
+            f'Chave API inválida ou sem permissão (erro 401). '
+            f'As chaves inseridas não são aceitas pelo servidor {"Testnet" if is_testnet else "Real"} da Bybit. '
+            f'{source_hint}'
+        )
+
+    # Invalid api_key (retCode 10003)
+    if '10003' in msg or 'invalid api_key' in lowered or 'invalid api key' in lowered:
+        return (
+            f'Chave API não reconhecida (código 10003). '
+            f'Verifique se copiou corretamente a API Key. {source_hint}'
+        )
+
+    # Invalid signature / wrong secret (retCode 10004)
+    if '10004' in msg or 'invalid sign' in lowered:
+        return (
+            f'Assinatura inválida (código 10004). '
+            f'Verifique se copiou corretamente o API Secret. {source_hint}'
+        )
+
+    # Expired key (retCode 33004)
+    if '33004' in msg or 'expired' in lowered:
+        return (
+            f'Chave API expirada (código 33004). '
+            f'Crie uma nova chave em {"testnet.bybit.com" if is_testnet else "bybit.com"}.'
+        )
+
+    # IP not whitelisted
+    if 'ip' in lowered and ('not allow' in lowered or 'whitelist' in lowered or 'forbidden' in lowered or '403' in msg):
+        return (
+            f'IP do servidor não autorizado pela chave API. '
+            f'No painel da Bybit, adicione o IP do servidor à lista de IPs permitidos da chave, '
+            f'ou crie uma chave sem restrição de IP.'
+        )
+
+    # Generic fallback – keep original but add hint
+    return f'Erro ao validar chaves Bybit: {msg}'
+
+
 def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=None, client_id=None, existing_client=None):
-    """Valida credenciais Bybit V5 com pybit e persiste o cliente no fluxo atual do projeto."""
+    """Valida credenciais da exchange (Bybit ou Binance) e persiste o cliente."""
     payload = dict(client_payload or {})
     resolved_testnet = _resolve_client_testnet_flag(is_testnet)
     account_mode = 'testnet' if resolved_testnet else 'real'
     payload['account_mode'] = account_mode
     payload['is_testnet'] = resolved_testnet
     payload['balance_source'] = _mode_balance_source(account_mode)
+
+    exchange = str(payload.get('exchange') or 'bybit').strip().lower()
+    if exchange not in ('bybit', 'binance'):
+        exchange = 'bybit'
+    payload['exchange'] = exchange
 
     if client_id is not None:
         payload['id'] = client_id
@@ -820,38 +954,61 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
     if existing_client is not None and 'nome' not in payload:
         payload['nome'] = existing_client.get('nome')
 
-    base_url = _get_bybit_v5_base_url(resolved_testnet)
+    base_url = None
     recv_window = None
     validation_message = None
     valid = False
 
-    try:
-        recv_window = _compute_safe_recv_window(base_url)
-        session = _ensure_pybit_http_class()(
-            testnet=resolved_testnet,
-            api_key=api_key,
-            api_secret=api_secret,
-            recv_window=recv_window,
-        )
-        wallet_payload = session.get_wallet_balance(accountType='UNIFIED', coin='USDT')
-        balance = _extract_unified_usdt_balance(wallet_payload)
-        payload['saldo_base'] = round(float(balance), 2)
-        payload['status'] = 'ativo'
-        valid = True
-        validation_message = f'Conta {account_mode.upper()} validada via Bybit V5'
-    except Exception as e:
-        validation_message = str(e)
-        payload['status'] = 'erro_api'
-        if existing_client is not None:
-            try:
-                payload['saldo_base'] = round(float(existing_client.get('saldo_base') or 0.0), 2)
-            except Exception:
-                payload['saldo_base'] = 0.0
-        else:
-            try:
-                payload['saldo_base'] = round(float(payload.get('saldo_base') or 0.0), 2)
-            except Exception:
-                payload['saldo_base'] = 0.0
+    if exchange == 'binance':
+        # --- Validação via BinanceClient ---
+        try:
+            broker_cls = _ensure_broker_class('binance')
+            broker = broker_cls(api_key, api_secret, testnet=resolved_testnet)
+            ok, msg = broker.test_connection()
+            if ok:
+                balance = broker.get_balance()
+                payload['saldo_base'] = round(float(balance or 0.0), 2)
+                payload['status'] = 'ativo'
+                valid = True
+                validation_message = f'Conta Binance {account_mode.upper()} validada OK'
+            else:
+                validation_message = f'Erro Binance: {msg}'
+                payload['status'] = 'erro_api'
+                payload['saldo_base'] = round(float((existing_client or {}).get('saldo_base') or 0.0), 2)
+        except Exception as e:
+            validation_message = f'Erro ao validar Binance: {str(e)[:200]}'
+            payload['status'] = 'erro_api'
+            payload['saldo_base'] = round(float((existing_client or {}).get('saldo_base') or 0.0), 2)
+    else:
+        # --- Validação via Bybit V5 (comportamento original) ---
+        base_url = _get_bybit_v5_base_url(resolved_testnet)
+        try:
+            recv_window = _compute_safe_recv_window(base_url)
+            session = _ensure_pybit_http_class()(
+                testnet=resolved_testnet,
+                api_key=api_key,
+                api_secret=api_secret,
+                recv_window=recv_window,
+            )
+            wallet_payload = session.get_wallet_balance(accountType='UNIFIED', coin='USDT')
+            balance = _extract_unified_usdt_balance(wallet_payload)
+            payload['saldo_base'] = round(float(balance), 2)
+            payload['status'] = 'ativo'
+            valid = True
+            validation_message = f'Conta {account_mode.upper()} validada via Bybit V5'
+        except Exception as e:
+            validation_message = _friendly_bybit_error(str(e), account_mode)
+            payload['status'] = 'erro_api'
+            if existing_client is not None:
+                try:
+                    payload['saldo_base'] = round(float(existing_client.get('saldo_base') or 0.0), 2)
+                except Exception:
+                    payload['saldo_base'] = 0.0
+            else:
+                try:
+                    payload['saldo_base'] = round(float(payload.get('saldo_base') or 0.0), 2)
+                except Exception:
+                    payload['saldo_base'] = 0.0
 
     record = None
     cloud_synced = False
@@ -869,19 +1026,15 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
         'base_url': base_url,
         'balance': payload.get('saldo_base', 0.0),
         'account_mode': account_mode,
+        'exchange': exchange,
     }
 
 
 def _validate_client_broker_credentials(client_data, account_mode):
-    """Valida o broker no ambiente correto da Bybit."""
+    """Valida o broker no ambiente correto (Bybit ou Binance)."""
     normalized_account_mode = _normalize_account_mode(account_mode)
-    broker = None
     try:
-        broker = _ensure_broker_class()(
-            client_data.get('bybit_key'),
-            client_data.get('bybit_secret'),
-            testnet=_is_testnet_account(normalized_account_mode),
-        )
+        broker = _make_broker({**client_data, 'account_mode': normalized_account_mode})
         ok, msg = broker.test_connection()
         return broker, ok, msg
     except Exception:
@@ -889,17 +1042,46 @@ def _validate_client_broker_credentials(client_data, account_mode):
 
 
 def _fetch_active_client_balances(force=False):
-    """Busca o saldo real/testnet dos clientes ativos com cache curto."""
-    global client_balance_cache
+    """Busca o saldo real/testnet dos clientes ativos com cache.
+
+    Quando force=False (chamada HTTP):
+      - Se o cache ainda é válido (< 30s): retorna imediatamente sem bloquear.
+      - Se o cache está vencido: agenda refresh em background e retorna o cache
+        atual (possivelmente vazio no cold start) sem bloquear o worker HTTP.
+
+    Quando force=True (background thread):
+      - Sempre executa a busca bloqueante e atualiza o cache.
+    """
+    global client_balance_cache, _balance_refresh_in_progress
 
     now = time.time()
-    if not force and (now - client_balance_cache["timestamp"]) < 10:
+    cache_fresh = (now - client_balance_cache["timestamp"]) < 30
+
+    if not force and cache_fresh:
         return client_balance_cache
 
-    broker_cls = _ensure_broker_class()
+    if not force:
+        # Cache vencido — agenda refresh em background e retorna imediatamente.
+        # Usa lock para evitar race condition entre múltiplos workers HTTP.
+        with _balance_refresh_lock:
+            if not _balance_refresh_in_progress:
+                _balance_refresh_in_progress = True
 
+                def _bg_refresh():
+                    global _balance_refresh_in_progress
+                    try:
+                        _fetch_active_client_balances(force=True)
+                    finally:
+                        with _balance_refresh_lock:
+                            _balance_refresh_in_progress = False
+
+                threading.Thread(target=_bg_refresh, daemon=True).start()
+        return client_balance_cache
+
+    # force=True: executa a busca bloqueante (background thread ou warm-up)
     items = []
     total = 0.0
+    fetch_timestamp = time.time()
 
     try:
         active_clients = _get_registered_clients(active_only=True)
@@ -908,11 +1090,7 @@ def _fetch_active_client_balances(force=False):
             error = None
             account_mode = _normalize_account_mode(client.get('account_mode', client.get('is_testnet')))
             try:
-                broker = broker_cls(
-                    client.get('bybit_key'),
-                    client.get('bybit_secret'),
-                    testnet=_is_testnet_account(account_mode),
-                )
+                broker = _make_broker(client)
                 balance = broker.get_balance()
                 if balance is not None:
                     balance = round(float(balance), 2)
@@ -927,16 +1105,21 @@ def _fetch_active_client_balances(force=False):
                 "saldo_base": float(client.get('saldo_base', 0) or 0),
                 "is_testnet": _is_testnet_account(account_mode),
                 "account_mode": account_mode,
+                "exchange": str(client.get('exchange') or 'bybit').lower(),
                 "status": client.get('status'),
                 "error": error,
             })
     except Exception as e:
         print(f"⚠️ [_fetch_active_client_balances] erro: {e}")
+        # Mesmo em caso de erro, atualiza o timestamp para evitar storm de threads
+        # (aguarda 30s antes de tentar novamente)
+        client_balance_cache = {**client_balance_cache, "timestamp": fetch_timestamp}
+        return client_balance_cache
 
     client_balance_cache = {
         "items": items,
         "total": round(total, 2),
-        "timestamp": now,
+        "timestamp": fetch_timestamp,
     }
     return client_balance_cache
 
@@ -1041,19 +1224,31 @@ def _refresh_last_sniper_signal():
 
 
 def _get_initial_test_balance():
-    """Base fixa do paper trading; não deve oscilar com P&L aberto."""
+    """Base fixa do paper trading; não deve oscilar com P&L aberto.
+
+    Garante que o valor seja sempre positivo (≥ 1.0 USDT). Se o saldo ficou
+    zerado por perdas acumuladas, restaura ao valor padrão de 1000 USDT.
+    """
+    _DEFAULT_BALANCE = 1000.0
     configured = db.get_config('INITIAL_BALANCE')
     if configured is None:
-        initial_balance = round(float(db.get_test_balance() or TEST_BALANCE or 1000.0), 2)
+        candidate = float(db.get_test_balance() or TEST_BALANCE or _DEFAULT_BALANCE)
+        initial_balance = round(candidate if candidate > 0 else _DEFAULT_BALANCE, 2)
         db.set_config('INITIAL_BALANCE', str(initial_balance))
         return initial_balance
 
     try:
-        return round(float(configured), 2)
+        value = round(float(configured), 2)
+        if value <= 0:
+            # Saldo esgotado em sessão anterior — reinicia com o padrão.
+            initial_balance = _DEFAULT_BALANCE
+            db.set_config('INITIAL_BALANCE', str(initial_balance))
+            db.set_test_balance(initial_balance)
+            return initial_balance
+        return value
     except Exception:
-        initial_balance = round(float(TEST_BALANCE or 1000.0), 2)
-        db.set_config('INITIAL_BALANCE', str(initial_balance))
-        return initial_balance
+        db.set_config('INITIAL_BALANCE', str(_DEFAULT_BALANCE))
+        return _DEFAULT_BALANCE
 
 
 def _repair_open_trades():
@@ -1563,11 +1758,7 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
             def task_cliente(c):
                 try:
                     account_mode = _normalize_account_mode(c.get('account_mode', c.get('is_testnet')))
-                    broker = _ensure_broker_class()(
-                        c.get('bybit_key'),
-                        c.get('bybit_secret'),
-                        testnet=_is_testnet_account(account_mode),
-                    )
+                    broker = _make_broker(c)
                     
                     # Gestão Dinâmica: 5% Banca (GAIN) / 3% (RECOVERY)
                     margem = float(c.get('saldo_base', 1000.0)) * 0.05
@@ -1908,11 +2099,102 @@ def health_check():
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
 
+@app.route('/api/supabase/status', methods=['GET'])
+def get_supabase_status():
+    """Diagnóstico da conexão Supabase: mostra chave usada, contagem de clientes e fallback."""
+    supabase_ready = _is_supabase_ready()
+    key_type = "none"
+    cloud_count = None
+    cloud_error = None
+
+    if supabase_ready:
+        key_type = "service_role (RLS bypass)" if getattr(cloud_db, "_using_service_key", False) else "anon (pode ser bloqueado por RLS)"
+        try:
+            rows = cloud_db.get_clients(active_only=False)
+            cloud_count = len(rows) if rows is not None else None
+            if rows is None:
+                cloud_error = "Supabase indisponível ou erro na query"
+            elif cloud_count == 0:
+                cloud_error = (
+                    "Supabase acessível mas retornou 0 clientes. "
+                    "Causa provável: RLS bloqueando a chave anon. "
+                    "Solução: defina SUPABASE_SERVICE_KEY no Railway."
+                )
+        except Exception:
+            cloud_error = "Erro ao consultar Supabase. Verifique os logs do servidor."
+
+    local_count = 0
+    try:
+        local_count = len(db.get_all_clients() or [])
+    except Exception:
+        pass
+
+    return jsonify({
+        "supabase_ready": supabase_ready,
+        "key_type": key_type,
+        "cloud_client_count": cloud_count,
+        "local_client_count": local_count,
+        "cloud_error": cloud_error,
+        "recommendation": (
+            "Defina SUPABASE_SERVICE_KEY no Railway para contornar o RLS e mostrar os clientes."
+            if (supabase_ready and cloud_count == 0)
+            else ("OK" if cloud_count else "Configure SUPABASE_URL e SUPABASE_KEY nas variáveis de ambiente.")
+        ),
+    })
+
+
+@app.route('/api/supabase/force-sync', methods=['POST'])
+def supabase_force_sync():
+    """Força sincronização Supabase → SQLite local e retorna resultado."""
+    if not _is_supabase_ready():
+        return jsonify({
+            "success": False,
+            "msg": "Supabase não está configurado. Defina SUPABASE_URL e SUPABASE_KEY.",
+        }), 503
+
+    try:
+        cloud_clients = cloud_db.get_clients(active_only=False)
+        if cloud_clients is None:
+            return jsonify({"success": False, "msg": "Erro ao consultar Supabase."}), 502
+
+        if len(cloud_clients) == 0:
+            return jsonify({
+                "success": False,
+                "pulled": 0,
+                "msg": (
+                    "Supabase retornou 0 clientes. "
+                    "Causa provável: RLS bloqueando a chave anon. "
+                    "Defina SUPABASE_SERVICE_KEY no Railway para resolver."
+                ),
+            }), 200
+
+        pulled = 0
+        sync_errors = 0
+        for client in cloud_clients:
+            try:
+                db.upsert_client_local(dict(client))
+                pulled += 1
+            except Exception:
+                sync_errors += 1
+
+        print(f"✅ [force-sync] {pulled} cliente(s) sincronizados Supabase→Local")
+        return jsonify({
+            "success": True,
+            "pulled": pulled,
+            "errors": sync_errors,
+            "msg": f"✅ {pulled} cliente(s) sincronizado(s) com sucesso!",
+        })
+    except Exception as e:
+        print(f"❌ [force-sync] erro: {e}")
+        return jsonify({"success": False, "msg": "Erro interno ao sincronizar."}), 500
+
+
 @app.route('/api/investidores', methods=['GET'])
 def get_investidores():
     """Lista investidores do Supabase quando disponível, com fallback local."""
     try:
         rows = _get_registered_clients(active_only=False)
+        # _fetch_active_client_balances é não-bloqueante: retorna cache imediatamente
         balance_map = {item.get('id'): item for item in _fetch_active_client_balances().get('items', [])}
         return jsonify([{
             "id": r.get('id'),
@@ -1924,8 +2206,12 @@ def get_investidores():
             "mode": _normalize_account_mode(r.get('account_mode', r.get('is_testnet'))).upper(),
             "account_mode": _normalize_account_mode(r.get('account_mode', r.get('is_testnet'))),
             "balance_source": r.get('balance_source'),
+            "storage_source": r.get('storage_source', 'local'),
+            "exchange": str(r.get('exchange') or 'bybit').lower(),
         } for r in rows])
-    except: return jsonify([])
+    except Exception as e:
+        print(f"❌ [get_investidores] erro inesperado: {e}")
+        return jsonify([])
 
 
 @app.route('/api/cliente/<int:client_id>', methods=['GET'])
@@ -1963,7 +2249,7 @@ def api_update_cliente(client_id):
         if record:
             return jsonify({
                 "success": True,
-                "msg": f"Cliente atualizado! Conta {validation.get('account_mode', account_mode).upper()} sincronizada com a Bybit.",
+                "msg": f"Cliente atualizado! Conta {validation.get('account_mode', account_mode).upper()} sincronizada com a {str(validation.get('exchange','bybit')).upper()}.",
                 "valid": ok,
                 "api_error": None if ok else msg,
                 "recv_window": validation.get('recv_window'),
@@ -2018,7 +2304,7 @@ def add_cliente():
         if record:
             return jsonify({
                 "status": "sucesso",
-                "msg": f"Investidor conectado! Conta {validation.get('account_mode', account_mode).upper()} validada na Bybit.",
+                "msg": f"Investidor conectado! Conta {validation.get('account_mode', account_mode).upper()} validada na {str(validation.get('exchange','bybit')).upper()}.",
                 "valid": ok,
                 "api_error": None if ok else msg,
                 "recv_window": validation.get('recv_window'),
@@ -2044,12 +2330,18 @@ def get_server_ip():
 
 @app.route('/api/status', methods=['GET'])
 def get_status():
+    global _status_cache
+    now = time.time()
+    if _status_cache["data"] is not None and (now - _status_cache["timestamp"]) < 8:
+        return jsonify(_status_cache["data"])
     try:
         _repair_open_trades()
         _refresh_real_balance_state()
         _sync_active_trades_from_db()
         _refresh_last_sniper_signal()
         central_state['trades'] = db.get_recent_trades(20)
+        _status_cache["data"] = dict(central_state)
+        _status_cache["timestamp"] = now
         return jsonify(central_state)
     except:
         return jsonify(central_state)
@@ -2364,8 +2656,49 @@ def get_current_mode():
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
+@app.route('/api/config/risk-mode', methods=['GET'])
+def get_risk_mode():
+    """Retorna o modo de risco atual (conservative ou aggressive)."""
+    return jsonify({
+        "risk_mode": RISK_MODE,
+        "max_moedas_ativas": MAX_MOEDAS_ATIVAS,
+        "description": "1 moeda por vez" if RISK_MODE == 'conservative' else "5 moedas simultâneas",
+    })
+
+
+@app.route('/api/config/risk-mode', methods=['POST'])
+def set_risk_mode():
+    """Define o modo de risco: conservative (1 moeda) ou aggressive (5 moedas).
+
+    POST /api/config/risk-mode
+    {"mode": "conservative"} | {"mode": "aggressive"}
+    """
+    global RISK_MODE, MAX_MOEDAS_ATIVAS
+    try:
+        mode = str((request.json or {}).get('mode', 'conservative')).strip().lower()
+        if mode not in ('conservative', 'aggressive'):
+            return jsonify({"error": "mode deve ser 'conservative' ou 'aggressive'"}), 400
+
+        RISK_MODE = mode
+        MAX_MOEDAS_ATIVAS = 1 if mode == 'conservative' else 5
+        central_state['risk_mode'] = RISK_MODE
+        central_state['max_moedas_ativas'] = MAX_MOEDAS_ATIVAS
+
+        db.set_config('RISK_MODE', RISK_MODE)
+        print(f"⚙️ [RISK MODE] Alterado para {RISK_MODE.upper()} — máx {MAX_MOEDAS_ATIVAS} moeda(s)")
+        return jsonify({
+            "success": True,
+            "risk_mode": RISK_MODE,
+            "max_moedas_ativas": MAX_MOEDAS_ATIVAS,
+            "description": "1 moeda por vez" if RISK_MODE == 'conservative' else "5 moedas simultâneas",
+        })
+    except Exception as e:
+        print(f"⚠️ [RISK MODE] Erro ao alterar modo: {e}")
+        return jsonify({"error": "Erro ao alterar modo de risco. Verifique os logs."}), 400
+
+
 @app.route('/api/sniper/broadcast', methods=['POST'])
-def sniper_broadcast_signal():
+def broadcast_sniper_signal():
     """🚀 RECEBE SINAL SNIPER BROADCAST E EXECUTA OPERAÇÃO
     
     POST /api/sniper/broadcast

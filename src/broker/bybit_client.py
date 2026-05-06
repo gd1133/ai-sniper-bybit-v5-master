@@ -60,6 +60,7 @@ class BybitClient:
         cfg = {
             'enableRateLimit': True,
             'rateLimit': 100,  # Delay mínimo entre requisições
+            'timeout': 8000,   # Timeout HTTP de 8s para evitar travamento dos workers
             'options': {
                 'defaultType': 'swap', # Foco em Perpétuos
                 'defaultSubType': 'linear',
@@ -88,7 +89,7 @@ class BybitClient:
         self.cache_ohlcv = {} 
         self.cache_ticker = {} 
         self.cache_ttl_ohlcv = 30
-        self.cache_ttl_ticker = 3
+        self.cache_ttl_ticker = 10
         self.ohlcv_failures = {}
         self.max_ohlcv_failures = 3
         self.last_request_time = {}

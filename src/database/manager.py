@@ -74,6 +74,7 @@ def init_db():
     ''')
     _ensure_column(cur, 'clientes_sniper', 'account_mode', "TEXT DEFAULT 'testnet'")
     _ensure_column(cur, 'clientes_sniper', 'balance_source', "TEXT DEFAULT 'broker_testnet_balance'")
+    _ensure_column(cur, 'clientes_sniper', 'exchange', "TEXT DEFAULT 'bybit'")
     cur.execute("""
         UPDATE clientes_sniper
         SET account_mode = CASE
@@ -163,6 +164,9 @@ def add_client(data: Dict[str, Any]):
                 'broker_testnet_balance' if account_mode == 'testnet' else 'broker_real_balance',
             )
         )
+        exchange = str(data.get('exchange') or 'bybit').strip().lower()
+        if exchange not in ('bybit', 'binance'):
+            exchange = 'bybit'
         payload = (
             data.get('nome'),
             data.get('bybit_key'),
@@ -175,6 +179,7 @@ def add_client(data: Dict[str, Any]):
             1 if account_mode == 'testnet' else 0,
             account_mode,
             balance_source,
+            exchange,
         )
         explicit_id = data.get('id')
 
@@ -185,13 +190,13 @@ def add_client(data: Dict[str, Any]):
                 return int(explicit_id) if update_client(int(explicit_id), data) else False
 
             cur.execute(
-                'INSERT INTO clientes_sniper (id, nome, bybit_key, bybit_secret, tg_token, tg_api_key, chat_id, status, saldo_base, is_testnet, account_mode, balance_source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+                'INSERT INTO clientes_sniper (id, nome, bybit_key, bybit_secret, tg_token, tg_api_key, chat_id, status, saldo_base, is_testnet, account_mode, balance_source, exchange) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
                 (int(explicit_id), *payload)
             )
             inserted_id = int(explicit_id)
         else:
             cur.execute(
-                'INSERT INTO clientes_sniper (nome, bybit_key, bybit_secret, tg_token, tg_api_key, chat_id, status, saldo_base, is_testnet, account_mode, balance_source) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+                'INSERT INTO clientes_sniper (nome, bybit_key, bybit_secret, tg_token, tg_api_key, chat_id, status, saldo_base, is_testnet, account_mode, balance_source, exchange) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
                 payload
             )
             inserted_id = cur.lastrowid
@@ -289,8 +294,11 @@ def update_client(client_id: int, data: Dict[str, Any]) -> bool:
                 'broker_testnet_balance' if account_mode == 'testnet' else 'broker_real_balance',
             )
         )
+        exchange = str(data.get('exchange') or 'bybit').strip().lower()
+        if exchange not in ('bybit', 'binance'):
+            exchange = 'bybit'
         cur.execute(
-            "UPDATE clientes_sniper SET nome=?, bybit_key=?, bybit_secret=?, tg_token=?, tg_api_key=?, chat_id=?, status=?, saldo_base=?, is_testnet=?, account_mode=?, balance_source=? WHERE id=?",
+            "UPDATE clientes_sniper SET nome=?, bybit_key=?, bybit_secret=?, tg_token=?, tg_api_key=?, chat_id=?, status=?, saldo_base=?, is_testnet=?, account_mode=?, balance_source=?, exchange=? WHERE id=?",
             (
                 data.get('nome'),
                 data.get('bybit_key'),
@@ -303,6 +311,7 @@ def update_client(client_id: int, data: Dict[str, Any]) -> bool:
                 1 if account_mode == 'testnet' else 0,
                 account_mode,
                 balance_source,
+                exchange,
                 client_id,
             ),
         )
