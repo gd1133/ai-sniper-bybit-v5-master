@@ -7,7 +7,16 @@ import requests
 import re
 import sys
 import io
+import logging
+import traceback
 from datetime import datetime, timedelta
+
+# Configura logging nativo
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # Força UTF-8 no stdout do Windows
 if sys.platform == 'win32':
@@ -25,10 +34,10 @@ try:
         from src.database.supabase_manager import SupabaseManager
         cloud_db = SupabaseManager()
     except Exception as e:
-        print(f"⚠️ Erro ao inicializar Supabase: {e}")
+        logger.warning(f"⚠️ Erro ao inicializar Supabase: {e}")
         cloud_db = None
 except Exception as e:
-    print(f"❌ Erro Crítico ao importar Database Manager: {e}")
+    logger.error(f"❌ Erro Crítico ao importar Database Manager: {e}")
     db = None
     cloud_db = None
 
@@ -49,7 +58,7 @@ RUNTIME_STARTED = False
 load_dotenv()
 ENV_CONFIG = get_environment_config()
 ENVIRONMENT = ENV_CONFIG.name
-print(f"[SISTEMA] Iniciando em modo: {ENVIRONMENT}")
+logger.info(f"[SISTEMA] Iniciando em modo: {ENVIRONMENT}")
 
 VALID_OPERATION_MODES = {'paper', 'testnet', 'real'}
 VALID_ACCOUNT_MODES = {'testnet', 'real'}
@@ -148,20 +157,39 @@ app = Flask(__name__, static_folder='dist', static_url_path='')
 CORS(app)
 
 # Inicializa o Banco de Dados Local (Cria tabelas se não existirem)
-db.init_db()
+try:
+    if db:
+        db.init_db()
+        logger.info("✅ Banco de dados local inicializado")
+    else:
+        logger.warning("⚠️ Database manager não disponível - funcionalidade limitada")
+except Exception as e:
+    logger.error(f"❌ Erro ao inicializar banco de dados: {e}")
+    logger.error(traceback.format_exc())
+    # Continua mesmo com erro no banco - permite que o servidor inicie
 
 # 🧪 CARREGA CONFIGURAÇÕES DE TESTE
-_raw_test_balance = db.get_test_balance()  # Saldo fictício para treinar
-# Garante que o saldo paper nunca inicie zerado (pode acontecer se sessão anterior
-# esgotou o saldo por perdas e persistiu TEST_BALANCE=0 no banco).
-TEST_BALANCE = _raw_test_balance if _raw_test_balance > 0 else 1000.0
-if _raw_test_balance <= 0:
-    db.set_test_balance(TEST_BALANCE)
-    print(f"⚠️ TEST_BALANCE restaurado para {TEST_BALANCE} USDT (estava zerado/inválido).")
-APP_MODE = _normalize_operation_mode(db.get_operation_mode())
-TEST_MODE_ENABLED = APP_MODE == 'paper'
-ALLOW_ORDER_EXECUTION = ENV_CONFIG.allow_order_execution
-ALLOW_REAL_TRADING = ENV_CONFIG.allow_real_trading
+try:
+    _raw_test_balance = db.get_test_balance() if db else 1000.0
+    # Garante que o saldo paper nunca inicie zerado (pode acontecer se sessão anterior
+    # esgotou o saldo por perdas e persistiu TEST_BALANCE=0 no banco).
+    TEST_BALANCE = _raw_test_balance if _raw_test_balance > 0 else 1000.0
+    if _raw_test_balance <= 0 and db:
+        db.set_test_balance(TEST_BALANCE)
+        logger.warning(f"⚠️ TEST_BALANCE restaurado para {TEST_BALANCE} USDT (estava zerado/inválido).")
+    APP_MODE = _normalize_operation_mode(db.get_operation_mode() if db else 'paper')
+    TEST_MODE_ENABLED = APP_MODE == 'paper'
+    ALLOW_ORDER_EXECUTION = ENV_CONFIG.allow_order_execution
+    ALLOW_REAL_TRADING = ENV_CONFIG.allow_real_trading
+except Exception as e:
+    logger.error(f"❌ Erro ao carregar configurações: {e}")
+    logger.error(traceback.format_exc())
+    # Valores padrão seguros
+    TEST_BALANCE = 1000.0
+    APP_MODE = 'paper'
+    TEST_MODE_ENABLED = True
+    ALLOW_ORDER_EXECUTION = False
+    ALLOW_REAL_TRADING = False
 
 # Estado Global de Sincronização (O que o Dashboard React consome)
 central_state = {
@@ -231,35 +259,43 @@ _balance_refresh_in_progress = False
 
 def _sync_runtime_mode_state(persist=False):
     global APP_MODE, TEST_MODE_ENABLED
-    APP_MODE = _normalize_operation_mode(APP_MODE)
-    TEST_MODE_ENABLED = APP_MODE == 'paper'
-    central_state['test_mode'] = TEST_MODE_ENABLED
-    central_state['operation_mode'] = APP_MODE
-    central_state['operation_mode_label'] = _mode_display_label(APP_MODE)
-    central_state['execution_enabled'] = _is_order_execution_enabled(APP_MODE)
-    central_state['execution_label'] = _execution_status_label(APP_MODE)
+    try:
+        APP_MODE = _normalize_operation_mode(APP_MODE)
+        TEST_MODE_ENABLED = APP_MODE == 'paper'
+        central_state['test_mode'] = TEST_MODE_ENABLED
+        central_state['operation_mode'] = APP_MODE
+        central_state['operation_mode_label'] = _mode_display_label(APP_MODE)
+        central_state['execution_enabled'] = _is_order_execution_enabled(APP_MODE)
+        central_state['execution_label'] = _execution_status_label(APP_MODE)
 
-    if TEST_MODE_ENABLED:
-        central_state['balance'] = TEST_BALANCE
-        central_state['test_balance'] = TEST_BALANCE
-        central_state['status'] = f"🧪 {_mode_display_label(APP_MODE)}: {TEST_BALANCE} USDT (preço real, sem ordens)"
-    else:
-        central_state['status'] = f"💼 {_mode_display_label(APP_MODE)}: sincronizando saldo dos clientes"
+        if TEST_MODE_ENABLED:
+            central_state['balance'] = TEST_BALANCE
+            central_state['test_balance'] = TEST_BALANCE
+            central_state['status'] = f"🧪 {_mode_display_label(APP_MODE)}: {TEST_BALANCE} USDT (preço real, sem ordens)"
+        else:
+            central_state['status'] = f"💼 {_mode_display_label(APP_MODE)}: sincronizando saldo dos clientes"
 
-    if persist:
-        db.set_operation_mode(APP_MODE)
-        db.set_config('TEST_MODE', 'true' if TEST_MODE_ENABLED else 'false')
+        if persist and db:
+            db.set_operation_mode(APP_MODE)
+            db.set_config('TEST_MODE', 'true' if TEST_MODE_ENABLED else 'false')
+    except Exception as e:
+        logger.error(f"❌ Erro ao sincronizar estado do runtime: {e}")
+        logger.error(traceback.format_exc())
 
 
 _sync_runtime_mode_state()
 
 # Restaura RISK_MODE persistido (se existir no banco)
-_saved_risk_mode = db.get_config('RISK_MODE')
-if _saved_risk_mode in ('conservative', 'aggressive'):
-    RISK_MODE = _saved_risk_mode
-    MAX_MOEDAS_ATIVAS = 1 if RISK_MODE == 'conservative' else 5
-    central_state['risk_mode'] = RISK_MODE
-    central_state['max_moedas_ativas'] = MAX_MOEDAS_ATIVAS
+try:
+    _saved_risk_mode = db.get_config('RISK_MODE') if db else None
+    if _saved_risk_mode in ('conservative', 'aggressive'):
+        RISK_MODE = _saved_risk_mode
+        MAX_MOEDAS_ATIVAS = 1 if RISK_MODE == 'conservative' else 5
+        central_state['risk_mode'] = RISK_MODE
+        central_state['max_moedas_ativas'] = MAX_MOEDAS_ATIVAS
+except Exception as e:
+    logger.error(f"❌ Erro ao restaurar RISK_MODE: {e}")
+    logger.error(traceback.format_exc())
 
 
 def start_runtime_services():
@@ -270,20 +306,39 @@ def start_runtime_services():
         if RUNTIME_STARTED:
             return False
 
-        threading.Thread(target=sniper_worker_loop, daemon=True).start()
-        threading.Thread(target=_monitor_sl_tp_automatico, daemon=True).start()
-        print("   Monitor SL/TP: ATIVO (-3% SL / +6% TP)")
+        try:
+            threading.Thread(target=sniper_worker_loop, daemon=True).start()
+            logger.info("✅ Thread sniper_worker_loop iniciada")
+        except Exception as e:
+            logger.error(f"❌ Erro ao iniciar sniper_worker_loop: {e}")
+            logger.error(traceback.format_exc())
 
-        # Aquece o cache de saldo em background imediatamente para que o
-        # primeiro poll do dashboard não precise esperar.
-        threading.Thread(target=_fetch_active_client_balances, kwargs={'force': True}, daemon=True).start()
-        print("⚡ Cache de saldo: aquecendo em background...")
+        try:
+            threading.Thread(target=_monitor_sl_tp_automatico, daemon=True).start()
+            logger.info("✅ Monitor SL/TP: ATIVO (-3% SL / +6% TP)")
+        except Exception as e:
+            logger.error(f"❌ Erro ao iniciar monitor SL/TP: {e}")
+            logger.error(traceback.format_exc())
 
-        if cloud_db:
-            print("☁️ Iniciando Sincronização com Supabase Cloud em background...")
-            threading.Thread(target=cloud_db.sync_clients, args=(db,), daemon=True).start()
+        try:
+            # Aquece o cache de saldo em background imediatamente para que o
+            # primeiro poll do dashboard não precise esperar.
+            threading.Thread(target=_fetch_active_client_balances, kwargs={'force': True}, daemon=True).start()
+            logger.info("⚡ Cache de saldo: aquecendo em background...")
+        except Exception as e:
+            logger.error(f"❌ Erro ao iniciar cache de saldo: {e}")
+            logger.error(traceback.format_exc())
+
+        try:
+            if cloud_db:
+                logger.info("☁️ Iniciando Sincronização com Supabase Cloud em background...")
+                threading.Thread(target=cloud_db.sync_clients, args=(db,), daemon=True).start()
+        except Exception as e:
+            logger.error(f"❌ Erro ao iniciar sincronização Supabase: {e}")
+            logger.error(traceback.format_exc())
 
         RUNTIME_STARTED = True
+        logger.info("✅ Serviços de runtime iniciados com sucesso")
         return True
 
 # Modo Fallback: Se True, usa APENAS o 3º Cérebro (Local Brain)
@@ -379,6 +434,20 @@ def _render_frontend_status_page():
         200,
         {"Content-Type": "text/html; charset=utf-8"},
     )
+
+
+@app.route('/health')
+@app.route('/api/health')
+def health_check():
+    """Health check endpoint para monitoramento do servidor."""
+    return jsonify({
+        "status": "online",
+        "message": "Motor Sniper V60.7 running",
+        "environment": ENVIRONMENT,
+        "runtime_started": RUNTIME_STARTED,
+        "db_available": db is not None,
+        "cloud_db_available": cloud_db is not None
+    }), 200
 
 
 @app.route('/', defaults={'path': ''})
