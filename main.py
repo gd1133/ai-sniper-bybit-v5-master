@@ -23,7 +23,6 @@ Regras de Negócio:
 import os
 import time
 import sys
-import getpass
 
 from dotenv import load_dotenv
 
@@ -406,69 +405,6 @@ def place_order_with_protection(
         return False
 
 
-# ─── Autenticação 2FA (Google Authenticator / TOTP) ──────────────────────────
-
-def verify_2fa() -> None:
-    """
-    Valida o código TOTP do Google Authenticator antes de inicializar a sessão.
-
-    Lógica de verificação (em ordem de prioridade):
-      1. Se a variável de ambiente TOTP_SECRET não estiver definida, o 2FA é
-         considerado opcional e a função retorna sem bloquear (compatibilidade
-         com ambientes sem 2FA configurado).
-      2. Se TOTP_CODE estiver definida (deploy em nuvem / CI), usa esse valor
-         diretamente, sem interação com o terminal — evita bloqueio em Railway.
-      3. Se houver TTY interativo (execução local), solicita o código ao operador.
-      4. Se nenhum dos casos acima fornecer um código, o arranque é interrompido
-         com mensagem clara.
-
-    Variáveis de ambiente relevantes:
-      TOTP_SECRET  — segredo Base32 gerado pelo Google Authenticator (obrigatório
-                     para ativar 2FA).
-      TOTP_CODE    — código de 6 dígitos fornecido pelo app; use em ambientes sem
-                     TTY (ex.: Railway, Docker) para evitar bloqueio de input.
-    """
-    try:
-        import pyotp  # noqa: PLC0415
-    except ImportError:
-        print("⚠️  [2FA] pyotp não instalado — execute 'pip install pyotp==2.9.0'.")
-        print("         O 2FA será ignorado nesta inicialização.")
-        return
-
-    totp_secret = str(os.getenv("TOTP_SECRET", "")).strip()
-    if not totp_secret:
-        # 2FA não configurado: avança sem bloqueio
-        print("ℹ️  [2FA] TOTP_SECRET não definida. Autenticação 2FA desativada.")
-        return
-
-    totp = pyotp.TOTP(totp_secret)
-
-    # ── Origem do código: variável de ambiente (cloud) ────────────────────────
-    env_code = str(os.getenv("TOTP_CODE", "")).strip()
-    if env_code:
-        code = env_code
-        source = "variável de ambiente TOTP_CODE"
-    elif sys.stdin.isatty():
-        # ── Origem do código: input interativo (terminal local) ───────────────
-        print("\n🔐 [2FA] Google Authenticator — insira o código de 6 dígitos:")
-        code = getpass.getpass("   Código: ").strip()
-        source = "input interativo"
-    else:
-        # ── Sem TTY e sem TOTP_CODE: não pode prosseguir ──────────────────────
-        print("❌ [2FA] TOTP_SECRET definida, mas não há TTY nem TOTP_CODE disponível.")
-        print("   → Em ambientes cloud (Railway/Docker), defina TOTP_CODE nas variáveis")
-        print("     de ambiente com o código atual do Google Authenticator.")
-        sys.exit(1)
-
-    if totp.verify(code, valid_window=1):
-        print(f"✅ [2FA] Código válido (fonte: {source}). Autenticação concluída.")
-    else:
-        print(f"❌ [2FA] Código INVÁLIDO (fonte: {source}).")
-        print("   → Verifique se o horário do dispositivo está sincronizado (NTP).")
-        print("   → O código expira a cada 30 segundos — tente novamente.")
-        sys.exit(1)
-
-
 # ─── Diagnóstico de Inicialização ─────────────────────────────────────────────
 
 def run_diagnostics(client: BybitClient, symbol: str) -> None:
@@ -735,8 +671,5 @@ def run_sniper(symbol: str = SYMBOL):
 # ─── Ponto de entrada ─────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # ── Etapa 0: Autenticação 2FA (Google Authenticator) ──────────────────────
-    verify_2fa()
-
     target_symbol = sys.argv[1] if len(sys.argv) > 1 else SYMBOL
     run_sniper(symbol=target_symbol)
