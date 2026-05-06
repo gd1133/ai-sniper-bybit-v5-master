@@ -2151,6 +2151,17 @@ def root_status():
 
 
 # =============================================================================
+# AUTO-START: Inicializa serviços na primeira requisição API
+# =============================================================================
+@app.before_request
+def _auto_start_runtime_services():
+    """Auto-inicia runtime services na primeira requisição à API (não na raiz)."""
+    if request.path.startswith('/api/'):
+        # Inicia serviços apenas uma vez
+        start_runtime_services()
+
+
+# =============================================================================
 # ROTAS DO FRONTEND: Servir dashboard React (fallback para todas as outras rotas)
 # =============================================================================
 @app.route('/<path:path>')
