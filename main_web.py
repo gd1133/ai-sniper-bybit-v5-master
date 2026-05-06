@@ -163,6 +163,10 @@ TEST_MODE_ENABLED = APP_MODE == 'paper'
 ALLOW_ORDER_EXECUTION = ENV_CONFIG.allow_order_execution
 ALLOW_REAL_TRADING = ENV_CONFIG.allow_real_trading
 
+# --- Configuração de Risco (defaults; sobrescritos pelo banco em _sync_runtime_mode_state) ---
+RISK_MODE = 'conservative'       # 'conservative' = 1 moeda | 'aggressive' = 5 moedas
+MAX_MOEDAS_ATIVAS = 1            # Conservador: 1 moeda por vez (use /api/config/risk-mode para trocar)
+
 # Estado Global de Sincronização (O que o Dashboard React consome)
 central_state = {
     "balance": TEST_BALANCE,  # Carregado do banco de dados
