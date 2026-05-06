@@ -16,6 +16,29 @@ if sys.platform == 'win32':
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
+import concurrent.futures
+from threading import Semaphore
+
+# Limitar threads simultâneas
+MAX_CONCURRENT_THREADS = 5
+thread_semaphore = Semaphore(MAX_CONCURRENT_THREADS)
+
+# Pool de threads com limite
+thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=3)
+
+def safe_thread_start(target, *args, **kwargs):
+    """Inicia thread com limite de concorrência e tratamento de erro"""
+    def wrapper():
+        with thread_semaphore:
+            try:
+                target(*args, **kwargs)
+            except Exception as e:
+                print(f"❌ Erro em thread {target.__name__}: {e}")
+                import traceback
+                traceback.print_exc()
+
+    thread_pool.submit(wrapper)
+
 from src.config import get_bybit_base_url, get_bybit_credentials, get_environment_config, resolve_use_testnet
 
 # --- IMPORTAÇÕES DAS PASTAS INTERNAS (SRC) - LAZY LOADING ---
@@ -250,18 +273,18 @@ def start_runtime_services():
         if RUNTIME_STARTED:
             return False
 
-        threading.Thread(target=sniper_worker_loop, daemon=True).start()
-        threading.Thread(target=_monitor_sl_tp_automatico, daemon=True).start()
+        safe_thread_start(sniper_worker_loop)
+        safe_thread_start(_monitor_sl_tp_automatico)
         print("   Monitor SL/TP: ATIVO (-3% SL / +6% TP)")
 
         # Aquece o cache de saldo em background imediatamente para que o
         # primeiro poll do dashboard não precise esperar.
-        threading.Thread(target=_fetch_active_client_balances, kwargs={'force': True}, daemon=True).start()
+        safe_thread_start(_fetch_active_client_balances, force=True)
         print("⚡ Cache de saldo: aquecendo em background...")
 
         if cloud_db:
             print("☁️ Iniciando Sincronização com Supabase Cloud em background...")
-            threading.Thread(target=cloud_db.sync_clients, args=(db,), daemon=True).start()
+            safe_thread_start(cloud_db.sync_clients, db)
 
         RUNTIME_STARTED = True
         return True
