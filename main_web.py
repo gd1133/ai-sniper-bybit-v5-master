@@ -2062,6 +2062,96 @@ def health_check():
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
 
+@app.route('/api/supabase/status', methods=['GET'])
+def get_supabase_status():
+    """Diagnóstico da conexão Supabase: mostra chave usada, contagem de clientes e fallback."""
+    supabase_ready = _is_supabase_ready()
+    key_type = "none"
+    cloud_count = None
+    cloud_error = None
+
+    if supabase_ready:
+        key_type = "service_role (RLS bypass)" if getattr(cloud_db, "_using_service_key", False) else "anon (pode ser bloqueado por RLS)"
+        try:
+            rows = cloud_db.get_clients(active_only=False)
+            cloud_count = len(rows) if rows is not None else None
+            if rows is None:
+                cloud_error = "Supabase indisponível ou erro na query"
+            elif cloud_count == 0:
+                cloud_error = (
+                    "Supabase acessível mas retornou 0 clientes. "
+                    "Causa provável: RLS bloqueando a chave anon. "
+                    "Solução: defina SUPABASE_SERVICE_KEY no Railway."
+                )
+        except Exception as e:
+            cloud_error = str(e)
+
+    local_count = 0
+    try:
+        local_count = len(db.get_all_clients() or [])
+    except Exception:
+        pass
+
+    return jsonify({
+        "supabase_ready": supabase_ready,
+        "key_type": key_type,
+        "cloud_client_count": cloud_count,
+        "local_client_count": local_count,
+        "cloud_error": cloud_error,
+        "recommendation": (
+            "Defina SUPABASE_SERVICE_KEY no Railway para contornar o RLS e mostrar os clientes."
+            if (supabase_ready and cloud_count == 0)
+            else ("OK" if cloud_count else "Configure SUPABASE_URL e SUPABASE_KEY nas variáveis de ambiente.")
+        ),
+    })
+
+
+@app.route('/api/supabase/force-sync', methods=['POST'])
+def supabase_force_sync():
+    """Força sincronização Supabase → SQLite local e retorna resultado."""
+    if not _is_supabase_ready():
+        return jsonify({
+            "success": False,
+            "msg": "Supabase não está configurado. Defina SUPABASE_URL e SUPABASE_KEY.",
+        }), 503
+
+    try:
+        cloud_clients = cloud_db.get_clients(active_only=False)
+        if cloud_clients is None:
+            return jsonify({"success": False, "msg": "Erro ao consultar Supabase."}), 502
+
+        if len(cloud_clients) == 0:
+            return jsonify({
+                "success": False,
+                "pulled": 0,
+                "msg": (
+                    "Supabase retornou 0 clientes. "
+                    "Causa provável: RLS bloqueando a chave anon. "
+                    "Defina SUPABASE_SERVICE_KEY no Railway para resolver."
+                ),
+            }), 200
+
+        pulled = 0
+        errors = []
+        for client in cloud_clients:
+            try:
+                db.upsert_client_local(dict(client))
+                pulled += 1
+            except Exception as e:
+                errors.append(str(e))
+
+        print(f"✅ [force-sync] {pulled} cliente(s) sincronizados Supabase→Local")
+        return jsonify({
+            "success": True,
+            "pulled": pulled,
+            "errors": errors[:5],
+            "msg": f"✅ {pulled} cliente(s) sincronizado(s) com sucesso!",
+        })
+    except Exception as e:
+        print(f"❌ [force-sync] erro: {e}")
+        return jsonify({"success": False, "msg": "Erro interno ao sincronizar."}), 500
+
+
 @app.route('/api/investidores', methods=['GET'])
 def get_investidores():
     """Lista investidores do Supabase quando disponível, com fallback local."""
