@@ -151,6 +151,7 @@ CORS(app)
 # INICIALIZAÇÃO LAZY: Banco e configurações carregados sob demanda
 # =============================================================================
 _db_initialized = False
+_db_init_failed = False
 TEST_BALANCE = 1000.0  # Default inicial, carregado sob demanda
 APP_MODE = 'paper'     # Default inicial, carregado sob demanda
 TEST_MODE_ENABLED = True
@@ -159,15 +160,19 @@ ALLOW_REAL_TRADING = ENV_CONFIG.allow_real_trading
 
 def _ensure_db_initialized():
     """Inicializa o banco de dados sob demanda (lazy loading)."""
-    global _db_initialized, TEST_BALANCE, APP_MODE, TEST_MODE_ENABLED
+    global _db_initialized, _db_init_failed, TEST_BALANCE, APP_MODE, TEST_MODE_ENABLED
     
     if _db_initialized:
-        return
+        return True
+    
+    if _db_init_failed:
+        # Já tentamos e falhou, não tenta novamente nesta sessão
+        return False
     
     if db is None:
         print("⚠️ Database manager não disponível")
-        _db_initialized = True
-        return
+        _db_init_failed = True
+        return False
     
     try:
         db.init_db()
@@ -184,9 +189,12 @@ def _ensure_db_initialized():
         
         _db_initialized = True
         print("✅ Database inicializado com sucesso")
+        return True
     except Exception as e:
         print(f"⚠️ Erro ao inicializar database: {e}")
-        _db_initialized = True  # Marca como inicializado para não tentar novamente
+        _db_init_failed = True
+        return False
+
 
 # Estado Global de Sincronização (O que o Dashboard React consome)
 # Inicializado com valores padrão, será populado quando DB for carregado
@@ -359,7 +367,25 @@ def _frontend_is_built():
 
 
 def _frontend_asset_exists(path):
-    return bool(path) and bool(app.static_folder) and os.path.isfile(os.path.join(app.static_folder, path))
+    """Verifica se um asset do frontend existe, prevenindo path traversal."""
+    if not path or not app.static_folder:
+        return False
+    
+    # Previne path traversal removendo ../ e /
+    safe_path = path.lstrip('/')
+    if '..' in safe_path or safe_path.startswith('/'):
+        return False
+    
+    try:
+        full_path = os.path.join(app.static_folder, safe_path)
+        # Garante que o caminho final está dentro de static_folder
+        real_static = os.path.realpath(app.static_folder)
+        real_file = os.path.realpath(full_path)
+        if not real_file.startswith(real_static):
+            return False
+        return os.path.isfile(full_path)
+    except (OSError, ValueError):
+        return False
 
 
 def _render_frontend_status_page():
@@ -2153,12 +2179,21 @@ def root_status():
 # =============================================================================
 # AUTO-START: Inicializa serviços na primeira requisição API
 # =============================================================================
+_runtime_auto_started = False
+
 @app.before_request
 def _auto_start_runtime_services():
     """Auto-inicia runtime services na primeira requisição à API (não na raiz)."""
+    global _runtime_auto_started
+    
+    # Otimização: evita chamada de função após inicialização
+    if _runtime_auto_started:
+        return
+    
     if request.path.startswith('/api/'):
         # Inicia serviços apenas uma vez
-        start_runtime_services()
+        if start_runtime_services():
+            _runtime_auto_started = True
 
 
 # =============================================================================
@@ -2167,6 +2202,8 @@ def _auto_start_runtime_services():
 @app.route('/<path:path>')
 def serve_frontend(path):
     """Entrega o dashboard React sem interferir nas rotas da API."""
+    # Fallback para rotas API não encontradas (já processadas pelo Flask)
+    # Se chegou aqui e começa com api/, significa que nenhum endpoint correspondeu
     if path.startswith('api/'):
         return jsonify({"error": "Endpoint não encontrado"}), 404
 
