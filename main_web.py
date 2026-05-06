@@ -2695,6 +2695,10 @@ def set_risk_mode():
     except Exception as e:
         print(f"⚠️ [RISK MODE] Erro ao alterar modo: {e}")
         return jsonify({"error": "Erro ao alterar modo de risco. Verifique os logs."}), 400
+
+
+@app.route('/api/sniper/broadcast', methods=['POST'])
+def broadcast_sniper_signal():
     """🚀 RECEBE SINAL SNIPER BROADCAST E EXECUTA OPERAÇÃO
     
     POST /api/sniper/broadcast
