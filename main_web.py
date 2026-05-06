@@ -155,6 +155,7 @@ DEFAULT_TEST_BALANCE = 1000.0  # Saldo padrão para paper trading
 _db_initialized = False
 _db_init_failed = False
 _db_init_lock = threading.Lock()
+_config_lock = threading.Lock()  # Lock separado para config
 TEST_BALANCE = DEFAULT_TEST_BALANCE
 APP_MODE = 'paper'
 TEST_MODE_ENABLED = True
@@ -194,6 +195,7 @@ def _ensure_db_initialized():
             APP_MODE = _normalize_operation_mode(db.get_operation_mode())
             TEST_MODE_ENABLED = APP_MODE == 'paper'
             
+            # Marca como inicializado apenas após todas as variáveis globais estarem atualizadas
             _db_initialized = True
             print("✅ Database inicializado com sucesso")
             return True
@@ -301,7 +303,7 @@ def _load_saved_config():
     if not _ensure_db_initialized():
         return
     
-    with _db_init_lock:
+    with _config_lock:
         # Restaura RISK_MODE persistido (se existir no banco)
         _saved_risk_mode = db.get_config('RISK_MODE')
         if _saved_risk_mode in ('conservative', 'aggressive'):
@@ -2207,15 +2209,16 @@ def _auto_start_runtime_services():
 def serve_frontend(path):
     """Entrega o dashboard React sem interferir nas rotas da API."""
     # Fallback para rotas API não encontradas (já processadas pelo Flask)
-    # Se chegou aqui e começa com api/, significa que nenhum endpoint correspondeu
-    if path.startswith('api/'):
+    # Se chegou aqui e começa com api/ ou /api/, significa que nenhum endpoint correspondeu
+    if path.startswith('api/') or path == 'api':
         return jsonify({"error": "Endpoint não encontrado"}), 404
 
     if _frontend_asset_exists(path):
         # send_from_directory já usa safe_join internamente
         try:
             return send_from_directory(app.static_folder, path)
-        except (OSError, ValueError):
+        except (OSError, ValueError) as e:
+            print(f"⚠️ Erro ao servir asset {path}: {e}")
             pass  # Fallback para index.html
 
     if _frontend_is_built():
