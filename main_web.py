@@ -620,6 +620,24 @@ def _get_public_price_broker():
     return public_price_broker
 
 
+def _get_indicator_engine():
+    """Carrega IndicatorEngine sob demanda (lazy loading)."""
+    global IndicatorEngine
+    if IndicatorEngine is None:
+        from src.engine.indicators import IndicatorEngine as _IE
+        IndicatorEngine = _IE
+    return IndicatorEngine
+
+
+def _get_groq_validator():
+    """Carrega GroqValidator sob demanda (lazy loading)."""
+    global GroqValidator
+    if GroqValidator is None:
+        from src.ai_brain.validator import GroqValidator as _GV
+        GroqValidator = _GV
+    return GroqValidator
+
+
 def _ensure_broker_class(exchange='bybit'):
     """Retorna a classe broker correta dependendo da corretora do cliente."""
     exchange = str(exchange or 'bybit').strip().lower()
@@ -1850,26 +1868,26 @@ def _executar_trade_teste():
 
 def sniper_worker_loop():
     """Motor Sniper que varre o mercado e atualiza o Dashboard sem travar."""
-    global central_state, BybitClient, IndicatorEngine, GroqValidator
-    
+    global central_state
+
     # ⏳ Carregamento Lazy (apenas quando worker inicia)
     print("⏳ Carregando dependências pesadas (primeira vez)...")
     try:
-        from src.broker.bybit_client import BybitClient
-        from src.engine.indicators import IndicatorEngine
-        from src.ai_brain.validator import GroqValidator
+        _get_indicator_engine()
+        _get_groq_validator()
+        _ensure_broker_class('bybit')
         print("✅ Dependências carregadas com sucesso")
-    except ImportError as e:
+    except Exception as e:
         print(f"❌ Erro ao carregar: {e}")
         time.sleep(5)
         return
-    
+
     # Scanner Master
-    master_broker = BybitClient(
+    master_broker = _ensure_broker_class('bybit')(
         *get_bybit_credentials(),
         testnet=_mode_uses_testnet(APP_MODE),
     )
-    validator = GroqValidator(os.getenv("GEMINI_API_KEY"), os.getenv("GROQ_API_KEY"))
+    validator = _get_groq_validator()(os.getenv("GEMINI_API_KEY"), os.getenv("GROQ_API_KEY"))
 
     print(f"🚀 Motor Sniper v60.1 Operante. Rigor: {THRESHOLD_ENTRADA}%")
     
@@ -1933,7 +1951,7 @@ def sniper_worker_loop():
                             if df is None or len(df) < 200:
                                 continue
 
-                            engine = IndicatorEngine(df)
+                            engine = _get_indicator_engine()(df)
                             signals = engine.get_signals()
                             local_score = validator.local_signal(signals)
                             
@@ -2449,7 +2467,7 @@ def test_signal():
     """Testa um sinal manualmente (para debugging)."""
     data = request.json
     try:
-        validator = GroqValidator(os.getenv("GEMINI_API_KEY"), os.getenv("GROQ_API_KEY"))
+        validator = _get_groq_validator()(os.getenv("GEMINI_API_KEY"), os.getenv("GROQ_API_KEY"))
         
         # Simula dados técnicos
         tech_data = {
