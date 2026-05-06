@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import ReactDOM from 'react-dom/client';
+import { SpeedInsights } from '@vercel/speed-insights/react';
 import { 
   LayoutDashboard, 
   FileSearch, 
@@ -1237,6 +1238,7 @@ const App = () => {
          </div>
          <p className="text-[9px] font-black text-zinc-700 uppercase tracking-[0.5em] italic">Motor Sniper v60.7 &copy; 2026</p>
        </footer>
+       <SpeedInsights />
     </div>
   );
 };
