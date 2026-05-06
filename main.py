@@ -23,6 +23,7 @@ Regras de Negócio:
 import os
 import time
 import sys
+import getpass
 
 from dotenv import load_dotenv
 
@@ -405,7 +406,138 @@ def place_order_with_protection(
         return False
 
 
-# ─── Loop Principal de Varredura ──────────────────────────────────────────────
+# ─── Autenticação 2FA (Google Authenticator / TOTP) ──────────────────────────
+
+def verify_2fa() -> None:
+    """
+    Valida o código TOTP do Google Authenticator antes de inicializar a sessão.
+
+    Lógica de verificação (em ordem de prioridade):
+      1. Se a variável de ambiente TOTP_SECRET não estiver definida, o 2FA é
+         considerado opcional e a função retorna sem bloquear (compatibilidade
+         com ambientes sem 2FA configurado).
+      2. Se TOTP_CODE estiver definida (deploy em nuvem / CI), usa esse valor
+         diretamente, sem interação com o terminal — evita bloqueio em Railway.
+      3. Se houver TTY interativo (execução local), solicita o código ao operador.
+      4. Se nenhum dos casos acima fornecer um código, o arranque é interrompido
+         com mensagem clara.
+
+    Variáveis de ambiente relevantes:
+      TOTP_SECRET  — segredo Base32 gerado pelo Google Authenticator (obrigatório
+                     para ativar 2FA).
+      TOTP_CODE    — código de 6 dígitos fornecido pelo app; use em ambientes sem
+                     TTY (ex.: Railway, Docker) para evitar bloqueio de input.
+    """
+    try:
+        import pyotp  # noqa: PLC0415
+    except ImportError:
+        print("⚠️  [2FA] pyotp não instalado — execute 'pip install pyotp==2.9.0'.")
+        print("         O 2FA será ignorado nesta inicialização.")
+        return
+
+    totp_secret = str(os.getenv("TOTP_SECRET", "")).strip()
+    if not totp_secret:
+        # 2FA não configurado: avança sem bloqueio
+        print("ℹ️  [2FA] TOTP_SECRET não definida. Autenticação 2FA desativada.")
+        return
+
+    totp = pyotp.TOTP(totp_secret)
+
+    # ── Origem do código: variável de ambiente (cloud) ────────────────────────
+    env_code = str(os.getenv("TOTP_CODE", "")).strip()
+    if env_code:
+        code = env_code
+        source = "variável de ambiente TOTP_CODE"
+    elif sys.stdin.isatty():
+        # ── Origem do código: input interativo (terminal local) ───────────────
+        print("\n🔐 [2FA] Google Authenticator — insira o código de 6 dígitos:")
+        code = getpass.getpass("   Código: ").strip()
+        source = "input interativo"
+    else:
+        # ── Sem TTY e sem TOTP_CODE: não pode prosseguir ──────────────────────
+        print("❌ [2FA] TOTP_SECRET definida, mas não há TTY nem TOTP_CODE disponível.")
+        print("   → Em ambientes cloud (Railway/Docker), defina TOTP_CODE nas variáveis")
+        print("     de ambiente com o código atual do Google Authenticator.")
+        sys.exit(1)
+
+    if totp.verify(code, valid_window=1):
+        print(f"✅ [2FA] Código válido (fonte: {source}). Autenticação concluída.")
+    else:
+        print(f"❌ [2FA] Código INVÁLIDO (fonte: {source}).")
+        print("   → Verifique se o horário do dispositivo está sincronizado (NTP).")
+        print("   → O código expira a cada 30 segundos — tente novamente.")
+        sys.exit(1)
+
+
+# ─── Diagnóstico de Inicialização ─────────────────────────────────────────────
+
+def run_diagnostics(client: BybitClient, symbol: str) -> None:
+    """
+    Executa a rotina de diagnóstico antes de entrar no loop de varredura.
+
+    Verificações realizadas:
+      1. Conectividade — acesso ao endpoint Bybit (público, sem credenciais)
+      2. Ambiente — confirma se está operando em Testnet ou Produção
+      3. Permissões da chave API:
+           • Ordens   — tenta listar ordens abertas (confirma permissão "Trade")
+           • Posições — consulta posições abertas (confirma permissão "Position")
+
+    Nenhuma falha aqui interrompe o boot; o sistema apenas loga um alerta e
+    continua — permitindo operação em modo leitura quando as credenciais não
+    têm todas as permissões necessárias.
+    """
+    print("\n" + "═" * 60)
+    print("  DIAGNÓSTICO DE INICIALIZAÇÃO")
+    print("═" * 60)
+
+    # ── 1. Ambiente ───────────────────────────────────────────────────────────
+    env_label = "TESTNET ⚠️ (sandbox)" if USE_TESTNET else "PRODUÇÃO 🔴 (real)"
+    print(f"🌐 Ambiente   : {env_label}")
+    print(f"   Endpoint   : {client.active_endpoint}")
+
+    # ── 2. Conectividade via pybit (V5 public endpoint) ───────────────────────
+    ok_conn, msg_conn = client.test_connection()
+    if ok_conn:
+        print(f"🔌 Conexão    : OK — {msg_conn}")
+    else:
+        print(f"⚠️  Conexão    : FALHOU — {msg_conn}")
+        if "10003" in msg_conn:
+            print("   → Chave de API inválida (10003). Verifique BYBIT_API_KEY no .env")
+
+    # ── 3. Permissões — apenas se autenticado ─────────────────────────────────
+    if not client.authenticated or client.pybit_session is None:
+        print("🔑 Permissões : chave API não configurada — modo leitura ativo.")
+        print("═" * 60 + "\n")
+        return
+
+    v5_symbol = client._normalize_v5_symbol(symbol)
+
+    # 3a. Permissão de Ordens (Trade)
+    try:
+        rsp_orders = client.pybit_session.get_open_orders(
+            category="linear", symbol=v5_symbol
+        )
+        ok_orders, _ = client._handle_v5_ret_code(rsp_orders, "get_open_orders")
+        status_orders = "✅ OK" if ok_orders else "❌ FALHOU (verifique permissão 'Trade')"
+    except Exception as exc:
+        status_orders = f"❌ EXCEÇÃO — {str(exc)[:80]}"
+
+    # 3b. Permissão de Posições
+    try:
+        rsp_pos = client.pybit_session.get_positions(
+            category="linear", symbol=v5_symbol
+        )
+        ok_pos, _ = client._handle_v5_ret_code(rsp_pos, "get_positions")
+        status_pos = "✅ OK" if ok_pos else "❌ FALHOU (verifique permissão 'Position')"
+    except Exception as exc:
+        status_pos = f"❌ EXCEÇÃO — {str(exc)[:80]}"
+
+    print(f"🔑 Ordens     : {status_orders}")
+    print(f"🔑 Posições   : {status_pos}")
+    print("═" * 60 + "\n")
+
+
+
 
 def run_sniper(symbol: str = SYMBOL):
     """
@@ -455,6 +587,9 @@ def run_sniper(symbol: str = SYMBOL):
     # ── Configura alavancagem e modo de margem ─────────────────────────────────
     if client.authenticated:
         configure_leverage_and_margin(client, symbol)
+
+    # ── Diagnóstico de inicialização ───────────────────────────────────────────
+    run_diagnostics(client, symbol)
 
     # ── Estado de controle do ciclo ────────────────────────────────────────────
     cycle = 0
@@ -600,5 +735,8 @@ def run_sniper(symbol: str = SYMBOL):
 # ─── Ponto de entrada ─────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    # ── Etapa 0: Autenticação 2FA (Google Authenticator) ──────────────────────
+    verify_2fa()
+
     target_symbol = sys.argv[1] if len(sys.argv) > 1 else SYMBOL
     run_sniper(symbol=target_symbol)
