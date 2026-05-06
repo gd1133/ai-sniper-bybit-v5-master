@@ -18,6 +18,7 @@ import {
   Trash2,
   Settings
 } from 'lucide-react';
+import { Analytics } from '@vercel/analytics/react';
 
 const getApiBase = () => {
   const configuredBase = import.meta.env.VITE_API_BASE?.trim();
@@ -1282,6 +1283,7 @@ if (rootEl) {
   ReactDOM.createRoot(rootEl).render(
     <React.StrictMode>
       <App />
+      <Analytics />
     </React.StrictMode>
   );
 } else {
