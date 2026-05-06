@@ -118,6 +118,13 @@ def init_db():
     )
     ''')
 
+    # ÍNDICES PARA PERFORMANCE
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_trades_client_id ON trades(client_id)')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_trades_pair ON trades(pair)')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_clientes_status ON clientes_sniper(status)')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_config_k ON config(k)')
+
     conn.commit()
     conn.close()
 
