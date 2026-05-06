@@ -191,6 +191,10 @@ except Exception as e:
     ALLOW_ORDER_EXECUTION = False
     ALLOW_REAL_TRADING = False
 
+# --- PROTOCOLO SNIPER RIGOROSO - Configurações Iniciais ---
+RISK_MODE = 'conservative'       # 'conservative' = 1 moeda | 'aggressive' = 5 moedas
+MAX_MOEDAS_ATIVAS = 1            # Conservador: 1 moeda por vez (use /api/config/risk-mode para trocar)
+
 # Estado Global de Sincronização (O que o Dashboard React consome)
 central_state = {
     "balance": TEST_BALANCE,  # Carregado do banco de dados
@@ -347,8 +351,7 @@ USE_LOCAL_BRAIN_ONLY = False
 # --- PROTOCOLO SNIPER RIGOROSO v60.1 ---
 THRESHOLD_ENTRADA = 60           # 🎯 Teste Provisório: 50% (Restaurar 60% depois)
 COOLDOWN_INSTITUCIONAL_SECS = 15  # Reduzido para ver entradas rápido igual na foto 4
-RISK_MODE = 'conservative'       # 'conservative' = 1 moeda | 'aggressive' = 5 moedas
-MAX_MOEDAS_ATIVAS = 1            # Conservador: 1 moeda por vez (use /api/config/risk-mode para trocar)
+# RISK_MODE e MAX_MOEDAS_ATIVAS foram movidos para cima (antes do central_state)
 SNIPER_POSICAO_UNICA = False     # Multi-ativo: permite até MAX_MOEDAS_ATIVAS simultâneas
 
 # Trava atômica para bloquear corrida entre validação e gravação de sinal
