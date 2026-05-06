@@ -163,6 +163,12 @@ TEST_MODE_ENABLED = APP_MODE == 'paper'
 ALLOW_ORDER_EXECUTION = ENV_CONFIG.allow_order_execution
 ALLOW_REAL_TRADING = ENV_CONFIG.allow_real_trading
 
+# --- CONFIGURAÇÕES GLOBAIS (definidas antes do uso em central_state/rotas) ---
+RISK_MODE = 'conservative'       # 'conservative' = 1 moeda | 'aggressive' = 5 moedas
+MAX_MOEDAS_ATIVAS = 1            # Conservador: 1 moeda por vez (use /api/config/risk-mode para trocar)
+SL_PCT = -3.0                    # Stop Loss automático padrão
+TP_PCT = 6.0                     # Take Profit automático padrão
+
 # Estado Global de Sincronização (O que o Dashboard React consome)
 central_state = {
     "balance": TEST_BALANCE,  # Carregado do banco de dados
@@ -292,8 +298,6 @@ USE_LOCAL_BRAIN_ONLY = False
 # --- PROTOCOLO SNIPER RIGOROSO v60.1 ---
 THRESHOLD_ENTRADA = 60           # 🎯 Teste Provisório: 50% (Restaurar 60% depois)
 COOLDOWN_INSTITUCIONAL_SECS = 15  # Reduzido para ver entradas rápido igual na foto 4
-RISK_MODE = 'conservative'       # 'conservative' = 1 moeda | 'aggressive' = 5 moedas
-MAX_MOEDAS_ATIVAS = 1            # Conservador: 1 moeda por vez (use /api/config/risk-mode para trocar)
 SNIPER_POSICAO_UNICA = False     # Multi-ativo: permite até MAX_MOEDAS_ATIVAS simultâneas
 
 # Trava atômica para bloquear corrida entre validação e gravação de sinal
@@ -1438,9 +1442,6 @@ def _monitor_sl_tp_automatico():
     - Take Profit: +6% (lucro alvo)
     Executa em background a cada 10 segundos.
     """
-    SL_PCT = -3.0
-    TP_PCT =  6.0
-
     while True:
         try:
             trades_abertos = list(central_state.get('active_trades', []))
@@ -2803,4 +2804,3 @@ if __name__ == "__main__":
     print(f"📊 Dashboard: http://0.0.0.0:{render_port}")
     print("🧠 Cérebro Triplo: ATIVO (Rigor 50%)")
     app.run(host='0.0.0.0', port=render_port, debug=False, use_reloader=False)
-
