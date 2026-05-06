@@ -23,7 +23,6 @@ Regras de Negócio:
 import os
 import time
 import sys
-import getpass
 
 from dotenv import load_dotenv
 
@@ -600,69 +599,6 @@ def run_sniper(symbol: str = SYMBOL):
 
 # ─── Ponto de entrada ─────────────────────────────────────────────────────────
 
-def verify_2fa() -> bool:
-    """
-    Verificação de autenticação em dois fatores (2FA) via Google Authenticator.
-
-    Lê o segredo TOTP de TOTP_2FA_SECRET no .env.
-    - Se a variável não estiver configurada → exibe aviso e ignora 2FA
-      (adequado para ambientes automatizados como Railway / CI).
-    - Se configurada → solicita o código de 6 dígitos do app Google Authenticator
-      e valida via pyotp.TOTP. O operador tem 3 tentativas antes do bloqueio.
-
-    Retorna True se autenticado (ou 2FA não configurado), False caso contrário.
-
-    Como gerar o segredo:
-        python -c "import pyotp; print(pyotp.random_base32())"
-    Adicione o segredo ao .env e escaneie o QR Code com o Google Authenticator:
-        python -c "import pyotp; print(pyotp.totp.TOTP('SEU_SEGREDO').provisioning_uri('MotorSniper','Bybit'))"
-    """
-    totp_secret = str(os.getenv("TOTP_2FA_SECRET", "")).strip()
-
-    if not totp_secret:
-        print(
-            "⚠️  [2FA] TOTP_2FA_SECRET não configurado no .env. "
-            "Verificação 2FA IGNORADA (modo automatizado)."
-        )
-        return True
-
-    try:
-        import pyotp  # noqa: PLC0415 (pylint: disable=import-outside-toplevel)
-    except ImportError:
-        print("❌ [2FA] pyotp não instalado. Execute: pip install pyotp")
-        return False
-
-    totp = pyotp.TOTP(totp_secret)
-    max_attempts = 3
-
-    print("\n🔐 [2FA] Autenticação de dois fatores requerida.")
-    print("   Abra o Google Authenticator e insira o código de 6 dígitos para 'MotorSniper'.\n")
-
-    for attempt in range(1, max_attempts + 1):
-        try:
-            code = getpass.getpass(f"   Código 2FA (tentativa {attempt}/{max_attempts}): ").strip()
-        except (EOFError, KeyboardInterrupt):
-            # Ambiente não-interativo (CI/cron) — cancela silenciosamente
-            print("\n⚠️  [2FA] Entrada interativa indisponível; 2FA ignorado (ambiente não-interativo).")
-            return True
-
-        if totp.verify(code, valid_window=1):
-            print("✅ [2FA] Autenticado com sucesso!\n")
-            return True
-
-        remaining = max_attempts - attempt
-        if remaining > 0:
-            print(f"   ❌ Código inválido. {remaining} tentativa(s) restante(s).")
-        else:
-            print("❌ [2FA] Número máximo de tentativas atingido. Acesso BLOQUEADO.")
-
-    return False
-
-
 if __name__ == "__main__":
-    # ── Verificação 2FA antes de qualquer inicialização da API ────────────────
-    if not verify_2fa():
-        sys.exit(1)
-
     target_symbol = sys.argv[1] if len(sys.argv) > 1 else SYMBOL
     run_sniper(symbol=target_symbol)
