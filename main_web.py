@@ -361,6 +361,16 @@ def _render_frontend_status_page():
     )
 
 
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    """Health check para Railway e load balancers"""
+    return jsonify({
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "runtime_started": RUNTIME_STARTED,
+    }), 200
+
+
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def serve_frontend(path):
