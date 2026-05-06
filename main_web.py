@@ -150,7 +150,7 @@ CORS(app)
 # Inicializa o Banco de Dados Local (Cria tabelas se não existirem)
 # Fault-tolerant: permite que a app inicie mesmo se DB falhar
 try:
-    if db:
+    if db and hasattr(db, 'init_db'):
         db.init_db()
         print("✅ Database initialized successfully")
     else:
@@ -162,7 +162,7 @@ except Exception as e:
 # 🧪 CARREGA CONFIGURAÇÕES DE TESTE
 _raw_test_balance = 1000.0  # Default fallback
 try:
-    if db:
+    if db and hasattr(db, 'get_test_balance'):
         _raw_test_balance = db.get_test_balance()  # Saldo fictício para treinar
 except Exception as e:
     print(f"⚠️ Could not load test balance from DB: {e}. Using default.")
@@ -172,14 +172,17 @@ except Exception as e:
 TEST_BALANCE = _raw_test_balance if _raw_test_balance > 0 else 1000.0
 if _raw_test_balance <= 0:
     try:
-        if db:
+        if db and hasattr(db, 'set_test_balance'):
             db.set_test_balance(TEST_BALANCE)
         print(f"⚠️ TEST_BALANCE restaurado para {TEST_BALANCE} USDT (estava zerado/inválido).")
     except Exception:
         pass
 
 try:
-    APP_MODE = _normalize_operation_mode(db.get_operation_mode() if db else 'paper')
+    if db and hasattr(db, 'get_operation_mode'):
+        APP_MODE = _normalize_operation_mode(db.get_operation_mode())
+    else:
+        APP_MODE = 'paper'
 except Exception:
     APP_MODE = 'paper'
     print("⚠️ Could not load operation mode from DB. Using 'paper' mode.")
@@ -423,11 +426,8 @@ def health_check():
 @app.route('/<path:path>')
 def serve_frontend(path):
     """Entrega o dashboard React no root sem interferir nas rotas da API."""
-    # Health check rápido na raiz para Railway
-    if path == '' and request.args.get('health') is not None:
-        return jsonify({"status": "ok"}), 200
-    
     if path.startswith('api/'):
+        return jsonify({"error": "Endpoint não encontrado"}), 404
         return jsonify({"error": "Endpoint não encontrado"}), 404
 
     if _frontend_asset_exists(path):
