@@ -627,7 +627,7 @@ def verify_2fa() -> bool:
         return True
 
     try:
-        import pyotp  # noqa: PLC0415
+        import pyotp  # noqa: PLC0415 (pylint: disable=import-outside-toplevel)
     except ImportError:
         print("❌ [2FA] pyotp não instalado. Execute: pip install pyotp")
         return False
