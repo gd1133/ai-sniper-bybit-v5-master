@@ -8,7 +8,7 @@ RUN npm run build
 
 # Stage 2: servidor Python
 FROM python:3.10-slim
-# cache-bust: 2026-04-28
+# cache-bust: 2026-05-06
 
 WORKDIR /app
 
