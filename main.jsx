@@ -65,6 +65,7 @@ const normalizeAccountMode = (value) => {
 
 const normalizeInvestorRecord = (client) => {
   const accountMode = normalizeAccountMode(client?.account_mode ?? client?.is_testnet);
+  const exchange = String(client?.exchange || 'bybit').toLowerCase();
   return {
     ...client,
     banca: client?.saldo_real ?? client?.saldo_base ?? client?.banca ?? 0,
@@ -72,6 +73,7 @@ const normalizeInvestorRecord = (client) => {
     saldo_configurado: client?.saldo_base ?? client?.saldo_configurado ?? 0,
     mode: accountMode.toUpperCase(),
     account_mode: accountMode,
+    exchange: exchange,
     storage_source: String(client?.storage_source || client?.source || 'local').toUpperCase(),
     pnl: client?.pnl ?? '+0.0%',
   };
@@ -1008,7 +1010,7 @@ const App = () => {
                             {String(inv.account_mode || inv.mode || 'TESTNET').toUpperCase() === 'REAL' ? 'Conta Real' : 'Conta Testnet'}
                           </span>
                           <span className={`px-3 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest ${String(inv.exchange || 'bybit').toLowerCase() === 'binance' ? 'bg-orange-500/10 border-orange-500/30 text-orange-300' : 'bg-yellow-500/10 border-yellow-500/30 text-yellow-300'}`}>
-                            {String(inv.exchange || 'BYBIT').toUpperCase()}
+                            {String(inv.exchange || 'bybit').toUpperCase()}
                           </span>
                           <span className={`px-3 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest ${String(inv.storage_source || 'LOCAL').toUpperCase() === 'SUPABASE' ? 'bg-blue-500/10 border-blue-500/30 text-blue-300' : 'bg-zinc-800 border-white/10 text-zinc-300'}`}>
                             {String(inv.storage_source || 'LOCAL').toUpperCase()}
