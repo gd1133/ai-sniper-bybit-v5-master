@@ -170,13 +170,13 @@ class BinanceClient:
             return None
 
     def set_tp_sl_sniper(self, symbol, side, entry_price, position_qty):
-        """Define Take Profit (+10%) e Stop Loss (-3%) via ordens limitadas."""
+        """Define Take Profit (+10%) e Stop Loss (-5%) via ordens limitadas."""
         try:
             if not self.authenticated:
                 return False
 
             tp_price = round(entry_price * 1.10, 8)
-            sl_price = round(entry_price * 0.97, 8)
+            sl_price = round(entry_price * 0.95, 8)
 
             close_side = 'sell' if side.lower() in ('buy', 'long') else 'buy'
 
