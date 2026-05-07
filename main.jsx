@@ -1041,8 +1041,8 @@ const App = () => {
       {/* FORMULÁRIO MODAL (Gestão de Pessoas) */}
       {showAddForm && (
         <div className="fixed inset-0 bg-black/95 backdrop-blur-xl z-[100] flex items-center justify-center p-6 animate-in fade-in duration-300">
-          <div className="bg-[#0d0e12] w-full max-w-2xl rounded-[4rem] border border-zinc-800 shadow-2xl relative overflow-hidden">
-            <div className="p-10 border-b border-white/5 flex justify-between items-center bg-zinc-900/20">
+          <div className="bg-[#0d0e12] w-full max-w-2xl max-h-[90vh] rounded-[4rem] border border-zinc-800 shadow-2xl relative flex flex-col overflow-hidden">
+            <div className="p-10 border-b border-white/5 flex justify-between items-center bg-zinc-900/20 flex-shrink-0">
                <div className="flex items-center gap-5">
                   <div className="w-14 h-14 bg-green-500/10 rounded-2xl flex items-center justify-center text-green-500 border border-green-500/20">
                      <Users size={28}/>
@@ -1061,7 +1061,7 @@ const App = () => {
                  <button onClick={() => { setShowAddForm(false); setAddFormMsg(null); }} className="p-4 hover:bg-zinc-800 rounded-full transition-all text-zinc-500 hover:text-white"><X size={28}/></button>
                </div>
             </div>
-            <form className="p-12 space-y-8" onSubmit={async (e) => {
+            <form className="p-12 space-y-8 overflow-y-auto flex-1" onSubmit={async (e) => {
                 e.preventDefault();
                 setAddFormSaving(true);
                 setAddFormMsg(null);
