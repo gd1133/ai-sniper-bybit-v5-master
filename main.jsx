@@ -147,7 +147,7 @@ const getTradeProgressText = (trade) => {
   const pnlPct = Number(trade?.pnl_pct || 0);
   if (!Number.isFinite(pnlPct)) return 'TP 100% • SL 5%';
   if (pnlPct >= 0) return `Faltam ${Math.max(0, 100 - pnlPct).toFixed(2)}% para TP`;
-  return `Faltam ${Math.max(0, 3 - Math.abs(pnlPct)).toFixed(2)}% para SL`;
+  return `Faltam ${Math.max(0, 5 - Math.abs(pnlPct)).toFixed(2)}% para SL`;
 };
 
 /**
