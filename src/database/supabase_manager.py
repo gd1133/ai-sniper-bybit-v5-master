@@ -189,7 +189,7 @@ class SupabaseManager:
                 "broker_testnet_balance" if normalized["account_mode"] == "testnet" else "broker_real_balance"
             )
         # Ensure exchange field has a valid value
-        if "exchange" not in normalized or not normalized.get("exchange"):
+        if not normalized.get("exchange"):
             normalized["exchange"] = "bybit"
         else:
             exchange = str(normalized["exchange"]).strip().lower()
