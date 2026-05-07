@@ -441,12 +441,12 @@ class BybitClient:
             
             # Cálculo de TP/SL (Bybit usa preços absolutos, não percentuais)
             tp_price = entry_price * 1.10  # +10% = +100% de margem (alavancagem 10x)
-            sl_price = entry_price * 0.97  # -3% = Stop Loss Institucional
+            sl_price = entry_price * 0.95  # -5% = Stop Loss Institucional
             
             print(f"🛡️  [PROTEÇÃO SNIPER] {symbol}")
             print(f"   📍 Entrada: ${entry_price:.2f}")
             print(f"   ✅ TP: ${tp_price:.2f} (+100% margem)")
-            print(f"   ❌ SL: ${sl_price:.2f} (-3% trava)")
+            print(f"   ❌ SL: ${sl_price:.2f} (-5% trava)")
             
             params = {
                 'category': 'linear',

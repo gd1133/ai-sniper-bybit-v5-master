@@ -16,11 +16,11 @@ MONITOR_FUNC = '''
 def _monitor_sl_tp_automatico():
     """
     Monitora trades abertos e fecha automaticamente quando atingem:
-    - Stop Loss: -3% (perda maxima institucional)
+    - Stop Loss: -5% (perda maxima institucional)
     - Take Profit: +6% (lucro alvo)
     Executa em background a cada 10 segundos.
     """
-    SL_PCT = -3.0
+    SL_PCT = -5.0
     TP_PCT = 6.0
 
     while True:
@@ -40,7 +40,7 @@ def _monitor_sl_tp_automatico():
 
                 motivo = None
                 if pnl_pct <= SL_PCT:
-                    motivo = f"SL_AUTO -3% (real: {pnl_pct:.2f}%)"
+                    motivo = f"SL_AUTO -5% (real: {pnl_pct:.2f}%)"
                 elif pnl_pct >= TP_PCT:
                     motivo = f"TP_AUTO +6% (real: {pnl_pct:.2f}%)"
 
@@ -95,9 +95,9 @@ content = content.replace(marker, MONITOR_FUNC + "\ndef _sync_active_trades_from
 # Adiciona a thread no bloco if __name__ == "__main__"
 THREAD_MARKER = "    threading.Thread(target=sniper_worker_loop, daemon=True).start()"
 THREAD_INSERT = (
-    "\n\n    # Monitor SL/TP automatico (-3% stop loss / +6% take profit)\n"
+    "\n\n    # Monitor SL/TP automatico (-5% stop loss / +6% take profit)\n"
     "    threading.Thread(target=_monitor_sl_tp_automatico, daemon=True).start()\n"
-    '    print("   Monitor SL/TP: ATIVO (-3% SL / +6% TP)")'
+    '    print("   Monitor SL/TP: ATIVO (-5% SL / +6% TP)")'
 )
 
 if THREAD_MARKER in content:

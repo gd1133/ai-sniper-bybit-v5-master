@@ -276,7 +276,7 @@ def start_runtime_services():
 
         threading.Thread(target=sniper_worker_loop, daemon=True).start()
         threading.Thread(target=_monitor_sl_tp_automatico, daemon=True).start()
-        print("   Monitor SL/TP: ATIVO (-3% SL / +6% TP)")
+        print("   Monitor SL/TP: ATIVO (-5% SL / +6% TP)")
 
         # Aquece o cache de saldo em background imediatamente para que o
         # primeiro poll do dashboard não precise esperar.
@@ -302,7 +302,7 @@ SNIPER_POSICAO_UNICA = False     # Multi-ativo: permite até MAX_MOEDAS_ATIVAS s
 SNIPER_SIGNAL_LOCK = threading.Lock()
 SNIPER_SIGNAL_RESERVATIONS = set()
 PAPER_TRADE_TP_PCT = 100.0       # Fecha somente quando dobrar a margem projetada
-PAPER_TRADE_SL_PCT = -3.0        # Stop de perda em 3% da entrada
+PAPER_TRADE_SL_PCT = -5.0        # Stop de perda em 5% da entrada
 ENABLE_RANDOM_TEST_TRADES = False
 
 # Anti-loop de ativo único (evita ficar preso na mesma moeda por muitos ciclos)
@@ -1436,11 +1436,11 @@ def _atualizar_saldo_com_pnl(pnl_lucro):
 def _monitor_sl_tp_automatico():
     """
     Monitora trades abertos e fecha automaticamente quando atingem:
-    - Stop Loss: -3% (perda maxima institucional)
+    - Stop Loss: -5% (perda maxima institucional)
     - Take Profit: +6% (lucro alvo)
     Executa em background a cada 10 segundos.
     """
-    SL_PCT = -3.0
+    SL_PCT = -5.0
     TP_PCT =  6.0
 
     while True:
@@ -1460,7 +1460,7 @@ def _monitor_sl_tp_automatico():
 
                 motivo = None
                 if pnl_pct <= SL_PCT:
-                    motivo = f"SL_AUTO -3% (real: {pnl_pct:.2f}%)"
+                    motivo = f"SL_AUTO -5% (real: {pnl_pct:.2f}%)"
                 elif pnl_pct >= TP_PCT:
                     motivo = f"TP_AUTO +6% (real: {pnl_pct:.2f}%)"
 
@@ -1639,7 +1639,7 @@ def _settle_paper_trades():
             pnl_value = round(margin * (pnl_pct / 100), 2)
 
             if pnl_pct >= PAPER_TRADE_TP_PCT or pnl_pct <= PAPER_TRADE_SL_PCT:
-                reason = 'PAPER_TP_100' if pnl_pct >= PAPER_TRADE_TP_PCT else 'PAPER_SL_3'
+                reason = 'PAPER_TP_100' if pnl_pct >= PAPER_TRADE_TP_PCT else 'PAPER_SL_5'
                 notes = f"{trade.get('notes', '')} | {reason} @ {current_price:.8f}"
                 db.close_trade(
                     trade_id=trade_id,
@@ -1816,7 +1816,7 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                              f"👤 *Conta:* {account_mode.upper()}\n\n"
                              f"🛡️  *PROTEÇÃO ATIVA:*\n"
                              f"✅ TP: ${entry_price * 1.10:.2f} (+100% lucro)\n"
-                             f"❌ SL: ${entry_price * 0.97:.2f} (-3% trava)\n\n"
+                             f"❌ SL: ${entry_price * 0.95:.2f} (-5% trava)\n\n"
                              f"⏱️ *Cooldown Institucional:* 10 min após fechamento")
                     
                     client_tg_token = str(c.get('tg_token') or '').strip()

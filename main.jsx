@@ -145,7 +145,7 @@ const getTradeProgressPercent = (trade) => {
 const getTradeProgressText = (trade) => {
   if (!hasLivePrice(trade)) return 'Aguardando preço ao vivo';
   const pnlPct = Number(trade?.pnl_pct || 0);
-  if (!Number.isFinite(pnlPct)) return 'TP 100% • SL 3%';
+  if (!Number.isFinite(pnlPct)) return 'TP 100% • SL 5%';
   if (pnlPct >= 0) return `Faltam ${Math.max(0, 100 - pnlPct).toFixed(2)}% para TP`;
   return `Faltam ${Math.max(0, 3 - Math.abs(pnlPct)).toFixed(2)}% para SL`;
 };
@@ -619,7 +619,7 @@ const App = () => {
                   {Math.min(data.active_trades?.length || 0, data.max_moedas_ativas || 1)}/{data.max_moedas_ativas || 1}
                 </h2>
                 <p className="text-[8px] font-black text-zinc-700 uppercase mt-2 tracking-widest">
-                  {data.risk_mode === 'aggressive' ? '5 moedas simultâneas' : '1 moeda por vez'} • Ordem 5% da banca • TP 100% • SL 3%
+                  {data.risk_mode === 'aggressive' ? '5 moedas simultâneas' : '1 moeda por vez'} • Ordem 5% da banca • TP 100% • SL 5%
                 </p>
                 {/* Toggle conservador / agressivo */}
                 <div className="mt-4 flex items-center gap-2">
@@ -701,7 +701,7 @@ const App = () => {
                        <div className="text-center py-6">
                          <div className="w-12 h-12 mx-auto rounded-2xl bg-zinc-900 flex items-center justify-center text-zinc-700 mb-4"><Zap size={18} /></div>
                          <p className="text-lg font-black italic text-zinc-700">AGUARDANDO MOEDA</p>
-                           <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-600 mt-2">Cada ordem usa 5% da banca • TP 100% • SL 3%</p>
+                           <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-600 mt-2">Cada ordem usa 5% da banca • TP 100% • SL 5%</p>
                        </div>
                        <div className="h-2 rounded-full bg-zinc-900" />
                      </div>
@@ -930,7 +930,7 @@ const App = () => {
                      <span className="text-[10px] font-black text-zinc-200 uppercase tracking-widest">Certificação Tactical</span>
                   </div>
                   <p className="text-[9px] text-zinc-500 font-bold uppercase leading-relaxed italic">
-                      TRIPLO CÉREBRO COM RIGOR DE {evidence.threshold || 60}% • ATÉ {evidence.max_positions || 5} ENTRADAS SIMULTÂNEAS, SEM REPETIR MOEDA • ORDEM 5% DA BANCA • TP 100% E SL 3%.
+                      TRIPLO CÉREBRO COM RIGOR DE {evidence.threshold || 60}% • ATÉ {evidence.max_positions || 5} ENTRADAS SIMULTÂNEAS, SEM REPETIR MOEDA • ORDEM 5% DA BANCA • TP 100% E SL 5%.
                   </p>
                </div>
             </div>
