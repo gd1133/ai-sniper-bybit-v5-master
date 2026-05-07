@@ -1788,7 +1788,7 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                         order_result = broker.execute_market_order(symbol, side.lower(), qty)
                         
                         if order_result:
-                            # ✅ Executa Proteção: TP +100% / SL -3%
+                            # ✅ Executa Proteção: TP +100% / SL -5%
                             broker.set_tp_sl_sniper(symbol, side.lower(), entry_price, qty)
                             print(f"✅ [ORDEM EXECUTADA] ID: {order_result.get('id', 'N/A')}")
                         else:
