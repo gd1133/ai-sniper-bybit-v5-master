@@ -256,6 +256,7 @@ class BinanceClient:
                 return False, 'ERRO_CORRETORA', f'Erro ao validar conexão: {error_msg[:200]}'
             
             # 3. Validar saldo
+            balance = None
             try:
                 balance = self.get_balance()
                 if balance is None:
@@ -285,7 +286,8 @@ class BinanceClient:
                     return False, 'ERRO_ROBO', f'Erro ao validar símbolo: {error_msg[:200]}'
             
             # 5. Tudo OK!
-            return True, 'OK', f'✅ Pre-flight check Binance passou: Saldo ${balance:.2f}'
+            balance_str = f'${balance:.2f}' if balance is not None else 'N/A'
+            return True, 'OK', f'✅ Pre-flight check Binance passou: Saldo {balance_str}'
             
         except Exception as e:
             # Erro inesperado no próprio pre_flight_check
