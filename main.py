@@ -349,6 +349,31 @@ def place_order_with_protection(
     print(f"   🛡️  SL       : ${sl_price:.4f}  (-{STOP_LOSS_PCT*100:.0f}% preço = -50% margem)")
     print(f"   🧠 Motivo   : {consensus.get('motivo', '')[:120]}")
 
+    # 🔍 PRE-FLIGHT CHECK: Valida condições antes de executar a ordem
+    print("\n🔍 [PRE-FLIGHT CHECK] Validando condições de execução...")
+    
+    # Calcula saldo necessário (entrada + margem de segurança)
+    balance = client.get_balance()
+    required_balance = (qty * price) * 1.1  # 10% de margem de segurança
+    
+    ok, error_category, error_message = client.pre_flight_check(symbol=v5_symbol, required_balance=required_balance)
+    
+    if not ok:
+        print(f"\n❌ [{error_category}] {error_message}")
+        if error_category == 'ERRO_CORRETORA':
+            print("   → Verifique:")
+            print("      • Chaves API válidas e com permissões corretas")
+            print("      • Saldo suficiente na conta")
+            print("      • API não expirou ou foi revogada")
+        elif error_category == 'ERRO_ROBO':
+            print("   → Erro de sistema:")
+            print("      • Problema de conectividade/timeout")
+            print("      • Verifique conexão com a internet")
+            print("      • Tente novamente em alguns instantes")
+        return False
+    
+    print(f"✅ [PRE-FLIGHT CHECK] {error_message}")
+
     if client.pybit_session is None:
         print("⚠️  [ORDEM] pybit_session indisponível. Ordem NÃO executada.")
         return False

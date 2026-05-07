@@ -425,6 +425,74 @@ class BybitClient:
         except Exception as e:
             return False, str(e).split('\n')[0][:200]
 
+    def pre_flight_check(self, symbol=None, required_balance=0):
+        """
+        🔍 PRE-FLIGHT CHECK - Validação completa antes de executar ordem
+        
+        Verifica:
+        1. Conectividade com a API
+        2. Autenticação válida
+        3. Permissões de trading
+        4. Saldo suficiente
+        5. Símbolo válido (se fornecido)
+        
+        Retorna tupla (bool sucesso, str categoria_erro, str mensagem_detalhada)
+        Categorias: 'OK', 'ERRO_CORRETORA', 'ERRO_ROBO'
+        """
+        try:
+            # 1. Validar autenticação
+            if not self.authenticated:
+                return False, 'ERRO_CORRETORA', 'Chave API não configurada ou inválida'
+            
+            # 2. Testar conectividade
+            try:
+                ok, msg = self.test_connection()
+                if not ok:
+                    # Detectar tipo de erro
+                    if any(kw in msg.lower() for kw in ['authenticationerror', '10003', 'invalid key', 'signature', 'permission']):
+                        return False, 'ERRO_CORRETORA', f'Autenticação falhou: {msg}'
+                    elif any(kw in msg.lower() for kw in ['timeout', 'connection', 'network']):
+                        return False, 'ERRO_ROBO', f'Timeout de conexão: {msg}'
+                    else:
+                        return False, 'ERRO_CORRETORA', f'Erro de API: {msg}'
+            except Exception as e:
+                error_msg = str(e)
+                if any(kw in error_msg.lower() for kw in ['timeout', 'connection']):
+                    return False, 'ERRO_ROBO', f'Timeout de conexão: {error_msg[:200]}'
+                return False, 'ERRO_CORRETORA', f'Erro ao validar conexão: {error_msg[:200]}'
+            
+            # 3. Validar saldo
+            try:
+                balance = self.get_balance()
+                if balance is None:
+                    return False, 'ERRO_CORRETORA', 'Não foi possível ler saldo da conta'
+                
+                if required_balance > 0 and balance < required_balance:
+                    return False, 'ERRO_CORRETORA', f'Saldo insuficiente: ${balance:.2f} disponível, ${required_balance:.2f} necessário'
+            except Exception as e:
+                return False, 'ERRO_CORRETORA', f'Erro ao consultar saldo: {str(e)[:200]}'
+            
+            # 4. Validar símbolo (se fornecido)
+            if symbol:
+                try:
+                    normalized_symbol = self._normalize_v5_symbol(symbol)
+                    # Tenta buscar ticker para validar se o símbolo existe
+                    ticker = self.exchange.fetch_ticker(normalized_symbol)
+                    if not ticker:
+                        return False, 'ERRO_CORRETORA', f'Símbolo {normalized_symbol} não encontrado ou inativo'
+                except Exception as e:
+                    error_msg = str(e)
+                    if 'symbol' in error_msg.lower() or 'not found' in error_msg.lower():
+                        return False, 'ERRO_CORRETORA', f'Símbolo inválido: {error_msg[:200]}'
+                    return False, 'ERRO_ROBO', f'Erro ao validar símbolo: {error_msg[:200]}'
+            
+            # 5. Tudo OK!
+            return True, 'OK', f'✅ Pre-flight check passou: Saldo ${balance:.2f}'
+            
+        except Exception as e:
+            # Erro inesperado no próprio pre_flight_check
+            return False, 'ERRO_ROBO', f'Erro interno no pre_flight_check: {str(e)[:200]}'
+
     def set_tp_sl_sniper(self, symbol, side, entry_price, position_qty):
         """
         🎯 REGRA 100/3 PROTOCOL - SETAGEM AUTOMÁTICA DE TP/SL
