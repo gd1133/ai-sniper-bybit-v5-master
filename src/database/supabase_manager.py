@@ -143,6 +143,9 @@ class SupabaseManager:
 
     def _prepare_client_payload(self, client: Dict[str, Any]) -> Dict[str, Any]:
         account_mode = _normalize_account_mode(client.get("account_mode", client.get("is_testnet")))
+        exchange = str(client.get("exchange") or "bybit").strip().lower()
+        if exchange not in ("bybit", "binance"):
+            exchange = "bybit"
         payload = {
             "nome": client.get("nome"),
             "bybit_key": client.get("bybit_key"),
@@ -158,6 +161,7 @@ class SupabaseManager:
                 "balance_source",
                 "broker_testnet_balance" if account_mode == "testnet" else "broker_real_balance",
             ),
+            "exchange": exchange,
         }
         client_id = client.get("id")
         if client_id is not None:
@@ -184,6 +188,12 @@ class SupabaseManager:
             normalized["balance_source"] = (
                 "broker_testnet_balance" if normalized["account_mode"] == "testnet" else "broker_real_balance"
             )
+        # Ensure exchange field has a valid value
+        if "exchange" not in normalized or not normalized.get("exchange"):
+            normalized["exchange"] = "bybit"
+        else:
+            exchange = str(normalized["exchange"]).strip().lower()
+            normalized["exchange"] = exchange if exchange in ("bybit", "binance") else "bybit"
         return normalized
 
     def get_clients(self, active_only: bool = False) -> Optional[List[Dict[str, Any]]]:
