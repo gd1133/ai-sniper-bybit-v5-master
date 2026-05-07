@@ -1781,6 +1781,27 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                     margem = float(c.get('saldo_base', 1000.0)) * 0.05
                     qty = margem / entry_price
 
+                    # --- 🔍 PRE-FLIGHT CHECK: Valida condições antes de executar ---
+                    if _is_order_execution_enabled(APP_MODE):
+                        exchange_name = str(c.get('exchange') or 'bybit').upper()
+                        print(f"🔍 [PRE-FLIGHT CHECK] Validando {c.get('nome')} ({exchange_name})...")
+                        
+                        ok, error_category, error_message = broker.pre_flight_check(
+                            symbol=symbol, 
+                            required_balance=margem * 1.1  # 10% de margem de segurança
+                        )
+                        
+                        if not ok:
+                            print(f"❌ [{error_category}] Cliente: {c.get('nome')} | {error_message}")
+                            if error_category == 'ERRO_CORRETORA':
+                                print(f"   → {c.get('nome')}: Verificar chaves API, permissões ou saldo na {exchange_name}")
+                            elif error_category == 'ERRO_ROBO':
+                                print(f"   → {c.get('nome')}: Problema de conectividade/timeout")
+                            # Pula este cliente e continua com os próximos
+                            return
+                        
+                        print(f"✅ [PRE-FLIGHT OK] {c.get('nome')} ({exchange_name}): {error_message}")
+
                     # --- EXECUÇÃO REAL NA EXCHANGE (PROTOCOLO SNIPER) ---
                     if _is_order_execution_enabled(APP_MODE):
                         exec_label = 'TESTNET' if APP_MODE == 'testnet' else 'REAL'
