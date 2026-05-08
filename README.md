@@ -1,12 +1,20 @@
 # Motor Sniper v60.7
 
-Bot de trading com dashboard web em tempo real, operacao multiativo e integracao com Bybit, Supabase e IA para validacao de sinais.
+Bot de trading com dashboard web em tempo real, operacao multiativo e integracao com **Bybit** e **Binance**, Supabase e IA para validacao de sinais.
 
-## Documentacao completa
+## 🚀 Começar Rápido - Operar REAL
 
-Para a documentacao tecnica, operacional e comercial completa, consulte:
+**Problema:** Robô mostra trades no frontend mas não aparecem na exchange?
 
-- `docs/DOCUMENTACAO_COMPLETA.md`
+**Solução:** Configure para Binance (mais simples que Bybit)
+
+👉 **Guia rápido:** `docs/GUIA_RAPIDO_REAL.md`
+
+### Documentação Completa
+
+- **📘 Documentação Geral:** `docs/DOCUMENTACAO_COMPLETA.md`
+- **🟠 Configurar Binance (RECOMENDADO):** `docs/CONFIGURAR_BINANCE.md`
+- **🔧 Resolver IP Whitelist Bybit:** `docs/RESOLVER_IP_BYBIT.md`
 
 ## Stack
 
