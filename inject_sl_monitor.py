@@ -20,7 +20,7 @@ def _monitor_sl_tp_automatico():
     - Take Profit: +6% (lucro alvo)
     Executa em background a cada 10 segundos.
     """
-    SL_PCT = -3.0
+    SL_PCT = -50.0  # -50% da margem (equivale a -5% de preço com 10x alavancagem)
     TP_PCT = 6.0
 
     while True:
@@ -95,9 +95,9 @@ content = content.replace(marker, MONITOR_FUNC + "\ndef _sync_active_trades_from
 # Adiciona a thread no bloco if __name__ == "__main__"
 THREAD_MARKER = "    threading.Thread(target=sniper_worker_loop, daemon=True).start()"
 THREAD_INSERT = (
-    "\n\n    # Monitor SL/TP automatico (-3% stop loss / +6% take profit)\n"
+    "\n\n    # Monitor SL/TP automatico (-50% margem stop loss / +100% margem take profit)\n"
     "    threading.Thread(target=_monitor_sl_tp_automatico, daemon=True).start()\n"
-    '    print("   Monitor SL/TP: ATIVO (-3% SL / +6% TP)")'
+    '    print("   Monitor SL/TP: ATIVO (-50% SL / +100% TP margem)")'
 )
 
 if THREAD_MARKER in content:

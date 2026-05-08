@@ -302,7 +302,7 @@ SNIPER_POSICAO_UNICA = False     # Multi-ativo: permite até MAX_MOEDAS_ATIVAS s
 SNIPER_SIGNAL_LOCK = threading.Lock()
 SNIPER_SIGNAL_RESERVATIONS = set()
 PAPER_TRADE_TP_PCT = 100.0       # Fecha somente quando dobrar a margem projetada
-PAPER_TRADE_SL_PCT = -3.0        # Stop de perda em 3% da entrada
+PAPER_TRADE_SL_PCT = -50.0       # Stop de perda em 50% da margem (5% de preço com 10x alavancagem)
 ENABLE_RANDOM_TEST_TRADES = False
 
 # Anti-loop de ativo único (evita ficar preso na mesma moeda por muitos ciclos)
@@ -1440,7 +1440,7 @@ def _monitor_sl_tp_automatico():
     - Take Profit: +6% (lucro alvo)
     Executa em background a cada 10 segundos.
     """
-    SL_PCT = -3.0
+    SL_PCT = -50.0  # -50% da margem (equivale a -5% de preço com 10x alavancagem)
     TP_PCT =  6.0
 
     while True:

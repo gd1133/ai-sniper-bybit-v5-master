@@ -176,7 +176,7 @@ class BinanceClient:
                 return False
 
             tp_price = round(entry_price * 1.10, 8)
-            sl_price = round(entry_price * 0.97, 8)
+            sl_price = round(entry_price * 0.95, 8)  # -5% = -50% de margem (alavancagem 10x)
 
             close_side = 'sell' if side.lower() in ('buy', 'long') else 'buy'
 
