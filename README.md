@@ -12,7 +12,7 @@ Para a documentacao tecnica, operacional e comercial completa, consulte:
 
 - **Backend:** Python, Flask, SQLite
 - **Frontend:** React, Vite
-- **Trading/mercado:** CCXT / Bybit
+- **Trading/mercado:** CCXT / Bybit / Binance
 - **IA:** Groq + Gemini + motor local
 - **Persistencia cloud:** Supabase
 
@@ -32,11 +32,12 @@ O motor combina:
 
 - Ate **5 moedas simultaneas**
 - Sem repetir moeda ja aberta
-- **Valor da ordem:** 5% da banca total do cliente
-- **Take Profit:** 100%
-- **Stop Loss:** 3%
+- **Valor da ordem:** 5% da banca total do cliente (3% após stop loss)
+- **Take Profit:** 100% de margem (+10% de preço com 10x alavancagem)
+- **Stop Loss:** 50% de margem (-5% de preço com 10x alavancagem)
+- **Exchanges suportadas:** Bybit e Binance Futures (USDM)
 - **Saida manual:** disponivel no painel para encerrar operacao antes do TP/SL
-- Modo teste e modo real
+- Modo teste e modo real (testnet e conta real)
 - Gestao de investidores/clientes com armazenamento seguro de credenciais
 - Telegram do cliente opcional: so recebe sinal privado se preencher token e chat id
 
