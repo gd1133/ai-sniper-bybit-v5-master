@@ -29,6 +29,7 @@ if __name__ == '__main__':
     original_http = main_web.BybitV5HTTP
     original_compute_recv = main_web._compute_safe_recv_window
     original_save = main_web._save_client_everywhere
+    original_ensure_broker_class = main_web._ensure_broker_class
     original_env = os.environ.get('USE_TESTNET')
 
     captured_payloads = []
@@ -57,6 +58,39 @@ if __name__ == '__main__':
         saved_payload = captured_payloads[-1]
         if saved_payload.get('status') != 'ativo' or saved_payload.get('account_mode') != 'testnet':
             print(f"❌ Payload salvo incorreto no sucesso: {saved_payload}")
+            raise SystemExit(3)
+
+        if saved_payload.get('exchange') != 'bybit':
+            print(f"❌ Exchange default incorreta (esperado bybit): {saved_payload.get('exchange')}")
+            raise SystemExit(3)
+
+        class _FakeBinanceClient:
+            def __init__(self, api_key, api_secret, testnet=False):
+                self.api_key = api_key
+                self.api_secret = api_secret
+                self.testnet = testnet
+
+            def test_connection(self):
+                return True, "OK"
+
+            def get_balance(self):
+                return 123.0
+
+        main_web._ensure_broker_class = lambda exchange='bybit': _FakeBinanceClient
+        binance_ok = main_web.validar_e_salvar_cliente(
+            'key',
+            'secret',
+            True,
+            client_payload={'nome': 'Cliente Binance', 'exchange': 'binance'},
+        )
+
+        if not binance_ok.get('valid') or binance_ok.get('exchange') != 'binance':
+            print(f"❌ Validação Binance esperada como sucesso: {binance_ok}")
+            raise SystemExit(3)
+
+        saved_binance_payload = captured_payloads[-1]
+        if saved_binance_payload.get('exchange') != 'binance':
+            print(f"❌ Exchange Binance não persistida no payload: {saved_binance_payload}")
             raise SystemExit(3)
 
         class _FailingBybitHTTP:
@@ -90,6 +124,7 @@ if __name__ == '__main__':
         main_web.BybitV5HTTP = original_http
         main_web._compute_safe_recv_window = original_compute_recv
         main_web._save_client_everywhere = original_save
+        main_web._ensure_broker_class = original_ensure_broker_class
         if original_env is None:
             os.environ.pop('USE_TESTNET', None)
         else:

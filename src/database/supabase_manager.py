@@ -143,6 +143,9 @@ class SupabaseManager:
 
     def _prepare_client_payload(self, client: Dict[str, Any]) -> Dict[str, Any]:
         account_mode = _normalize_account_mode(client.get("account_mode", client.get("is_testnet")))
+        exchange = str(client.get("exchange") or "bybit").strip().lower()
+        if exchange not in ("bybit", "binance"):
+            exchange = "bybit"
         payload = {
             "nome": client.get("nome"),
             "bybit_key": client.get("bybit_key"),
@@ -158,6 +161,9 @@ class SupabaseManager:
                 "balance_source",
                 "broker_testnet_balance" if account_mode == "testnet" else "broker_real_balance",
             ),
+            # Necessário para multi-corretora (Bybit/Binance). Se a coluna não
+            # existir no Supabase (schema antigo), save_client fará retry sem o campo.
+            "exchange": exchange,
         }
         client_id = client.get("id")
         if client_id is not None:
@@ -184,6 +190,10 @@ class SupabaseManager:
             normalized["balance_source"] = (
                 "broker_testnet_balance" if normalized["account_mode"] == "testnet" else "broker_real_balance"
             )
+        exchange = str(normalized.get("exchange") or "bybit").strip().lower()
+        if exchange not in ("bybit", "binance"):
+            exchange = "bybit"
+        normalized["exchange"] = exchange
         return normalized
 
     def get_clients(self, active_only: bool = False) -> Optional[List[Dict[str, Any]]]:
@@ -226,6 +236,18 @@ class SupabaseManager:
 
         payload = self._prepare_client_payload(client_data)
 
+        def _looks_like_missing_column_error(err: Exception, column: str) -> bool:
+            msg = str(err or "").lower()
+            if not msg:
+                return False
+            # PostgREST / PostgreSQL often mentions "column <x> does not exist"
+            if "does not exist" in msg and column.lower() in msg:
+                return True
+            # Some clients wrap as "schema cache" issues.
+            if "schema cache" in msg and column.lower() in msg:
+                return True
+            return False
+
         try:
             table = self.client.table("clientes")
             if payload.get("id") is None:
@@ -245,6 +267,23 @@ class SupabaseManager:
                 return latest[0]
             return payload
         except Exception as e:
+            # Compatibilidade: schema antigo pode não ter coluna `exchange`.
+            # Faz retry removendo o campo para não quebrar cadastro/edição.
+            if "exchange" in payload and _looks_like_missing_column_error(e, "exchange"):
+                try:
+                    retry_payload = dict(payload)
+                    retry_payload.pop("exchange", None)
+                    table = self.client.table("clientes")
+                    if retry_payload.get("id") is None:
+                        result = table.insert(retry_payload).execute()
+                    else:
+                        result = table.upsert(retry_payload).execute()
+                    rows = getattr(result, "data", None) or []
+                    if rows:
+                        return self._normalize_client_row(rows[0])
+                except Exception as e2:
+                    self._handle_cloud_error("salvar cliente (retry sem exchange)", e2)
+                    return None
             self._handle_cloud_error("salvar cliente", e)
             return None
 

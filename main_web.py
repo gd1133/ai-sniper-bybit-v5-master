@@ -701,9 +701,27 @@ def _get_registered_clients(active_only=False):
     if _is_supabase_ready():
         cloud_clients = cloud_db.get_clients(active_only=active_only)
         if cloud_clients is not None and len(cloud_clients) > 0:
+            # Compatibilidade: ambientes Supabase antigos podem não ter coluna `exchange`.
+            # Se o registro vier sem exchange, preserva o valor local (se existir).
+            try:
+                local_exchange_map = {
+                    int(c.get('id')): str(c.get('exchange') or 'bybit').strip().lower()
+                    for c in (db.get_all_clients() or [])
+                    if c and c.get('id') is not None
+                }
+            except Exception:
+                local_exchange_map = {}
+
             normalized_cloud_clients = []
             for client in cloud_clients:
                 client_with_source = dict(client)
+                exchange = str(client_with_source.get('exchange') or '').strip().lower()
+                if exchange not in ('bybit', 'binance'):
+                    try:
+                        exchange = local_exchange_map.get(int(client_with_source.get('id'))) or 'bybit'
+                    except Exception:
+                        exchange = 'bybit'
+                client_with_source['exchange'] = exchange
                 client_with_source['storage_source'] = 'supabase'
                 try:
                     db.upsert_client_local(client_with_source)
@@ -734,6 +752,18 @@ def _get_registered_client_by_id(client_id):
         if cloud_client is not None:
             cloud_client = dict(cloud_client)
             cloud_client['storage_source'] = 'supabase'
+            # Compatibilidade: Supabase antigo pode não ter coluna `exchange`.
+            try:
+                exchange = str(cloud_client.get('exchange') or '').strip().lower()
+            except Exception:
+                exchange = ''
+            if exchange not in ('bybit', 'binance'):
+                try:
+                    local_existing = db.get_client_by_id(int(client_id))
+                    exchange = str((local_existing or {}).get('exchange') or 'bybit').strip().lower()
+                except Exception:
+                    exchange = 'bybit'
+            cloud_client['exchange'] = exchange
             try:
                 db.upsert_client_local(cloud_client)
             except Exception as e:
@@ -2805,4 +2835,3 @@ if __name__ == "__main__":
     print(f"📊 Dashboard: http://0.0.0.0:{render_port}")
     print("🧠 Cérebro Triplo: ATIVO (Rigor 50%)")
     app.run(host='0.0.0.0', port=render_port, debug=False, use_reloader=False)
-

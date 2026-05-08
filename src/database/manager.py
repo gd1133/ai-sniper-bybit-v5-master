@@ -336,7 +336,13 @@ def upsert_client_local(data: Dict[str, Any]) -> bool:
     if client_id is None:
         return bool(add_client(data))
 
-    if get_client_by_id(int(client_id)):
+    existing = get_client_by_id(int(client_id))
+    if existing:
+        # Compatibilidade: registros antigos (ex: Supabase sem coluna `exchange`)
+        # podem vir sem `exchange` e não devem sobrescrever o valor local.
+        incoming_exchange = str(data.get('exchange') or '').strip().lower()
+        if incoming_exchange not in ('bybit', 'binance'):
+            data = {**data, 'exchange': existing.get('exchange')}
         return update_client(int(client_id), data)
 
     return bool(add_client(data))

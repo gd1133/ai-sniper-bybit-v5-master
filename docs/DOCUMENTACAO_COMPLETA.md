@@ -369,12 +369,15 @@ O sistema possui camada de cadastro para clientes com campos como:
 - nome,
 - saldo base,
 - modo teste ou real,
+- corretora (`exchange`): `bybit` ou `binance`,
 - chave Bybit,
 - segredo Bybit,
 - token Telegram,
 - chat id.
 
 Os campos de Telegram sao **opcionais**. O cliente pode operar apenas com a API da corretora. O Telegram privado so e usado quando token e chat id forem preenchidos.
+
+Observacao: os campos `bybit_key`/`bybit_secret` sao usados para **as duas corretoras**. O que define o broker e o campo `exchange`.
 
 ### Responsabilidades desta camada
 
@@ -388,6 +391,9 @@ Os campos de Telegram sao **opcionais**. O cliente pode operar apenas com a API 
 
 - **Local:** SQLite
 - **Cloud:** Supabase
+
+Para multi-corretora no Supabase, a tabela `public.clientes` precisa ter a coluna `exchange`.
+Use `tools/migrate_add_exchange_column.sql` (ou atualize via `tools/supabase_schema.sql`).
 
 ### Regra de fallback
 
