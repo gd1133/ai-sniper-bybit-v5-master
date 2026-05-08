@@ -16,7 +16,13 @@ if sys.platform == 'win32':
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
-from src.config import get_bybit_base_url, get_bybit_credentials, get_environment_config, resolve_use_testnet
+from src.config import (
+    get_bybit_base_url,
+    get_default_exchange,
+    get_exchange_credentials,
+    get_environment_config,
+    resolve_use_testnet,
+)
 
 # --- IMPORTAÇÕES DAS PASTAS INTERNAS (SRC) - LAZY LOADING ---
 try:
@@ -629,16 +635,10 @@ def _get_public_price_broker():
     if public_price_broker is not None:
         return public_price_broker
 
-    if BybitClient is None:
-        from src.broker.bybit_client import BybitClient as _BybitClient
-        BybitClient = _BybitClient
-
-    bybit_api_key, bybit_api_secret = get_bybit_credentials()
-    public_price_broker = BybitClient(
-        bybit_api_key,
-        bybit_api_secret,
-        testnet=_mode_uses_testnet(APP_MODE),
-    )
+    exchange = get_default_exchange()
+    broker_cls = _ensure_broker_class(exchange)
+    api_key, api_secret = get_exchange_credentials(exchange)
+    public_price_broker = broker_cls(api_key, api_secret, testnet=_mode_uses_testnet(APP_MODE))
     return public_price_broker
 
 
@@ -1872,7 +1872,6 @@ def sniper_worker_loop():
     # ⏳ Carregamento Lazy (apenas quando worker inicia)
     print("⏳ Carregando dependências pesadas (primeira vez)...")
     try:
-        from src.broker.bybit_client import BybitClient
         from src.engine.indicators import IndicatorEngine
         from src.ai_brain.validator import GroqValidator
         print("✅ Dependências carregadas com sucesso")
@@ -1882,10 +1881,10 @@ def sniper_worker_loop():
         return
     
     # Scanner Master
-    master_broker = BybitClient(
-        *get_bybit_credentials(),
-        testnet=_mode_uses_testnet(APP_MODE),
-    )
+    master_exchange = get_default_exchange()
+    master_broker_cls = _ensure_broker_class(master_exchange)
+    master_api_key, master_api_secret = get_exchange_credentials(master_exchange)
+    master_broker = master_broker_cls(master_api_key, master_api_secret, testnet=_mode_uses_testnet(APP_MODE))
     validator = GroqValidator(os.getenv("GEMINI_API_KEY"), os.getenv("GROQ_API_KEY"))
 
     print(f"🚀 Motor Sniper v60.1 Operante. Rigor: {THRESHOLD_ENTRADA}%")
@@ -2805,4 +2804,3 @@ if __name__ == "__main__":
     print(f"📊 Dashboard: http://0.0.0.0:{render_port}")
     print("🧠 Cérebro Triplo: ATIVO (Rigor 50%)")
     app.run(host='0.0.0.0', port=render_port, debug=False, use_reloader=False)
-

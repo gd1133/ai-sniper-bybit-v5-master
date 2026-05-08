@@ -155,6 +155,11 @@ const getTradeProgressText = (trade) => {
  * Visual Proof Framework • Emerald Design
  */
 
+const DEFAULT_EXCHANGE = (() => {
+  const raw = String(import.meta.env.VITE_DEFAULT_EXCHANGE || 'bybit').toLowerCase().trim();
+  return raw === 'binance' ? 'binance' : 'bybit';
+})();
+
 const App = () => {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [showAddForm, setShowAddForm] = useState(false);
@@ -164,7 +169,7 @@ const App = () => {
   const [riskModeUpdating, setRiskModeUpdating] = useState(false);
   const [manualClosingSymbol, setManualClosingSymbol] = useState(null);
   const [addFormFields, setAddFormFields] = useState({
-    id: null, nome: '', saldo_base: 0, bybit_key: '', bybit_secret: '', tg_token: '', chat_id: '', account_mode: 'testnet', exchange: 'bybit'
+    id: null, nome: '', saldo_base: 0, bybit_key: '', bybit_secret: '', tg_token: '', chat_id: '', account_mode: 'testnet', exchange: DEFAULT_EXCHANGE
   });
   const [data, setData] = useState({
     balance: 0,  // Será atualizado do backend
@@ -291,7 +296,7 @@ const App = () => {
   }, []);
 
   const openNewInvestorModal = () => {
-    setAddFormFields({ id: null, nome: '', saldo_base: 0, bybit_key: '', bybit_secret: '', tg_token: '', chat_id: '', account_mode: 'testnet', exchange: 'bybit' });
+    setAddFormFields({ id: null, nome: '', saldo_base: 0, bybit_key: '', bybit_secret: '', tg_token: '', chat_id: '', account_mode: 'testnet', exchange: DEFAULT_EXCHANGE });
     setAddFormMsg(null);
     setShowAddForm(true);
   };

@@ -625,6 +625,7 @@ src/
     learning.py
   broker/
     bybit_client.py
+    binance_client.py
   database/
     manager.py
     supabase_manager.py
@@ -642,8 +643,11 @@ tests/
 Principais variaveis:
 
 - `USE_TESTNET`
+- `DEFAULT_EXCHANGE`
 - `BYBIT_API_KEY`
 - `BYBIT_API_SECRET`
+- `BINANCE_API_KEY`
+- `BINANCE_API_SECRET`
 - `TELEGRAM_TOKEN`
 - `TELEGRAM_CHAT_ID`
 - `GEMINI_API_KEY`

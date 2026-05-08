@@ -12,7 +12,7 @@ Para a documentacao tecnica, operacional e comercial completa, consulte:
 
 - **Backend:** Python, Flask, SQLite
 - **Frontend:** React, Vite
-- **Trading/mercado:** CCXT / Bybit
+- **Trading/mercado:** CCXT / Bybit + Binance
 - **IA:** Groq + Gemini + motor local
 - **Persistencia cloud:** Supabase
 
@@ -62,10 +62,16 @@ Variavel mestre do ambiente:
 
 - `ENVIRONMENT=development|production`
 
-Padrao unico das credenciais Bybit:
+Exchange padrão do deploy (impacta scanner/preços públicos):
+
+- `DEFAULT_EXCHANGE=bybit|binance`
+
+Credenciais MASTER (opcional; para uso público pode ficar em branco):
 
 - `BYBIT_API_KEY`
 - `BYBIT_API_SECRET`
+- `BINANCE_API_KEY`
+- `BINANCE_API_SECRET`
 
 Regras do endpoint:
 
@@ -93,14 +99,17 @@ Valores recomendados para subir com seguranca:
 
 ```env
 ENVIRONMENT=development
+DEFAULT_EXCHANGE=binance
 BYBIT_API_KEY=YOUR_BYBIT_API_KEY
 BYBIT_API_SECRET=YOUR_BYBIT_API_SECRET
+BINANCE_API_KEY=YOUR_BINANCE_API_KEY
+BINANCE_API_SECRET=YOUR_BINANCE_API_SECRET
 ```
 
 Depois do deploy:
 
 1. Use o dashboard para alternar entre `paper`, `testnet` e `real`
-2. Cadastre clientes com `Conta Testnet` ou `Conta Real`
+2. Cadastre clientes com `Conta Testnet` ou `Conta Real` e selecione `Bybit` ou `Binance`
 3. Ajuste `ENVIRONMENT` para `production` quando quiser subir com execucao real por padrao
 
 ## Como rodar
