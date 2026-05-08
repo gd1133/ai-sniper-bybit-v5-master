@@ -642,9 +642,39 @@ def _get_public_price_broker():
     return public_price_broker
 
 
+def _normalize_exchange(value):
+    """Normaliza nomes de corretora para ('bybit'|'binance')."""
+    if value is None:
+        return None
+    exchange = str(value).strip().lower()
+    if not exchange:
+        return None
+    aliases = {
+        'binace': 'binance',
+        'biance': 'binance',
+    }
+    exchange = aliases.get(exchange, exchange)
+    if exchange in ('bybit', 'binance'):
+        return exchange
+    return None
+
+
+def _looks_like_bybit_auth_error(raw_error):
+    lowered = str(raw_error or '').lower()
+    return any(token in lowered for token in (
+        '10003',           # invalid api_key
+        '10004',           # invalid sign
+        'invalid api_key',
+        'invalid api key',
+        'invalid sign',
+        'http 401',
+        'errcode: 401',
+    ))
+
+
 def _ensure_broker_class(exchange='bybit'):
     """Retorna a classe broker correta dependendo da corretora do cliente."""
-    exchange = str(exchange or 'bybit').strip().lower()
+    exchange = _normalize_exchange(exchange) or 'bybit'
     if exchange == 'binance':
         global _BinanceClient
         if '_BinanceClient' not in globals() or _BinanceClient is None:
@@ -661,7 +691,7 @@ def _ensure_broker_class(exchange='bybit'):
 
 def _make_broker(client):
     """Instancia o broker correto usando as credenciais e exchange do cliente."""
-    exchange = str(client.get('exchange') or 'bybit').strip().lower()
+    exchange = _normalize_exchange(client.get('exchange')) or 'bybit'
     broker_cls = _ensure_broker_class(exchange)
     account_mode = _normalize_account_mode(client.get('account_mode', client.get('is_testnet')))
     return broker_cls(
@@ -960,9 +990,7 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
     payload['is_testnet'] = resolved_testnet
     payload['balance_source'] = _mode_balance_source(account_mode)
 
-    exchange = str(payload.get('exchange') or 'bybit').strip().lower()
-    if exchange not in ('bybit', 'binance'):
-        exchange = 'bybit'
+    exchange = _normalize_exchange(payload.get('exchange')) or 'bybit'
     payload['exchange'] = exchange
 
     if client_id is not None:
@@ -1019,16 +1047,40 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
             valid = True
             validation_message = f'Conta {account_mode.upper()} validada via Bybit V5'
         except Exception as e:
-            validation_message = _friendly_bybit_error(str(e), account_mode)
-            payload['status'] = 'erro_api'
-            if existing_client is not None:
+            raw_err = str(e)
+            # Ajuda o usuário quando ele colou chaves da Binance mas esqueceu
+            # de mudar a corretora no painel (erro comum).
+            if _looks_like_bybit_auth_error(raw_err):
                 try:
-                    payload['saldo_base'] = round(float(existing_client.get('saldo_base') or 0.0), 2)
+                    broker_cls = _ensure_broker_class('binance')
+                    broker = broker_cls(api_key, api_secret, testnet=resolved_testnet)
+                    ok, msg = broker.test_connection()
+                    if ok:
+                        balance = broker.get_balance()
+                        exchange = 'binance'
+                        payload['exchange'] = exchange
+                        payload['saldo_base'] = round(float(balance or 0.0), 2)
+                        payload['status'] = 'ativo'
+                        valid = True
+                        validation_message = (
+                            f'Chaves parecem ser da Binance — corretora ajustada para BINANCE ({account_mode.upper()})'
+                        )
+                    else:
+                        validation_message = _friendly_bybit_error(raw_err, account_mode)
+                        payload['status'] = 'erro_api'
+                        payload['saldo_base'] = round(float((existing_client or {}).get('saldo_base') or 0.0), 2)
                 except Exception:
-                    payload['saldo_base'] = 0.0
+                    validation_message = _friendly_bybit_error(raw_err, account_mode)
+                    payload['status'] = 'erro_api'
+                    try:
+                        payload['saldo_base'] = round(float((existing_client or {}).get('saldo_base') or 0.0), 2)
+                    except Exception:
+                        payload['saldo_base'] = 0.0
             else:
+                validation_message = _friendly_bybit_error(raw_err, account_mode)
+                payload['status'] = 'erro_api'
                 try:
-                    payload['saldo_base'] = round(float(payload.get('saldo_base') or 0.0), 2)
+                    payload['saldo_base'] = round(float((existing_client or {}).get('saldo_base') or payload.get('saldo_base') or 0.0), 2)
                 except Exception:
                     payload['saldo_base'] = 0.0
 
@@ -2805,4 +2857,3 @@ if __name__ == "__main__":
     print(f"📊 Dashboard: http://0.0.0.0:{render_port}")
     print("🧠 Cérebro Triplo: ATIVO (Rigor 50%)")
     app.run(host='0.0.0.0', port=render_port, debug=False, use_reloader=False)
-

@@ -1,6 +1,6 @@
 # Motor Sniper v60.7
 
-Bot de trading com dashboard web em tempo real, operacao multiativo e integracao com Bybit, Supabase e IA para validacao de sinais.
+Bot de trading com dashboard web em tempo real, operacao multiativo e integracao com Bybit/Binance, Supabase e IA para validacao de sinais.
 
 ## Documentacao completa
 
@@ -12,7 +12,7 @@ Para a documentacao tecnica, operacional e comercial completa, consulte:
 
 - **Backend:** Python, Flask, SQLite
 - **Frontend:** React, Vite
-- **Trading/mercado:** CCXT / Bybit
+- **Trading/mercado:** CCXT / Bybit / Binance (Futures USDM)
 - **IA:** Groq + Gemini + motor local
 - **Persistencia cloud:** Supabase
 
@@ -62,10 +62,14 @@ Variavel mestre do ambiente:
 
 - `ENVIRONMENT=development|production`
 
-Padrao unico das credenciais Bybit:
+Padrao unico das credenciais (painel):
 
 - `BYBIT_API_KEY`
 - `BYBIT_API_SECRET`
+
+No dashboard, ao cadastrar/editar um investidor, selecione a **Corretora** (Bybit ou Binance). As chaves ficam nos mesmos campos (`bybit_key`/`bybit_secret`) e a escolha da corretora define qual broker sera usado.
+
+Se voce colar chaves da **Binance** mas esquecer a corretora como **Bybit**, o backend tenta detectar isso (erro de autenticacao na Bybit + validacao OK na Binance) e ajusta automaticamente para **Binance**.
 
 Regras do endpoint:
 
@@ -100,8 +104,10 @@ BYBIT_API_SECRET=YOUR_BYBIT_API_SECRET
 Depois do deploy:
 
 1. Use o dashboard para alternar entre `paper`, `testnet` e `real`
-2. Cadastre clientes com `Conta Testnet` ou `Conta Real`
+2. Cadastre clientes com `Conta Testnet` ou `Conta Real` e selecione a corretora (Bybit/Binance)
 3. Ajuste `ENVIRONMENT` para `production` quando quiser subir com execucao real por padrao
+
+Para saber **onde o seu robo esta hospedado**, veja o painel do provedor (Render/Railway) e copie a URL do servico (dominio/endpoint) exibida la.
 
 ## Como rodar
 
