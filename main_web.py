@@ -431,6 +431,51 @@ def _canonicalize_symbol(sym):
     return compact
 
 
+def _canonicalize_symbol_for_exchange(sym, exchange):
+    """Converte símbolo para o formato esperado pela corretora do cliente."""
+    exchange = str(exchange or 'bybit').strip().lower()
+    canonical_bybit = _canonicalize_symbol(sym)
+    if exchange != 'binance':
+        return canonical_bybit
+
+    raw = str(canonical_bybit or sym or '').strip().upper()
+    if not raw:
+        return ""
+
+    # Binance USDM (CCXT) usa o padrão "BASE/QUOTE" sem sufixos (ex.: :USDT).
+    if ':' in raw:
+        raw = raw.split(':', 1)[0]
+
+    raw = raw.replace(' ', '')
+    if '/' in raw:
+        base, quote = raw.split('/', 1)
+        if base and quote:
+            return f"{base}/{quote}"
+
+    if raw.endswith('USDT') and len(raw) > 4:
+        base = raw[:-4]
+        return f"{base}/USDT"
+
+    return raw
+
+
+def _normalize_broker_side(side):
+    """Normaliza side para o formato aceito pelo CCXT: 'buy' ou 'sell'."""
+    raw = str(side or '').strip().upper()
+    mapping = {
+        'BUY': 'buy',
+        'LONG': 'buy',
+        'COMPRAR': 'buy',
+        'SELL': 'sell',
+        'SHORT': 'sell',
+        'VENDER': 'sell',
+    }
+    normalized = mapping.get(raw)
+    if normalized is None:
+        raise ValueError(f"Lado inválido para execução: {raw or 'vazio'}.")
+    return normalized
+
+
 def _coerce_float(*values, default=0.0):
     for value in values:
         try:
@@ -1747,35 +1792,57 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
         can_open, reason = _reserve_signal_slot(symbol)
         if not can_open:
             print(f"🔒 Bloqueio de Segurança: {reason}")
-            return
+            return {"accepted": False, "error": reason}
         slot_reserved = True
 
+        canonical_symbol = _canonicalize_symbol(symbol) or str(symbol or '').strip()
+        confidence = _coerce_float(res_ia.get('probabilidade'), res_ia.get('confidence'), default=0.0)
+        motivo = str(res_ia.get('motivo') or res_ia.get('reason') or '').strip()
+        normalized_side_label = str(side or '').strip().upper()
+        broker_side = _normalize_broker_side(normalized_side_label)
+
         signal_snapshot = _build_last_sniper_signal(
-            symbol,
-            side,
+            canonical_symbol,
+            normalized_side_label,
             entry_price,
-            res_ia.get('probabilidade'),
-            res_ia.get('motivo'),
+            confidence,
+            motivo,
         )
         central_state['last_sniper_signal'] = signal_snapshot
         _push_recent_sniper_signal(signal_snapshot)
+        central_state['symbol'] = _limpar_simbolo(canonical_symbol)
+        central_state['confidence'] = confidence
+        central_state['status'] = (
+            f"🎯 SINAL BROADCAST: {normalized_side_label} {_limpar_simbolo(canonical_symbol)} @ ${float(entry_price):.2f}"
+        )
+        central_state['ia2_decision']['motivo'] = motivo or central_state['ia2_decision'].get('motivo')
 
         # 1. Notificação Master (Para o seu Grupo VIP ou seu Bot de Controle)
         master_tk, master_chat = _get_master_telegram_config()
         if master_tk and master_chat:
             m_msg = (f"🚀 *SINAL SNIPER BROADCAST*\n\n"
-                     f"📦 *Ativo:* {symbol}\n📈 *Lado:* {side}\n"
-                     f"🎯 *Entrada:* ${entry_price}\n🧠 *Confiança:* {res_ia.get('probabilidade')}%")
+                     f"📦 *Ativo:* {canonical_symbol}\n📈 *Lado:* {normalized_side_label}\n"
+                     f"🎯 *Entrada:* ${entry_price}\n🧠 *Confiança:* {confidence}%")
             requests.post(f"https://api.telegram.org/bot{master_tk}/sendMessage", 
                           json={"chat_id": master_chat, "text": m_msg, "parse_mode": "Markdown"})
 
         # 2. Loop de Execução para Clientes Cadastrados
         clientes = _get_registered_clients(active_only=True)
+        target_account_mode = _get_synced_account_mode_for_operation(APP_MODE)
+        scheduled = 0
+        skipped_mode = 0
         for cliente in clientes:
             def task_cliente(c):
                 try:
                     account_mode = _normalize_account_mode(c.get('account_mode', c.get('is_testnet')))
+                    if target_account_mode and account_mode != target_account_mode:
+                        print(
+                            f"⏭️ [SKIP] {c.get('nome')} account_mode={account_mode} (APP_MODE={APP_MODE})"
+                        )
+                        return
                     broker = _make_broker(c)
+                    exchange = str(c.get('exchange') or 'bybit').strip().lower()
+                    broker_symbol = _canonicalize_symbol_for_exchange(canonical_symbol, exchange)
                     
                     # Gestão Dinâmica: 5% Banca (GAIN) / 3% (RECOVERY)
                     margem = float(c.get('saldo_base', 1000.0)) * 0.05
@@ -1784,12 +1851,14 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                     # --- EXECUÇÃO REAL NA EXCHANGE (PROTOCOLO SNIPER) ---
                     if _is_order_execution_enabled(APP_MODE):
                         exec_label = 'TESTNET' if APP_MODE == 'testnet' else 'REAL'
-                        print(f"🚀 [EXECUÇÃO {exec_label}] {c.get('nome')} - {side} {qty:.4f} {symbol}")
-                        order_result = broker.execute_market_order(symbol, side.lower(), qty)
+                        print(
+                            f"🚀 [EXECUÇÃO {exec_label}] {c.get('nome')} - {normalized_side_label} {qty:.4f} {broker_symbol} ({exchange})"
+                        )
+                        order_result = broker.execute_market_order(broker_symbol, broker_side, qty)
                         
                         if order_result:
                             # ✅ Executa Proteção: TP +100% / SL -3%
-                            broker.set_tp_sl_sniper(symbol, side.lower(), entry_price, qty)
+                            broker.set_tp_sl_sniper(broker_symbol, broker_side, entry_price, qty)
                             print(f"✅ [ORDEM EXECUTADA] ID: {order_result.get('id', 'N/A')}")
                         else:
                             print(f"⚠️  [ORDEM FALHADA] {c.get('nome')} - Fallback para simulação")
@@ -1805,13 +1874,13 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                     # --- NOTIFICAÇÃO PRIVADA EDUCATIVA (SNIPER PROTOCOL) ---
                     c_msg = (f"🎯 *SNIPER GIVALDO v60.1 - DISPARO CONFIRMADO*\n\n"
                              f"👤 *Trader:* {c.get('nome')}\n"
-                             f"📦 *Ativo:* {symbol}\n"
-                             f"📈 *Lado:* {side.upper()}\n"
+                             f"📦 *Ativo:* {_limpar_simbolo(canonical_symbol)}\n"
+                             f"📈 *Lado:* {normalized_side_label}\n"
                              f"💰 *Margem:* ${margem:.2f} (5% da banca)\n"
                              f"🎯 *Quantidade:* {qty:.4f}\n"
                              f"📍 *Entrada:* ${entry_price:.2f}\n\n"
-                             f"🧠 *Confiança Cérebro Triplo:* {res_ia.get('probabilidade')}%\n"
-                             f"📝 *Motivo:* {res_ia.get('motivo')}\n"
+                             f"🧠 *Confiança Cérebro Triplo:* {confidence}%\n"
+                             f"📝 *Motivo:* {motivo}\n"
                              f"🔐 *Modo:* {_mode_display_label(APP_MODE)} • {_execution_status_label(APP_MODE)}\n"
                              f"👤 *Conta:* {account_mode.upper()}\n\n"
                              f"🛡️  *PROTEÇÃO ATIVA:*\n"
@@ -1827,21 +1896,30 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
 
                     # Regista no histórico do cliente (com status OPEN)
                     closed_at = time.strftime("%d/%m %H:%M", time.localtime())
-                    db.record_trade(c.get('id'), symbol, side, 0.0, round(margem, 2), closed_at, 
-                                  notes=f"SNIPER v60.1 - Conf: {res_ia.get('probabilidade')}% | Entrada: {entry_price:.8f}", status="open", entry_price=entry_price)
+                    db.record_trade(
+                        c.get('id'),
+                        canonical_symbol,
+                        normalized_side_label,
+                        0.0,
+                        round(margem, 2),
+                        closed_at,
+                        notes=f"SNIPER v60.1 - Conf: {confidence}% | Entrada: {entry_price:.8f}",
+                        status="open",
+                        entry_price=entry_price,
+                    )
 
                     # --- SINCRONIZAÇÃO NUVEM (SUPABASE) ---
                     if cloud_db:
                         try:
                             cloud_db.record_trade({
                                 "client_id": c.get('id'),
-                                "pair": symbol,
-                                "side": side,
+                                "pair": canonical_symbol,
+                                "side": normalized_side_label,
                                 "pnl_pct": 0.0,
                                 "profit": round(margem, 2),
                                 "entry_price": round(entry_price, 8),
                                 "closed_at": closed_at,
-                                "notes": f"SNIPER v60.1 - Conf: {res_ia.get('probabilidade')}%",
+                                "notes": f"SNIPER v60.1 - Conf: {confidence}%",
                                 "status": "open",
                                 "nome_cliente": c.get('nome') # Campo extra para facilitar análise na nuvem
                             })
@@ -1851,10 +1929,21 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                 except Exception as e:
                     print(f"❌ Falha na conta de {c.get('nome')}: {e}")
 
+            client_mode = _normalize_account_mode(cliente.get('account_mode', cliente.get('is_testnet')))
+            if target_account_mode and client_mode != target_account_mode:
+                skipped_mode += 1
+                continue
+            scheduled += 1
             threading.Thread(target=task_cliente, args=(cliente,)).start()
 
+        return {
+            "accepted": True,
+            "scheduled_clients": scheduled,
+            "skipped_clients_mode_mismatch": skipped_mode,
+        }
     except Exception as e:
         print(f"⚠️ Erro Crítico no Broadcast: {e}")
+        return {"accepted": False, "error": str(e)}
     finally:
         if slot_reserved:
             _release_signal_slot(symbol)
@@ -2725,7 +2814,6 @@ def broadcast_sniper_signal():
         "reason": "Confluência 70% detectada"
     }
     """
-    slot_reserved = False
     try:
         payload = _sanitize_signal_payload(request.json)
         symbol = payload['symbol']
@@ -2733,35 +2821,16 @@ def broadcast_sniper_signal():
         entry_price = payload['entry_price']
         confidence = payload['confidence']
         reason = payload['reason']
-        can_open, block_reason = _reserve_signal_slot(symbol)
-        if not can_open:
-            return jsonify({"error": block_reason}), 409
-        slot_reserved = True
-        signal_snapshot = _build_last_sniper_signal(symbol, side, entry_price, confidence, reason)
-        
-        # Atualiza central_state
-        symbol_limpo = _limpar_simbolo(symbol)
-        central_state['symbol'] = symbol_limpo
-        central_state['confidence'] = confidence
-        central_state['status'] = f"🎯 SINAL BROADCAST: {side} {symbol_limpo} @ ${entry_price:.2f}"
-        central_state['last_sniper_signal'] = signal_snapshot
-        _push_recent_sniper_signal(signal_snapshot)
-        central_state['ia2_decision']['motivo'] = reason
-        
-        # Registra operação no banco
-        db.record_trade(
-            client_id=1,
-            pair=symbol,
-            side=side,
-            pnl_pct=0,
-            profit=round(_get_initial_test_balance() * 0.05, 2),
-            closed_at=time.strftime("%d/%m %H:%M", time.localtime()),
-            notes=f"BROADCAST: {side} {symbol} @ {entry_price:.2f} | Conf: {confidence}% | {reason}",
-            status="open",
-            entry_price=entry_price,
+        result = broadcast_ordem_global(
+            symbol,
+            side,
+            entry_price,
+            {"probabilidade": confidence, "motivo": reason},
         )
+        if not (result or {}).get("accepted", False):
+            return jsonify({"error": (result or {}).get("error") or "Bloqueado"}), 409
 
-        # Atualiza ativo em aberto imediatamente para aparecer no frontend sem esperar o loop.
+        # Atualiza ativos em aberto imediatamente para aparecer no frontend sem esperar o loop.
         _sync_active_trades_from_db()
         
         print(f"\n{'='*60}")
@@ -2777,18 +2846,17 @@ def broadcast_sniper_signal():
         return jsonify({
             "success": True,
             "status": "✅ Sinal Broadcast Executado!",
-            "symbol": symbol_limpo,
+            "symbol": _limpar_simbolo(symbol),
             "side": side,
             "entry_price": entry_price,
             "confidence": confidence,
-            "message": f"Operação {side} {symbol} registrada com sucesso"
-        })
+            "scheduled_clients": (result or {}).get("scheduled_clients", 0),
+            "skipped_clients_mode_mismatch": (result or {}).get("skipped_clients_mode_mismatch", 0),
+            "message": f"Broadcast agendado para os investidores ativos",
+        }), 202
     except Exception as e:
         print(f"❌ Erro ao processar broadcast: {e}")
         return jsonify({"error": str(e)}), 400
-    finally:
-        if slot_reserved:
-            _release_signal_slot(symbol)
 
 if __name__ == "__main__":
     render_port = int(os.getenv("PORT", "5000"))
@@ -2805,4 +2873,3 @@ if __name__ == "__main__":
     print(f"📊 Dashboard: http://0.0.0.0:{render_port}")
     print("🧠 Cérebro Triplo: ATIVO (Rigor 50%)")
     app.run(host='0.0.0.0', port=render_port, debug=False, use_reloader=False)
-
