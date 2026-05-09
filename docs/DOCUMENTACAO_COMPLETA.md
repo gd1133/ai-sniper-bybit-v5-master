@@ -314,7 +314,7 @@ Configuracao observada no codigo:
 - **Posicao unica:** desativada
 - **Valor da ordem:** 5% da banca total do cliente
 - **Take Profit:** 100%
-- **Stop Loss:** 3%
+- **Stop Loss:** 50% (margem)
 - **Saida manual pelo painel:** disponivel para encerramento antecipado
 - **Cooldown institucional:** 15 segundos
 - **Top moedas por ciclo:** 8

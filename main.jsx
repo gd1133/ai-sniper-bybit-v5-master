@@ -139,15 +139,15 @@ const getTradeProgressPercent = (trade) => {
   const pnlPct = Number(trade?.pnl_pct || 0);
   if (!Number.isFinite(pnlPct)) return 0;
   if (pnlPct >= 0) return Math.max(0, Math.min(100, pnlPct));
-  return Math.max(0, Math.min(100, (Math.abs(pnlPct) / 3) * 100));
+  return Math.max(0, Math.min(100, (Math.abs(pnlPct) / 50) * 100));
 };
 
 const getTradeProgressText = (trade) => {
   if (!hasLivePrice(trade)) return 'Aguardando preço ao vivo';
   const pnlPct = Number(trade?.pnl_pct || 0);
-  if (!Number.isFinite(pnlPct)) return 'TP 100% • SL 3%';
+  if (!Number.isFinite(pnlPct)) return 'TP 100% • SL 50%';
   if (pnlPct >= 0) return `Faltam ${Math.max(0, 100 - pnlPct).toFixed(2)}% para TP`;
-  return `Faltam ${Math.max(0, 3 - Math.abs(pnlPct)).toFixed(2)}% para SL`;
+  return `Faltam ${Math.max(0, 50 - Math.abs(pnlPct)).toFixed(2)}% para SL`;
 };
 
 /**
@@ -618,9 +618,9 @@ const App = () => {
                 <h2 className="text-4xl font-black italic tracking-tighter text-white">
                   {Math.min(data.active_trades?.length || 0, data.max_moedas_ativas || 1)}/{data.max_moedas_ativas || 1}
                 </h2>
-                <p className="text-[8px] font-black text-zinc-700 uppercase mt-2 tracking-widest">
-                  {data.risk_mode === 'aggressive' ? '5 moedas simultâneas' : '1 moeda por vez'} • Ordem 5% da banca • TP 100% • SL 3%
-                </p>
+                  <p className="text-[8px] font-black text-zinc-700 uppercase mt-2 tracking-widest">
+                  {data.risk_mode === 'aggressive' ? '5 moedas simultâneas' : '1 moeda por vez'} • Ordem 5% da banca • TP 100% • SL 50%
+                  </p>
                 {/* Toggle conservador / agressivo */}
                 <div className="mt-4 flex items-center gap-2">
                   <button
@@ -701,7 +701,7 @@ const App = () => {
                        <div className="text-center py-6">
                          <div className="w-12 h-12 mx-auto rounded-2xl bg-zinc-900 flex items-center justify-center text-zinc-700 mb-4"><Zap size={18} /></div>
                          <p className="text-lg font-black italic text-zinc-700">AGUARDANDO MOEDA</p>
-                           <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-600 mt-2">Cada ordem usa 5% da banca • TP 100% • SL 3%</p>
+                          <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-600 mt-2">Cada ordem usa 5% da banca • TP 100% • SL 50%</p>
                        </div>
                        <div className="h-2 rounded-full bg-zinc-900" />
                      </div>
@@ -930,7 +930,7 @@ const App = () => {
                      <span className="text-[10px] font-black text-zinc-200 uppercase tracking-widest">Certificação Tactical</span>
                   </div>
                   <p className="text-[9px] text-zinc-500 font-bold uppercase leading-relaxed italic">
-                      TRIPLO CÉREBRO COM RIGOR DE {evidence.threshold || 60}% • ATÉ {evidence.max_positions || 5} ENTRADAS SIMULTÂNEAS, SEM REPETIR MOEDA • ORDEM 5% DA BANCA • TP 100% E SL 3%.
+                      TRIPLO CÉREBRO COM RIGOR DE {evidence.threshold || 60}% • ATÉ {evidence.max_positions || 5} ENTRADAS SIMULTÂNEAS, SEM REPETIR MOEDA • ORDEM 5% DA BANCA • TP 100% E SL 50%.
                   </p>
                </div>
             </div>
@@ -1041,8 +1041,8 @@ const App = () => {
       {/* FORMULÁRIO MODAL (Gestão de Pessoas) */}
       {showAddForm && (
         <div className="fixed inset-0 bg-black/95 backdrop-blur-xl z-[100] flex items-center justify-center p-6 animate-in fade-in duration-300">
-          <div className="bg-[#0d0e12] w-full max-w-2xl rounded-[4rem] border border-zinc-800 shadow-2xl relative overflow-hidden">
-            <div className="p-10 border-b border-white/5 flex justify-between items-center bg-zinc-900/20">
+          <div className="bg-[#0d0e12] w-full max-w-xl mx-auto rounded-[4rem] border border-zinc-800 shadow-2xl relative overflow-hidden">
+            <div className="p-8 sm:p-10 border-b border-white/5 flex justify-between items-center bg-zinc-900/20">
                <div className="flex items-center gap-5">
                   <div className="w-14 h-14 bg-green-500/10 rounded-2xl flex items-center justify-center text-green-500 border border-green-500/20">
                      <Users size={28}/>
@@ -1061,7 +1061,7 @@ const App = () => {
                  <button onClick={() => { setShowAddForm(false); setAddFormMsg(null); }} className="p-4 hover:bg-zinc-800 rounded-full transition-all text-zinc-500 hover:text-white"><X size={28}/></button>
                </div>
             </div>
-            <form className="p-12 space-y-8" onSubmit={async (e) => {
+            <form className="p-8 sm:p-10 space-y-8" onSubmit={async (e) => {
                 e.preventDefault();
                 setAddFormSaving(true);
                 setAddFormMsg(null);
@@ -1233,7 +1233,7 @@ const App = () => {
           </div>
           <div className="flex items-center gap-3 text-[10px] font-black text-zinc-500 uppercase tracking-widest italic">
              <ShieldCheck size={14} className="text-zinc-600"/>
-             Protocolo 100/3 Verificado
+             Protocolo 100/50 Verificado
            </div>
          </div>
          <p className="text-[9px] font-black text-zinc-700 uppercase tracking-[0.5em] italic">Motor Sniper v60.7 &copy; 2026</p>

@@ -34,7 +34,7 @@ O motor combina:
 - Sem repetir moeda ja aberta
 - **Valor da ordem:** 5% da banca total do cliente
 - **Take Profit:** 100%
-- **Stop Loss:** 3%
+- **Stop Loss:** 50% (margem)
 - **Saida manual:** disponivel no painel para encerrar operacao antes do TP/SL
 - Modo teste e modo real
 - Gestao de investidores/clientes com armazenamento seguro de credenciais
