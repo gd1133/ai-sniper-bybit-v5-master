@@ -276,7 +276,7 @@ def start_runtime_services():
 
         threading.Thread(target=sniper_worker_loop, daemon=True).start()
         threading.Thread(target=_monitor_sl_tp_automatico, daemon=True).start()
-        print("   Monitor SL/TP: ATIVO (-3% SL / +6% TP)")
+        print("   Monitor SL/TP: ATIVO (SL -50% / TP +100%)")
 
         # Aquece o cache de saldo em background imediatamente para que o
         # primeiro poll do dashboard não precise esperar.
@@ -302,8 +302,13 @@ SNIPER_POSICAO_UNICA = False     # Multi-ativo: permite até MAX_MOEDAS_ATIVAS s
 SNIPER_SIGNAL_LOCK = threading.Lock()
 SNIPER_SIGNAL_RESERVATIONS = set()
 PAPER_TRADE_TP_PCT = 100.0       # Fecha somente quando dobrar a margem projetada
-PAPER_TRADE_SL_PCT = -3.0        # Stop de perda em 3% da entrada
+PAPER_TRADE_SL_PCT = -50.0       # Stop de perda em 50% da margem (≈ -5% preço com 10×)
 ENABLE_RANDOM_TEST_TRADES = False
+
+# Premissa do protocolo 100/50:
+# - pnl_pct expresso em % da margem (não em % do preço)
+# - com 10× de alavancagem, 1% de variação no preço ≈ 10% de variação na margem
+SNIPER_LEVERAGE = 10.0
 
 # Anti-loop de ativo único (evita ficar preso na mesma moeda por muitos ciclos)
 BLOQUEIO_REPETICAO_MOEDA_SECS = 60       # 1 min para girar moedas rápido
@@ -1199,7 +1204,8 @@ def _calculate_live_trade_metrics(entry_price, current_price, side):
     market_move_pct = ((current - entry) / entry) * 100
     normalized_side = str(side or '').upper()
     is_sell = normalized_side in {'VENDER', 'SELL'}
-    pnl_pct = ((entry - current) / entry) * 100 if is_sell else ((current - entry) / entry) * 100
+    pnl_pct_price = ((entry - current) / entry) * 100 if is_sell else ((current - entry) / entry) * 100
+    pnl_pct = pnl_pct_price * float(SNIPER_LEVERAGE or 1.0)
 
     if current > entry:
         trend = "up"
@@ -1436,12 +1442,12 @@ def _atualizar_saldo_com_pnl(pnl_lucro):
 def _monitor_sl_tp_automatico():
     """
     Monitora trades abertos e fecha automaticamente quando atingem:
-    - Stop Loss: -3% (perda maxima institucional)
-    - Take Profit: +6% (lucro alvo)
+    - Stop Loss: -50% (perda maxima institucional, % da margem)
+    - Take Profit: +100% (lucro alvo, % da margem)
     Executa em background a cada 10 segundos.
     """
-    SL_PCT = -3.0
-    TP_PCT =  6.0
+    SL_PCT = -50.0
+    TP_PCT =  100.0
 
     while True:
         try:
@@ -1460,9 +1466,9 @@ def _monitor_sl_tp_automatico():
 
                 motivo = None
                 if pnl_pct <= SL_PCT:
-                    motivo = f"SL_AUTO -3% (real: {pnl_pct:.2f}%)"
+                    motivo = f"SL_AUTO -50% (real: {pnl_pct:.2f}%)"
                 elif pnl_pct >= TP_PCT:
-                    motivo = f"TP_AUTO +6% (real: {pnl_pct:.2f}%)"
+                    motivo = f"TP_AUTO +100% (real: {pnl_pct:.2f}%)"
 
                 if motivo:
                     try:
@@ -1639,7 +1645,7 @@ def _settle_paper_trades():
             pnl_value = round(margin * (pnl_pct / 100), 2)
 
             if pnl_pct >= PAPER_TRADE_TP_PCT or pnl_pct <= PAPER_TRADE_SL_PCT:
-                reason = 'PAPER_TP_100' if pnl_pct >= PAPER_TRADE_TP_PCT else 'PAPER_SL_3'
+                reason = 'PAPER_TP_100' if pnl_pct >= PAPER_TRADE_TP_PCT else 'PAPER_SL_50'
                 notes = f"{trade.get('notes', '')} | {reason} @ {current_price:.8f}"
                 db.close_trade(
                     trade_id=trade_id,
@@ -1788,7 +1794,7 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                         order_result = broker.execute_market_order(symbol, side.lower(), qty)
                         
                         if order_result:
-                            # ✅ Executa Proteção: TP +100% / SL -3%
+                            # ✅ Executa Proteção: TP +100% / SL -50%
                             broker.set_tp_sl_sniper(symbol, side.lower(), entry_price, qty)
                             print(f"✅ [ORDEM EXECUTADA] ID: {order_result.get('id', 'N/A')}")
                         else:
@@ -1816,7 +1822,7 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                              f"👤 *Conta:* {account_mode.upper()}\n\n"
                              f"🛡️  *PROTEÇÃO ATIVA:*\n"
                              f"✅ TP: ${entry_price * 1.10:.2f} (+100% lucro)\n"
-                             f"❌ SL: ${entry_price * 0.97:.2f} (-3% trava)\n\n"
+                             f"❌ SL: ${entry_price * 0.95:.2f} (-50% perda)\n\n"
                              f"⏱️ *Cooldown Institucional:* 10 min após fechamento")
                     
                     client_tg_token = str(c.get('tg_token') or '').strip()
@@ -2805,4 +2811,3 @@ if __name__ == "__main__":
     print(f"📊 Dashboard: http://0.0.0.0:{render_port}")
     print("🧠 Cérebro Triplo: ATIVO (Rigor 50%)")
     app.run(host='0.0.0.0', port=render_port, debug=False, use_reloader=False)
-

@@ -427,10 +427,10 @@ class BybitClient:
 
     def set_tp_sl_sniper(self, symbol, side, entry_price, position_qty):
         """
-        🎯 REGRA 100/3 PROTOCOL - SETAGEM AUTOMÁTICA DE TP/SL
+        🎯 REGRA 100/50 PROTOCOL - SETAGEM AUTOMÁTICA DE TP/SL
         
         Take Profit: +100% de lucro sobre a margem
-        Stop Loss: -3% de perda fixa (TRAVA INSTITUCIONAL)
+        Stop Loss: -50% de perda sobre a margem (≈ -5% no preço com alavancagem 10×)
         
         Funciona pós-entrada para garantir proteção de capital.
         """
@@ -441,12 +441,12 @@ class BybitClient:
             
             # Cálculo de TP/SL (Bybit usa preços absolutos, não percentuais)
             tp_price = entry_price * 1.10  # +10% = +100% de margem (alavancagem 10x)
-            sl_price = entry_price * 0.97  # -3% = Stop Loss Institucional
+            sl_price = entry_price * 0.95  # -5% preço = -50% margem (alavancagem 10x)
             
             print(f"🛡️  [PROTEÇÃO SNIPER] {symbol}")
             print(f"   📍 Entrada: ${entry_price:.2f}")
             print(f"   ✅ TP: ${tp_price:.2f} (+100% margem)")
-            print(f"   ❌ SL: ${sl_price:.2f} (-3% trava)")
+            print(f"   ❌ SL: ${sl_price:.2f} (-50% margem)")
             
             params = {
                 'category': 'linear',
