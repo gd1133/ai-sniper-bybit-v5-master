@@ -158,6 +158,7 @@ class SupabaseManager:
                 "balance_source",
                 "broker_testnet_balance" if account_mode == "testnet" else "broker_real_balance",
             ),
+            "exchange": str(client.get("exchange") or "bybit").strip().lower(),
         }
         client_id = client.get("id")
         if client_id is not None:
@@ -184,6 +185,7 @@ class SupabaseManager:
             normalized["balance_source"] = (
                 "broker_testnet_balance" if normalized["account_mode"] == "testnet" else "broker_real_balance"
             )
+        normalized["exchange"] = str(normalized.get("exchange") or "bybit").strip().lower()
         return normalized
 
     def get_clients(self, active_only: bool = False) -> Optional[List[Dict[str, Any]]]:

@@ -18,7 +18,6 @@ import {
   Trash2,
   Settings
 } from 'lucide-react';
-import { Analytics } from '@vercel/analytics/react';
 
 const getApiBase = () => {
   const configuredBase = import.meta.env.VITE_API_BASE?.trim();
@@ -145,9 +144,9 @@ const getTradeProgressPercent = (trade) => {
 const getTradeProgressText = (trade) => {
   if (!hasLivePrice(trade)) return 'Aguardando preço ao vivo';
   const pnlPct = Number(trade?.pnl_pct || 0);
-  if (!Number.isFinite(pnlPct)) return 'TP 100% • SL 3%';
+  if (!Number.isFinite(pnlPct)) return 'TP 100% da entrada • SL 50% da entrada';
   if (pnlPct >= 0) return `Faltam ${Math.max(0, 100 - pnlPct).toFixed(2)}% para TP`;
-  return `Faltam ${Math.max(0, 3 - Math.abs(pnlPct)).toFixed(2)}% para SL`;
+  return `Faltam ${Math.max(0, 50 - Math.abs(pnlPct)).toFixed(2)}% para SL`;
 };
 
 /**
@@ -619,7 +618,7 @@ const App = () => {
                   {Math.min(data.active_trades?.length || 0, data.max_moedas_ativas || 1)}/{data.max_moedas_ativas || 1}
                 </h2>
                 <p className="text-[8px] font-black text-zinc-700 uppercase mt-2 tracking-widest">
-                  {data.risk_mode === 'aggressive' ? '5 moedas simultâneas' : '1 moeda por vez'} • Ordem 5% da banca • TP 100% • SL 3%
+                  {data.risk_mode === 'aggressive' ? '5 moedas simultâneas' : '1 moeda por vez'} • Ordem 5% da banca • TP 100% • SL 50%
                 </p>
                 {/* Toggle conservador / agressivo */}
                 <div className="mt-4 flex items-center gap-2">
@@ -701,7 +700,7 @@ const App = () => {
                        <div className="text-center py-6">
                          <div className="w-12 h-12 mx-auto rounded-2xl bg-zinc-900 flex items-center justify-center text-zinc-700 mb-4"><Zap size={18} /></div>
                          <p className="text-lg font-black italic text-zinc-700">AGUARDANDO MOEDA</p>
-                           <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-600 mt-2">Cada ordem usa 5% da banca • TP 100% • SL 3%</p>
+                           <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-600 mt-2">Cada ordem usa 5% da banca • TP 100% da entrada • SL 50% da entrada</p>
                        </div>
                        <div className="h-2 rounded-full bg-zinc-900" />
                      </div>
@@ -930,7 +929,7 @@ const App = () => {
                      <span className="text-[10px] font-black text-zinc-200 uppercase tracking-widest">Certificação Tactical</span>
                   </div>
                   <p className="text-[9px] text-zinc-500 font-bold uppercase leading-relaxed italic">
-                      TRIPLO CÉREBRO COM RIGOR DE {evidence.threshold || 60}% • ATÉ {evidence.max_positions || 5} ENTRADAS SIMULTÂNEAS, SEM REPETIR MOEDA • ORDEM 5% DA BANCA • TP 100% E SL 3%.
+                      TRIPLO CÉREBRO COM RIGOR DE {evidence.threshold || 60}% • ATÉ {evidence.max_positions || 5} ENTRADAS SIMULTÂNEAS, SEM REPETIR MOEDA • ORDEM 5% DA BANCA • TP 100% DA ENTRADA • SL 50% DA ENTRADA • BYBIT + BINANCE.
                   </p>
                </div>
             </div>
@@ -1041,15 +1040,15 @@ const App = () => {
       {/* FORMULÁRIO MODAL (Gestão de Pessoas) */}
       {showAddForm && (
         <div className="fixed inset-0 bg-black/95 backdrop-blur-xl z-[100] flex items-center justify-center p-6 animate-in fade-in duration-300">
-          <div className="bg-[#0d0e12] w-full max-w-2xl rounded-[4rem] border border-zinc-800 shadow-2xl relative overflow-hidden">
-            <div className="p-10 border-b border-white/5 flex justify-between items-center bg-zinc-900/20">
+          <div className="bg-[#0d0e12] w-full max-w-2xl rounded-[2rem] border border-zinc-800 shadow-2xl relative flex flex-col max-h-[92vh]">
+            <div className="p-5 border-b border-white/5 flex justify-between items-center bg-zinc-900/20 flex-shrink-0">
                <div className="flex items-center gap-5">
-                  <div className="w-14 h-14 bg-green-500/10 rounded-2xl flex items-center justify-center text-green-500 border border-green-500/20">
-                     <Users size={28}/>
+                  <div className="w-10 h-10 bg-green-500/10 rounded-xl flex items-center justify-center text-green-500 border border-green-500/20">
+                     <Users size={20}/>
                   </div>
                   <div>
-                    <h3 className="text-2xl font-black italic uppercase tracking-tighter">Vincular Investidor</h3>
-                    <p className="text-[9px] text-zinc-500 font-bold uppercase tracking-widest">Setup de Chaves e Banca Institucional</p>
+                    <h3 className="text-lg font-black italic uppercase tracking-tighter">Vincular Investidor</h3>
+                    <p className="text-[9px] text-zinc-500 font-bold uppercase tracking-widest">Setup de Chaves • Bybit & Binance</p>
                   </div>
                </div>
                <div className="flex items-center gap-3">
@@ -1061,7 +1060,7 @@ const App = () => {
                  <button onClick={() => { setShowAddForm(false); setAddFormMsg(null); }} className="p-4 hover:bg-zinc-800 rounded-full transition-all text-zinc-500 hover:text-white"><X size={28}/></button>
                </div>
             </div>
-            <form className="p-12 space-y-8" onSubmit={async (e) => {
+            <form className="p-5 space-y-4 overflow-y-auto flex-1" onSubmit={async (e) => {
                 e.preventDefault();
                 setAddFormSaving(true);
                 setAddFormMsg(null);
@@ -1115,21 +1114,21 @@ const App = () => {
                 setAddFormSaving(false);
                 // NÃO fecha automaticamente o modal — o usuário pode revisar/editar ou fechar manualmente
               }}>
-               <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                  <div className="space-y-3 md:col-span-2">
+               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="space-y-2 md:col-span-2">
                      <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">Corretora</label>
-                      <div className="grid grid-cols-2 gap-4">
+                      <div className="grid grid-cols-2 gap-3">
                          <button
                            type="button"
                            onClick={() => handleFieldChange('exchange', 'bybit')}
-                           className={`px-5 py-4 rounded-[1.5rem] border text-sm font-black uppercase italic transition-all ${formExchange === 'bybit' ? 'bg-yellow-500/15 border-yellow-500/40 text-yellow-300' : 'bg-black border-white/10 text-zinc-500 hover:text-white'}`}
+                           className={`px-4 py-3 rounded-2xl border text-sm font-black uppercase italic transition-all ${formExchange === 'bybit' ? 'bg-yellow-500/15 border-yellow-500/40 text-yellow-300' : 'bg-black border-white/10 text-zinc-500 hover:text-white'}`}
                          >
                            🟡 Bybit
                          </button>
                          <button
                            type="button"
                            onClick={() => handleFieldChange('exchange', 'binance')}
-                           className={`px-5 py-4 rounded-[1.5rem] border text-sm font-black uppercase italic transition-all ${formExchange === 'binance' ? 'bg-orange-500/15 border-orange-500/40 text-orange-300' : 'bg-black border-white/10 text-zinc-500 hover:text-white'}`}
+                           className={`px-4 py-3 rounded-2xl border text-sm font-black uppercase italic transition-all ${formExchange === 'binance' ? 'bg-orange-500/15 border-orange-500/40 text-orange-300' : 'bg-black border-white/10 text-zinc-500 hover:text-white'}`}
                          >
                            🟠 Binance
                          </button>
@@ -1140,20 +1139,20 @@ const App = () => {
                           : 'Use suas chaves da Bybit Perpetual. Testnet = Bybit Testnet Sandbox.'}
                       </p>
                    </div>
-                  <div className="space-y-3 md:col-span-2">
+                  <div className="space-y-2 md:col-span-2">
                      <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">Modo da Conta</label>
-                      <div className="grid grid-cols-2 gap-4">
+                      <div className="grid grid-cols-2 gap-3">
                          <button
                            type="button"
                            onClick={() => handleFieldChange('account_mode', 'testnet')}
-                           className={`px-5 py-4 rounded-[1.5rem] border text-sm font-black uppercase italic transition-all ${formAccountMode === 'testnet' ? 'bg-blue-500/15 border-blue-500/40 text-blue-300' : 'bg-black border-white/10 text-zinc-500 hover:text-white'}`}
+                           className={`px-4 py-3 rounded-2xl border text-sm font-black uppercase italic transition-all ${formAccountMode === 'testnet' ? 'bg-blue-500/15 border-blue-500/40 text-blue-300' : 'bg-black border-white/10 text-zinc-500 hover:text-white'}`}
                          >
-                           🛰️ Conta Testnet
+                           🛰️ Testnet
                          </button>
                          <button
                            type="button"
                            onClick={() => handleFieldChange('account_mode', 'real')}
-                           className={`px-5 py-4 rounded-[1.5rem] border text-sm font-black uppercase italic transition-all ${formAccountMode === 'real' ? 'bg-green-500/15 border-green-500/40 text-green-300' : 'bg-black border-white/10 text-zinc-500 hover:text-white'}`}
+                           className={`px-4 py-3 rounded-2xl border text-sm font-black uppercase italic transition-all ${formAccountMode === 'real' ? 'bg-green-500/15 border-green-500/40 text-green-300' : 'bg-black border-white/10 text-zinc-500 hover:text-white'}`}
                          >
                            💼 Conta Real
                          </button>
@@ -1164,60 +1163,51 @@ const App = () => {
                           : `A conta real valida chaves reais e sincroniza saldo da ${formExchangeLabel} Real.`}
                       </p>
                    </div>
-                  <div className="space-y-3">
+                  <div className="space-y-2">
                      <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">Nome do Cliente</label>
-                     <input value={addFormFields.nome} onChange={(e)=>handleFieldChange('nome', e.target.value)} className="w-full bg-black border border-white/10 p-5 rounded-[1.5rem] focus:border-green-500 outline-none transition-all italic text-lg" placeholder="Ex: Roberto Ferreira" required />
+                     <input value={addFormFields.nome} onChange={(e)=>handleFieldChange('nome', e.target.value)} className="w-full bg-black border border-white/10 p-3 rounded-2xl focus:border-green-500 outline-none transition-all italic" placeholder="Ex: Roberto Ferreira" required />
                   </div>
-                  <div className="space-y-3">
+                  <div className="space-y-2">
                      <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">{formBalanceLabel}</label>
                       <input
                         value={addFormFields.saldo_base ? `Sincronizado: ${addFormFields.saldo_base}` : ''}
                         onChange={() => {}}
                         type="text"
                         disabled
-                        className="w-full p-5 rounded-[1.5rem] outline-none transition-all font-mono text-lg border bg-zinc-950 border-white/5 text-zinc-500 cursor-not-allowed"
+                        className="w-full p-3 rounded-2xl outline-none font-mono border bg-zinc-950 border-white/5 text-zinc-500 cursor-not-allowed"
                         placeholder={formBalancePlaceholder}
                       />
-                      <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest ml-1">
-                        O saldo aparece depois que a chave for validada e salva.
-                      </p>
+                      <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest ml-1">Saldo aparece após validar a chave.</p>
                    </div>
                 </div>
                
-               <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                  <div className="space-y-3">
+               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="space-y-2">
                      <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">API Key {formExchangeLabel}</label>
-                    <input value={addFormFields.bybit_key} onChange={(e)=>handleFieldChange('bybit_key', e.target.value)} type="password" autoComplete="new-password" placeholder="••••••••••••" className="w-full bg-black border border-white/10 p-5 rounded-[1.5rem] focus:border-green-500 outline-none transition-all font-mono" required />
+                    <input value={addFormFields.bybit_key} onChange={(e)=>handleFieldChange('bybit_key', e.target.value)} type="password" autoComplete="new-password" placeholder="••••••••••••" className="w-full bg-black border border-white/10 p-3 rounded-2xl focus:border-green-500 outline-none transition-all font-mono" required />
                   </div>
-                  <div className="space-y-3">
+                  <div className="space-y-2">
                      <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">API Secret {formExchangeLabel}</label>
-                    <input value={addFormFields.bybit_secret} onChange={(e)=>handleFieldChange('bybit_secret', e.target.value)} type="password" autoComplete="new-password" placeholder="••••••••••••" className="w-full bg-black border border-white/10 p-5 rounded-[1.5rem] focus:border-green-500 outline-none transition-all font-mono" required />
+                    <input value={addFormFields.bybit_secret} onChange={(e)=>handleFieldChange('bybit_secret', e.target.value)} type="password" autoComplete="new-password" placeholder="••••••••••••" className="w-full bg-black border border-white/10 p-3 rounded-2xl focus:border-green-500 outline-none transition-all font-mono" required />
                   </div>
                </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                <div className="space-y-3">
+               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-2">
                      <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">Token Telegram (Opcional)</label>
-                     <input value={addFormFields.tg_token} onChange={(e)=>handleFieldChange('tg_token', e.target.value)} placeholder="Preencha so se quiser receber sinais no Telegram" className="w-full bg-black border border-white/10 p-5 rounded-[1.5rem] focus:border-green-500 outline-none transition-all font-mono text-sm" />
+                     <input value={addFormFields.tg_token} onChange={(e)=>handleFieldChange('tg_token', e.target.value)} placeholder="Token do bot Telegram" className="w-full bg-black border border-white/10 p-3 rounded-2xl focus:border-green-500 outline-none transition-all font-mono text-sm" />
                 </div>
-                {/* API Key Telegram removed: use only Bot Token + Chat ID */}
-                <div />
+                <div className="space-y-2">
+                     <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">Telegram Chat ID (Opcional)</label>
+                     <input value={addFormFields.chat_id} onChange={(e)=>handleFieldChange('chat_id', e.target.value)} placeholder="Chat ID para alertas" className="w-full bg-black border border-white/10 p-3 rounded-2xl focus:border-green-500 outline-none transition-all font-mono" />
+                </div>
               </div>
 
-               <div className="grid grid-cols-1 md:grid-cols-2 gap-8 items-end">
-                  <div className="space-y-3">
-                     <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">Telegram Chat ID (Opcional)</label>
-                     <input value={addFormFields.chat_id} onChange={(e)=>handleFieldChange('chat_id', e.target.value)} placeholder="Preencha junto com o token se quiser alertas" className="w-full bg-black border border-white/10 p-5 rounded-[1.5rem] focus:border-green-500 outline-none transition-all font-mono" />
-                     <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest ml-1 mt-2">
-                       Telegram e opcional. Sem esses campos, o cliente opera so com a API da corretora.
-                     </p>
-                  </div>
-                  <div className="flex gap-4 items-center">
-                    <button type="submit" disabled={addFormSaving} className="flex-1 bg-green-500 hover:bg-green-400 text-black font-black py-6 rounded-[1.5rem] text-lg transition-all shadow-2xl shadow-green-900/30 flex items-center justify-center gap-4 uppercase italic disabled:opacity-50">
-                      <Save size={20} /> {addFormSaving ? 'Salvando...' : 'Guardar Investidor'}
+               <div className="flex gap-3 pt-1">
+                    <button type="submit" disabled={addFormSaving} className="flex-1 bg-green-500 hover:bg-green-400 text-black font-black py-4 rounded-2xl transition-all shadow-lg shadow-green-900/30 flex items-center justify-center gap-3 uppercase italic disabled:opacity-50">
+                      <Save size={18} /> {addFormSaving ? 'Salvando...' : 'Guardar Investidor'}
                     </button>
-                    <button type="button" onClick={() => { setShowAddForm(false); setAddFormMsg(null); }} className="px-6 py-4 bg-zinc-900/30 border border-white/5 rounded-[1.5rem] text-zinc-300 uppercase font-black">Fechar</button>
-                  </div>
+                    <button type="button" onClick={() => { setShowAddForm(false); setAddFormMsg(null); }} className="px-5 py-4 bg-zinc-900/30 border border-white/5 rounded-2xl text-zinc-300 uppercase font-black text-sm">Fechar</button>
                </div>
             </form>
           </div>
@@ -1233,7 +1223,7 @@ const App = () => {
           </div>
           <div className="flex items-center gap-3 text-[10px] font-black text-zinc-500 uppercase tracking-widest italic">
              <ShieldCheck size={14} className="text-zinc-600"/>
-             Protocolo 100/3 Verificado
+             Protocolo 100/50 — Bybit + Binance
            </div>
          </div>
          <p className="text-[9px] font-black text-zinc-700 uppercase tracking-[0.5em] italic">Motor Sniper v60.7 &copy; 2026</p>
@@ -1283,7 +1273,6 @@ if (rootEl) {
   ReactDOM.createRoot(rootEl).render(
     <React.StrictMode>
       <App />
-      <Analytics />
     </React.StrictMode>
   );
 } else {

@@ -1788,7 +1788,7 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                         order_result = broker.execute_market_order(symbol, side.lower(), qty)
                         
                         if order_result:
-                            # ✅ Executa Proteção: TP +100% / SL -3%
+                            # ✅ Executa Proteção: TP +100% margem / SL -50% margem (5% preço com 10x)
                             broker.set_tp_sl_sniper(symbol, side.lower(), entry_price, qty)
                             print(f"✅ [ORDEM EXECUTADA] ID: {order_result.get('id', 'N/A')}")
                         else:
@@ -1815,8 +1815,8 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                              f"🔐 *Modo:* {_mode_display_label(APP_MODE)} • {_execution_status_label(APP_MODE)}\n"
                              f"👤 *Conta:* {account_mode.upper()}\n\n"
                              f"🛡️  *PROTEÇÃO ATIVA:*\n"
-                             f"✅ TP: ${entry_price * 1.10:.2f} (+100% lucro)\n"
-                             f"❌ SL: ${entry_price * 0.97:.2f} (-3% trava)\n\n"
+                             f"✅ TP: ${entry_price * 1.10:.2f} (+100% da entrada = +10% preço)\n"
+                             f"❌ SL: ${entry_price * 0.95:.2f} (-50% da entrada = -5% preço)\n\n"
                              f"⏱️ *Cooldown Institucional:* 10 min após fechamento")
                     
                     client_tg_token = str(c.get('tg_token') or '').strip()
