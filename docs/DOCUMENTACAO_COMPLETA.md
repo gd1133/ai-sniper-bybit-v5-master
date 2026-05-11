@@ -650,6 +650,7 @@ Principais variaveis:
 - `GROQ_API_KEY`
 - `SUPABASE_URL`
 - `SUPABASE_KEY`
+- `SUPABASE_SERVICE_KEY` (recomendado se RLS estiver ativo)
 - `SUPABASE_CLIENTS_SECRET`
 - `VITE_API_BASE`
 

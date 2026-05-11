@@ -2123,12 +2123,16 @@ def get_supabase_status():
     key_type = "none"
     cloud_count = None
     cloud_error = None
+    cloud_disable_reason = None
+    last_error = None
 
     if supabase_ready:
         key_type = "service_role (RLS bypass)" if getattr(cloud_db, "_using_service_key", False) else "anon (pode ser bloqueado por RLS)"
         try:
             rows = cloud_db.get_clients(active_only=False)
             cloud_count = len(rows) if rows is not None else None
+            cloud_disable_reason = getattr(cloud_db, "cloud_disable_reason", None)
+            last_error = getattr(cloud_db, "last_error", None)
             if rows is None:
                 cloud_error = "Supabase indisponível ou erro na query"
             elif cloud_count == 0:
@@ -2152,6 +2156,8 @@ def get_supabase_status():
         "cloud_client_count": cloud_count,
         "local_client_count": local_count,
         "cloud_error": cloud_error,
+        "cloud_disable_reason": cloud_disable_reason,
+        "last_error": last_error,
         "recommendation": (
             "Defina SUPABASE_SERVICE_KEY no Railway para contornar o RLS e mostrar os clientes."
             if (supabase_ready and cloud_count == 0)
@@ -2162,7 +2168,7 @@ def get_supabase_status():
 
 @app.route('/api/supabase/force-sync', methods=['POST'])
 def supabase_force_sync():
-    """Força sincronização Supabase → SQLite local e retorna resultado."""
+    """Força sincronização Supabase ↔ SQLite local e retorna resultado."""
     if not _is_supabase_ready():
         return jsonify({
             "success": False,
@@ -2170,36 +2176,47 @@ def supabase_force_sync():
         }), 503
 
     try:
-        cloud_clients = cloud_db.get_clients(active_only=False)
-        if cloud_clients is None:
-            return jsonify({"success": False, "msg": "Erro ao consultar Supabase."}), 502
+        summary = cloud_db.sync_clients(db) if hasattr(cloud_db, "sync_clients") else None
+        if not isinstance(summary, dict):
+            return jsonify({"success": False, "msg": "Erro ao sincronizar (método indisponível)."}), 500
 
-        if len(cloud_clients) == 0:
-            return jsonify({
-                "success": False,
-                "pulled": 0,
-                "msg": (
-                    "Supabase retornou 0 clientes. "
-                    "Causa provável: RLS bloqueando a chave anon. "
-                    "Defina SUPABASE_SERVICE_KEY no Railway para resolver."
-                ),
-            }), 200
+        pulled = int(summary.get("pulled") or 0)
+        pull_errors = int(summary.get("pull_errors") or 0)
+        pushed = int(summary.get("pushed") or 0)
+        push_errors = int(summary.get("push_errors") or 0)
+        cloud_count = summary.get("cloud_client_count")
+        local_count = summary.get("local_client_count")
+        cloud_empty = bool(summary.get("cloud_returned_empty"))
 
-        pulled = 0
-        sync_errors = 0
-        for client in cloud_clients:
-            try:
-                db.upsert_client_local(dict(client))
-                pulled += 1
-            except Exception:
-                sync_errors += 1
+        print(f"✅ [force-sync] pulled={pulled} pushed={pushed} pull_errors={pull_errors} push_errors={push_errors}")
 
-        print(f"✅ [force-sync] {pulled} cliente(s) sincronizados Supabase→Local")
+        success = (pulled > 0) or (pushed > 0)
+        using_service = bool(getattr(cloud_db, "_using_service_key", False))
+
+        if not success and cloud_empty and not using_service:
+            msg = (
+                "Supabase retornou 0 clientes e nenhuma escrita foi confirmada. "
+                "Causa provável: RLS bloqueando a chave anon. "
+                "Defina SUPABASE_SERVICE_KEY no Railway para resolver."
+            )
+        elif not success and cloud_empty and using_service:
+            msg = "Supabase está acessível mas a tabela está vazia."
+        elif success:
+            msg = f"✅ Sync OK: pulled={pulled}, pushed={pushed} (erros pull={pull_errors}, push={push_errors})"
+        else:
+            msg = "❌ Sync concluído sem confirmações. Verifique `/api/supabase/status` e logs."
+
         return jsonify({
-            "success": True,
+            "success": success,
             "pulled": pulled,
-            "errors": sync_errors,
-            "msg": f"✅ {pulled} cliente(s) sincronizado(s) com sucesso!",
+            "pushed": pushed,
+            "pull_errors": pull_errors,
+            "push_errors": push_errors,
+            "cloud_client_count": cloud_count,
+            "local_client_count": local_count,
+            "using_service_key": using_service,
+            "last_error": getattr(cloud_db, "last_error", None),
+            "msg": msg,
         })
     except Exception as e:
         print(f"❌ [force-sync] erro: {e}")
@@ -2805,4 +2822,3 @@ if __name__ == "__main__":
     print(f"📊 Dashboard: http://0.0.0.0:{render_port}")
     print("🧠 Cérebro Triplo: ATIVO (Rigor 50%)")
     app.run(host='0.0.0.0', port=render_port, debug=False, use_reloader=False)
-

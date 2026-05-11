@@ -16,6 +16,9 @@ dist/
 *.log
 backend.log
 database.db
+database.db-*
+*.db-wal
+*.db-shm
 src/database.db
 data/
 

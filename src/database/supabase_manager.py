@@ -38,6 +38,7 @@ class SupabaseManager:
         self.cipher = self._build_cipher()
         self.cloud_enabled = False
         self.cloud_disable_reason = None
+        self.last_error: Optional[Dict[str, Any]] = None
         if self.url and self.key:
             self.client: Optional[Client] = create_client(self.url, self.key)
             self.cloud_enabled = True
@@ -57,6 +58,30 @@ class SupabaseManager:
         self.cloud_disable_reason = reason
         print(f"⚠️ Supabase desativado para esta sessão: {reason}. Fallback local ativo.")
 
+    def _classify_error_kind(self, message: str) -> str:
+        normalized = (message or "").lower()
+        if any(kw in normalized for kw in (
+            "row-level security",
+            "row level security",
+            "rls",
+            "permission denied",
+            "not authorized",
+            "new row violates row-level security policy",
+            "violates row-level security",
+        )):
+            return "RLS"
+        if any(kw in normalized for kw in (
+            "invalid api key",
+            "jwt",
+            "token",
+            "invalid signature",
+            "authentication",
+            "unauthorized",
+            "forbidden",
+        )):
+            return "AUTH"
+        return "OTHER"
+
     # Controle de throttle para evitar spam de erros no log
     _last_error_log: float = 0
     _error_count: int = 0
@@ -65,6 +90,14 @@ class SupabaseManager:
     def _handle_cloud_error(self, action: str, error: Exception):
         message = str(error)
         normalized = message.lower()
+
+        self.last_error = {
+            "action": str(action or "").strip(),
+            "message": message,
+            "kind": self._classify_error_kind(message),
+            "at": datetime.now(timezone.utc).isoformat(),
+        }
+
         # Schema cache errors are TRANSIENT (e.g. column added to table → stale cache).
         # Reconnect to refresh the schema rather than permanently disabling cloud.
         if "pgrst205" in normalized or "schema cache" in normalized:
@@ -201,6 +234,7 @@ class SupabaseManager:
             rows = getattr(result, "data", None)
             if rows is None:
                 return []
+            self.last_error = None
             return [self._normalize_client_row(row) for row in rows]
         except Exception as e:
             self._handle_cloud_error("buscar clientes", e)
@@ -216,6 +250,7 @@ class SupabaseManager:
             rows = getattr(result, "data", None) or []
             if not rows:
                 return None
+            self.last_error = None
             return self._normalize_client_row(rows[0])
         except Exception as e:
             self._handle_cloud_error(f"buscar cliente {client_id}", e)
@@ -237,6 +272,7 @@ class SupabaseManager:
 
             rows = getattr(result, "data", None) or []
             if rows:
+                self.last_error = None
                 return self._normalize_client_row(rows[0])
 
             if payload.get("id") is not None:
@@ -257,6 +293,7 @@ class SupabaseManager:
 
         try:
             self.client.table("clientes").delete().eq("id", int(client_id)).execute()
+            self.last_error = None
             return True
         except Exception as e:
             self._handle_cloud_error(f"deletar cliente {client_id}", e)
@@ -300,35 +337,54 @@ class SupabaseManager:
         1. Puxa todos os clientes do Supabase para o SQLite local (seed inicial).
         2. Envia os clientes locais que porventura não existam em nuvem.
         """
+        summary = {
+            "pulled": 0,
+            "pull_errors": 0,
+            "pushed": 0,
+            "push_errors": 0,
+            "cloud_client_count": None,
+            "local_client_count": None,
+            "cloud_returned_empty": False,
+        }
         if not self.is_available():
-            return
+            return summary
 
         # 1. Supabase → Local: garante que o cache local reflete a nuvem.
         cloud_clients = self.get_clients(active_only=False)
-        if cloud_clients:
-            pulled = 0
-            for client in cloud_clients:
-                if not self.is_available():
-                    break
-                try:
-                    local_db_manager.upsert_client_local(client)
-                    pulled += 1
-                except Exception as e:
-                    print(f"⚠️ [Supabase→Local] cliente {client.get('id')}: {e}")
-            if pulled:
-                print(f"✅ {pulled} cliente(s) sincronizado(s) Supabase→Local.")
+        if cloud_clients is None:
+            return summary
+
+        summary["cloud_client_count"] = len(cloud_clients)
+        summary["cloud_returned_empty"] = len(cloud_clients) == 0
+
+        for client in cloud_clients:
+            if not self.is_available():
+                break
+            try:
+                local_db_manager.upsert_client_local(client)
+                summary["pulled"] += 1
+            except Exception as e:
+                summary["pull_errors"] += 1
+                print(f"⚠️ [Supabase→Local] cliente {client.get('id')}: {e}")
+
+        if summary["pulled"]:
+            print(f"✅ {summary['pulled']} cliente(s) sincronizado(s) Supabase→Local.")
 
         # 2. Local → Supabase: envia novos clientes locais para a nuvem.
-        local_clients = local_db_manager.get_all_clients()
-        pushed = 0
+        local_clients = local_db_manager.get_all_clients() or []
+        summary["local_client_count"] = len(local_clients)
         for client in local_clients:
             if not self.is_available():
                 break
-            self.save_client(client)
-            pushed += 1
-        if pushed:
-            print(f"✅ {pushed} cliente(s) sincronizado(s) Local→Supabase.")
+            saved = self.save_client(client)
+            if saved is not None:
+                summary["pushed"] += 1
+            else:
+                summary["push_errors"] += 1
+        if summary["pushed"]:
+            print(f"✅ {summary['pushed']} cliente(s) sincronizado(s) Local→Supabase.")
         print("✅ Sincronização bidirecional em background finalizada.")
+        return summary
 
     def record_trade(self, trade_data):
         """Registra um trade diretamente no Supabase."""
