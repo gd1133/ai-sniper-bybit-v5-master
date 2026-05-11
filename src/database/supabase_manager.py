@@ -189,22 +189,47 @@ class SupabaseManager:
         return normalized
 
     def get_clients(self, active_only: bool = False) -> Optional[List[Dict[str, Any]]]:
-        """Lê clientes do Supabase. Retorna None apenas quando a nuvem está indisponível."""
+        """Lê clientes do Supabase com retry e backoff exponencial.
+
+        Retorna None apenas quando a nuvem está indisponível após todas as tentativas.
+        Retorna lista vazia quando a query foi bem-sucedida mas não há registros.
+        """
         if not self.is_available():
             return None
 
-        try:
-            query = self.client.table("clientes").select("*").order("id", desc=True)
-            if active_only:
-                query = query.eq("status", "ativo")
-            result = query.execute()
-            rows = getattr(result, "data", None)
-            if rows is None:
-                return []
-            return [self._normalize_client_row(row) for row in rows]
-        except Exception as e:
-            self._handle_cloud_error("buscar clientes", e)
-            return None
+        key_type = "service_role (RLS bypass)" if self._using_service_key else "anon (pode ser bloqueado por RLS)"
+        max_attempts = 3
+        base_delay = 1.0  # segundos
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                print(f"🔍 [Supabase] Buscando clientes (tentativa {attempt}/{max_attempts}, chave: {key_type})...")
+                query = self.client.table("clientes").select("*").order("id", desc=True)
+                if active_only:
+                    query = query.eq("status", "ativo")
+                result = query.execute()
+                rows = getattr(result, "data", None)
+                if rows is None:
+                    print("⚠️ [Supabase] Query executada mas retornou data=None — tratando como lista vazia.")
+                    return []
+                count = len(rows)
+                if count == 0 and not self._using_service_key:
+                    print(
+                        "⚠️ [Supabase] Nenhum cliente retornado com chave anon. "
+                        "Provável bloqueio por RLS. Configure SUPABASE_SERVICE_KEY para contornar."
+                    )
+                else:
+                    print(f"✅ [Supabase] {count} cliente(s) retornado(s) com chave {key_type}.")
+                return [self._normalize_client_row(row) for row in rows]
+            except Exception as e:
+                self._handle_cloud_error(f"buscar clientes (tentativa {attempt}/{max_attempts})", e)
+                if attempt < max_attempts and self.is_available():
+                    delay = base_delay * (2 ** (attempt - 1))  # 1s, 2s, 4s
+                    print(f"⏳ [Supabase] Aguardando {delay:.0f}s antes da próxima tentativa...")
+                    time.sleep(delay)
+                else:
+                    print(f"❌ [Supabase] Todas as {max_attempts} tentativas falharam. Fallback para SQLite local.")
+                    return None
 
     def get_client_by_id(self, client_id: int) -> Optional[Dict[str, Any]]:
         """Busca um cliente específico no Supabase."""
@@ -299,36 +324,78 @@ class SupabaseManager:
         efêmero como Railway), o SQLite local começa vazio.  Este método:
         1. Puxa todos os clientes do Supabase para o SQLite local (seed inicial).
         2. Envia os clientes locais que porventura não existam em nuvem.
+
+        Cada direção é independente: uma falha em Supabase→Local não impede
+        Local→Supabase, e vice-versa.
         """
         if not self.is_available():
+            print("⚠️ [Sync] Supabase indisponível — sincronização ignorada, usando SQLite local.")
             return
 
-        # 1. Supabase → Local: garante que o cache local reflete a nuvem.
-        cloud_clients = self.get_clients(active_only=False)
-        if cloud_clients:
-            pulled = 0
-            for client in cloud_clients:
-                if not self.is_available():
-                    break
-                try:
-                    local_db_manager.upsert_client_local(client)
-                    pulled += 1
-                except Exception as e:
-                    print(f"⚠️ [Supabase→Local] cliente {client.get('id')}: {e}")
-            if pulled:
-                print(f"✅ {pulled} cliente(s) sincronizado(s) Supabase→Local.")
+        key_type = "service_role (RLS bypass)" if self._using_service_key else "anon (pode ser bloqueado por RLS)"
+        print(f"🔄 [Sync] Iniciando sincronização bidirecional (chave: {key_type})...")
 
-        # 2. Local → Supabase: envia novos clientes locais para a nuvem.
-        local_clients = local_db_manager.get_all_clients()
+        # ── 1. Supabase → Local ──────────────────────────────────────────────
+        pulled = 0
+        pull_failed = False
+        try:
+            cloud_clients = self.get_clients(active_only=False)
+            if cloud_clients is None:
+                print("⚠️ [Sync] Supabase→Local: falha ao buscar clientes da nuvem. Continuando com Local→Supabase...")
+                pull_failed = True
+            elif len(cloud_clients) == 0:
+                if not self._using_service_key:
+                    print(
+                        "⚠️ [Sync] Supabase→Local: nenhum cliente retornado — possível bloqueio por RLS com chave anon. "
+                        "Configure SUPABASE_SERVICE_KEY para contornar."
+                    )
+                else:
+                    print("ℹ️ [Sync] Supabase→Local: nuvem está vazia, nada a puxar.")
+            else:
+                for client in cloud_clients:
+                    try:
+                        local_db_manager.upsert_client_local(client)
+                        pulled += 1
+                    except Exception as e:
+                        print(f"⚠️ [Sync] Supabase→Local: erro ao espelhar cliente {client.get('id')}: {e}")
+                print(f"✅ [Sync] Supabase→Local: {pulled}/{len(cloud_clients)} cliente(s) sincronizado(s).")
+        except Exception as e:
+            print(f"❌ [Sync] Supabase→Local: erro inesperado: {e}. Continuando com Local→Supabase...")
+            pull_failed = True
+
+        # ── 2. Local → Supabase ──────────────────────────────────────────────
         pushed = 0
-        for client in local_clients:
-            if not self.is_available():
-                break
-            self.save_client(client)
-            pushed += 1
-        if pushed:
-            print(f"✅ {pushed} cliente(s) sincronizado(s) Local→Supabase.")
-        print("✅ Sincronização bidirecional em background finalizada.")
+        push_errors = 0
+        try:
+            local_clients = local_db_manager.get_all_clients()
+            if not local_clients:
+                print("ℹ️ [Sync] Local→Supabase: SQLite local está vazio, nada a enviar.")
+            else:
+                for client in local_clients:
+                    if not self.is_available():
+                        print("⚠️ [Sync] Local→Supabase: Supabase ficou indisponível durante o envio. Abortando.")
+                        break
+                    try:
+                        self.save_client(client)
+                        pushed += 1
+                    except Exception as e:
+                        push_errors += 1
+                        print(f"⚠️ [Sync] Local→Supabase: erro ao enviar cliente {client.get('id')}: {e}")
+                status = f"{pushed}/{len(local_clients)} cliente(s) enviado(s)"
+                if push_errors:
+                    status += f", {push_errors} erro(s)"
+                print(f"✅ [Sync] Local→Supabase: {status}.")
+        except Exception as e:
+            print(f"❌ [Sync] Local→Supabase: erro inesperado: {e}.")
+
+        # ── Resumo ───────────────────────────────────────────────────────────
+        if pull_failed:
+            print(
+                f"⚠️ [Sync] Sincronização concluída com falhas na direção Supabase→Local. "
+                f"Local→Supabase: {pushed} enviado(s). Fallback SQLite ativo."
+            )
+        else:
+            print(f"✅ [Sync] Sincronização bidirecional finalizada — ↓{pulled} puxado(s), ↑{pushed} enviado(s).")
 
     def record_trade(self, trade_data):
         """Registra um trade diretamente no Supabase."""
