@@ -103,6 +103,8 @@ Depois do deploy:
 2. Cadastre clientes com `Conta Testnet` ou `Conta Real`
 3. Ajuste `ENVIRONMENT` para `production` quando quiser subir com execucao real por padrao
 
+Nota: reiniciar o servidor nao recompila o frontend. Se uma atualizacao do dashboard nao aparecer, faca um novo deploy (ou rebuild da imagem) para gerar o bundle `dist/` e, no navegador, atualize a pagina (hard refresh) caso algum cache antigo tenha ficado preso.
+
 ## Como rodar
 
 ### Backend

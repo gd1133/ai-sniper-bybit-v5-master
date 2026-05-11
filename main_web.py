@@ -398,6 +398,40 @@ def serve_frontend(path):
 
     return _render_frontend_status_page()
 
+@app.after_request
+def _frontend_cache_control(response):
+    """Evita cache agressivo do HTML (index/fallback) e permite cache longo para assets versionados."""
+    try:
+        if request.path.startswith('/api/'):
+            return response
+
+        # Ajusta apenas respostas do frontend (rota SPA ou arquivos estáticos do Flask)
+        if request.endpoint not in {'serve_frontend', 'static'}:
+            return response
+
+        if response.status_code != 200:
+            return response
+
+        requested_path = (request.path or '/').lstrip('/')
+
+        # HTML (index.html e fallback SPA) precisa sempre revalidar para puxar novos bundles.
+        if response.mimetype == 'text/html' or requested_path.endswith('.html') or requested_path == '':
+            response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+            response.headers['Pragma'] = 'no-cache'
+            response.headers['Expires'] = '0'
+            return response
+
+        # Assets do Vite (hash no filename) podem ser cacheados por 1 ano.
+        if requested_path.startswith('assets/'):
+            response.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
+            return response
+
+        # Favicon/manifest/etc: cache curto para facilitar deploys sem precisar hard refresh.
+        response.headers.setdefault('Cache-Control', 'public, max-age=3600')
+        return response
+    except Exception:
+        return response
+
 def _limpar_simbolo(sym):
     """Remove o sufixo da Bybit para limpeza visual no Dashboard."""
     if not sym: return "---"
@@ -2805,4 +2839,3 @@ if __name__ == "__main__":
     print(f"📊 Dashboard: http://0.0.0.0:{render_port}")
     print("🧠 Cérebro Triplo: ATIVO (Rigor 50%)")
     app.run(host='0.0.0.0', port=render_port, debug=False, use_reloader=False)
-
