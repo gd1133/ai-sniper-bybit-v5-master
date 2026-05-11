@@ -691,6 +691,45 @@ def _is_supabase_ready():
     return bool(cloud_db and getattr(cloud_db, "is_available", lambda: False)())
 
 
+# Throttle para evitar spam quando Supabase responde com lista vazia (RLS/anon ou tabela vazia).
+_SUPABASE_EMPTY_CLIENTS_WARN_INTERVAL_SECS = 60.0
+_supabase_empty_clients_warn_lock = threading.Lock()
+_last_supabase_empty_clients_warn_ts = 0.0
+_supabase_empty_clients_warn_suppressed = 0
+
+
+def _warn_supabase_empty_clients_once():
+    """Loga o aviso de '0 clientes no Supabase' no máximo 1x por minuto."""
+    global _last_supabase_empty_clients_warn_ts, _supabase_empty_clients_warn_suppressed
+
+    now = time.time()
+    with _supabase_empty_clients_warn_lock:
+        if now - _last_supabase_empty_clients_warn_ts < _SUPABASE_EMPTY_CLIENTS_WARN_INTERVAL_SECS:
+            _supabase_empty_clients_warn_suppressed += 1
+            return
+
+        suppressed = _supabase_empty_clients_warn_suppressed
+        _supabase_empty_clients_warn_suppressed = 0
+        _last_supabase_empty_clients_warn_ts = now
+
+    using_service_key = bool(getattr(cloud_db, "_using_service_key", False))
+    suffix = f" (suprimidas {suppressed} repetições)" if suppressed else ""
+
+    if using_service_key:
+        print(
+            "⚠️ [Supabase] Nenhum cliente retornado do Supabase (service_role). "
+            "Se a tabela estiver vazia, ignore; caso contrário, verifique schema/filters. "
+            "Tentando SQLite local..." + suffix
+        )
+    else:
+        print(
+            "⚠️ [Supabase] Nenhum cliente retornado do Supabase. "
+            "Possíveis causas: (1) RLS ativo bloqueando a chave anon — "
+            "configure SUPABASE_SERVICE_KEY no Railway para resolver; "
+            "(2) tabela realmente vazia. Tentando SQLite local..." + suffix
+        )
+
+
 def _get_registered_clients(active_only=False):
     """Fonte de verdade SaaS: Supabase quando disponível; SQLite como fallback.
 
@@ -717,12 +756,7 @@ def _get_registered_clients(active_only=False):
             # Se o SQLite local também estiver vazio, os clientes ficam invisíveis.
             # SOLUÇÃO: defina SUPABASE_SERVICE_KEY no Railway (chave service_role
             # bypassa RLS completamente) ou desative RLS na tabela "clientes".
-            print(
-                "⚠️ [Supabase] Nenhum cliente retornado do Supabase. "
-                "Possíveis causas: (1) RLS ativo bloqueando a chave anon — "
-                "configure SUPABASE_SERVICE_KEY no Railway para resolver; "
-                "(2) tabela realmente vazia. Tentando SQLite local..."
-            )
+            _warn_supabase_empty_clients_once()
 
     local_clients = db.get_active_clients() if active_only else db.get_all_clients()
     return [{**dict(client), "storage_source": "local"} for client in local_clients]
@@ -2805,4 +2839,3 @@ if __name__ == "__main__":
     print(f"📊 Dashboard: http://0.0.0.0:{render_port}")
     print("🧠 Cérebro Triplo: ATIVO (Rigor 50%)")
     app.run(host='0.0.0.0', port=render_port, debug=False, use_reloader=False)
-
