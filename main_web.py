@@ -1035,8 +1035,15 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
     record = None
     cloud_synced = False
     local_synced = False
+    cloud_warning = None
     if client_payload is not None:
         record, cloud_synced, local_synced = _save_client_everywhere(payload)
+        if _is_supabase_ready() and not cloud_synced:
+            cloud_warning = (
+                getattr(cloud_db, "last_error", None)
+                or getattr(cloud_db, "cloud_disable_reason", None)
+                or "Falha ao salvar no Supabase. Se o RLS estiver ativo, defina SUPABASE_SERVICE_KEY (service_role)."
+            )
 
     return {
         'valid': valid,
@@ -1044,6 +1051,7 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
         'record': record,
         'synced_to_cloud': cloud_synced,
         'synced_to_local': local_synced,
+        'cloud_warning': cloud_warning,
         'recv_window': recv_window,
         'base_url': base_url,
         'balance': payload.get('saldo_base', 0.0),
@@ -2135,7 +2143,7 @@ def get_supabase_status():
                 cloud_error = (
                     "Supabase acessível mas retornou 0 clientes. "
                     "Causa provável: RLS bloqueando a chave anon. "
-                    "Solução: defina SUPABASE_SERVICE_KEY no Railway."
+                    "Solução: defina SUPABASE_SERVICE_KEY (service_role) no Railway."
                 )
         except Exception:
             cloud_error = "Erro ao consultar Supabase. Verifique os logs do servidor."
@@ -2153,9 +2161,9 @@ def get_supabase_status():
         "local_client_count": local_count,
         "cloud_error": cloud_error,
         "recommendation": (
-            "Defina SUPABASE_SERVICE_KEY no Railway para contornar o RLS e mostrar os clientes."
+            "Defina SUPABASE_SERVICE_KEY (service_role) no Railway para contornar o RLS e mostrar os clientes."
             if (supabase_ready and cloud_count == 0)
-            else ("OK" if cloud_count else "Configure SUPABASE_URL e SUPABASE_KEY nas variáveis de ambiente.")
+            else ("OK" if cloud_count else "Configure SUPABASE_URL e SUPABASE_KEY (ou SUPABASE_ANON_KEY) nas variáveis de ambiente.")
         ),
     })
 
@@ -2166,7 +2174,7 @@ def supabase_force_sync():
     if not _is_supabase_ready():
         return jsonify({
             "success": False,
-            "msg": "Supabase não está configurado. Defina SUPABASE_URL e SUPABASE_KEY.",
+            "msg": "Supabase não está configurado. Defina SUPABASE_URL e SUPABASE_KEY (ou SUPABASE_ANON_KEY).",
         }), 503
 
     try:
@@ -2181,7 +2189,7 @@ def supabase_force_sync():
                 "msg": (
                     "Supabase retornou 0 clientes. "
                     "Causa provável: RLS bloqueando a chave anon. "
-                    "Defina SUPABASE_SERVICE_KEY no Railway para resolver."
+                    "Defina SUPABASE_SERVICE_KEY (service_role) no Railway para resolver."
                 ),
             }), 200
 
@@ -2263,10 +2271,14 @@ def api_update_cliente(client_id):
         record = validation.get('record')
         cloud_synced = validation.get('synced_to_cloud', False)
         local_synced = validation.get('synced_to_local', False)
+        cloud_warning = validation.get('cloud_warning')
         if record:
+            response_msg = f"Cliente atualizado! Conta {validation.get('account_mode', account_mode).upper()} sincronizada com a {str(validation.get('exchange','bybit')).upper()}."
+            if cloud_warning:
+                response_msg = f"{response_msg} ⚠️ Supabase: {cloud_warning}"
             return jsonify({
                 "success": True,
-                "msg": f"Cliente atualizado! Conta {validation.get('account_mode', account_mode).upper()} sincronizada com a {str(validation.get('exchange','bybit')).upper()}.",
+                "msg": response_msg,
                 "valid": ok,
                 "api_error": None if ok else msg,
                 "recv_window": validation.get('recv_window'),
@@ -2274,12 +2286,14 @@ def api_update_cliente(client_id):
                 "client": record,
                 "synced_to_cloud": cloud_synced,
                 "synced_to_local": local_synced,
+                "cloud_warning": cloud_warning,
             })
         return jsonify({
             "error": "Falha ao atualizar",
             "valid": ok,
             "synced_to_cloud": cloud_synced,
             "synced_to_local": local_synced,
+            "cloud_warning": cloud_warning,
         }), 500
     except Exception as e:
         return jsonify({"error": str(e)}), 400
@@ -2318,10 +2332,14 @@ def add_cliente():
         record = validation.get('record')
         cloud_synced = validation.get('synced_to_cloud', False)
         local_synced = validation.get('synced_to_local', False)
+        cloud_warning = validation.get('cloud_warning')
         if record:
+            response_msg = f"Investidor conectado! Conta {validation.get('account_mode', account_mode).upper()} validada na {str(validation.get('exchange','bybit')).upper()}."
+            if cloud_warning:
+                response_msg = f"{response_msg} ⚠️ Supabase: {cloud_warning}"
             return jsonify({
                 "status": "sucesso",
-                "msg": f"Investidor conectado! Conta {validation.get('account_mode', account_mode).upper()} validada na {str(validation.get('exchange','bybit')).upper()}.",
+                "msg": response_msg,
                 "valid": ok,
                 "api_error": None if ok else msg,
                 "recv_window": validation.get('recv_window'),
@@ -2329,6 +2347,7 @@ def add_cliente():
                 "client": record,
                 "synced_to_cloud": cloud_synced,
                 "synced_to_local": local_synced,
+                "cloud_warning": cloud_warning,
             })
         return jsonify({"status": "erro", "msg": "Falha ao salvar investidor"}), 500
     except Exception as e:
@@ -2805,4 +2824,3 @@ if __name__ == "__main__":
     print(f"📊 Dashboard: http://0.0.0.0:{render_port}")
     print("🧠 Cérebro Triplo: ATIVO (Rigor 50%)")
     app.run(host='0.0.0.0', port=render_port, debug=False, use_reloader=False)
-

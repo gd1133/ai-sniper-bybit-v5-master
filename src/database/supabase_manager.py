@@ -14,12 +14,25 @@ from dotenv import load_dotenv
 ENV_PATH = Path(__file__).resolve().parents[2] / '.env'
 load_dotenv(dotenv_path=ENV_PATH)
 
+_ENV_TRUE = {True, 1, "1", "true", "TRUE", "True"}
+
+
+def _env_first(*names: str) -> str:
+    for name in names:
+        value = os.getenv(name)
+        if value is None:
+            continue
+        value = str(value).strip()
+        if value:
+            return value
+    return ""
+
 
 def _normalize_account_mode(value: Any) -> str:
     normalized = str(value or '').strip().lower()
     if normalized in {'testnet', 'real'}:
         return normalized
-    if value in [True, 1, '1', 'true', 'TRUE', 'True']:
+    if value in _ENV_TRUE:
         return 'testnet'
     if value in [False, 0, '0', 'false', 'FALSE', 'False']:
         return 'real'
@@ -28,16 +41,25 @@ def _normalize_account_mode(value: Any) -> str:
 
 class SupabaseManager:
     def __init__(self):
-        self.url = os.getenv("SUPABASE_URL")
+        self.url = _env_first("SUPABASE_URL")
         # Prefer service_role key (bypasses RLS) when available; fall back to anon key.
-        service_key = os.getenv("SUPABASE_SERVICE_KEY", "").strip()
-        anon_key = os.getenv("SUPABASE_KEY", "").strip()
+        service_key = _env_first(
+            "SUPABASE_SERVICE_KEY",
+            "SUPABASE_SERVICE_ROLE_KEY",
+            "SUPABASE_SERVICE_ROLE",
+        )
+        anon_key = _env_first(
+            "SUPABASE_KEY",
+            "SUPABASE_ANON_KEY",
+            "SUPABASE_ANON_PUBLIC_KEY",
+        )
         self.key = service_key or anon_key
         self._using_service_key = bool(service_key)
         self.crypto_secret = os.getenv("SUPABASE_CLIENTS_SECRET") or self.key
         self.cipher = self._build_cipher()
         self.cloud_enabled = False
         self.cloud_disable_reason = None
+        self.last_error: Optional[str] = None
         if self.url and self.key:
             self.client: Optional[Client] = create_client(self.url, self.key)
             self.cloud_enabled = True
@@ -55,6 +77,7 @@ class SupabaseManager:
             return
         self.cloud_enabled = False
         self.cloud_disable_reason = reason
+        self.last_error = reason
         print(f"⚠️ Supabase desativado para esta sessão: {reason}. Fallback local ativo.")
 
     # Controle de throttle para evitar spam de erros no log
@@ -62,15 +85,26 @@ class SupabaseManager:
     _error_count: int = 0
     _ERROR_LOG_INTERVAL: float = 60.0  # Loga no máximo 1x por minuto
 
+    def _reconnect(self) -> bool:
+        if not self.url or not self.key:
+            return False
+        self.client = create_client(self.url, self.key)
+        return True
+
+    @staticmethod
+    def _is_schema_cache_error(error: Exception) -> bool:
+        normalized = str(error).lower()
+        return ("pgrst205" in normalized) or ("schema cache" in normalized)
+
     def _handle_cloud_error(self, action: str, error: Exception):
         message = str(error)
         normalized = message.lower()
+        self.last_error = f"{action}: {message}"
         # Schema cache errors are TRANSIENT (e.g. column added to table → stale cache).
         # Reconnect to refresh the schema rather than permanently disabling cloud.
-        if "pgrst205" in normalized or "schema cache" in normalized:
+        if self._is_schema_cache_error(error):
             try:
-                if self.url and self.key:
-                    self.client = create_client(self.url, self.key)
+                if self._reconnect():
                     print("⚠️ [Supabase] Schema cache desatualizado — reconectando para atualizar.")
             except Exception as reconnect_err:
                 print(f"⚠️ [Supabase] Falha ao reconectar após schema cache error: {reconnect_err}")
@@ -80,6 +114,13 @@ class SupabaseManager:
         if "could not find the table" in normalized:
             self._disable_cloud("tabela ausente no banco de dados")
             return
+
+        # RLS / permission errors: do not disable cloud, but expose an actionable hint.
+        if "row-level security" in normalized or "permission denied" in normalized:
+            self.last_error = (
+                f"{action}: Supabase bloqueou a operação (RLS/permissão). "
+                f"Defina SUPABASE_SERVICE_KEY (service_role) para permitir gravação/leitura."
+            )
 
         # Erros de conexão SSL/HTTP2 são transitórios — reconecta silenciosamente
         is_transient = any(kw in normalized for kw in (
@@ -201,8 +242,15 @@ class SupabaseManager:
             rows = getattr(result, "data", None)
             if rows is None:
                 return []
+            self.last_error = None
             return [self._normalize_client_row(row) for row in rows]
         except Exception as e:
+            if self._is_schema_cache_error(e):
+                try:
+                    if self._reconnect():
+                        return self.get_clients(active_only=active_only)
+                except Exception:
+                    pass
             self._handle_cloud_error("buscar clientes", e)
             return None
 
@@ -216,8 +264,15 @@ class SupabaseManager:
             rows = getattr(result, "data", None) or []
             if not rows:
                 return None
+            self.last_error = None
             return self._normalize_client_row(rows[0])
         except Exception as e:
+            if self._is_schema_cache_error(e):
+                try:
+                    if self._reconnect():
+                        return self.get_client_by_id(client_id)
+                except Exception:
+                    pass
             self._handle_cloud_error(f"buscar cliente {client_id}", e)
             return None
 
@@ -237,6 +292,7 @@ class SupabaseManager:
 
             rows = getattr(result, "data", None) or []
             if rows:
+                self.last_error = None
                 return self._normalize_client_row(rows[0])
 
             if payload.get("id") is not None:
@@ -247,6 +303,12 @@ class SupabaseManager:
                 return latest[0]
             return payload
         except Exception as e:
+            if self._is_schema_cache_error(e):
+                try:
+                    if self._reconnect():
+                        return self.save_client(client_data)
+                except Exception:
+                    pass
             self._handle_cloud_error("salvar cliente", e)
             return None
 
@@ -257,8 +319,15 @@ class SupabaseManager:
 
         try:
             self.client.table("clientes").delete().eq("id", int(client_id)).execute()
+            self.last_error = None
             return True
         except Exception as e:
+            if self._is_schema_cache_error(e):
+                try:
+                    if self._reconnect():
+                        return self.delete_client(client_id)
+                except Exception:
+                    pass
             self._handle_cloud_error(f"deletar cliente {client_id}", e)
             return False
 

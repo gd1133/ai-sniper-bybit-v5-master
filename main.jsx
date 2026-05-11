@@ -1085,10 +1085,13 @@ const App = () => {
                          upsertInvestor(json.client);
                          setAddFormFields(prev => ({ ...prev, id: json.client.id, saldo_base: json.client.saldo_base ?? prev.saldo_base }));
                        }
-                       const msgAtualiza = json.valid === false
-                         ? `Salvo, mas API inválida: ${json.api_error || 'verifique as chaves'}`
-                         : (json.msg || 'Investidor atualizado');
-                       setAddFormMsg({ type: json.valid === false ? 'error' : 'success', text: msgAtualiza });
+                       const cloudIssue = (json.synced_to_cloud === false) && (json.cloud_warning || json.msg);
+                       const msgAtualiza = cloudIssue
+                         ? `Salvo localmente, mas Supabase falhou: ${json.cloud_warning || 'verifique SUPABASE_SERVICE_KEY'}`
+                         : (json.valid === false
+                           ? `Salvo, mas API inválida: ${json.api_error || 'verifique as chaves'}`
+                           : (json.msg || 'Investidor atualizado'));
+                       setAddFormMsg({ type: (cloudIssue || json.valid === false) ? 'error' : 'success', text: msgAtualiza });
                         const invRes = await fetch(`${API_BASE}/api/investidores`); if (invRes.ok) setInvestidores((await invRes.json()).map(normalizeInvestorRecord));
                      } else {
                       setAddFormMsg({ type: 'error', text: json.error || 'Erro ao atualizar' });
@@ -1101,10 +1104,13 @@ const App = () => {
                          upsertInvestor(json.client);
                          setAddFormFields(prev => ({ ...prev, id: json.client.id, saldo_base: json.client.saldo_base ?? prev.saldo_base }));
                        }
-                       const msgSalvo = json.valid === false
-                         ? `Salvo, mas API inválida: ${json.api_error || 'verifique as chaves'}`
-                         : (json.msg || 'Investidor salvo com sucesso');
-                       setAddFormMsg({ type: json.valid === false ? 'error' : 'success', text: msgSalvo });
+                       const cloudIssue = (json.synced_to_cloud === false) && (json.cloud_warning || json.msg);
+                       const msgSalvo = cloudIssue
+                         ? `Salvo localmente, mas Supabase falhou: ${json.cloud_warning || 'verifique SUPABASE_SERVICE_KEY'}`
+                         : (json.valid === false
+                           ? `Salvo, mas API inválida: ${json.api_error || 'verifique as chaves'}`
+                           : (json.msg || 'Investidor salvo com sucesso'));
+                       setAddFormMsg({ type: (cloudIssue || json.valid === false) ? 'error' : 'success', text: msgSalvo });
                         try { const invRes = await fetch(`${API_BASE}/api/investidores`); if (invRes.ok) setInvestidores((await invRes.json()).map(normalizeInvestorRecord)); } catch (e) { }
                      } else {
                       setAddFormMsg({ type: 'error', text: json.msg || json.error || 'Erro ao salvar investidor' });

@@ -649,7 +649,8 @@ Principais variaveis:
 - `GEMINI_API_KEY`
 - `GROQ_API_KEY`
 - `SUPABASE_URL`
-- `SUPABASE_KEY`
+- `SUPABASE_KEY` (ou `SUPABASE_ANON_KEY`)
+- `SUPABASE_SERVICE_KEY` (service_role; recomendado para backend/RLS)
 - `SUPABASE_CLIENTS_SECRET`
 - `VITE_API_BASE`
 
