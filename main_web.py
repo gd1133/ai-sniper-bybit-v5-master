@@ -2131,6 +2131,7 @@ def get_supabase_status():
     key_type = "none"
     cloud_count = None
     cloud_error = None
+    last_error = getattr(cloud_db, "last_error", None) if cloud_db else None
 
     if supabase_ready:
         key_type = "service_role (RLS bypass)" if getattr(cloud_db, "_using_service_key", False) else "anon (pode ser bloqueado por RLS)"
@@ -2157,6 +2158,7 @@ def get_supabase_status():
     return jsonify({
         "supabase_ready": supabase_ready,
         "key_type": key_type,
+        "last_error": last_error,
         "cloud_client_count": cloud_count,
         "local_client_count": local_count,
         "cloud_error": cloud_error,

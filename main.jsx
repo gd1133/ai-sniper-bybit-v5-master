@@ -21,7 +21,16 @@ import {
 
 const getApiBase = () => {
   const configuredBase = import.meta.env.VITE_API_BASE?.trim();
-  if (configuredBase) return configuredBase.replace(/\/$/, '');
+  if (configuredBase) {
+    const cleaned = configuredBase.replace(/\/$/, '');
+    if (typeof window !== 'undefined') {
+      const host = String(window.location.hostname || '').toLowerCase();
+      const isBrowserLocal = host === 'localhost' || host === '127.0.0.1';
+      const configuredLooksLocal = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(cleaned);
+      if (!isBrowserLocal && configuredLooksLocal) return window.location.origin;
+    }
+    return cleaned;
+  }
   if (typeof window !== 'undefined') return window.location.origin;
   return 'http://localhost:5000';
 };
