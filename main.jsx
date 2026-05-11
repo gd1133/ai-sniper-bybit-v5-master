@@ -449,7 +449,7 @@ const App = () => {
       const res = await fetch(`${API_BASE}/api/supabase/force-sync`, { method: 'POST' });
       const json = await res.json();
       setSupabaseSyncMsg(json.msg || (json.success ? '✅ Sincronizado!' : '❌ Falha na sincronização'));
-      if (json.success && json.pulled > 0) {
+      if (json.success && ((json.pulled || 0) > 0 || (json.pushed || 0) > 0)) {
         // Recarrega lista de investidores após sincronização
         const r2 = await fetch(`${API_BASE}/api/investidores`);
         if (r2.ok) {
