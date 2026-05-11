@@ -160,7 +160,13 @@ def get_all_clients() -> List[Dict[str, Any]]:
 
 
 def add_client(data: Dict[str, Any]):
-    """Adiciona ou espelha um cliente localmente. Retorna o id persistido."""
+    """Adiciona ou espelha um cliente localmente. Retorna o id persistido.
+
+    Quando um ``id`` explícito é fornecido (e.g. durante sync com Supabase),
+    usa INSERT OR REPLACE para garantir idempotência: se o registro já existe
+    ele é atualizado; se não existe, é inserido.  Isso evita o erro
+    ``UNIQUE constraint failed`` em reinicializações do container.
+    """
     try:
         conn = _connect()
         cur = conn.cursor()
@@ -191,13 +197,11 @@ def add_client(data: Dict[str, Any]):
         explicit_id = data.get('id')
 
         if explicit_id is not None:
-            existing = get_client_by_id(int(explicit_id))
-            if existing:
-                conn.close()
-                return int(explicit_id) if update_client(int(explicit_id), data) else False
-
+            # INSERT OR REPLACE is atomic: no TOCTOU race, no UNIQUE constraint
+            # errors on container restarts.  SQLite replaces the row in-place
+            # when the primary key already exists.
             cur.execute(
-                'INSERT INTO clientes_sniper (id, nome, bybit_key, bybit_secret, tg_token, tg_api_key, chat_id, status, saldo_base, is_testnet, account_mode, balance_source, exchange) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                'INSERT OR REPLACE INTO clientes_sniper (id, nome, bybit_key, bybit_secret, tg_token, tg_api_key, chat_id, status, saldo_base, is_testnet, account_mode, balance_source, exchange) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
                 (int(explicit_id), *payload)
             )
             inserted_id = int(explicit_id)
@@ -331,15 +335,18 @@ def update_client(client_id: int, data: Dict[str, Any]) -> bool:
 
 
 def upsert_client_local(data: Dict[str, Any]) -> bool:
-    """Espelha um cliente vindo da nuvem no SQLite local."""
-    client_id = data.get('id')
-    if client_id is None:
-        return bool(add_client(data))
+    """Espelha um cliente vindo da nuvem no SQLite local.
 
-    if get_client_by_id(int(client_id)):
-        return update_client(int(client_id), data)
-
-    return bool(add_client(data))
+    Delega para ``add_client`` que, quando um ``id`` explícito está presente,
+    usa INSERT OR REPLACE de forma atômica — sem verificação prévia de
+    existência e sem risco de UNIQUE constraint em reinicializações.
+    """
+    try:
+        result = add_client(data)
+        return bool(result)
+    except Exception as e:
+        print(f"⚠️ Erro ao upsert cliente local {data.get('id')}: {e}")
+        return False
 
 
 def delete_client(client_id: int) -> bool:
