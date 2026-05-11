@@ -7,4 +7,4 @@ services:
       - key: ENVIRONMENT
         value: development
     buildCommand: pip install -r requirements.txt && npm ci && npm run build
-    startCommand: gunicorn -w 1 -k gthread --threads 8 -b 0.0.0.0:$PORT wsgi:app --timeout 120 --log-level info --access-logfile /dev/stdout --error-logfile /dev/stdout --capture-output
+    startCommand: gunicorn -w 1 -k gthread --threads 8 -b 0.0.0.0:$PORT wsgi:app --timeout 120 --log-level info --access-logfile - --capture-output 2>&1
