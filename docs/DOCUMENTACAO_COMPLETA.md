@@ -8,8 +8,7 @@ O sistema foi desenhado para operar com:
 
 - **Backend Python + Flask**
 - **Frontend React + Vite**
-- **Banco local SQLite**
-- **Persistencia cloud via Supabase**
+- **Banco local SQLite em /app/data/database.db**
 - **Conexao de mercado via Bybit/CCXT**
 - **Validacao de sinais com logica local + Groq + Gemini**
 
@@ -107,18 +106,7 @@ Responsabilidades:
 - manter `trades`,
 - manter `config`,
 - registrar historico local,
-- funcionar como fallback operacional.
-
-### Persistencia cloud
-
-Arquivo principal: `src/database/supabase_manager.py`
-
-Responsabilidades:
-
-- salvar clientes no Supabase,
-- criptografar campos sensiveis,
-- ler clientes da nuvem,
-- cair para fallback local quando a nuvem falhar.
+- persistir dados em /app/data/database.db.
 
 ### Logica de IA
 
@@ -405,9 +393,9 @@ Boas praticas aplicadas:
 - banco local fora do Git,
 - logs fora do Git,
 - arquivo `.env.example` sem segredos reais,
-- criptografia de campos sensiveis antes do envio ao Supabase.
+- credenciais armazenadas localmente em SQLite com protecao adequada.
 
-Campos protegidos no fluxo cloud:
+Campos protegidos no banco:
 
 - `bybit_key`
 - `bybit_secret`
@@ -415,19 +403,15 @@ Campos protegidos no fluxo cloud:
 - `tg_api_key`
 - `chat_id`
 
-## 10.2 Fallback seguro
+## 10.2 Persistencia de dados
 
-Quando o Supabase falha por tabela ausente/schema cache:
-
-- a nuvem e desligada na sessao,
-- o sistema cai para local,
-- evita spam continuo de erro.
+O banco de dados SQLite é armazenado em `/app/data/database.db` e deve ser montado em um volume persistente no Railway ou outro provedor de nuvem para garantir que os dados não sejam perdidos entre deployments.
 
 ## 10.3 Recomendacoes de seguranca
 
 Para producao, recomenda-se:
 
-1. usar uma chave dedicada em `SUPABASE_CLIENTS_SECRET`,
+1. montar volume persistente em /app/data no Railway,
 2. rotacionar segredos periodicamente,
 3. restringir acesso ao dashboard,
 4. usar HTTPS e proxy reverso,
@@ -446,7 +430,7 @@ O projeto ja possui algumas bases de escalabilidade:
 - filtro local antes da IA,
 - cooldowns para evitar tempestade de requests,
 - suporte multiativo,
-- storage cloud opcional.
+- storage local em SQLite com WAL mode para performance.
 
 ### Pontos prontos para evolucao
 
@@ -513,7 +497,7 @@ Principais riscos tecnicos:
    - quando Gemini e Groq falham juntos, o 3o cerebro assume com regra de 80%.
 
 2. **Falha externa de API**
-   - Bybit, Groq, Gemini e Supabase podem sofrer indisponibilidade.
+   - Bybit, Groq, Gemini podem sofrer indisponibilidade.
 
 3. **Divergencia entre ambiente e mercado**
    - paper trading nao reproduz perfeitamente conta real.
@@ -608,7 +592,6 @@ Se houver erro:
 - revisar log,
 - revisar conectividade de APIs,
 - revisar cooldown/rate limit,
-- revisar Supabase,
 - revisar banco local,
 - pausar migracao para conta real se necessario.
 
@@ -625,13 +608,12 @@ src/
     learning.py
   broker/
     bybit_client.py
+    binance_client.py
   database/
     manager.py
-    supabase_manager.py
   engine/
     indicators.py
 tools/
-  supabase_schema.sql
 tests/
 ```
 
@@ -648,10 +630,10 @@ Principais variaveis:
 - `TELEGRAM_CHAT_ID`
 - `GEMINI_API_KEY`
 - `GROQ_API_KEY`
-- `SUPABASE_URL`
-- `SUPABASE_KEY`
-- `SUPABASE_CLIENTS_SECRET`
 - `VITE_API_BASE`
+
+Nota: O banco de dados é criado automaticamente em `/app/data/database.db`.
+Para Railway, configure um volume persistente montado em `/app/data`.
 
 ---
 
