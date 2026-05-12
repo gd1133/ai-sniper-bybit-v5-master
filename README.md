@@ -103,6 +103,12 @@ Depois do deploy:
 2. Cadastre clientes com `Conta Testnet` ou `Conta Real`
 3. Ajuste `ENVIRONMENT` para `production` quando quiser subir com execucao real por padrao
 
+## Deploy no Railway
+
+- Railway faz deploy por **commit/push** no GitHub (ou botao **Redeploy**). Botao **Restart** nao atualiza codigo.
+- Este repo ja inclui `railway.json` usando **Dockerfile**.
+- Se aparecer erro de SQLite (ex: nao consegue criar/abrir `database.db`), configure um caminho gravavel via `SQLITE_DB_PATH` (ex: `/tmp/ai-sniper/database.db` ou um volume do Railway).
+
 ## Como rodar
 
 ### Backend

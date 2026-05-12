@@ -2,14 +2,15 @@ import sqlite3
 import os
 import time
 from datetime import datetime
+from src.database.manager import DB_PATH as DEFAULT_DB_PATH
 
 class TradeLearner:
     """
     🧠 MEMÓRIA NEURAL v60.1 - GIVALDO SUPREME (THREAD-SAFE)
     Otimizado para evitar travamentos no Dashboard através de conexões síncronas.
     """
-    def __init__(self, db_path="database.db"):
-        self.db_path = db_path
+    def __init__(self, db_path=None):
+        self.db_path = db_path or DEFAULT_DB_PATH
         self._ensure_table()
 
     def _get_conn(self):

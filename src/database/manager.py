@@ -1,11 +1,45 @@
 import sqlite3
 import os
+import tempfile
 from typing import List, Dict, Any
 from src.config import get_environment_config
 
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '..', 'database.db')
+_DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '..', 'database.db')
 VALID_ACCOUNT_MODES = {'testnet', 'real'}
 VALID_OPERATION_MODES = {'paper', 'testnet', 'real'}
+
+def _is_writable_path(path: str) -> bool:
+    try:
+        parent = os.path.dirname(os.path.abspath(path)) or "."
+        os.makedirs(parent, exist_ok=True)
+        probe_path = os.path.join(parent, ".write_test")
+        with open(probe_path, "w", encoding="utf-8") as probe:
+            probe.write("ok")
+        os.remove(probe_path)
+        return True
+    except Exception:
+        return False
+
+
+def _resolve_db_path() -> str:
+    explicit = (
+        os.getenv("SQLITE_DB_PATH")
+        or os.getenv("AI_SNIPER_DB_PATH")
+        or os.getenv("DB_PATH")
+    )
+    if explicit:
+        return explicit
+
+    if _is_writable_path(_DEFAULT_DB_PATH):
+        return _DEFAULT_DB_PATH
+
+    fallback = os.path.join(tempfile.gettempdir(), "ai-sniper", "database.db")
+    os.makedirs(os.path.dirname(fallback), exist_ok=True)
+    print(f"⚠️ DB_PATH não gravável em '{_DEFAULT_DB_PATH}'. Usando '{fallback}'.")
+    return fallback
+
+
+DB_PATH = _resolve_db_path()
 
 
 def is_truthy(value: Any) -> bool:
