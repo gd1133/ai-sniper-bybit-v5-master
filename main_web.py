@@ -712,17 +712,27 @@ def _get_registered_clients(active_only=False):
                 normalized_cloud_clients.append(client_with_source)
             return normalized_cloud_clients
         if cloud_clients is not None and len(cloud_clients) == 0:
-            # Supabase acessível mas retornou vazio — provavelmente RLS bloqueando
-            # a chave anon ou tabela realmente vazia.
-            # Se o SQLite local também estiver vazio, os clientes ficam invisíveis.
-            # SOLUÇÃO: defina SUPABASE_SERVICE_KEY no Railway (chave service_role
-            # bypassa RLS completamente) ou desative RLS na tabela "clientes".
-            print(
-                "⚠️ [Supabase] Nenhum cliente retornado do Supabase. "
-                "Possíveis causas: (1) RLS ativo bloqueando a chave anon — "
-                "configure SUPABASE_SERVICE_KEY no Railway para resolver; "
-                "(2) tabela realmente vazia. Tentando SQLite local..."
-            )
+            using_service_key = bool(getattr(cloud_db, "_using_service_key", False))
+            if using_service_key:
+                print(
+                    "⚠️ [Supabase] Nenhum cliente retornado do Supabase (chave service_role ativa). "
+                    "Possíveis causas: (1) tabela 'clientes' vazia; "
+                    "(2) filtro de status (ex: 'ativo') não bate; "
+                    "(3) SUPABASE_URL/keys apontando para outro projeto. "
+                    "Tentando SQLite local..."
+                )
+            else:
+                # Supabase acessível mas retornou vazio — provavelmente RLS bloqueando
+                # a chave anon ou tabela realmente vazia.
+                # Se o SQLite local também estiver vazio, os clientes ficam invisíveis.
+                # SOLUÇÃO: defina SUPABASE_SERVICE_KEY no Railway (chave service_role
+                # bypassa RLS completamente) ou desative RLS na tabela "clientes".
+                print(
+                    "⚠️ [Supabase] Nenhum cliente retornado do Supabase. "
+                    "Possíveis causas: (1) RLS ativo bloqueando a chave anon — "
+                    "configure SUPABASE_SERVICE_KEY no Railway para resolver; "
+                    "(2) tabela realmente vazia. Tentando SQLite local..."
+                )
 
     local_clients = db.get_active_clients() if active_only else db.get_all_clients()
     return [{**dict(client), "storage_source": "local"} for client in local_clients]
@@ -2805,4 +2815,3 @@ if __name__ == "__main__":
     print(f"📊 Dashboard: http://0.0.0.0:{render_port}")
     print("🧠 Cérebro Triplo: ATIVO (Rigor 50%)")
     app.run(host='0.0.0.0', port=render_port, debug=False, use_reloader=False)
-
