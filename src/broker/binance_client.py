@@ -240,7 +240,7 @@ class BinanceClient:
                     if self.proxy_url:
                         error_msg = f"[Via Proxy {self.proxy_url}] {error_msg}"
                     return False, error_msg
-                error_msg = 'Chave API Binance inválida ou sem permissão Futures'
+                error_msg = '❌ ERRO: Chave API Binance inválida ou sem permissão Futures. Verifique se sua API Key está configurada como "No IP Restriction" (ou adicione o IP do proxy na whitelist) e se as permissões de Futures Trading estão ativas.'
                 if self.proxy_url:
                     error_msg = f"[Via Proxy] {error_msg}"
                 return False, error_msg

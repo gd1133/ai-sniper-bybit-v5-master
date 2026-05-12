@@ -5,7 +5,9 @@ from datetime import datetime
 from src.config import get_bybit_base_url, get_bybit_credentials, resolve_use_testnet
 
 AUTH_10003_ALERT = (
-    "ERRO DE AUTENTICAÇÃO: Verifique se a chave de API é de produção e se o 2FA está ativo na Bybit"
+    "❌ ERRO: Verifique se sua API Key na Bybit está configurada como 'No IP Restriction' "
+    "e se as permissões de Order/Position/Trade estão ativas. "
+    "Acesse: Bybit → API Management → Edit Restrictions → Select 'No IP Restriction'"
 )
 
 # Global para carregar CCXT apenas uma vez
@@ -455,7 +457,7 @@ class BybitClient:
                     if self.proxy_url:
                         short = f"[Via Proxy {self.proxy_url}] {short}"
                     return False, short
-                error_msg = "Chave API inválida ou sem permissão de leitura de saldo"
+                error_msg = "❌ ERRO: Chave API inválida ou sem permissão. Verifique se sua API Key na Bybit está configurada como 'No IP Restriction' e se as permissões de Order/Position/Trade estão ativas."
                 if self.proxy_url:
                     error_msg = f"[Via Proxy] {error_msg}"
                 return False, error_msg

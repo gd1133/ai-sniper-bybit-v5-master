@@ -68,6 +68,12 @@ Padrao unico das credenciais Bybit:
 - `BYBIT_API_SECRET`
 - `PROXY_URL` (opcional): endereço do proxy para conectar à Bybit (ex: `http://user:pass@proxy.com:port` ou `socks5://proxy.com:port`)
 
+⚠️ **IMPORTANTE - Configuração da API Key:**
+- Ao criar sua API Key na Bybit/Binance, **selecione "No IP Restriction"** (Sem Restrição de IP)
+- Ative as permissões: **Order**, **Position**, **Trade**
+- Se usar proxy, você pode adicionar o IP do proxy na whitelist OU usar "No IP Restriction"
+- O sistema funciona melhor com **"No IP Restriction"** para maior flexibilidade
+
 Regras do endpoint:
 
 - `ENVIRONMENT=development`: por padrao usa `USE_TESTNET=true`, `ALLOW_REAL_TRADING=false` e `ALLOW_ORDER_EXECUTION=false`

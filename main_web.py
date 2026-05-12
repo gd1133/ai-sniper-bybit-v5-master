@@ -853,8 +853,9 @@ def _friendly_bybit_error(raw_error: str, account_mode: str) -> str:
     # Invalid api_key (retCode 10003)
     if '10003' in msg or 'invalid api_key' in lowered or 'invalid api key' in lowered:
         return (
-            f'Chave API não reconhecida (código 10003). '
-            f'Verifique se copiou corretamente a API Key. {source_hint}'
+            f'❌ ERRO: Chave API não reconhecida (código 10003). '
+            f'Verifique se sua API Key na {exchange.upper()} está configurada como "No IP Restriction" '
+            f'e se as permissões de Order/Position/Trade estão ativas. {source_hint}'
         )
 
     # Invalid signature / wrong secret (retCode 10004)
@@ -874,9 +875,10 @@ def _friendly_bybit_error(raw_error: str, account_mode: str) -> str:
     # IP not whitelisted
     if 'ip' in lowered and ('not allow' in lowered or 'whitelist' in lowered or 'forbidden' in lowered or '403' in msg):
         return (
-            f'IP do servidor não autorizado pela chave API. '
-            f'No painel da Bybit, adicione o IP do servidor à lista de IPs permitidos da chave, '
-            f'ou crie uma chave sem restrição de IP.'
+            f'❌ ERRO: IP não autorizado pela API Key. '
+            f'Solução: Configure sua API Key na {exchange.upper()} como "No IP Restriction" (recomendado) '
+            f'ou adicione o IP do servidor/proxy à whitelist da chave. '
+            f'Se estiver usando proxy, adicione o IP do proxy na whitelist.'
         )
 
     # Generic fallback – keep original but add hint
