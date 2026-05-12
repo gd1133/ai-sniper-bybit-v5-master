@@ -910,13 +910,16 @@ def _friendly_binance_error(raw_error: str, account_mode: str) -> str:
         )
 
     # Invalid API key, IP, or permissions (-2015)
-    if '-2015' in msg or 'invalid api-key' in lowered or 'ip' in lowered:
-        if 'ip' in lowered or 'not allowed' in lowered:
-            return (
-                f'IP do servidor não autorizado pela chave API Binance. '
-                f'No painel da Binance, adicione o IP do servidor à lista de IPs permitidos, '
-                f'ou crie uma chave sem restrição de IP.'
-            )
+    # Check for IP restriction errors more specifically
+    if ('ip' in lowered and ('restrict' in lowered or 'whitelist' in lowered or 'not allowed' in lowered or 'not allow' in lowered)):
+        return (
+            f'IP do servidor não autorizado pela chave API Binance. '
+            f'No painel da Binance, adicione o IP do servidor à lista de IPs permitidos, '
+            f'ou crie uma chave sem restrição de IP.'
+        )
+
+    # Other -2015 errors (invalid key or permissions)
+    if '-2015' in msg or 'invalid api-key' in lowered:
         return (
             f'Chave API inválida ou sem permissões necessárias (código -2015). '
             f'Verifique se a chave tem permissão para Futures Trading. {source_hint}'
