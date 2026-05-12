@@ -74,7 +74,7 @@ class SupabaseManager:
             self.client: Optional[Client] = create_client(self.url, self.key)
             self.cloud_enabled = True
             key_type = "service_role (RLS bypass)" if self._using_service_key else "anon"
-            print(f"☁️ Supabase conectado com sucesso! (chave: {key_type})")
+            print(f"☁️ Supabase conectado com sucesso! (chave: {key_type}, tabela_clientes: {self.clients_table})")
         else:
             self.client = None
             print("⚠️ Supabase não configurado no .env")
@@ -164,7 +164,7 @@ class SupabaseManager:
             details["args"] = error.args
         print(
             f"❌ [Supabase] Falha ao {action} na tabela '{table_name}'. "
-            f"payload_keys={sorted(list(safe_payload.keys()))} details={details or str(error)}"
+            f"payload={safe_payload} details={details or str(error)}"
         )
         print(traceback.format_exc().strip())
 
@@ -309,6 +309,9 @@ class SupabaseManager:
         for idx, table_name in enumerate(candidates):
             try:
                 result = self.client.table(table_name).upsert(payload).execute()
+                response_error = getattr(result, "error", None)
+                if response_error:
+                    raise RuntimeError(f"Supabase response.error: {response_error}")
 
                 rows = getattr(result, "data", None) or []
                 if table_name != self.clients_table:

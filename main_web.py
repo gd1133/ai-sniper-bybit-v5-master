@@ -691,6 +691,10 @@ def _is_supabase_ready():
     return bool(cloud_db and getattr(cloud_db, "is_available", lambda: False)())
 
 
+_supabase_empty_warn_last = 0.0
+_SUPABASE_EMPTY_WARN_INTERVAL = 60.0
+
+
 def _get_registered_clients(active_only=False):
     """Fonte de verdade SaaS: Supabase quando disponível; SQLite como fallback.
 
@@ -718,12 +722,16 @@ def _get_registered_clients(active_only=False):
             # SOLUÇÃO: defina SUPABASE_SERVICE_KEY (ou SUPABASE_SERVICE_ROLE_KEY)
             # no Railway (chave service_role bypassa RLS completamente) ou desative
             # RLS na tabela "clientes".
-            print(
-                "⚠️ [Supabase] Nenhum cliente retornado do Supabase. "
-                "Possíveis causas: (1) RLS ativo bloqueando a chave anon — "
-                "configure SUPABASE_SERVICE_KEY (ou SUPABASE_SERVICE_ROLE_KEY) no Railway para resolver; "
-                "(2) tabela realmente vazia. Tentando SQLite local..."
-            )
+            global _supabase_empty_warn_last
+            now = time.time()
+            if now - _supabase_empty_warn_last >= _SUPABASE_EMPTY_WARN_INTERVAL:
+                _supabase_empty_warn_last = now
+                print(
+                    "⚠️ [Supabase] Nenhum cliente retornado do Supabase. "
+                    "Possíveis causas: (1) RLS ativo bloqueando a chave anon — "
+                    "configure SUPABASE_SERVICE_KEY (ou SUPABASE_SERVICE_ROLE_KEY) no Railway para resolver; "
+                    "(2) tabela realmente vazia. Tentando SQLite local..."
+                )
 
     local_clients = db.get_active_clients() if active_only else db.get_all_clients()
     return [{**dict(client), "storage_source": "local"} for client in local_clients]
@@ -2320,6 +2328,13 @@ def add_cliente():
         data['bybit_key'] = data.get('api_key')
     if 'bybit_secret' not in data and 'api_secret' in data:
         data['bybit_secret'] = data.get('api_secret')
+    if 'nome' not in data and 'nome_cliente' in data:
+        data['nome'] = data.get('nome_cliente')
+    if not str(data.get('nome') or '').strip():
+        return jsonify({
+            "status": "erro",
+            "msg": "Campo obrigatório ausente: nome (ou nome_cliente). Verifique o JSON enviado pelo frontend.",
+        }), 400
     try:
         account_mode = _normalize_account_mode(data.get('account_mode', data.get('is_testnet')))
         validation = validar_e_salvar_cliente(
