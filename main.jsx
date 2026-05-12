@@ -441,35 +441,10 @@ const App = () => {
     });
   };
 
-  const handleSupabaseSync = async () => {
-    if (supabaseSyncing) return;
-    try {
-      setSupabaseSyncing(true);
-      setSupabaseSyncMsg(null);
-      const res = await fetch(`${API_BASE}/api/supabase/force-sync`, { method: 'POST' });
-      const json = await res.json();
-      setSupabaseSyncMsg(json.msg || (json.success ? '✅ Sincronizado!' : '❌ Falha na sincronização'));
-      if (json.success && json.pulled > 0) {
-        // Recarrega lista de investidores após sincronização
-        const r2 = await fetch(`${API_BASE}/api/investidores`);
-        if (r2.ok) {
-          const list = await r2.json();
-          setInvestidores((list || []).map(normalizeInvestorRecord));
-        }
-      }
-    } catch (e) {
-      console.error('Erro ao sincronizar com Supabase', e);
-      setSupabaseSyncMsg('❌ Erro ao conectar com o servidor');
-    } finally {
-      setSupabaseSyncing(false);
-    }
-  };
 
-  // Lista de pessoas (será alimentada pelo banco local futuramente)
+  // Lista de pessoas (alimentada pelo banco SQLite local)
   const [investidores, setInvestidores] = useState([]);
   const [investidoresLoading, setInvestidoresLoading] = useState(true);
-  const [supabaseSyncing, setSupabaseSyncing] = useState(false);
-  const [supabaseSyncMsg, setSupabaseSyncMsg] = useState(null);
   const currentOperationMode = normalizeOperationMode(data.operation_mode);
   const currentOperationMeta = OPERATION_MODE_META[currentOperationMode] || OPERATION_MODE_META.paper;
   const formAccountMode = normalizeAccountMode(addFormFields.account_mode);
@@ -980,22 +955,9 @@ const App = () => {
                         <p className="text-zinc-600 text-xs font-black uppercase tracking-widest mb-6">
                           Nenhum investidor encontrado localmente.
                         </p>
-                        {supabaseSyncMsg && (
-                          <p className={`text-xs font-bold mb-4 ${supabaseSyncMsg.startsWith('✅') ? 'text-green-400' : 'text-orange-400'}`}>
-                            {supabaseSyncMsg}
-                          </p>
-                        )}
                         <p className="text-zinc-700 text-[10px] uppercase tracking-widest mb-6">
-                          Se você tem clientes salvos no Supabase, clique em Sincronizar para carregá-los.
+                          Adicione investidores usando o botão "Adicionar Investidor" acima.
                         </p>
-                        <button
-                          type="button"
-                          disabled={supabaseSyncing}
-                          onClick={handleSupabaseSync}
-                          className={`px-8 py-3 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all border border-blue-500/40 text-blue-400 hover:bg-blue-500/10 ${supabaseSyncing ? 'opacity-50 cursor-not-allowed' : ''}`}
-                        >
-                          {supabaseSyncing ? '⏳ Sincronizando...' : '☁️ Sincronizar com Supabase'}
-                        </button>
                       </td>
                     </tr>
                   ) : investidores.map(inv => (
@@ -1008,9 +970,6 @@ const App = () => {
                           </span>
                           <span className={`px-3 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest ${String(inv.exchange || 'bybit').toLowerCase() === 'binance' ? 'bg-orange-500/10 border-orange-500/30 text-orange-300' : 'bg-yellow-500/10 border-yellow-500/30 text-yellow-300'}`}>
                             {String(inv.exchange || 'BYBIT').toUpperCase()}
-                          </span>
-                          <span className={`px-3 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest ${String(inv.storage_source || 'LOCAL').toUpperCase() === 'SUPABASE' ? 'bg-blue-500/10 border-blue-500/30 text-blue-300' : 'bg-zinc-800 border-white/10 text-zinc-300'}`}>
-                            {String(inv.storage_source || 'LOCAL').toUpperCase()}
                           </span>
                         </div>
                       </td>
