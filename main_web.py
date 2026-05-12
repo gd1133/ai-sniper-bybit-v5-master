@@ -21,16 +21,9 @@ from src.config import get_bybit_base_url, get_bybit_credentials, get_environmen
 # --- IMPORTAÇÕES DAS PASTAS INTERNAS (SRC) - LAZY LOADING ---
 try:
     from src.database import manager as db
-    try:
-        from src.database.supabase_manager import SupabaseManager
-        cloud_db = SupabaseManager()
-    except Exception as e:
-        print(f"⚠️ Erro ao inicializar Supabase: {e}")
-        cloud_db = None
 except Exception as e:
     print(f"❌ Erro Crítico ao importar Database Manager: {e}")
     db = None
-    cloud_db = None
 
 # Importações pesadas (CCXT, TensorFlow, etc.) carregadas sob demanda
 BybitClient = None
@@ -282,10 +275,6 @@ def start_runtime_services():
         # primeiro poll do dashboard não precise esperar.
         threading.Thread(target=_fetch_active_client_balances, kwargs={'force': True}, daemon=True).start()
         print("⚡ Cache de saldo: aquecendo em background...")
-
-        if cloud_db:
-            print("☁️ Iniciando Sincronização com Supabase Cloud em background...")
-            threading.Thread(target=cloud_db.sync_clients, args=(db,), daemon=True).start()
 
         RUNTIME_STARTED = True
         return True
@@ -687,59 +676,13 @@ def _get_master_telegram_config():
     return token, chat_id
 
 
-def _is_supabase_ready():
-    return bool(cloud_db and getattr(cloud_db, "is_available", lambda: False)())
-
-
 def _get_registered_clients(active_only=False):
-    """Fonte de verdade SaaS: Supabase quando disponível; SQLite como fallback.
-
-    Se Supabase retorna lista vazia (possível bloqueio por RLS com chave anon),
-    faz fallback para SQLite local para garantir que clientes cadastrados sempre
-    apareçam no robô e no dashboard.
-    """
-    if _is_supabase_ready():
-        cloud_clients = cloud_db.get_clients(active_only=active_only)
-        if cloud_clients is not None and len(cloud_clients) > 0:
-            normalized_cloud_clients = []
-            for client in cloud_clients:
-                client_with_source = dict(client)
-                client_with_source['storage_source'] = 'supabase'
-                try:
-                    db.upsert_client_local(client_with_source)
-                except Exception as e:
-                    print(f"⚠️ [LOCAL MIRROR] cliente {client.get('id')}: {e}")
-                normalized_cloud_clients.append(client_with_source)
-            return normalized_cloud_clients
-        if cloud_clients is not None and len(cloud_clients) == 0:
-            # Supabase acessível mas retornou vazio — provavelmente RLS bloqueando
-            # a chave anon ou tabela realmente vazia.
-            # Se o SQLite local também estiver vazio, os clientes ficam invisíveis.
-            # SOLUÇÃO: defina SUPABASE_SERVICE_KEY no Railway (chave service_role
-            # bypassa RLS completamente) ou desative RLS na tabela "clientes".
-            print(
-                "⚠️ [Supabase] Nenhum cliente retornado do Supabase. "
-                "Possíveis causas: (1) RLS ativo bloqueando a chave anon — "
-                "configure SUPABASE_SERVICE_KEY no Railway para resolver; "
-                "(2) tabela realmente vazia. Tentando SQLite local..."
-            )
-
+    """Retorna clientes do SQLite local."""
     local_clients = db.get_active_clients() if active_only else db.get_all_clients()
     return [{**dict(client), "storage_source": "local"} for client in local_clients]
 
 
 def _get_registered_client_by_id(client_id):
-    if _is_supabase_ready():
-        cloud_client = cloud_db.get_client_by_id(client_id)
-        if cloud_client is not None:
-            cloud_client = dict(cloud_client)
-            cloud_client['storage_source'] = 'supabase'
-            try:
-                db.upsert_client_local(cloud_client)
-            except Exception as e:
-                print(f"⚠️ [LOCAL MIRROR] cliente {client_id}: {e}")
-            return cloud_client
-
     local_client = db.get_client_by_id(client_id)
     if local_client is None:
         return None
@@ -747,19 +690,11 @@ def _get_registered_client_by_id(client_id):
 
 
 def _save_client_everywhere(client_data):
-    """Persiste o cliente e devolve o registro final + status de sincronização."""
+    """Persiste o cliente no SQLite local e devolve o registro final + status de sincronização."""
     payload = dict(client_data or {})
     payload['account_mode'] = _normalize_account_mode(payload.get('account_mode', payload.get('is_testnet')))
     payload['is_testnet'] = _is_testnet_account(payload.get('account_mode'))
     payload['balance_source'] = payload.get('balance_source') or _mode_balance_source(payload.get('account_mode'))
-    remote_record = None
-    cloud_synced = False
-
-    if _is_supabase_ready():
-        remote_record = cloud_db.save_client(payload)
-        if remote_record is not None:
-            payload.update(remote_record)
-            cloud_synced = True
 
     local_result = db.upsert_client_local(payload) if payload.get('id') is not None else db.add_client(payload)
     local_synced = bool(local_result)
@@ -772,21 +707,18 @@ def _save_client_everywhere(client_data):
             pass
 
     final_record = _get_registered_client_by_id(final_id) if final_id is not None else None
-    if final_record is None and cloud_synced and remote_record is not None:
-        final_record = {**dict(remote_record), "storage_source": "supabase"}
     if final_record is None and local_synced and final_id is not None:
         local_record = db.get_client_by_id(final_id)
         final_record = {**dict(local_record), "storage_source": "local"} if local_record is not None else None
     client_balance_cache.clear()
-    return final_record, cloud_synced, local_synced
+    return final_record, False, local_synced
 
 
 def _delete_client_everywhere(client_id):
-    """Remove o cliente da nuvem e do fallback local."""
-    cloud_deleted = (not _is_supabase_ready()) or cloud_db.delete_client(client_id)
+    """Remove o cliente do SQLite local."""
     local_deleted = db.delete_client(client_id)
     client_balance_cache.clear()
-    return cloud_deleted, local_deleted
+    return True, local_deleted
 
 
 def _resolve_client_balance_payload(raw_data, broker, account_mode, existing_client=None):
@@ -1714,17 +1646,6 @@ def _manual_close_open_trades(symbol, requested_by="dashboard"):
             current_price_reference = current_price
             closed_count += 1
 
-    if closed_count and cloud_db and getattr(cloud_db, "is_available", lambda: False)():
-        try:
-            cloud_db.close_open_trades_by_symbol(
-                canonical_symbol,
-                current_price=current_price_reference,
-                closed_at=closed_at,
-                note_suffix=f"MANUAL_CLOSE_{str(requested_by).upper()}",
-            )
-        except Exception as cloud_err:
-            print(f"⚠️ [SUPABASE] Falha ao fechar trades manualmente em nuvem: {cloud_err}")
-
     _sync_active_trades_from_db()
     central_state['trades'] = db.get_recent_trades(20)
     if closed_count:
@@ -1829,24 +1750,6 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                     closed_at = time.strftime("%d/%m %H:%M", time.localtime())
                     db.record_trade(c.get('id'), symbol, side, 0.0, round(margem, 2), closed_at, 
                                   notes=f"SNIPER v60.1 - Conf: {res_ia.get('probabilidade')}% | Entrada: {entry_price:.8f}", status="open", entry_price=entry_price)
-
-                    # --- SINCRONIZAÇÃO NUVEM (SUPABASE) ---
-                    if cloud_db:
-                        try:
-                            cloud_db.record_trade({
-                                "client_id": c.get('id'),
-                                "pair": symbol,
-                                "side": side,
-                                "pnl_pct": 0.0,
-                                "profit": round(margem, 2),
-                                "entry_price": round(entry_price, 8),
-                                "closed_at": closed_at,
-                                "notes": f"SNIPER v60.1 - Conf: {res_ia.get('probabilidade')}%",
-                                "status": "open",
-                                "nome_cliente": c.get('nome') # Campo extra para facilitar análise na nuvem
-                            })
-                        except Exception as cloud_err:
-                            print(f"⚠️ [SUPABASE] Falha sync trade {c.get('nome')}: {cloud_err}")
 
                 except Exception as e:
                     print(f"❌ Falha na conta de {c.get('nome')}: {e}")
@@ -2116,99 +2019,9 @@ def health_check():
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
 
-@app.route('/api/supabase/status', methods=['GET'])
-def get_supabase_status():
-    """Diagnóstico da conexão Supabase: mostra chave usada, contagem de clientes e fallback."""
-    supabase_ready = _is_supabase_ready()
-    key_type = "none"
-    cloud_count = None
-    cloud_error = None
-
-    if supabase_ready:
-        key_type = "service_role (RLS bypass)" if getattr(cloud_db, "_using_service_key", False) else "anon (pode ser bloqueado por RLS)"
-        try:
-            rows = cloud_db.get_clients(active_only=False)
-            cloud_count = len(rows) if rows is not None else None
-            if rows is None:
-                cloud_error = "Supabase indisponível ou erro na query"
-            elif cloud_count == 0:
-                cloud_error = (
-                    "Supabase acessível mas retornou 0 clientes. "
-                    "Causa provável: RLS bloqueando a chave anon. "
-                    "Solução: defina SUPABASE_SERVICE_KEY no Railway."
-                )
-        except Exception:
-            cloud_error = "Erro ao consultar Supabase. Verifique os logs do servidor."
-
-    local_count = 0
-    try:
-        local_count = len(db.get_all_clients() or [])
-    except Exception:
-        pass
-
-    return jsonify({
-        "supabase_ready": supabase_ready,
-        "key_type": key_type,
-        "cloud_client_count": cloud_count,
-        "local_client_count": local_count,
-        "cloud_error": cloud_error,
-        "recommendation": (
-            "Defina SUPABASE_SERVICE_KEY no Railway para contornar o RLS e mostrar os clientes."
-            if (supabase_ready and cloud_count == 0)
-            else ("OK" if cloud_count else "Configure SUPABASE_URL e SUPABASE_KEY nas variáveis de ambiente.")
-        ),
-    })
-
-
-@app.route('/api/supabase/force-sync', methods=['POST'])
-def supabase_force_sync():
-    """Força sincronização Supabase → SQLite local e retorna resultado."""
-    if not _is_supabase_ready():
-        return jsonify({
-            "success": False,
-            "msg": "Supabase não está configurado. Defina SUPABASE_URL e SUPABASE_KEY.",
-        }), 503
-
-    try:
-        cloud_clients = cloud_db.get_clients(active_only=False)
-        if cloud_clients is None:
-            return jsonify({"success": False, "msg": "Erro ao consultar Supabase."}), 502
-
-        if len(cloud_clients) == 0:
-            return jsonify({
-                "success": False,
-                "pulled": 0,
-                "msg": (
-                    "Supabase retornou 0 clientes. "
-                    "Causa provável: RLS bloqueando a chave anon. "
-                    "Defina SUPABASE_SERVICE_KEY no Railway para resolver."
-                ),
-            }), 200
-
-        pulled = 0
-        sync_errors = 0
-        for client in cloud_clients:
-            try:
-                db.upsert_client_local(dict(client))
-                pulled += 1
-            except Exception:
-                sync_errors += 1
-
-        print(f"✅ [force-sync] {pulled} cliente(s) sincronizados Supabase→Local")
-        return jsonify({
-            "success": True,
-            "pulled": pulled,
-            "errors": sync_errors,
-            "msg": f"✅ {pulled} cliente(s) sincronizado(s) com sucesso!",
-        })
-    except Exception as e:
-        print(f"❌ [force-sync] erro: {e}")
-        return jsonify({"success": False, "msg": "Erro interno ao sincronizar."}), 500
-
-
 @app.route('/api/investidores', methods=['GET'])
 def get_investidores():
-    """Lista investidores do Supabase quando disponível, com fallback local."""
+    """Lista investidores cadastrados no banco local."""
     try:
         rows = _get_registered_clients(active_only=False)
         # _fetch_active_client_balances é não-bloqueante: retorna cache imediatamente

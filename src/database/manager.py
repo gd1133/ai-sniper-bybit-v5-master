@@ -3,7 +3,7 @@ import os
 from typing import List, Dict, Any
 from src.config import get_environment_config
 
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '..', 'database.db')
+DB_PATH = '/app/data/database.db'
 VALID_ACCOUNT_MODES = {'testnet', 'real'}
 VALID_OPERATION_MODES = {'paper', 'testnet', 'real'}
 
@@ -51,6 +51,7 @@ def _ensure_column(cur, table: str, column: str, definition: str):
 
 def init_db():
     """Inicializa banco com tabelas otimizadas e sem travamentos"""
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = _connect()
     cur = conn.cursor()
     
