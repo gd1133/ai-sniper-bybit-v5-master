@@ -191,17 +191,33 @@ def add_client(data: Dict[str, Any]):
         )
         explicit_id = data.get('id')
 
-        if explicit_id is not None:
-            existing = get_client_by_id(int(explicit_id))
-            if existing:
-                conn.close()
-                return int(explicit_id) if update_client(int(explicit_id), data) else False
-
+        if explicit_id is not None and str(explicit_id).strip() != '':
+            # UPSERT atômico: evita UNIQUE constraint em inicializações concorrentes
+            # e espelha atualizações do Supabase sem precisar de SELECT+INSERT.
+            explicit_id_int = int(explicit_id)
             cur.execute(
-                'INSERT INTO clientes_sniper (id, nome, bybit_key, bybit_secret, tg_token, tg_api_key, chat_id, status, saldo_base, is_testnet, account_mode, balance_source, exchange) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                (int(explicit_id), *payload)
+                '''
+                INSERT INTO clientes_sniper (
+                    id, nome, bybit_key, bybit_secret, tg_token, tg_api_key, chat_id,
+                    status, saldo_base, is_testnet, account_mode, balance_source, exchange
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(id) DO UPDATE SET
+                    nome = COALESCE(excluded.nome, clientes_sniper.nome),
+                    bybit_key = COALESCE(excluded.bybit_key, clientes_sniper.bybit_key),
+                    bybit_secret = COALESCE(excluded.bybit_secret, clientes_sniper.bybit_secret),
+                    tg_token = COALESCE(excluded.tg_token, clientes_sniper.tg_token),
+                    tg_api_key = COALESCE(excluded.tg_api_key, clientes_sniper.tg_api_key),
+                    chat_id = COALESCE(excluded.chat_id, clientes_sniper.chat_id),
+                    status = COALESCE(excluded.status, clientes_sniper.status),
+                    saldo_base = COALESCE(excluded.saldo_base, clientes_sniper.saldo_base),
+                    is_testnet = COALESCE(excluded.is_testnet, clientes_sniper.is_testnet),
+                    account_mode = COALESCE(excluded.account_mode, clientes_sniper.account_mode),
+                    balance_source = COALESCE(excluded.balance_source, clientes_sniper.balance_source),
+                    exchange = COALESCE(excluded.exchange, clientes_sniper.exchange)
+                ''',
+                (explicit_id_int, *payload),
             )
-            inserted_id = int(explicit_id)
+            inserted_id = explicit_id_int
         else:
             cur.execute(
                 'INSERT INTO clientes_sniper (nome, bybit_key, bybit_secret, tg_token, tg_api_key, chat_id, status, saldo_base, is_testnet, account_mode, balance_source, exchange) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
@@ -333,14 +349,12 @@ def update_client(client_id: int, data: Dict[str, Any]) -> bool:
 
 def upsert_client_local(data: Dict[str, Any]) -> bool:
     """Espelha um cliente vindo da nuvem no SQLite local."""
-    client_id = data.get('id')
-    if client_id is None:
+    try:
+        # add_client agora faz UPSERT quando "id" é fornecido.
         return bool(add_client(data))
-
-    if get_client_by_id(int(client_id)):
-        return update_client(int(client_id), data)
-
-    return bool(add_client(data))
+    except Exception as e:
+        print(f"⚠️ Erro ao upsert cliente local: {e}")
+        return False
 
 
 def delete_client(client_id: int) -> bool:
