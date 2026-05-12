@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import os
+import re
 import time
 import threading
 import traceback
@@ -56,6 +57,7 @@ class SupabaseManager:
     def __init__(self):
         self.url = os.getenv("SUPABASE_URL")
         self.clients_table = (os.getenv("SUPABASE_CLIENTS_TABLE") or "").strip() or "clientes"
+        self._last_get_clients_diag: float = 0.0
         # Prefer service_role key (bypasses RLS) when available; fall back to anon key.
         service_key = (
             os.getenv("SUPABASE_SERVICE_KEY")
@@ -168,6 +170,45 @@ class SupabaseManager:
         )
         print(traceback.format_exc().strip())
 
+    def _is_unique_violation_error(self, error: Exception) -> bool:
+        code = getattr(error, "code", None)
+        if str(code) == "23505":
+            return True
+        lowered = str(error).lower()
+        return ("unique" in lowered and "constraint" in lowered) or "23505" in lowered
+
+    def _extract_unique_violation_columns(self, error: Exception) -> List[str]:
+        details = None
+        if hasattr(error, "details"):
+            details = getattr(error, "details", None)
+        if details is None and isinstance(getattr(error, "args", None), (list, tuple)) and error.args:
+            details = str(error.args[0])
+        if details is None:
+            details = str(error)
+
+        # Common Postgres format: "Key (col1, col2)=(...) already exists."
+        match = re.search(r"key\s*\(([^)]+)\)\s*=", str(details), flags=re.IGNORECASE)
+        if not match:
+            return []
+        cols = [c.strip().strip('"') for c in match.group(1).split(",") if c.strip()]
+        return cols
+
+    def _infer_on_conflict(self, payload: Dict[str, Any], error: Optional[Exception] = None) -> Optional[str]:
+        if payload.get("id") is not None:
+            return "id"
+
+        # Best-effort fallback when there is no ID yet.
+        bybit_key = payload.get("bybit_key")
+        if bybit_key not in (None, ""):
+            return "bybit_key"
+
+        if error is not None:
+            cols = self._extract_unique_violation_columns(error)
+            if cols and all(col in payload for col in cols):
+                return ",".join(cols)
+
+        return None
+
     def _build_cipher(self) -> Optional[Fernet]:
         if not self.crypto_secret:
             return None
@@ -257,8 +298,17 @@ class SupabaseManager:
             return None
 
         candidates = self._clients_table_candidates()
+        key_mode = "service_role (RLS bypass)" if getattr(self, "_using_service_key", False) else "anon"
+        now = time.time()
+        debug = str(os.getenv("SUPABASE_DEBUG") or "").strip().lower() in {"1", "true", "yes", "on"}
+        if debug or (now - self._last_get_clients_diag) >= 60.0:
+            self._last_get_clients_diag = now
+            print(f"☁️ [Supabase] get_clients() | key_mode={key_mode} | candidates={candidates} | active_only={active_only}")
+
         for idx, table_name in enumerate(candidates):
             try:
+                if debug:
+                    print(f"☁️ [Supabase] Consultando tabela='{table_name}' | active_only={active_only}")
                 query = self.client.table(table_name).select("*").order("id", desc=True)
                 if active_only:
                     query = query.eq("status", "ativo")
@@ -269,7 +319,10 @@ class SupabaseManager:
                     self.clients_table = table_name
                 if rows is None:
                     return []
-                return [self._normalize_client_row(row) for row in rows]
+                normalized_rows = [self._normalize_client_row(row) for row in rows]
+                if debug:
+                    print(f"☁️ [Supabase] Retornou {len(normalized_rows)} linhas de '{table_name}'")
+                return normalized_rows
             except Exception as e:
                 if idx == 0 and len(candidates) > 1 and self._is_table_missing_error(e):
                     continue
@@ -308,10 +361,31 @@ class SupabaseManager:
         candidates = self._clients_table_candidates()
         for idx, table_name in enumerate(candidates):
             try:
-                result = self.client.table(table_name).upsert(payload).execute()
-                response_error = getattr(result, "error", None)
-                if response_error:
-                    raise RuntimeError(f"Supabase response.error: {response_error}")
+                on_conflict = self._infer_on_conflict(payload)
+
+                def _do_upsert(on_conflict_value: Optional[str]):
+                    table = self.client.table(table_name)
+                    if on_conflict_value:
+                        res = table.upsert(payload, on_conflict=on_conflict_value).execute()
+                    else:
+                        res = table.upsert(payload).execute()
+                    response_error = getattr(res, "error", None)
+                    if response_error:
+                        raise RuntimeError(f"Supabase response.error: {response_error}")
+                    return res
+
+                try:
+                    result = _do_upsert(on_conflict)
+                except Exception as upsert_err:
+                    # Retry once on unique-violation with a better on_conflict inferred from the DB error.
+                    if self._is_unique_violation_error(upsert_err):
+                        inferred = self._infer_on_conflict(payload, upsert_err)
+                        if inferred and inferred != on_conflict:
+                            result = _do_upsert(inferred)
+                        else:
+                            raise
+                    else:
+                        raise
 
                 rows = getattr(result, "data", None) or []
                 if table_name != self.clients_table:
