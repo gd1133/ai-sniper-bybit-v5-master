@@ -30,8 +30,13 @@ class SupabaseManager:
     def __init__(self):
         self.url = os.getenv("SUPABASE_URL")
         # Prefer service_role key (bypasses RLS) when available; fall back to anon key.
-        service_key = os.getenv("SUPABASE_SERVICE_KEY", "").strip()
-        anon_key = os.getenv("SUPABASE_KEY", "").strip()
+        service_key = (
+            os.getenv("SUPABASE_SERVICE_KEY")
+            or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+            or os.getenv("SUPABASE_SERVICE_ROLE")
+            or ""
+        ).strip()
+        anon_key = (os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_ANON_KEY") or "").strip()
         self.key = service_key or anon_key
         self._using_service_key = bool(service_key)
         self.crypto_secret = os.getenv("SUPABASE_CLIENTS_SECRET") or self.key

@@ -715,12 +715,13 @@ def _get_registered_clients(active_only=False):
             # Supabase acessível mas retornou vazio — provavelmente RLS bloqueando
             # a chave anon ou tabela realmente vazia.
             # Se o SQLite local também estiver vazio, os clientes ficam invisíveis.
-            # SOLUÇÃO: defina SUPABASE_SERVICE_KEY no Railway (chave service_role
-            # bypassa RLS completamente) ou desative RLS na tabela "clientes".
+            # SOLUÇÃO: defina SUPABASE_SERVICE_KEY (ou SUPABASE_SERVICE_ROLE_KEY)
+            # no Railway (chave service_role bypassa RLS completamente) ou desative
+            # RLS na tabela "clientes".
             print(
                 "⚠️ [Supabase] Nenhum cliente retornado do Supabase. "
                 "Possíveis causas: (1) RLS ativo bloqueando a chave anon — "
-                "configure SUPABASE_SERVICE_KEY no Railway para resolver; "
+                "configure SUPABASE_SERVICE_KEY (ou SUPABASE_SERVICE_ROLE_KEY) no Railway para resolver; "
                 "(2) tabela realmente vazia. Tentando SQLite local..."
             )
 
@@ -2135,7 +2136,7 @@ def get_supabase_status():
                 cloud_error = (
                     "Supabase acessível mas retornou 0 clientes. "
                     "Causa provável: RLS bloqueando a chave anon. "
-                    "Solução: defina SUPABASE_SERVICE_KEY no Railway."
+                    "Solução: defina SUPABASE_SERVICE_KEY (ou SUPABASE_SERVICE_ROLE_KEY) no Railway."
                 )
         except Exception:
             cloud_error = "Erro ao consultar Supabase. Verifique os logs do servidor."
@@ -2153,7 +2154,7 @@ def get_supabase_status():
         "local_client_count": local_count,
         "cloud_error": cloud_error,
         "recommendation": (
-            "Defina SUPABASE_SERVICE_KEY no Railway para contornar o RLS e mostrar os clientes."
+            "Defina SUPABASE_SERVICE_KEY (ou SUPABASE_SERVICE_ROLE_KEY) no Railway para contornar o RLS e mostrar os clientes."
             if (supabase_ready and cloud_count == 0)
             else ("OK" if cloud_count else "Configure SUPABASE_URL e SUPABASE_KEY nas variáveis de ambiente.")
         ),
@@ -2181,7 +2182,7 @@ def supabase_force_sync():
                 "msg": (
                     "Supabase retornou 0 clientes. "
                     "Causa provável: RLS bloqueando a chave anon. "
-                    "Defina SUPABASE_SERVICE_KEY no Railway para resolver."
+                    "Defina SUPABASE_SERVICE_KEY (ou SUPABASE_SERVICE_ROLE_KEY) no Railway para resolver."
                 ),
             }), 200
 
@@ -2805,4 +2806,3 @@ if __name__ == "__main__":
     print(f"📊 Dashboard: http://0.0.0.0:{render_port}")
     print("🧠 Cérebro Triplo: ATIVO (Rigor 50%)")
     app.run(host='0.0.0.0', port=render_port, debug=False, use_reloader=False)
-
