@@ -3,6 +3,7 @@ import hashlib
 import os
 import time
 import threading
+import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timezone
@@ -26,9 +27,35 @@ def _normalize_account_mode(value: Any) -> str:
     return 'testnet'
 
 
+_SENSITIVE_CLIENT_FIELDS = {
+    "bybit_key",
+    "bybit_secret",
+    "tg_token",
+    "tg_api_key",
+    "chat_id",
+}
+
+
+def _redact_value(value: Any) -> Any:
+    if value in (None, ""):
+        return value
+    raw = str(value)
+    if len(raw) <= 8:
+        return "***"
+    return f"{raw[:2]}***{raw[-2:]}"
+
+
+def _redact_client_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    safe: Dict[str, Any] = {}
+    for key, value in (payload or {}).items():
+        safe[key] = _redact_value(value) if key in _SENSITIVE_CLIENT_FIELDS else value
+    return safe
+
+
 class SupabaseManager:
     def __init__(self):
         self.url = os.getenv("SUPABASE_URL")
+        self.clients_table = (os.getenv("SUPABASE_CLIENTS_TABLE") or "").strip() or "clientes"
         # Prefer service_role key (bypasses RLS) when available; fall back to anon key.
         service_key = (
             os.getenv("SUPABASE_SERVICE_KEY")
@@ -109,6 +136,37 @@ class SupabaseManager:
                 self._error_count = 0
         else:
             print(f"❌ Erro ao {action} no Supabase: {error}")
+
+    def _is_table_missing_error(self, error: Exception) -> bool:
+        normalized = str(error).lower()
+        return ("could not find the table" in normalized) or ("pgrst205" in normalized)
+
+    def _clients_table_candidates(self) -> List[str]:
+        primary = str(self.clients_table or "clientes").strip() or "clientes"
+        alternative = "clientes_sniper" if primary == "clientes" else "clientes"
+        return [primary] if alternative == primary else [primary, alternative]
+
+    def _log_detailed_supabase_error(
+        self,
+        action: str,
+        table_name: str,
+        error: Exception,
+        *,
+        payload: Optional[Dict[str, Any]] = None,
+    ):
+        safe_payload = _redact_client_payload(payload or {})
+        details: Dict[str, Any] = {}
+        for attr in ("code", "message", "details", "hint"):
+            value = getattr(error, attr, None)
+            if value not in (None, ""):
+                details[attr] = value
+        if not details and getattr(error, "args", None):
+            details["args"] = error.args
+        print(
+            f"❌ [Supabase] Falha ao {action} na tabela '{table_name}'. "
+            f"payload_keys={sorted(list(safe_payload.keys()))} details={details or str(error)}"
+        )
+        print(traceback.format_exc().strip())
 
     def _build_cipher(self) -> Optional[Fernet]:
         if not self.crypto_secret:
@@ -198,33 +256,47 @@ class SupabaseManager:
         if not self.is_available():
             return None
 
-        try:
-            query = self.client.table("clientes").select("*").order("id", desc=True)
-            if active_only:
-                query = query.eq("status", "ativo")
-            result = query.execute()
-            rows = getattr(result, "data", None)
-            if rows is None:
-                return []
-            return [self._normalize_client_row(row) for row in rows]
-        except Exception as e:
-            self._handle_cloud_error("buscar clientes", e)
-            return None
+        candidates = self._clients_table_candidates()
+        for idx, table_name in enumerate(candidates):
+            try:
+                query = self.client.table(table_name).select("*").order("id", desc=True)
+                if active_only:
+                    query = query.eq("status", "ativo")
+                result = query.execute()
+                rows = getattr(result, "data", None)
+                if table_name != self.clients_table:
+                    print(f"⚠️ [Supabase] Usando tabela '{table_name}' (fallback automático).")
+                    self.clients_table = table_name
+                if rows is None:
+                    return []
+                return [self._normalize_client_row(row) for row in rows]
+            except Exception as e:
+                if idx == 0 and len(candidates) > 1 and self._is_table_missing_error(e):
+                    continue
+                self._handle_cloud_error("buscar clientes", e)
+                return None
 
     def get_client_by_id(self, client_id: int) -> Optional[Dict[str, Any]]:
         """Busca um cliente específico no Supabase."""
         if not self.is_available():
             return None
 
-        try:
-            result = self.client.table("clientes").select("*").eq("id", int(client_id)).limit(1).execute()
-            rows = getattr(result, "data", None) or []
-            if not rows:
+        candidates = self._clients_table_candidates()
+        for idx, table_name in enumerate(candidates):
+            try:
+                result = self.client.table(table_name).select("*").eq("id", int(client_id)).limit(1).execute()
+                rows = getattr(result, "data", None) or []
+                if table_name != self.clients_table:
+                    print(f"⚠️ [Supabase] Usando tabela '{table_name}' (fallback automático).")
+                    self.clients_table = table_name
+                if not rows:
+                    return None
+                return self._normalize_client_row(rows[0])
+            except Exception as e:
+                if idx == 0 and len(candidates) > 1 and self._is_table_missing_error(e):
+                    continue
+                self._handle_cloud_error(f"buscar cliente {client_id}", e)
                 return None
-            return self._normalize_client_row(rows[0])
-        except Exception as e:
-            self._handle_cloud_error(f"buscar cliente {client_id}", e)
-            return None
 
     def save_client(self, client_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Cria ou atualiza um cliente no Supabase e devolve a linha persistida."""
@@ -233,39 +305,50 @@ class SupabaseManager:
 
         payload = self._prepare_client_payload(client_data)
 
-        try:
-            table = self.client.table("clientes")
-            if payload.get("id") is None:
-                result = table.insert(payload).execute()
-            else:
-                result = table.upsert(payload).execute()
+        candidates = self._clients_table_candidates()
+        for idx, table_name in enumerate(candidates):
+            try:
+                result = self.client.table(table_name).upsert(payload).execute()
 
-            rows = getattr(result, "data", None) or []
-            if rows:
-                return self._normalize_client_row(rows[0])
+                rows = getattr(result, "data", None) or []
+                if table_name != self.clients_table:
+                    print(f"⚠️ [Supabase] Usando tabela '{table_name}' (fallback automático).")
+                    self.clients_table = table_name
+                if rows:
+                    return self._normalize_client_row(rows[0])
 
-            if payload.get("id") is not None:
-                return self.get_client_by_id(int(payload["id"]))
+                if payload.get("id") is not None:
+                    return self.get_client_by_id(int(payload["id"]))
 
-            latest = self.get_clients(active_only=False)
-            if latest:
-                return latest[0]
-            return payload
-        except Exception as e:
-            self._handle_cloud_error("salvar cliente", e)
-            return None
+                latest = self.get_clients(active_only=False)
+                if latest:
+                    return latest[0]
+                return payload
+            except Exception as e:
+                if idx == 0 and len(candidates) > 1 and self._is_table_missing_error(e):
+                    continue
+                self._log_detailed_supabase_error("salvar cliente", table_name, e, payload=payload)
+                self._handle_cloud_error("salvar cliente", e)
+                return None
 
     def delete_client(self, client_id: int) -> bool:
         """Remove um cliente do Supabase."""
         if not self.is_available():
             return False
 
-        try:
-            self.client.table("clientes").delete().eq("id", int(client_id)).execute()
-            return True
-        except Exception as e:
-            self._handle_cloud_error(f"deletar cliente {client_id}", e)
-            return False
+        candidates = self._clients_table_candidates()
+        for idx, table_name in enumerate(candidates):
+            try:
+                self.client.table(table_name).delete().eq("id", int(client_id)).execute()
+                if table_name != self.clients_table:
+                    print(f"⚠️ [Supabase] Usando tabela '{table_name}' (fallback automático).")
+                    self.clients_table = table_name
+                return True
+            except Exception as e:
+                if idx == 0 and len(candidates) > 1 and self._is_table_missing_error(e):
+                    continue
+                self._handle_cloud_error(f"deletar cliente {client_id}", e)
+                return False
 
     def update_client_validation_status(self, user_id: int, ok: bool, error_message: str = "") -> bool:
         """Atualiza status do cliente após validação Bybit usando filtro por ID exato."""
@@ -275,20 +358,28 @@ class SupabaseManager:
         status_value = 'ativo' if ok else 'erro_api'
         timestamp = datetime.now(timezone.utc).isoformat()
 
-        try:
-            self.client.table("clientes").update({
-                "status": status_value,
-                "updated_at": timestamp,
-            }).eq("id", int(user_id)).execute()
-        except Exception as e:
-            self._handle_cloud_error(f"atualizar status de validação do cliente {user_id}", e)
-            return False
+        candidates = self._clients_table_candidates()
+        for idx, table_name in enumerate(candidates):
+            try:
+                self.client.table(table_name).update({
+                    "status": status_value,
+                    "updated_at": timestamp,
+                }).eq("id", int(user_id)).execute()
+                if table_name != self.clients_table:
+                    print(f"⚠️ [Supabase] Usando tabela '{table_name}' (fallback automático).")
+                    self.clients_table = table_name
+                break
+            except Exception as e:
+                if idx == 0 and len(candidates) > 1 and self._is_table_missing_error(e):
+                    continue
+                self._handle_cloud_error(f"atualizar status de validação do cliente {user_id}", e)
+                return False
 
         # Limpa (ou grava) campos de erro conhecidos de forma tolerante a schema.
         error_fields = ("api_error", "error_message", "last_error")
         for field in error_fields:
             try:
-                self.client.table("clientes").update({
+                self.client.table(self.clients_table).update({
                     field: None if ok else str(error_message or '').strip(),
                     "updated_at": timestamp,
                 }).eq("id", int(user_id)).execute()

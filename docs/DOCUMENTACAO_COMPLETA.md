@@ -651,6 +651,7 @@ Principais variaveis:
 - `SUPABASE_URL`
 - `SUPABASE_KEY`
 - `SUPABASE_SERVICE_KEY` (ou `SUPABASE_SERVICE_ROLE_KEY` para bypass do RLS)
+- `SUPABASE_CLIENTS_TABLE` (ex.: `clientes_sniper`)
 - `SUPABASE_CLIENTS_SECRET`
 - `VITE_API_BASE`
 

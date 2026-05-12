@@ -955,6 +955,8 @@ def _friendly_bybit_error(raw_error: str, account_mode: str) -> str:
 def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=None, client_id=None, existing_client=None):
     """Valida credenciais da exchange (Bybit ou Binance) e persiste o cliente."""
     payload = dict(client_payload or {})
+    if 'nome' not in payload and 'nome_cliente' in payload:
+        payload['nome'] = payload.get('nome_cliente')
     resolved_testnet = _resolve_client_testnet_flag(is_testnet)
     account_mode = 'testnet' if resolved_testnet else 'real'
     payload['account_mode'] = account_mode
@@ -2122,6 +2124,7 @@ def get_supabase_status():
     """Diagnóstico da conexão Supabase: mostra chave usada, contagem de clientes e fallback."""
     supabase_ready = _is_supabase_ready()
     key_type = "none"
+    clients_table = getattr(cloud_db, "clients_table", None) if supabase_ready else None
     cloud_count = None
     cloud_error = None
 
@@ -2150,13 +2153,14 @@ def get_supabase_status():
     return jsonify({
         "supabase_ready": supabase_ready,
         "key_type": key_type,
+        "clients_table": clients_table,
         "cloud_client_count": cloud_count,
         "local_client_count": local_count,
         "cloud_error": cloud_error,
         "recommendation": (
             "Defina SUPABASE_SERVICE_KEY (ou SUPABASE_SERVICE_ROLE_KEY) no Railway para contornar o RLS e mostrar os clientes."
             if (supabase_ready and cloud_count == 0)
-            else ("OK" if cloud_count else "Configure SUPABASE_URL e SUPABASE_KEY nas variáveis de ambiente.")
+            else ("OK" if cloud_count else "Configure SUPABASE_URL e SUPABASE_KEY nas variáveis de ambiente. Opcional: SUPABASE_CLIENTS_TABLE=clientes_sniper")
         ),
     })
 
@@ -2247,7 +2251,9 @@ def api_get_cliente(client_id):
 @app.route('/api/cliente/<int:client_id>', methods=['PUT'])
 def api_update_cliente(client_id):
     """Atualiza um cliente existente."""
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "JSON inválido"}), 400
     try:
         account_mode = _normalize_account_mode(data.get('account_mode', data.get('is_testnet')))
         existing_client = _get_registered_client_by_id(client_id)
@@ -2305,7 +2311,15 @@ def api_delete_cliente(client_id):
 @app.route('/api/vincular_cliente', methods=['POST'])
 def add_cliente():
     """Recebe novos investidores do formulário SaaS."""
-    data = request.json
+    data = request.get_json(silent=True)
+    if data is None:
+        return jsonify({"status": "erro", "msg": "Body JSON ausente ou inválido"}), 400
+    if not isinstance(data, dict):
+        return jsonify({"status": "erro", "msg": "Body JSON deve ser um objeto"}), 400
+    if 'bybit_key' not in data and 'api_key' in data:
+        data['bybit_key'] = data.get('api_key')
+    if 'bybit_secret' not in data and 'api_secret' in data:
+        data['bybit_secret'] = data.get('api_secret')
     try:
         account_mode = _normalize_account_mode(data.get('account_mode', data.get('is_testnet')))
         validation = validar_e_salvar_cliente(
