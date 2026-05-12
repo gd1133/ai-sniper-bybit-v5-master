@@ -317,18 +317,7 @@ class SupabaseManager:
                     print(f"⚠️ [Supabase→Local] cliente {client.get('id')}: {e}")
             if pulled:
                 print(f"✅ {pulled} cliente(s) sincronizado(s) Supabase→Local.")
-
-        # 2. Local → Supabase: envia novos clientes locais para a nuvem.
-        local_clients = local_db_manager.get_all_clients()
-        pushed = 0
-        for client in local_clients:
-            if not self.is_available():
-                break
-            self.save_client(client)
-            pushed += 1
-        if pushed:
-            print(f"✅ {pushed} cliente(s) sincronizado(s) Local→Supabase.")
-        print("✅ Sincronização bidirecional em background finalizada.")
+        print("✅ Sincronização Supabase→Local em background finalizada.")
 
     def record_trade(self, trade_data):
         """Registra um trade diretamente no Supabase."""

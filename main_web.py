@@ -18,12 +18,18 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 from src.config import get_bybit_base_url, get_bybit_credentials, get_environment_config, resolve_use_testnet
 
+# Armazenamento de clientes: por padrão, usa apenas SQLite local (sem Supabase).
+CLIENT_STORAGE = str(os.getenv("CLIENT_STORAGE") or "local").strip().lower()
+
 # --- IMPORTAÇÕES DAS PASTAS INTERNAS (SRC) - LAZY LOADING ---
 try:
     from src.database import manager as db
     try:
-        from src.database.supabase_manager import SupabaseManager
-        cloud_db = SupabaseManager()
+        if CLIENT_STORAGE == "supabase":
+            from src.database.supabase_manager import SupabaseManager
+            cloud_db = SupabaseManager()
+        else:
+            cloud_db = None
     except Exception as e:
         print(f"⚠️ Erro ao inicializar Supabase: {e}")
         cloud_db = None
@@ -282,10 +288,6 @@ def start_runtime_services():
         # primeiro poll do dashboard não precise esperar.
         threading.Thread(target=_fetch_active_client_balances, kwargs={'force': True}, daemon=True).start()
         print("⚡ Cache de saldo: aquecendo em background...")
-
-        if cloud_db:
-            print("☁️ Iniciando Sincronização com Supabase Cloud em background...")
-            threading.Thread(target=cloud_db.sync_clients, args=(db,), daemon=True).start()
 
         RUNTIME_STARTED = True
         return True
@@ -688,6 +690,8 @@ def _get_master_telegram_config():
 
 
 def _is_supabase_ready():
+    if CLIENT_STORAGE != "supabase":
+        return False
     return bool(cloud_db and getattr(cloud_db, "is_available", lambda: False)())
 
 
@@ -765,12 +769,6 @@ def _save_client_everywhere(client_data):
     remote_record = None
     cloud_synced = False
 
-    if _is_supabase_ready():
-        remote_record = cloud_db.save_client(payload)
-        if remote_record is not None:
-            payload.update(remote_record)
-            cloud_synced = True
-
     local_result = db.upsert_client_local(payload) if payload.get('id') is not None else db.add_client(payload)
     local_synced = bool(local_result)
 
@@ -793,7 +791,7 @@ def _save_client_everywhere(client_data):
 
 def _delete_client_everywhere(client_id):
     """Remove o cliente da nuvem e do fallback local."""
-    cloud_deleted = (not _is_supabase_ready()) or cloud_db.delete_client(client_id)
+    cloud_deleted = False
     local_deleted = db.delete_client(client_id)
     client_balance_cache.clear()
     return cloud_deleted, local_deleted
@@ -2173,6 +2171,12 @@ def get_supabase_status():
 @app.route('/api/supabase/force-sync', methods=['POST'])
 def supabase_force_sync():
     """Força sincronização Supabase → SQLite local e retorna resultado."""
+    if CLIENT_STORAGE != "supabase":
+        return jsonify({
+            "success": False,
+            "msg": "Sincronização com Supabase desativada (CLIENT_STORAGE=local).",
+        }), 410
+
     if not _is_supabase_ready():
         return jsonify({
             "success": False,

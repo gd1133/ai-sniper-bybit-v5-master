@@ -107,7 +107,9 @@ Depois do deploy:
 
 - Railway faz deploy por **commit/push** no GitHub (ou botao **Redeploy**). Botao **Restart** nao atualiza codigo.
 - Este repo ja inclui `railway.json` usando **Dockerfile**.
-- Se aparecer erro de SQLite (ex: nao consegue criar/abrir `database.db`), configure um caminho gravavel via `SQLITE_DB_PATH` (ex: `/tmp/ai-sniper/database.db` ou um volume do Railway).
+- Para persistir os clientes no Railway, crie um **Volume** e monte em `/app/data`.
+- Configure `CLIENT_STORAGE=local` e `SQLITE_DB_PATH=/app/data/database.db` nas variaveis do Railway.
+- O cadastro/atualizacao de clientes grava somente no SQLite local (o Supabase nao participa do fluxo).
 
 ## Como rodar
 

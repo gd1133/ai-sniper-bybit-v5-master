@@ -30,6 +30,10 @@ def _resolve_db_path() -> str:
     if explicit:
         return explicit
 
+    railway_volume_path = "/app/data/database.db"
+    if _is_writable_path(railway_volume_path):
+        return railway_volume_path
+
     if _is_writable_path(_DEFAULT_DB_PATH):
         return _DEFAULT_DB_PATH
 
