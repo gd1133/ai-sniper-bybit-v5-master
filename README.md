@@ -66,6 +66,7 @@ Padrao unico das credenciais Bybit:
 
 - `BYBIT_API_KEY`
 - `BYBIT_API_SECRET`
+- `PROXY_URL` (opcional): endereço do proxy para conectar à Bybit (ex: `http://user:pass@proxy.com:port` ou `socks5://proxy.com:port`)
 
 Regras do endpoint:
 
@@ -76,6 +77,26 @@ Regras do endpoint:
 - `USE_TESTNET=false`: conecta obrigatoriamente em `https://api.bybit.com`
 
 O modo operacional do dashboard (`paper`, `testnet`, `real`) continua sendo controlado pela aplicacao/banco, sem precisar duplicar variaveis de ambiente no deploy.
+
+### Usando Proxy para conectar à Bybit
+
+Se a Bybit requer um IP fixo e você precisa usar um proxy, configure a variável `PROXY_URL`:
+
+```env
+PROXY_URL=http://usuario:senha@seu-proxy.com:8080
+```
+
+Formatos suportados:
+- HTTP/HTTPS: `http://proxy.com:port` ou `https://proxy.com:port`
+- SOCKS5: `socks5://proxy.com:port`
+- Com autenticação: `http://usuario:senha@proxy.com:port`
+
+O bot irá:
+- Conectar automaticamente via proxy quando `PROXY_URL` estiver configurado
+- Exibir logs indicando que está usando o proxy
+- Mostrar erros detalhados se a conexão via proxy falhar
+
+**Nota:** Deixe `PROXY_URL` em branco ou remova a variável se não usar proxy.
 
 ## Banco de dados SQLite
 
