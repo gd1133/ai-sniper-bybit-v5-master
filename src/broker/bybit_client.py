@@ -175,6 +175,7 @@ class BybitClient:
         return (
             '10003' in msg          # Invalid API Key
             or '10004' in msg       # Invalid sign / timestamp mismatch
+            or '10005' in msg       # IP restriction / not whitelisted
             or 'API key is invalid' in msg
             or '403' in msg
             or 'Forbidden' in msg

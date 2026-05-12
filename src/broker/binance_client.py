@@ -91,7 +91,17 @@ class BinanceClient:
         self.last_request_time[endpoint] = time.time()
 
     def _is_auth_error(self, msg):
-        auth_keywords = ['AuthenticationError', '1100', '-2014', '-2015', 'invalid key', 'API key', 'signature']
+        auth_keywords = [
+            'AuthenticationError',
+            '1100',  # Binance error code for signature issues
+            '-2014', # API key format invalid
+            '-2015', # Invalid API key, IP, or permissions
+            'invalid key',
+            'API key',
+            'signature',
+            'IP address',  # IP restriction errors
+            'not allowed'  # IP not whitelisted
+        ]
         return any(kw.lower() in msg.lower() for kw in auth_keywords)
 
     # ------------------------------------------------------------------

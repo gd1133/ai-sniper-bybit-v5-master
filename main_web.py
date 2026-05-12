@@ -830,6 +830,7 @@ def _friendly_bybit_error(raw_error: str, account_mode: str) -> str:
       401  → chave inválida / sem permissão IP (pybit expõe via HTTP 401 ou retMsg)
       10003 → invalid api_key
       10004 → invalid sign / secret incorreto
+      10005 → IP not allowed / IP restriction
       33004 → apikey is expired
     """
     msg = str(raw_error)
@@ -871,8 +872,8 @@ def _friendly_bybit_error(raw_error: str, account_mode: str) -> str:
             f'Crie uma nova chave em {"testnet.bybit.com" if is_testnet else "bybit.com"}.'
         )
 
-    # IP not whitelisted
-    if 'ip' in lowered and ('not allow' in lowered or 'whitelist' in lowered or 'forbidden' in lowered or '403' in msg):
+    # IP not whitelisted (retCode 10005 or other IP restriction errors)
+    if '10005' in msg or ('ip' in lowered and ('not allow' in lowered or 'whitelist' in lowered or 'forbidden' in lowered or '403' in msg)):
         return (
             f'IP do servidor não autorizado pela chave API. '
             f'No painel da Bybit, adicione o IP do servidor à lista de IPs permitidos da chave, '
@@ -881,6 +882,55 @@ def _friendly_bybit_error(raw_error: str, account_mode: str) -> str:
 
     # Generic fallback – keep original but add hint
     return f'Erro ao validar chaves Bybit: {msg}'
+
+
+def _friendly_binance_error(raw_error: str, account_mode: str) -> str:
+    """Converte mensagens de erro cruas da Binance em mensagens amigáveis em português.
+
+    Erros comuns da Binance:
+      -2014 → API key format invalid
+      -2015 → Invalid API key, IP, or permissions for action
+      1100  → Illegal characters found in a parameter / signature issue
+    """
+    msg = str(raw_error)
+    is_testnet = account_mode == 'testnet'
+    source_hint = (
+        'Use chaves criadas em testnet.binancefuture.com.'
+        if is_testnet
+        else 'Use chaves criadas em binance.com (API Management).'
+    )
+
+    lowered = msg.lower()
+
+    # API key format invalid (-2014)
+    if '-2014' in msg or 'api key format' in lowered:
+        return (
+            f'Formato de chave API inválido (código -2014). '
+            f'Verifique se copiou corretamente a API Key. {source_hint}'
+        )
+
+    # Invalid API key, IP, or permissions (-2015)
+    if '-2015' in msg or 'invalid api-key' in lowered or 'ip' in lowered:
+        if 'ip' in lowered or 'not allowed' in lowered:
+            return (
+                f'IP do servidor não autorizado pela chave API Binance. '
+                f'No painel da Binance, adicione o IP do servidor à lista de IPs permitidos, '
+                f'ou crie uma chave sem restrição de IP.'
+            )
+        return (
+            f'Chave API inválida ou sem permissões necessárias (código -2015). '
+            f'Verifique se a chave tem permissão para Futures Trading. {source_hint}'
+        )
+
+    # Signature issues (1100)
+    if '1100' in msg or 'signature' in lowered:
+        return (
+            f'Erro de assinatura (código 1100). '
+            f'Verifique se copiou corretamente o API Secret. {source_hint}'
+        )
+
+    # Generic fallback
+    return f'Erro ao validar chaves Binance: {msg}'
 
 
 def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=None, client_id=None, existing_client=None):
@@ -926,11 +976,11 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
                 valid = True
                 validation_message = f'Conta Binance {account_mode.upper()} validada OK'
             else:
-                validation_message = f'Erro Binance: {msg}'
+                validation_message = _friendly_binance_error(msg, account_mode)
                 payload['status'] = 'erro_api'
                 payload['saldo_base'] = round(float((existing_client or {}).get('saldo_base') or 0.0), 2)
         except Exception as e:
-            validation_message = f'Erro ao validar Binance: {str(e)[:200]}'
+            validation_message = _friendly_binance_error(str(e), account_mode)
             payload['status'] = 'erro_api'
             payload['saldo_base'] = round(float((existing_client or {}).get('saldo_base') or 0.0), 2)
     else:
