@@ -1,3 +1,4 @@
+import os
 import time
 
 # Global lazy imports
@@ -39,6 +40,10 @@ class BinanceClient:
         self.testnet = bool(testnet)
         self.active_endpoint = self.TESTNET_URL if self.testnet else self.REAL_URL
 
+        # Lê configuração de proxy do ambiente
+        proxy_url = str(os.getenv('PROXY_URL') or '').strip()
+        self.proxy_url = proxy_url if proxy_url else None
+
         cfg = {
             'enableRateLimit': True,
             'rateLimit': 100,
@@ -52,26 +57,43 @@ class BinanceClient:
             cfg['apiKey'] = api_key
             cfg['secret'] = api_secret
 
-        self.exchange = ccxt.binanceusdm(cfg)
+        # Configura proxy se disponível
+        if self.proxy_url:
+            cfg['proxies'] = {
+                'http': self.proxy_url,
+                'https': self.proxy_url,
+            }
+            print(f"🌐 [PROXY] Usando proxy para Binance: {self.proxy_url}")
 
-        if self.testnet:
-            self.exchange.set_sandbox_mode(True)
+        try:
+            self.exchange = ccxt.binanceusdm(cfg)
 
-        self.authenticated = bool(api_key and api_secret)
+            if self.testnet:
+                self.exchange.set_sandbox_mode(True)
 
-        # Cache & rate-limiting (mesmo padrão do BybitClient)
-        self.cache_ohlcv = {}
-        self.cache_ticker = {}
-        self.cache_ttl_ohlcv = 30
-        self.cache_ttl_ticker = 10
-        self.ohlcv_failures = {}
-        self.max_ohlcv_failures = 3
-        self.last_request_time = {}
-        self.adaptive_delay = 0.5
-        self.rate_limit_block_until = 0
+            self.authenticated = bool(api_key and api_secret)
 
-        mode_label = 'TESTNET' if self.testnet else 'REAL'
-        print(f"🔍 [BINANCE ENDPOINT] testnet={self.testnet} mode={mode_label}")
+            # Cache & rate-limiting (mesmo padrão do BybitClient)
+            self.cache_ohlcv = {}
+            self.cache_ticker = {}
+            self.cache_ttl_ohlcv = 30
+            self.cache_ttl_ticker = 10
+            self.ohlcv_failures = {}
+            self.max_ohlcv_failures = 3
+            self.last_request_time = {}
+            self.adaptive_delay = 0.5
+            self.rate_limit_block_until = 0
+
+            mode_label = 'TESTNET' if self.testnet else 'REAL'
+            proxy_info = f" proxy={self.proxy_url}" if self.proxy_url else ""
+            print(f"🔍 [BINANCE ENDPOINT] testnet={self.testnet} mode={mode_label}{proxy_info}")
+        except Exception as e:
+            error_msg = str(e)
+            if self.proxy_url:
+                print(f"❌ [ERRO PROXY] Falha ao conectar Binance via proxy {self.proxy_url}: {error_msg}")
+            else:
+                print(f"❌ [ERRO CONEXÃO] Falha ao inicializar Binance: {error_msg}")
+            raise
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -206,15 +228,34 @@ class BinanceClient:
             if self.authenticated:
                 balance = self.get_balance()
                 if balance is not None:
-                    return True, f"Binance Autenticado OK (USDT {balance:.2f})"
+                    success_msg = f"Binance Autenticado OK (USDT {balance:.2f})"
+                    if self.proxy_url:
+                        success_msg = f"[Via Proxy] {success_msg}"
+                    return True, success_msg
                 # Tenta via fetch_balance direto para obter melhor mensagem de erro
                 try:
                     self.exchange.fetch_balance(params={'type': 'future'})
                 except Exception as inner:
-                    return False, str(inner).split('\n')[0][:200]
-                return False, 'Chave API Binance inválida ou sem permissão Futures'
+                    error_msg = str(inner).split('\n')[0][:200]
+                    if self.proxy_url:
+                        error_msg = f"[Via Proxy {self.proxy_url}] {error_msg}"
+                    return False, error_msg
+                error_msg = 'Chave API Binance inválida ou sem permissão Futures'
+                if self.proxy_url:
+                    error_msg = f"[Via Proxy] {error_msg}"
+                return False, error_msg
             else:
                 self.exchange.fetch_tickers()
-                return True, 'API pública Binance OK (sem credenciais)'
+                success_msg = 'API pública Binance OK (sem credenciais)'
+                if self.proxy_url:
+                    success_msg = f"[Via Proxy] {success_msg}"
+                return True, success_msg
         except Exception as e:
-            return False, str(e).split('\n')[0][:200]
+            error_msg = str(e).split('\n')[0][:200]
+            if self.proxy_url:
+                # Verifica se é um erro de conexão de proxy
+                if any(keyword in error_msg.lower() for keyword in ['proxy', 'connection', 'timeout', 'timed out', 'refused']):
+                    error_msg = f"❌ ERRO DE PROXY: Não foi possível conectar via {self.proxy_url}. Verifique se o proxy está ativo e acessível. Erro: {error_msg}"
+                else:
+                    error_msg = f"[Via Proxy {self.proxy_url}] {error_msg}"
+            return False, error_msg

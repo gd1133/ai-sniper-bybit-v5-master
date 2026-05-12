@@ -78,9 +78,9 @@ Regras do endpoint:
 
 O modo operacional do dashboard (`paper`, `testnet`, `real`) continua sendo controlado pela aplicacao/banco, sem precisar duplicar variaveis de ambiente no deploy.
 
-### Usando Proxy para conectar à Bybit
+### Usando Proxy para conectar à Bybit e Binance
 
-Se a Bybit requer um IP fixo e você precisa usar um proxy, configure a variável `PROXY_URL`:
+Se sua exchange requer um IP fixo e você precisa usar um proxy, configure a variável `PROXY_URL`:
 
 ```env
 PROXY_URL=http://usuario:senha@seu-proxy.com:8080
@@ -93,6 +93,7 @@ Formatos suportados:
 
 O bot irá:
 - Conectar automaticamente via proxy quando `PROXY_URL` estiver configurado
+- Usar o proxy para conexões com Bybit e Binance
 - Exibir logs indicando que está usando o proxy
 - Mostrar erros detalhados se a conexão via proxy falhar
 
