@@ -1,3 +1,4 @@
+import os
 import time
 from datetime import datetime
 
@@ -55,6 +56,10 @@ class BybitClient:
         self.active_endpoint = get_bybit_base_url(self.testnet)
         self.pybit_session = None
 
+        # Lê configuração de proxy do ambiente
+        proxy_url = str(os.getenv('PROXY_URL') or '').strip()
+        self.proxy_url = proxy_url if proxy_url else None
+
         # Não inclua chaves vazias na configuração — passar apiKey=None faz a API
         # interpretar como credencial inválida e causa erro 10003.
         cfg = {
@@ -72,18 +77,36 @@ class BybitClient:
             cfg['apiKey'] = api_key
             cfg['secret'] = api_secret
 
-        self.exchange = ccxt.bybit(cfg)
-        self._configure_exchange_endpoint()
-        self.pybit_api_version = 'v5'
-        self.pybit_sdk_module = ''
+        # Configura proxy se disponível
+        if self.proxy_url:
+            cfg['proxies'] = {
+                'http': self.proxy_url,
+                'https': self.proxy_url,
+            }
+            print(f"🌐 [PROXY] Usando proxy: {self.proxy_url}")
 
-        if api_key and api_secret:
-            self._init_pybit_session(api_key, api_secret)
+        try:
+            self.exchange = ccxt.bybit(cfg)
+            self._configure_exchange_endpoint()
+            self.pybit_api_version = 'v5'
+            self.pybit_sdk_module = ''
 
-        print(f"🔍 [BYBIT ENDPOINT] testnet={self.testnet} endpoint={self.active_endpoint}")
+            if api_key and api_secret:
+                self._init_pybit_session(api_key, api_secret)
 
-        # Indica se esta instância tem credenciais de escrita/autenticação
-        self.authenticated = bool(api_key and api_secret)
+            endpoint_info = f"testnet={self.testnet} endpoint={self.active_endpoint}"
+            proxy_info = f" proxy={self.proxy_url}" if self.proxy_url else ""
+            print(f"🔍 [BYBIT ENDPOINT] {endpoint_info}{proxy_info}")
+
+            # Indica se esta instância tem credenciais de escrita/autenticação
+            self.authenticated = bool(api_key and api_secret)
+        except Exception as e:
+            error_msg = str(e)
+            if self.proxy_url:
+                print(f"❌ [ERRO PROXY] Falha ao conectar via proxy {self.proxy_url}: {error_msg}")
+            else:
+                print(f"❌ [ERRO CONEXÃO] Falha ao inicializar Bybit: {error_msg}")
+            raise
         
         # --- SISTEMA DE CACHE E SEGURANÇA ---
         self.cache_ohlcv = {} 
@@ -379,12 +402,18 @@ class BybitClient:
             if self.authenticated:
                 insurance_ok, insurance_message = self._validate_insurance_fund()
                 if not insurance_ok:
-                    return False, insurance_message
+                    error_detail = insurance_message
+                    if self.proxy_url:
+                        error_detail = f"[Via Proxy {self.proxy_url}] {error_detail}"
+                    return False, error_detail
 
                 # 1) Validação principal via CCXT com fallback de accountType.
                 bal = self.get_balance()
                 if bal is not None:
-                    return True, f"{insurance_message} | Autenticado OK (USDT {bal:.2f})"
+                    success_msg = f"{insurance_message} | Autenticado OK (USDT {bal:.2f})"
+                    if self.proxy_url:
+                        success_msg = f"[Via Proxy] {success_msg}"
+                    return True, success_msg
 
                 # 2) Fallback via pybit para capturar melhor mensagem de erro.
                 if self.pybit_session is not None:
@@ -403,13 +432,19 @@ class BybitClient:
                                 usdt_bal = 0.0
                                 if rows:
                                     usdt_bal = float(rows[0].get('totalWalletBalance') or 0.0)
-                                return True, f"{insurance_message} | Autenticado OK ({account_type}, USDT {usdt_bal:.2f})"
+                                success_msg = f"{insurance_message} | Autenticado OK ({account_type}, USDT {usdt_bal:.2f})"
+                                if self.proxy_url:
+                                    success_msg = f"[Via Proxy] {success_msg}"
+                                return True, success_msg
                             pybit_errors.append(error_message)
                         except Exception as pybit_err:
                             pybit_errors.append(str(pybit_err).split('\n')[0][:220])
 
                     if pybit_errors:
-                        return False, pybit_errors[0][:220]
+                        error_detail = pybit_errors[0][:220]
+                        if self.proxy_url:
+                            error_detail = f"[Via Proxy {self.proxy_url}] {error_detail}"
+                        return False, error_detail
 
                 # 3) Último fallback para retornar erro limpo.
                 try:
@@ -417,13 +452,28 @@ class BybitClient:
                 except Exception as inner_e:
                     inner_msg = str(inner_e)
                     short = inner_msg.split('\n')[0][:200]
+                    if self.proxy_url:
+                        short = f"[Via Proxy {self.proxy_url}] {short}"
                     return False, short
-                return False, "Chave API inválida ou sem permissão de leitura de saldo"
+                error_msg = "Chave API inválida ou sem permissão de leitura de saldo"
+                if self.proxy_url:
+                    error_msg = f"[Via Proxy] {error_msg}"
+                return False, error_msg
             else:
                 _ = self.exchange.fetch_tickers()
-                return True, "API pública OK (sem credenciais)"
+                success_msg = "API pública OK (sem credenciais)"
+                if self.proxy_url:
+                    success_msg = f"[Via Proxy] {success_msg}"
+                return True, success_msg
         except Exception as e:
-            return False, str(e).split('\n')[0][:200]
+            error_msg = str(e).split('\n')[0][:200]
+            if self.proxy_url:
+                # Verifica se é um erro de conexão de proxy
+                if any(keyword in error_msg.lower() for keyword in ['proxy', 'connection', 'timeout', 'timed out', 'refused']):
+                    error_msg = f"❌ ERRO DE PROXY: Não foi possível conectar via {self.proxy_url}. Verifique se o proxy está ativo e acessível. Erro: {error_msg}"
+                else:
+                    error_msg = f"[Via Proxy {self.proxy_url}] {error_msg}"
+            return False, error_msg
 
     def set_tp_sl_sniper(self, symbol, side, entry_price, position_qty):
         """
