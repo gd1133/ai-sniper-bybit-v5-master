@@ -16,7 +16,7 @@ if sys.platform == 'win32':
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
-from src.config import get_bybit_base_url, get_bybit_credentials, get_environment_config, resolve_use_testnet
+from src.config import get_bybit_base_url, get_bybit_credentials, get_environment_config, resolve_use_testnet, is_truthy
 
 # --- IMPORTAÇÕES DAS PASTAS INTERNAS (SRC) - LAZY LOADING ---
 try:
@@ -89,6 +89,16 @@ def _mode_uses_testnet(mode):
     return _normalize_operation_mode(mode) == 'testnet'
 
 
+def _refresh_execution_runtime_flags():
+    global ALLOW_REAL_TRADING, ALLOW_ORDER_EXECUTION
+    ALLOW_REAL_TRADING = is_truthy(
+        os.getenv('ALLOW_REAL_TRADING', 'true' if ENV_CONFIG.allow_real_trading else 'false')
+    )
+    ALLOW_ORDER_EXECUTION = is_truthy(
+        os.getenv('ALLOW_ORDER_EXECUTION', 'true' if ENV_CONFIG.allow_order_execution else 'false')
+    )
+
+
 def _resolve_client_testnet_flag(value):
     if value is None:
         return resolve_use_testnet(default=ENV_CONFIG.use_testnet)
@@ -118,6 +128,7 @@ def _filter_balance_items_for_operation_mode(items, mode):
 
 
 def _is_order_execution_enabled(mode):
+    _refresh_execution_runtime_flags()
     mode = _normalize_operation_mode(mode)
     if mode == 'paper':
         return False
@@ -269,7 +280,7 @@ def start_runtime_services():
 
         threading.Thread(target=sniper_worker_loop, daemon=True).start()
         threading.Thread(target=_monitor_sl_tp_automatico, daemon=True).start()
-        print("   Monitor SL/TP: ATIVO (-3% SL / +6% TP)")
+        print("   Monitor SL/TP: ATIVO (-50% SL / +100% TP)")
 
         # Aquece o cache de saldo em background imediatamente para que o
         # primeiro poll do dashboard não precise esperar.
@@ -291,7 +302,7 @@ SNIPER_POSICAO_UNICA = False     # Multi-ativo: permite até MAX_MOEDAS_ATIVAS s
 SNIPER_SIGNAL_LOCK = threading.Lock()
 SNIPER_SIGNAL_RESERVATIONS = set()
 PAPER_TRADE_TP_PCT = 100.0       # Fecha somente quando dobrar a margem projetada
-PAPER_TRADE_SL_PCT = -3.0        # Stop de perda em 3% da entrada
+PAPER_TRADE_SL_PCT = -50.0       # Stop de perda configurado em -50% de PnL
 ENABLE_RANDOM_TEST_TRADES = False
 
 # Anti-loop de ativo único (evita ficar preso na mesma moeda por muitos ciclos)
@@ -1368,12 +1379,12 @@ def _atualizar_saldo_com_pnl(pnl_lucro):
 def _monitor_sl_tp_automatico():
     """
     Monitora trades abertos e fecha automaticamente quando atingem:
-    - Stop Loss: -3% (perda maxima institucional)
-    - Take Profit: +6% (lucro alvo)
+    - Stop Loss: -50% (limite de perda configurado)
+    - Take Profit: +100% (lucro alvo)
     Executa em background a cada 10 segundos.
     """
-    SL_PCT = -3.0
-    TP_PCT =  6.0
+    SL_PCT = -50.0
+    TP_PCT = 100.0
 
     while True:
         try:
@@ -1392,9 +1403,9 @@ def _monitor_sl_tp_automatico():
 
                 motivo = None
                 if pnl_pct <= SL_PCT:
-                    motivo = f"SL_AUTO -3% (real: {pnl_pct:.2f}%)"
+                    motivo = f"SL_AUTO -50% (real: {pnl_pct:.2f}%)"
                 elif pnl_pct >= TP_PCT:
-                    motivo = f"TP_AUTO +6% (real: {pnl_pct:.2f}%)"
+                    motivo = f"TP_AUTO +100% (real: {pnl_pct:.2f}%)"
 
                 if motivo:
                     try:
@@ -1571,7 +1582,7 @@ def _settle_paper_trades():
             pnl_value = round(margin * (pnl_pct / 100), 2)
 
             if pnl_pct >= PAPER_TRADE_TP_PCT or pnl_pct <= PAPER_TRADE_SL_PCT:
-                reason = 'PAPER_TP_100' if pnl_pct >= PAPER_TRADE_TP_PCT else 'PAPER_SL_3'
+                reason = 'PAPER_TP_100' if pnl_pct >= PAPER_TRADE_TP_PCT else 'PAPER_SL_50'
                 notes = f"{trade.get('notes', '')} | {reason} @ {current_price:.8f}"
                 db.close_trade(
                     trade_id=trade_id,
@@ -1692,15 +1703,24 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
 
         # 2. Loop de Execução para Clientes Cadastrados
         clientes = _get_registered_clients(active_only=True)
+        synced_balances = _fetch_active_client_balances(force=True)
+        synced_balance_map = {
+            item.get('id'): _coerce_float(item.get('saldo_real'), default=0.0)
+            for item in (synced_balances or {}).get('items', [])
+            if item.get('id') is not None and item.get('saldo_real') is not None
+        }
         for cliente in clientes:
             def task_cliente(c):
                 try:
                     account_mode = _normalize_account_mode(c.get('account_mode', c.get('is_testnet')))
                     broker = _make_broker(c)
                     
-                    # Gestão Dinâmica: 5% Banca (GAIN) / 3% (RECOVERY)
-                    margem = float(c.get('saldo_base', 1000.0)) * 0.05
-                    qty = margem / entry_price
+                    # Entrada fixa em 5% do saldo real sincronizado
+                    saldo_sincronizado = synced_balance_map.get(c.get('id'))
+                    if saldo_sincronizado is None:
+                        saldo_sincronizado = _coerce_float(c.get('saldo_base'), default=1000.0)
+                    margem = round(float(saldo_sincronizado) * 0.05, 2)
+                    qty = (margem / entry_price) if entry_price > 0 else 0.0
 
                     # --- EXECUÇÃO REAL NA EXCHANGE (PROTOCOLO SNIPER) ---
                     if _is_order_execution_enabled(APP_MODE):
@@ -1773,7 +1793,6 @@ def sniper_worker_loop():
     global central_state, BybitClient, IndicatorEngine, GroqValidator
     
     # ⏳ Carregamento Lazy (apenas quando worker inicia)
-    print("⏳ Carregando dependências pesadas (primeira vez)...")
     try:
         from src.broker.bybit_client import BybitClient
         from src.engine.indicators import IndicatorEngine
@@ -2618,4 +2637,3 @@ if __name__ == "__main__":
     print(f"📊 Dashboard: http://0.0.0.0:{render_port}")
     print("🧠 Cérebro Triplo: ATIVO (Rigor 50%)")
     app.run(host='0.0.0.0', port=render_port, debug=False, use_reloader=False)
-
