@@ -302,7 +302,7 @@ SNIPER_POSICAO_UNICA = False     # Multi-ativo: permite até MAX_MOEDAS_ATIVAS s
 SNIPER_SIGNAL_LOCK = threading.Lock()
 SNIPER_SIGNAL_RESERVATIONS = set()
 PAPER_TRADE_TP_PCT = 100.0       # Fecha somente quando dobrar a margem projetada
-PAPER_TRADE_SL_PCT = -50.0       # Stop de perda de 50% da margem projetada
+PAPER_TRADE_SL_PCT = -50.0       # Stop de perda configurado em -50% de PnL
 ENABLE_RANDOM_TEST_TRADES = False
 
 # Anti-loop de ativo único (evita ficar preso na mesma moeda por muitos ciclos)
@@ -1379,7 +1379,7 @@ def _atualizar_saldo_com_pnl(pnl_lucro):
 def _monitor_sl_tp_automatico():
     """
     Monitora trades abertos e fecha automaticamente quando atingem:
-    - Stop Loss: -50% (perda maxima institucional)
+    - Stop Loss: -50% (limite de perda configurado)
     - Take Profit: +100% (lucro alvo)
     Executa em background a cada 10 segundos.
     """
@@ -1705,7 +1705,7 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
         clientes = _get_registered_clients(active_only=True)
         synced_balances = _fetch_active_client_balances(force=True)
         synced_balance_map = {
-            item.get('id'): float(item.get('saldo_real'))
+            item.get('id'): _coerce_float(item.get('saldo_real'), default=0.0)
             for item in (synced_balances or {}).get('items', [])
             if item.get('id') is not None and item.get('saldo_real') is not None
         }
@@ -1714,12 +1714,11 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                 try:
                     account_mode = _normalize_account_mode(c.get('account_mode', c.get('is_testnet')))
                     broker = _make_broker(c)
-                    _refresh_execution_runtime_flags()
                     
                     # Entrada fixa em 5% do saldo real sincronizado
                     saldo_sincronizado = synced_balance_map.get(c.get('id'))
                     if saldo_sincronizado is None:
-                        saldo_sincronizado = float(c.get('saldo_base', 1000.0) or 0.0)
+                        saldo_sincronizado = _coerce_float(c.get('saldo_base'), default=1000.0)
                     margem = round(float(saldo_sincronizado) * 0.05, 2)
                     qty = (margem / entry_price) if entry_price > 0 else 0.0
 

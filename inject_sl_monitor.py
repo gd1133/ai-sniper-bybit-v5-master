@@ -16,7 +16,7 @@ MONITOR_FUNC = '''
 def _monitor_sl_tp_automatico():
     """
     Monitora trades abertos e fecha automaticamente quando atingem:
-    - Stop Loss: -50% (perda maxima institucional)
+    - Stop Loss: -50% (limite de perda configurado)
     - Take Profit: +100% (lucro alvo)
     Executa em background a cada 10 segundos.
     """
