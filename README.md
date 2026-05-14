@@ -91,7 +91,45 @@ Para ambientes Railway, certifique-se de montar um volume em `/app/data` para pe
 
 ## Deploy no Railway / Render
 
-Valores recomendados para subir com seguranca:
+### Validacao de ambiente
+
+Antes de fazer deploy, valide sua configuracao local:
+
+```bash
+python validate_environment.py
+```
+
+### Railway - Configuracao completa
+
+**⚠️ IMPORTANTE**: Para instrucoes detalhadas de configuracao no Railway, consulte:
+
+📖 **[docs/RAILWAY_SETUP.md](docs/RAILWAY_SETUP.md)** - Guia completo com troubleshooting
+
+#### Variaveis minimas necessarias (Railway):
+
+```env
+ENVIRONMENT=production
+BYBIT_API_KEY=sua_chave_bybit
+BYBIT_API_SECRET=seu_segredo_bybit
+GEMINI_API_KEY=sua_chave_gemini
+GROQ_API_KEY=sua_chave_groq
+TELEGRAM_TOKEN=seu_token_telegram
+TELEGRAM_CHAT_ID=seu_chat_id
+VITE_API_BASE=https://seu-app.railway.app
+```
+
+**⚠️ ATENCAO**: `VITE_API_BASE` deve incluir `https://` no inicio!
+
+#### Volume no Railway
+
+Configure um volume para persistir o banco de dados:
+
+- **Mount Path**: `/app/data`
+- Sem volume = perda de dados a cada deploy
+
+#### Deploy seguro
+
+Para desenvolvimento/testes:
 
 ```env
 ENVIRONMENT=development
@@ -99,11 +137,18 @@ BYBIT_API_KEY=YOUR_BYBIT_API_KEY
 BYBIT_API_SECRET=YOUR_BYBIT_API_SECRET
 ```
 
+Para producao com trading real:
+
+```env
+ENVIRONMENT=production
+# + todas as outras variaveis acima
+```
+
 Depois do deploy:
 
 1. Use o dashboard para alternar entre `paper`, `testnet` e `real`
 2. Cadastre clientes com `Conta Testnet` ou `Conta Real`
-3. Ajuste `ENVIRONMENT` para `production` quando quiser subir com execucao real por padrao
+3. Configure credenciais individuais por cliente no dashboard
 
 ## Como rodar
 
