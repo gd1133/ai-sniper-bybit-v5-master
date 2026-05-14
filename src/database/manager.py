@@ -22,7 +22,7 @@ def _get_db_path():
         test_dir = os.path.dirname(repo_path)
         if os.access(test_dir, os.W_OK):
             return repo_path
-    except:
+    except (OSError, IOError):
         pass
 
     # Fallback to /tmp
