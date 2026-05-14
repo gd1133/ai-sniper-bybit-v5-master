@@ -6,9 +6,13 @@ Verifica se todas as variáveis de ambiente necessárias estão configuradas cor
 """
 import os
 import sys
-from dotenv import load_dotenv
 
-load_dotenv()
+# Tenta carregar .env se dotenv estiver disponível
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # dotenv não instalado, continua sem ele
 
 # Cores para output
 RED = '\033[91m'
