@@ -76,7 +76,9 @@ def _ensure_column(cur, table: str, column: str, definition: str):
 
 def init_db():
     """Inicializa banco com tabelas otimizadas e sem travamentos"""
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir:  # Only create directory if there's a directory component
+        os.makedirs(db_dir, exist_ok=True)
     conn = _connect()
     cur = conn.cursor()
     
