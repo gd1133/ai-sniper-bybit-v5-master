@@ -19,14 +19,17 @@ def _get_ccxt():
         print("⏳ Carregando CCXT (primeira vez)...", flush=True)
         import ccxt as ccxt_lib
         _ccxt_instance = ccxt_lib
+        print("✅ CCXT carregado com sucesso", flush=True)
     return _ccxt_instance
 
 def _get_pd():
     """Carrega Pandas lazy."""
     global _pd_instance
     if _pd_instance is None:
+        print("⏳ Carregando Pandas...", flush=True)
         import pandas as pd
         _pd_instance = pd
+        print("✅ Pandas carregado com sucesso", flush=True)
     return _pd_instance
 
 
@@ -34,8 +37,10 @@ def _get_pybit_http():
     """Carrega pybit HTTP lazy (apenas primeira vez)."""
     global _pybit_http_class
     if _pybit_http_class is None:
+        print("⏳ Carregando pybit HTTP...", flush=True)
         from pybit.unified_trading import HTTP as pybit_http
         _pybit_http_class = pybit_http
+        print("✅ pybit HTTP carregado com sucesso", flush=True)
     return _pybit_http_class
 
 class BybitClient:

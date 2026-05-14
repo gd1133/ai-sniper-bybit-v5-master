@@ -8,16 +8,20 @@ _pd_instance = None
 def _get_ccxt():
     global _ccxt_instance
     if _ccxt_instance is None:
+        print("⏳ Carregando CCXT (primeira vez)...", flush=True)
         import ccxt as ccxt_lib
         _ccxt_instance = ccxt_lib
+        print("✅ CCXT carregado com sucesso", flush=True)
     return _ccxt_instance
 
 
 def _get_pd():
     global _pd_instance
     if _pd_instance is None:
+        print("⏳ Carregando Pandas...", flush=True)
         import pandas as pd
         _pd_instance = pd
+        print("✅ Pandas carregado com sucesso", flush=True)
     return _pd_instance
 
 
