@@ -3,7 +3,32 @@ import os
 from typing import List, Dict, Any
 from src.config import get_environment_config
 
-DB_PATH = '/app/data/database.db'
+# DB path with fallback logic for writable locations
+def _get_db_path():
+    """
+    Determine writable database path with fallbacks:
+    1. SQLITE_DB_PATH environment variable
+    2. ./database.db (repository root)
+    3. /tmp/ai-sniper/database.db (last resort)
+    """
+    env_path = os.getenv('SQLITE_DB_PATH')
+    if env_path:
+        return env_path
+
+    # Try repository root
+    repo_path = os.path.join(os.getcwd(), 'database.db')
+    try:
+        # Test if we can write to this location
+        test_dir = os.path.dirname(repo_path)
+        if os.access(test_dir, os.W_OK):
+            return repo_path
+    except (OSError, IOError):
+        pass
+
+    # Fallback to /tmp
+    return '/tmp/ai-sniper/database.db'
+
+DB_PATH = _get_db_path()
 VALID_ACCOUNT_MODES = {'testnet', 'real'}
 VALID_OPERATION_MODES = {'paper', 'testnet', 'real'}
 
@@ -432,7 +457,7 @@ def get_test_balance() -> float:
     val = get_config('TEST_BALANCE', '1000')
     try:
         return float(val)
-    except:
+    except (ValueError, TypeError):
         return 1000.0
 
 

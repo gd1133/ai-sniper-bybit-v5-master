@@ -2171,7 +2171,8 @@ def get_status():
         central_state['trades'] = db.get_recent_trades(20)
         _status_cache.set(dict(central_state))
         return jsonify(central_state)
-    except:
+    except Exception as e:
+        print(f"⚠️  Erro ao atualizar status central: {e}")
         return jsonify(central_state)
 
 
