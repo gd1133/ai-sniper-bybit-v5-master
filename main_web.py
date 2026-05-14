@@ -1779,17 +1779,22 @@ def sniper_worker_loop():
         from src.engine.indicators import IndicatorEngine
         from src.ai_brain.validator import GroqValidator
         print("✅ Dependências carregadas com sucesso")
-    except ImportError as e:
-        print(f"❌ Erro ao carregar: {e}")
+    except Exception as e:
+        print(f"❌ Erro ao carregar dependências: {e}")
         time.sleep(5)
         return
-    
+
     # Scanner Master
-    master_broker = BybitClient(
-        *get_bybit_credentials(),
-        testnet=_mode_uses_testnet(APP_MODE),
-    )
-    validator = GroqValidator(os.getenv("GEMINI_API_KEY"), os.getenv("GROQ_API_KEY"))
+    try:
+        master_broker = BybitClient(
+            *get_bybit_credentials(),
+            testnet=_mode_uses_testnet(APP_MODE),
+        )
+        validator = GroqValidator(os.getenv("GEMINI_API_KEY"), os.getenv("GROQ_API_KEY"))
+    except Exception as e:
+        print(f"❌ Erro ao inicializar broker/validator: {e}")
+        time.sleep(5)
+        return
 
     print(f"🚀 Motor Sniper v60.1 Operante. Rigor: {THRESHOLD_ENTRADA}%")
     
