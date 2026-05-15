@@ -75,7 +75,8 @@ class BinanceClient:
         self.rate_limit_block_until = 0
 
         mode_label = 'TESTNET' if self.testnet else 'REAL'
-        print(f"🔍 [BINANCE ENDPOINT] testnet={self.testnet} mode={mode_label}")
+        auth_status = '🔐 Autenticado' if self.authenticated else '🔓 Público'
+        print(f"🔍 [BINANCE] Modo: {mode_label} | Status: {auth_status} | Endpoint: {self.active_endpoint}")
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -174,17 +175,19 @@ class BinanceClient:
             return None
 
     def set_tp_sl_sniper(self, symbol, side, entry_price, position_qty):
-        """Define Take Profit (+10%) e Stop Loss (-3%) via ordens limitadas."""
+        """Define Take Profit (+10% = +100% margem) e Stop Loss (-5% = -50% margem) via ordens limitadas."""
         try:
             if not self.authenticated:
                 return False
 
+            # TP = +10% preço = +100% margem (10x leverage)
+            # SL = -5% preço = -50% margem (10x leverage)
             tp_price = round(entry_price * 1.10, 8)
-            sl_price = round(entry_price * 0.97, 8)
+            sl_price = round(entry_price * 0.95, 8)
 
             close_side = 'sell' if side.lower() in ('buy', 'long') else 'buy'
 
-            print(f"🛡️ [BINANCE TP/SL] {symbol} TP={tp_price} SL={sl_price}")
+            print(f"🛡️ [BINANCE TP/SL] {symbol} TP={tp_price} (+10% = +100% margem) SL={sl_price} (-5% = -50% margem)")
 
             # Take profit — limit reduceOnly
             self.exchange.create_order(
@@ -222,3 +225,54 @@ class BinanceClient:
                 return True, 'API pública Binance OK (sem credenciais)'
         except Exception as e:
             return False, str(e).split('\n')[0][:200]
+
+    def pre_flight_check(self, symbol, side, qty):
+        """
+        Validação pré-voo antes de executar ordem (compatível com BybitClient).
+
+        Retorna: (bool, str categoria, str mensagem)
+        categoria: 'OK', 'ERRO_CORRETORA', 'ERRO_ROBO'
+        """
+        try:
+            # 1. Valida autenticação
+            if not self.authenticated:
+                return False, 'ERRO_ROBO', 'Cliente Binance não autenticado (sem API key/secret)'
+
+            # 2. Valida conectividade e saldo
+            balance = self.get_balance()
+            if balance is None:
+                return False, 'ERRO_CORRETORA', 'Falha ao consultar saldo Binance - verifique API Key e permissões'
+
+            if balance <= 0:
+                return False, 'ERRO_ROBO', f'Saldo insuficiente: {balance} USDT'
+
+            # 3. Valida margem necessária
+            try:
+                price = self.get_last_price(symbol)
+                if price <= 0:
+                    return False, 'ERRO_CORRETORA', f'Falha ao obter preço do símbolo {symbol}'
+
+                margin_needed = price * qty
+                if margin_needed > balance:
+                    return False, 'ERRO_ROBO', f'Margem insuficiente: necessário {margin_needed:.2f} USDT, disponível {balance:.2f} USDT'
+
+            except Exception as price_err:
+                return False, 'ERRO_CORRETORA', f'Erro ao validar símbolo {symbol}: {str(price_err)[:100]}'
+
+            # 4. Valida que o símbolo existe
+            try:
+                self.exchange.load_markets()
+                if symbol not in self.exchange.markets:
+                    return False, 'ERRO_ROBO', f'Símbolo {symbol} não encontrado na Binance Futures'
+            except Exception as market_err:
+                return False, 'ERRO_CORRETORA', f'Erro ao carregar mercados: {str(market_err)[:100]}'
+
+            # Tudo OK
+            mode_label = 'TESTNET' if self.testnet else 'REAL'
+            return True, 'OK', f'Binance {mode_label}: Validações OK (saldo={balance:.2f} USDT)'
+
+        except Exception as e:
+            error_msg = str(e)
+            if self._is_auth_error(error_msg):
+                return False, 'ERRO_CORRETORA', f'Erro de autenticação Binance: {error_msg[:100]}'
+            return False, 'ERRO_ROBO', f'Erro na validação pré-voo: {error_msg[:100]}'

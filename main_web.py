@@ -1706,22 +1706,54 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                     if _is_order_execution_enabled(APP_MODE):
                         exec_label = 'TESTNET' if APP_MODE == 'testnet' else 'REAL'
                         print(f"🚀 [EXECUÇÃO {exec_label}] {c.get('nome')} - {side} {qty:.4f} {symbol}")
+
+                        # Validação pré-voo antes da execução
+                        try:
+                            preflight_ok, preflight_category, preflight_msg = broker.pre_flight_check(symbol, side.lower(), qty)
+                            if not preflight_ok:
+                                error_emoji = "🔴" if preflight_category == 'ERRO_CORRETORA' else "⚠️"
+                                print(f"{error_emoji} [PRÉ-VOO FALHOU] {c.get('nome')} | {preflight_category}: {preflight_msg}")
+                                print(f"   Ordem bloqueada por segurança - verifique API e configurações")
+                                # Continua para próximo cliente sem executar
+                                return
+
+                            print(f"✅ [PRÉ-VOO OK] {preflight_msg}")
+                        except AttributeError:
+                            # Broker não tem pre_flight_check (versão antiga)
+                            print(f"⚠️  [AVISO] Broker sem validação pré-voo - continuando execução")
+                        except Exception as preflight_err:
+                            print(f"⚠️  [ERRO PRÉ-VOO] {preflight_err} - continuando execução")
+
                         order_result = broker.execute_market_order(symbol, side.lower(), qty)
-                        
+
                         if order_result:
-                            # ✅ Executa Proteção: TP +100% margem / SL -50% margem (5% preço com 10x)
+                            # ✅ Executa Proteção: TP +100% margem (10% preço) / SL -50% margem (5% preço com 10x leverage)
                             broker.set_tp_sl_sniper(symbol, side.lower(), entry_price, qty)
                             print(f"✅ [ORDEM EXECUTADA] ID: {order_result.get('id', 'N/A')}")
                         else:
                             print(f"⚠️  [ORDEM FALHADA] {c.get('nome')} - Fallback para simulação")
                     else:
+                        # Diagnóstico detalhado do bloqueio
+                        block_reasons = []
                         if APP_MODE == 'paper':
                             mode_label = "PAPER TRADING / PREÇO REAL"
+                            block_reasons.append("Modo Paper Trading ativo")
+                        elif not ALLOW_ORDER_EXECUTION:
+                            mode_label = "ORDENS BLOQUEADAS"
+                            block_reasons.append("ALLOW_ORDER_EXECUTION=false")
+                        elif APP_MODE == 'real' and not ALLOW_REAL_TRADING:
+                            mode_label = "SALDO REAL / ORDENS BLOQUEADAS"
+                            block_reasons.append("ALLOW_REAL_TRADING=false para conta real")
                         elif APP_MODE == 'testnet':
                             mode_label = "TESTNET / ORDENS BLOQUEADAS"
+                            block_reasons.append("ALLOW_ORDER_EXECUTION=false para testnet")
                         else:
-                            mode_label = "SALDO REAL / ORDENS BLOQUEADAS"
-                        print(f"📊 [{mode_label}] {c.get('nome')} - execução real bloqueada por segurança")
+                            mode_label = "ORDENS BLOQUEADAS"
+                            block_reasons.append("Configuração de segurança ativa")
+
+                        reason_str = ", ".join(block_reasons)
+                        print(f"🔒 [{mode_label}] {c.get('nome')} - execução bloqueada: {reason_str}")
+                        print(f"💡 DIAGNÓSTICO: API conectada ✅ | Saldo visível ✅ | Execução bloqueada por: {reason_str}")
 
                     # --- NOTIFICAÇÃO PRIVADA EDUCATIVA (SNIPER PROTOCOL) ---
                     c_msg = (f"🎯 *SNIPER GIVALDO v60.1 - DISPARO CONFIRMADO*\n\n"
