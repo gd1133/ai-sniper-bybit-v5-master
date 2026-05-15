@@ -44,89 +44,71 @@ ENV_CONFIG = get_environment_config()
 ENVIRONMENT = ENV_CONFIG.name
 print(f"[SISTEMA] Iniciando em modo: {ENVIRONMENT}")
 
-VALID_OPERATION_MODES = {'testnet', 'real'}
-VALID_ACCOUNT_MODES = {'testnet', 'real'}
+# Sistema fixado em modo REAL apenas
+VALID_OPERATION_MODES = {'real'}
+VALID_ACCOUNT_MODES = {'real'}
 
 
 def _normalize_operation_mode(value):
-    raw = str(value or '').strip().lower()
-    if raw in VALID_OPERATION_MODES:
-        return raw
+    """Sempre retorna 'real' - sistema opera apenas em modo real"""
     return 'real'
 
 
 def _normalize_account_mode(value):
-    raw = str(value or '').strip().lower()
-    if raw in VALID_ACCOUNT_MODES:
-        return raw
-    if value in [True, 1, '1', 'true', 'TRUE', 'True']:
-        return 'testnet'
-    if value in [False, 0, '0', 'false', 'FALSE', 'False']:
-        return 'real'
-    return 'testnet'
+    """Sempre retorna 'real' - apenas contas reais são suportadas"""
+    return 'real'
 
 
 def _is_testnet_account(value):
-    return _normalize_account_mode(value) == 'testnet'
+    """Sempre retorna False - testnet não é mais suportado"""
+    return False
 
 
 def _mode_display_label(mode):
-    labels = {
-        'testnet': 'BYBIT TESTNET',
-        'real': 'CONTA REAL',
-    }
-    return labels.get(_normalize_operation_mode(mode), 'CONTA REAL')
+    """Retorna label do modo de operação"""
+    return 'CONTA REAL'
 
 
 def _mode_balance_source(mode):
-    return 'broker_testnet_balance' if _normalize_account_mode(mode) == 'testnet' else 'broker_real_balance'
+    """Retorna source do saldo - sempre real"""
+    return 'broker_real_balance'
 
 
 def _mode_uses_testnet(mode):
-    return _normalize_operation_mode(mode) == 'testnet'
+    """Sempre retorna False - testnet não é mais usado"""
+    return False
 
 
 def _resolve_client_testnet_flag(value):
-    if value is None:
-        return resolve_use_testnet(default=ENV_CONFIG.use_testnet)
-    return _normalize_account_mode(value) == 'testnet'
+    """Sempre retorna False - clientes sempre operam em real"""
+    return False
 
 
 def _get_synced_account_mode_for_operation(mode):
-    normalized_mode = _normalize_operation_mode(mode)
-    if normalized_mode == 'testnet':
-        return 'testnet'
-    if normalized_mode == 'real':
-        return 'real'
-    return None
+    """Sempre retorna 'real'"""
+    return 'real'
 
 
 def _filter_balance_items_for_operation_mode(items, mode):
-    target_account_mode = _get_synced_account_mode_for_operation(mode)
-    if target_account_mode is None:
-        return []
-
+    """Filtra itens para modo real apenas"""
     filtered_items = []
     for item in items or []:
-        item_account_mode = _normalize_account_mode(item.get('account_mode', item.get('is_testnet')))
-        if item_account_mode == target_account_mode:
-            filtered_items.append({**item, "account_mode": item_account_mode})
+        # Sempre considera como real
+        filtered_items.append({**item, "account_mode": 'real'})
     return filtered_items
 
 
 def _is_order_execution_enabled(mode):
-    mode = _normalize_operation_mode(mode)
+    """Verifica se execução de ordens está habilitada"""
     if not ALLOW_ORDER_EXECUTION:
         return False
-    if mode == 'real' and not ALLOW_REAL_TRADING:
+    if not ALLOW_REAL_TRADING:
         return False
     return True
 
 
 def _execution_status_label(mode):
-    mode = _normalize_operation_mode(mode)
-    if mode == 'testnet':
-        return 'Ordens na testnet ativas' if _is_order_execution_enabled(mode) else 'Ordens na testnet bloqueadas'
+    """Retorna label de status de execução"""
     return 'Ordens reais ativas' if _is_order_execution_enabled(mode) else 'Ordens reais bloqueadas'
 
 
@@ -1633,12 +1615,9 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                         if not ALLOW_ORDER_EXECUTION:
                             mode_label = "ORDENS BLOQUEADAS"
                             block_reasons.append("ALLOW_ORDER_EXECUTION=false")
-                        elif APP_MODE == 'real' and not ALLOW_REAL_TRADING:
-                            mode_label = "SALDO REAL / ORDENS BLOQUEADAS"
-                            block_reasons.append("ALLOW_REAL_TRADING=false para conta real")
-                        elif APP_MODE == 'testnet':
-                            mode_label = "TESTNET / ORDENS BLOQUEADAS"
-                            block_reasons.append("ALLOW_ORDER_EXECUTION=false para testnet")
+                        elif not ALLOW_REAL_TRADING:
+                            mode_label = "ORDENS BLOQUEADAS"
+                            block_reasons.append("ALLOW_REAL_TRADING=false")
                         else:
                             mode_label = "ORDENS BLOQUEADAS"
                             block_reasons.append("Configuração de segurança ativa")
@@ -2274,58 +2253,42 @@ def learn_from_history():
 
 @app.route('/api/mode/toggle', methods=['POST'])
 def toggle_test_mode():
-    """🔄 ALTERNAR ENTRE TESTNET E REAL
+    """🔄 Sistema fixado em modo REAL - endpoint mantido para compatibilidade
 
     POST /api/mode/toggle
-    {"mode": "testnet"} | {"mode": "real"}
+    {"mode": "real"}
     """
-    global APP_MODE
-
     try:
-        new_mode = _normalize_operation_mode((request.json or {}).get('mode', 'real'))
-
-        if new_mode not in VALID_OPERATION_MODES:
-            return jsonify({"error": "Mode deve ser 'testnet' ou 'real'"}), 400
-
-        APP_MODE = new_mode
-        _sync_runtime_mode_state(persist=True)
-        _refresh_real_balance_state(force=True)
-
-        # Log
+        # Sistema sempre opera em modo real
         mode_name = _mode_display_label(APP_MODE)
-        mode_emoji = "🛰️" if APP_MODE == 'testnet' else "💼"
-        print(f"\n{mode_emoji} ALTERNAÇÃO DE MODO: {mode_name}")
-        print(f"   Status: {central_state['status']}")
-        print(f"   Execução: {_execution_status_label(APP_MODE)}")
-        print()
 
         return jsonify({
             "success": True,
-            "mode": new_mode,
-            "operation_mode": APP_MODE,
+            "mode": "real",
+            "operation_mode": "real",
             "operation_mode_label": mode_name,
-            "status": central_state['status'],
+            "status": central_state.get('status', 'Sistema operando'),
             "balance": central_state.get('balance', 0.0),
             "execution_enabled": _is_order_execution_enabled(APP_MODE),
             "execution_label": _execution_status_label(APP_MODE),
-            "message": f"✅ Sistema alternado para {mode_name}!"
+            "message": f"✅ Sistema em modo {mode_name} (fixo)"
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
 @app.route('/api/mode/current', methods=['GET'])
 def get_current_mode():
-    """📊 RETORNA MODO ATUAL (TESTNET OU REAL)"""
+    """📊 RETORNA MODO ATUAL (SEMPRE REAL)"""
     try:
         return jsonify({
-            "mode": APP_MODE,
-            "operation_mode": APP_MODE,
+            "mode": "real",
+            "operation_mode": "real",
             "operation_mode_label": _mode_display_label(APP_MODE),
             "status": central_state.get('status', 'desconhecido'),
             "balance": central_state.get('balance', 0.0),
             "execution_enabled": _is_order_execution_enabled(APP_MODE),
             "execution_label": _execution_status_label(APP_MODE),
-            "emoji": "🛰️" if APP_MODE == 'testnet' else "💼"
+            "emoji": "💼"
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 400
