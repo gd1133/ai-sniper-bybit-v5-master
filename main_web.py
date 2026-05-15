@@ -116,8 +116,6 @@ def _filter_balance_items_for_operation_mode(items, mode):
 
 def _is_order_execution_enabled(mode):
     mode = _normalize_operation_mode(mode)
-    if mode == 'paper':
-        return False
     if not ALLOW_ORDER_EXECUTION:
         return False
     if mode == 'real' and not ALLOW_REAL_TRADING:
@@ -127,8 +125,6 @@ def _is_order_execution_enabled(mode):
 
 def _execution_status_label(mode):
     mode = _normalize_operation_mode(mode)
-    if mode == 'paper':
-        return 'Sem ordens reais'
     if mode == 'testnet':
         return 'Ordens na testnet ativas' if _is_order_execution_enabled(mode) else 'Ordens na testnet bloqueadas'
     return 'Ordens reais ativas' if _is_order_execution_enabled(mode) else 'Ordens reais bloqueadas'
@@ -1139,7 +1135,7 @@ def _refresh_last_sniper_signal():
 
 
 def _get_initial_test_balance():
-    """Base fixa do paper trading; não deve oscilar com P&L aberto.
+    """Retorna saldo inicial configurado para referência histórica.
 
     Garante que o valor seja sempre positivo (≥ 1.0 USDT). Se o saldo ficou
     zerado por perdas acumuladas, restaura ao valor padrão de 1000 USDT.
@@ -1634,10 +1630,7 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                     else:
                         # Diagnóstico detalhado do bloqueio
                         block_reasons = []
-                        if APP_MODE == 'paper':
-                            mode_label = "PAPER TRADING / PREÇO REAL"
-                            block_reasons.append("Modo Paper Trading ativo")
-                        elif not ALLOW_ORDER_EXECUTION:
+                        if not ALLOW_ORDER_EXECUTION:
                             mode_label = "ORDENS BLOQUEADAS"
                             block_reasons.append("ALLOW_ORDER_EXECUTION=false")
                         elif APP_MODE == 'real' and not ALLOW_REAL_TRADING:
@@ -2152,27 +2145,13 @@ def get_neural_performance():
 def update_dashboard_balance():
     """Atualiza saldo do Dashboard em tempo real."""
     try:
-        if TEST_MODE_ENABLED:
-            return jsonify({
-                "balance": TEST_BALANCE,
-                "status": central_state.get('status'),
-                "symbol": central_state['symbol'],
-                "confidence": central_state['confidence'],
-                "test_mode": True,
-                "operation_mode": APP_MODE,
-                "operation_mode_label": _mode_display_label(APP_MODE),
-                "execution_enabled": _is_order_execution_enabled(APP_MODE),
-                "execution_label": _execution_status_label(APP_MODE),
-            })
-        
         _refresh_real_balance_state(force=True)
-        
+
         return jsonify({
             "balance": central_state['balance'],
             "status": central_state['status'],
             "symbol": central_state['symbol'],
             "confidence": central_state['confidence'],
-            "test_mode": False,
             "operation_mode": APP_MODE,
             "operation_mode_label": _mode_display_label(APP_MODE),
             "execution_enabled": _is_order_execution_enabled(APP_MODE),
@@ -2180,13 +2159,12 @@ def update_dashboard_balance():
             "real_client_balances": central_state.get('real_client_balances', []),
         })
     except Exception as e:
-        # Fallback para saldo de teste se broker falhar
+        # Fallback para saldo 0 se broker falhar
         return jsonify({
-            "balance": TEST_BALANCE,
-            "status": f"⚠️ Broker indisponível. Usando saldo teste: {TEST_BALANCE} USDT",
+            "balance": 0.0,
+            "status": f"⚠️ Broker indisponível: {str(e)}",
             "symbol": central_state['symbol'],
             "confidence": central_state['confidence'],
-            "test_mode": True,
             "operation_mode": APP_MODE,
             "operation_mode_label": _mode_display_label(APP_MODE),
             "execution_enabled": _is_order_execution_enabled(APP_MODE),
@@ -2477,12 +2455,8 @@ if __name__ == "__main__":
     start_runtime_services()
 
     print(f"✅ DuoIA Maestro v60.1 Online na Porta {render_port}")
-
-    print(f"💰 Saldo Carregado: {TEST_BALANCE} USDT")
     print(f"🧭 Modo operacional: {_mode_display_label(APP_MODE)}")
     print(f"⚡ Execução: {_execution_status_label(APP_MODE)}")
-    if TEST_MODE_ENABLED:
-        print("🧪 Paper ativo - preço real, saldo fictício, sem ordens")
     print(f"📊 Dashboard: http://0.0.0.0:{render_port}")
     print("🧠 Cérebro Triplo: ATIVO (Rigor 50%)")
     app.run(host='0.0.0.0', port=render_port, debug=False, use_reloader=False)
