@@ -7,7 +7,14 @@ Verifica se o sistema está configurado corretamente para execução de ordens.
 
 import os
 import sys
-from dotenv import load_dotenv
+
+# Tenta importar dotenv, mas continua sem ele se não estiver disponível
+try:
+    from dotenv import load_dotenv
+    HAS_DOTENV = True
+except ImportError:
+    HAS_DOTENV = False
+    print("⚠️  python-dotenv não instalado, lendo apenas variáveis de ambiente do sistema")
 
 # Cores para terminal
 GREEN = '\033[92m'
@@ -48,8 +55,11 @@ def validate_environment():
 
     print_header("DIAGNÓSTICO DE CONFIGURAÇÃO - AI SNIPER")
 
-    # Carrega variáveis de ambiente
-    load_dotenv()
+    # Carrega variáveis de ambiente se dotenv disponível
+    if HAS_DOTENV:
+        load_dotenv()
+    else:
+        print_warning("Lendo apenas variáveis de ambiente do sistema (dotenv não disponível)")
 
     issues = []
     warnings = []
