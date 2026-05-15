@@ -30,7 +30,7 @@ def _get_db_path():
 
 DB_PATH = _get_db_path()
 VALID_ACCOUNT_MODES = {'testnet', 'real'}
-VALID_OPERATION_MODES = {'paper', 'testnet', 'real'}
+VALID_OPERATION_MODES = {'testnet', 'real'}
 
 
 def is_truthy(value: Any) -> bool:
@@ -50,11 +50,9 @@ def normalize_account_mode(value: Any) -> str:
 
 def normalize_operation_mode(value: Any) -> str:
     normalized = str(value or '').strip().lower()
-    if normalized == 'test':
-        return 'paper'
     if normalized in VALID_OPERATION_MODES:
         return normalized
-    return 'paper'
+    return 'real'
 
 
 def _connect():
@@ -454,20 +452,6 @@ def set_config(key: str, value: str) -> bool:
         return False
 
 
-def get_test_balance() -> float:
-    """Retorna o saldo de teste configurado (padrão: 1000)"""
-    val = get_config('TEST_BALANCE', '1000')
-    try:
-        return float(val)
-    except (ValueError, TypeError):
-        return 1000.0
-
-
-def set_test_balance(amount: float) -> bool:
-    """Define o saldo de teste"""
-    return set_config('TEST_BALANCE', str(amount))
-
-
 def is_test_mode_enabled() -> bool:
     """Verifica se modo teste está ativo"""
     return get_config('TEST_MODE', 'false').lower() == 'true'
@@ -477,8 +461,6 @@ def get_operation_mode() -> str:
     mode = normalize_operation_mode(get_config('APP_MODE', ''))
     if mode in VALID_OPERATION_MODES and get_config('APP_MODE') is not None:
         return mode
-    if is_test_mode_enabled():
-        return 'paper'
     return get_environment_config().default_operation_mode
 
 
