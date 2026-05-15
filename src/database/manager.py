@@ -29,8 +29,9 @@ def _get_db_path():
     return '/tmp/ai-sniper/database.db'
 
 DB_PATH = _get_db_path()
-VALID_ACCOUNT_MODES = {'testnet', 'real'}
-VALID_OPERATION_MODES = {'testnet', 'real'}
+# Sistema opera apenas em modo REAL
+VALID_ACCOUNT_MODES = {'real'}
+VALID_OPERATION_MODES = {'real'}
 
 
 def is_truthy(value: Any) -> bool:
@@ -38,20 +39,12 @@ def is_truthy(value: Any) -> bool:
 
 
 def normalize_account_mode(value: Any) -> str:
-    normalized = str(value or '').strip().lower()
-    if normalized in VALID_ACCOUNT_MODES:
-        return normalized
-    if value in [True, 1, '1', 'true', 'TRUE', 'True']:
-        return 'testnet'
-    if value in [False, 0, '0', 'false', 'FALSE', 'False']:
-        return 'real'
-    return 'testnet'
+    """Sempre retorna 'real' - sistema opera apenas em modo real"""
+    return 'real'
 
 
 def normalize_operation_mode(value: Any) -> str:
-    normalized = str(value or '').strip().lower()
-    if normalized in VALID_OPERATION_MODES:
-        return normalized
+    """Sempre retorna 'real' - sistema opera apenas em modo real"""
     return 'real'
 
 
@@ -92,22 +85,22 @@ def init_db():
         chat_id TEXT,
         status TEXT DEFAULT 'ativo',
         saldo_base REAL DEFAULT 1000.0,
-        is_testnet INTEGER DEFAULT 1,
-        account_mode TEXT DEFAULT 'testnet',
-        balance_source TEXT DEFAULT 'broker_testnet_balance',
+        is_testnet INTEGER DEFAULT 0,
+        account_mode TEXT DEFAULT 'real',
+        balance_source TEXT DEFAULT 'broker_real_balance',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     ''')
-    _ensure_column(cur, 'clientes_sniper', 'account_mode', "TEXT DEFAULT 'testnet'")
-    _ensure_column(cur, 'clientes_sniper', 'balance_source', "TEXT DEFAULT 'broker_testnet_balance'")
+    _ensure_column(cur, 'clientes_sniper', 'account_mode', "TEXT DEFAULT 'real'")
+    _ensure_column(cur, 'clientes_sniper', 'balance_source', "TEXT DEFAULT 'broker_real_balance'")
     _ensure_column(cur, 'clientes_sniper', 'exchange', "TEXT DEFAULT 'bybit'")
+    # Atualiza registros existentes para modo real
     cur.execute("""
         UPDATE clientes_sniper
-        SET account_mode = CASE
-            WHEN COALESCE(is_testnet, 1) = 1 THEN 'testnet'
-            ELSE 'real'
-        END
-        WHERE account_mode IS NULL OR TRIM(account_mode) = ''
+        SET account_mode = 'real',
+            is_testnet = 0,
+            balance_source = 'broker_real_balance'
+        WHERE account_mode IS NULL OR TRIM(account_mode) = '' OR account_mode = 'testnet'
     """)
     cur.execute("""
         UPDATE clientes_sniper
@@ -190,13 +183,9 @@ def add_client(data: Dict[str, Any]):
     try:
         conn = _connect()
         cur = conn.cursor()
-        account_mode = normalize_account_mode(data.get('account_mode', data.get('is_testnet')))
-        balance_source = str(
-            data.get(
-                'balance_source',
-                'broker_testnet_balance' if account_mode == 'testnet' else 'broker_real_balance',
-            )
-        )
+        # Sistema sempre opera em modo real
+        account_mode = 'real'
+        balance_source = 'broker_real_balance'
         exchange = str(data.get('exchange') or 'bybit').strip().lower()
         if exchange not in ('bybit', 'binance'):
             exchange = 'bybit'
@@ -209,7 +198,7 @@ def add_client(data: Dict[str, Any]):
             data.get('chat_id'),
             data.get('status', 'ativo'),
             data.get('saldo_base', 1000.0),
-            1 if account_mode == 'testnet' else 0,
+            0,  # is_testnet sempre False
             account_mode,
             balance_source,
             exchange,
