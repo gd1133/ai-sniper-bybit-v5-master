@@ -29,33 +29,25 @@ class BinanceClient:
     """
 
     TESTNET_URL = 'https://testnet.binancefuture.com'
-    REAL_URL = 'https://fapi.binance.com'
+    BINANCE_API_HOSTS = (
+        'https://api1.binance.com',
+        'https://api2.binance.com',
+        'https://api3.binance.com',
+    )
+    REAL_URL = BINANCE_API_HOSTS[0]
+    FUTURES_URL = 'https://fapi.binance.com'
 
     def __init__(self, api_key=None, api_secret=None, testnet=False):
-        ccxt = _get_ccxt()
-
         api_key = str(api_key or '').strip()
         api_secret = str(api_secret or '').strip()
+        self.api_key = api_key
+        self.api_secret = api_secret
         self.testnet = bool(testnet)
+        self.endpoint_index = 0
+        self.api_hosts = [self.TESTNET_URL] if self.testnet else list(self.BINANCE_API_HOSTS)
         self.active_endpoint = self.TESTNET_URL if self.testnet else self.REAL_URL
 
-        cfg = {
-            'enableRateLimit': True,
-            'rateLimit': 100,
-            'timeout': 8000,
-            'options': {
-                'defaultType': 'future',
-                'adjustForTimeDifference': True,
-            },
-        }
-        if api_key and api_secret:
-            cfg['apiKey'] = api_key
-            cfg['secret'] = api_secret
-
-        self.exchange = ccxt.binanceusdm(cfg)
-
-        if self.testnet:
-            self.exchange.set_sandbox_mode(True)
+        self.exchange = self._create_exchange()
 
         self.authenticated = bool(api_key and api_secret)
 
@@ -80,6 +72,54 @@ class BinanceClient:
     def _is_cache_valid(self, entry, ttl):
         return (time.time() - entry[1]) < ttl
 
+    def _build_exchange_urls(self, api_host):
+        return {
+            'api': {
+                'public': f'{api_host}/sapi/v1',
+                'private': f'{api_host}/sapi/v1',
+            },
+            'fapi': {
+                'public': self.FUTURES_URL,
+                'private': self.FUTURES_URL,
+            },
+        }
+
+    def _build_exchange_config(self):
+        cfg = {
+            'enableRateLimit': True,
+            'rateLimit': 100,
+            'timeout': 8000,
+            'options': {
+                'defaultType': 'future',
+                'adjustForTimeDifference': True,
+            },
+        }
+        if self.api_key and self.api_secret:
+            cfg['apiKey'] = self.api_key
+            cfg['secret'] = self.api_secret
+        if not self.testnet:
+            cfg['urls'] = self._build_exchange_urls(self.active_endpoint)
+        return cfg
+
+    def _apply_exchange_urls(self, exchange, api_host):
+        if self.testnet:
+            return
+        urls = self._build_exchange_urls(api_host)
+        exchange.urls = getattr(exchange, 'urls', {}) or {}
+        exchange.urls['api'] = dict(urls['api'])
+        exchange.urls['fapi'] = dict(urls['fapi'])
+        exchange.options = getattr(exchange, 'options', {}) or {}
+        exchange.options['adjustForTimeDifference'] = True
+
+    def _create_exchange(self):
+        ccxt = _get_ccxt()
+        exchange = ccxt.binanceusdm(self._build_exchange_config())
+        if self.testnet:
+            exchange.set_sandbox_mode(True)
+        else:
+            self._apply_exchange_urls(exchange, self.active_endpoint)
+        return exchange
+
     def _apply_rate_limit(self, endpoint='default'):
         now = time.time()
         if now < self.rate_limit_block_until:
@@ -94,6 +134,39 @@ class BinanceClient:
         auth_keywords = ['AuthenticationError', '1100', '-2014', '-2015', 'invalid key', 'API key', 'signature']
         return any(kw.lower() in msg.lower() for kw in auth_keywords)
 
+    def _is_http_451_error(self, error):
+        status_code = getattr(error, 'status', None) or getattr(error, 'http_status_code', None)
+        if str(status_code) == '451':
+            return True
+        msg = str(error)
+        return '451' in msg and 'legal reasons' in msg.lower()
+
+    def _rotate_binance_api_endpoint(self):
+        if self.testnet or len(self.api_hosts) <= 1:
+            return False
+
+        next_index = self.endpoint_index + 1
+        if next_index >= len(self.api_hosts):
+            return False
+
+        self.endpoint_index = next_index
+        self.active_endpoint = self.api_hosts[self.endpoint_index]
+        self._apply_exchange_urls(self.exchange, self.active_endpoint)
+        print(f"⚠️ [BINANCE ENDPOINT] HTTP 451 detectado; alternando para {self.active_endpoint}")
+        return True
+
+    def _call_with_451_retry(self, operation):
+        attempts = 1 if self.testnet else len(self.api_hosts)
+        for current_attempt in range(attempts):
+            try:
+                return operation()
+            except Exception as e:
+                if not self._is_http_451_error(e):
+                    raise
+                has_next_endpoint = current_attempt < (attempts - 1) and self._rotate_binance_api_endpoint()
+                if not has_next_endpoint:
+                    raise
+
     # ------------------------------------------------------------------
     # Public interface (mirrors BybitClient)
     # ------------------------------------------------------------------
@@ -103,7 +176,9 @@ class BinanceClient:
         if not self.authenticated:
             return None
         try:
-            balance = self.exchange.fetch_balance(params={'type': 'future'})
+            balance = self._call_with_451_retry(
+                lambda: self.exchange.fetch_balance(params={'type': 'future'})
+            )
             usdt = balance.get('USDT', {})
             free = usdt.get('free')
             total = usdt.get('total')
@@ -127,7 +202,9 @@ class BinanceClient:
 
         try:
             self._apply_rate_limit('fetch_ohlcv')
-            data = self.exchange.fetch_ohlcv(symbol, timeframe, limit=250)
+            data = self._call_with_451_retry(
+                lambda: self.exchange.fetch_ohlcv(symbol, timeframe, limit=250)
+            )
             df = pd.DataFrame(data, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
             self.cache_ohlcv[cache_key] = (df, time.time())
             self.ohlcv_failures[cache_key] = 0
@@ -148,7 +225,7 @@ class BinanceClient:
             return self.cache_ticker[symbol][0]
         try:
             self._apply_rate_limit('get_last_price')
-            ticker = self.exchange.fetch_ticker(symbol)
+            ticker = self._call_with_451_retry(lambda: self.exchange.fetch_ticker(symbol))
             price = float(ticker['last'])
             self.cache_ticker[symbol] = (price, time.time())
             return price
@@ -163,7 +240,9 @@ class BinanceClient:
                 print('[ERRO BINANCE] Ordem não executada: sem credenciais.')
                 return None
             print(f"🔥 [BINANCE ORDER] {side.upper()} {qty} em {symbol}")
-            order = self.exchange.create_order(symbol, 'market', side, qty)
+            order = self._call_with_451_retry(
+                lambda: self.exchange.create_order(symbol, 'market', side, qty)
+            )
             return order
         except Exception as e:
             print(f"❌ [ERRO BINANCE] Falha na ordem: {e}")
@@ -183,14 +262,18 @@ class BinanceClient:
             print(f"🛡️ [BINANCE TP/SL] {symbol} TP={tp_price} SL={sl_price}")
 
             # Take profit — limit reduceOnly
-            self.exchange.create_order(
-                symbol, 'TAKE_PROFIT_MARKET', close_side, position_qty,
-                params={'stopPrice': tp_price, 'closePosition': True, 'workingType': 'MARK_PRICE'},
+            self._call_with_451_retry(
+                lambda: self.exchange.create_order(
+                    symbol, 'TAKE_PROFIT_MARKET', close_side, position_qty,
+                    params={'stopPrice': tp_price, 'closePosition': True, 'workingType': 'MARK_PRICE'},
+                )
             )
             # Stop loss — stop market reduceOnly
-            self.exchange.create_order(
-                symbol, 'STOP_MARKET', close_side, position_qty,
-                params={'stopPrice': sl_price, 'closePosition': True, 'workingType': 'MARK_PRICE'},
+            self._call_with_451_retry(
+                lambda: self.exchange.create_order(
+                    symbol, 'STOP_MARKET', close_side, position_qty,
+                    params={'stopPrice': sl_price, 'closePosition': True, 'workingType': 'MARK_PRICE'},
+                )
             )
             print('✅ [BINANCE TP/SL SETADO]')
             return True
@@ -209,12 +292,14 @@ class BinanceClient:
                     return True, f"Binance Autenticado OK (USDT {balance:.2f})"
                 # Tenta via fetch_balance direto para obter melhor mensagem de erro
                 try:
-                    self.exchange.fetch_balance(params={'type': 'future'})
+                    self._call_with_451_retry(
+                        lambda: self.exchange.fetch_balance(params={'type': 'future'})
+                    )
                 except Exception as inner:
                     return False, str(inner).split('\n')[0][:200]
                 return False, 'Chave API Binance inválida ou sem permissão Futures'
             else:
-                self.exchange.fetch_tickers()
+                self._call_with_451_retry(self.exchange.fetch_tickers)
                 return True, 'API pública Binance OK (sem credenciais)'
         except Exception as e:
             return False, str(e).split('\n')[0][:200]
