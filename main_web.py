@@ -910,11 +910,25 @@ def _friendly_bybit_error(raw_error: str, account_mode: str) -> str:
 
     lowered = msg.lower()
 
+    # IP not whitelisted — check BEFORE 401 because Bybit sometimes returns 401 for IP bans
+    if 'ip' in lowered and ('not allow' in lowered or 'whitelist' in lowered or 'forbidden' in lowered or '403' in msg):
+        return (
+            'IP do servidor não autorizado pela chave API. '
+            'O servidor Railway/cloud usa IPs dinâmicos. '
+            'Solução: no painel da Bybit vá em API Management → edite a chave → desative restrição de IP '
+            '(escolha "No IP Restriction") ou adicione o IP atual do servidor.'
+        )
+
     # HTTP 401 or Bybit retCode 401
     if '401' in msg or 'errcode: 401' in lowered or 'http 401' in lowered:
+        server_label = 'Testnet' if is_testnet else 'Real'
         return (
-            f'Chave API inválida ou sem permissão (erro 401). '
-            f'As chaves inseridas não são aceitas pelo servidor {"Testnet" if is_testnet else "Real"} da Bybit. '
+            f'Chave API inválida ou sem permissão (erro 401) no servidor {server_label} da Bybit. '
+            f'Causas mais comuns: '
+            f'(1) A chave foi criada com restrição de IP — o Railway usa IPs dinâmicos, '
+            f'então desative a restrição de IP na chave Bybit (API Management → editar → No IP Restriction). '
+            f'(2) A chave foi copiada errada. '
+            f'(3) Você está em modo {"Testnet mas usou chave da conta Real" if is_testnet else "Conta Real mas usou chave do Testnet"}. '
             f'{source_hint}'
         )
 
@@ -937,14 +951,6 @@ def _friendly_bybit_error(raw_error: str, account_mode: str) -> str:
         return (
             f'Chave API expirada (código 33004). '
             f'Crie uma nova chave em {"testnet.bybit.com" if is_testnet else "bybit.com"}.'
-        )
-
-    # IP not whitelisted
-    if 'ip' in lowered and ('not allow' in lowered or 'whitelist' in lowered or 'forbidden' in lowered or '403' in msg):
-        return (
-            f'IP do servidor não autorizado pela chave API. '
-            f'No painel da Bybit, adicione o IP do servidor à lista de IPs permitidos da chave, '
-            f'ou crie uma chave sem restrição de IP.'
         )
 
     # Generic fallback – keep original but add hint
