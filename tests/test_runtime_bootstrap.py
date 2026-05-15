@@ -18,21 +18,14 @@ class _FakeThread:
         _FakeThread.started_targets.append((getattr(self.target, '__name__', str(self.target)), self.args, self.daemon))
 
 
-class _FakeCloudDb:
-    def sync_clients(self, db):
-        return None
-
-
 if __name__ == '__main__':
     original_thread = main_web.threading.Thread
     original_started = main_web.RUNTIME_STARTED
-    original_cloud_db = main_web.cloud_db
 
     try:
         _FakeThread.started_targets = []
         main_web.threading.Thread = _FakeThread
         main_web.RUNTIME_STARTED = False
-        main_web.cloud_db = _FakeCloudDb()
 
         first = main_web.start_runtime_services()
         second = main_web.start_runtime_services()
@@ -42,7 +35,7 @@ if __name__ == '__main__':
             raise SystemExit(1)
 
         started = [item[0] for item in _FakeThread.started_targets]
-        expected = ['sniper_worker_loop', '_monitor_sl_tp_automatico', 'sync_clients']
+        expected = ['sniper_worker_loop', '_monitor_sl_tp_automatico', '_fetch_active_client_balances']
         if started != expected:
             print(f"❌ Threads iniciadas incorretamente: {started}")
             raise SystemExit(2)
@@ -52,4 +45,3 @@ if __name__ == '__main__':
     finally:
         main_web.threading.Thread = original_thread
         main_web.RUNTIME_STARTED = original_started
-        main_web.cloud_db = original_cloud_db

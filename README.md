@@ -1,6 +1,6 @@
 # Motor Sniper v60.7
 
-Bot de trading com dashboard web em tempo real, operacao multiativo e integracao com Bybit, Supabase e IA para validacao de sinais.
+Bot de trading com dashboard web em tempo real, operacao multiativo e integracao com Bybit e IA para validacao de sinais.
 
 ## Documentacao completa
 
@@ -14,7 +14,7 @@ Para a documentacao tecnica, operacional e comercial completa, consulte:
 - **Frontend:** React, Vite
 - **Trading/mercado:** CCXT / Bybit
 - **IA:** Groq + Gemini + motor local
-- **Persistencia cloud:** Supabase
+- **Persistencia:** SQLite local em /app/data/database.db
 
 ## Logica estrategica
 
@@ -44,8 +44,8 @@ O motor combina:
 
 - Credenciais sensiveis ficam fora do Git
 - `.env` e bancos locais estao ignorados no versionamento
-- Campos sensiveis de clientes no Supabase sao protegidos no aplicativo
-- Projeto preparado para operar com fallback local quando a nuvem estiver indisponivel
+- Campos sensiveis de clientes no banco SQLite sao protegidos no aplicativo
+- Banco de dados local em /app/data/database.db com persistencia em volume
 
 ## Escalabilidade
 
@@ -77,19 +77,59 @@ Regras do endpoint:
 
 O modo operacional do dashboard (`paper`, `testnet`, `real`) continua sendo controlado pela aplicacao/banco, sem precisar duplicar variaveis de ambiente no deploy.
 
-## Supabase
+## Banco de dados SQLite
 
-O projeto usa a tabela `clientes` com os campos:
+O projeto usa SQLite local com tabela `clientes_sniper` que inclui os campos:
 
 - `account_mode` (`testnet` ou `real`)
 - `is_testnet` (compatibilidade)
 - `balance_source`
+- `exchange` (`bybit` ou `binance`)
 
-Se o schema da nuvem estiver desatualizado, aplique `tools/supabase_schema.sql`.
+O banco de dados é criado automaticamente em `/app/data/database.db` no primeiro uso.
+Para ambientes Railway, certifique-se de montar um volume em `/app/data` para persistir os dados.
 
-## Deploy no Render / GitHub
+## Deploy no Railway / Render
 
-Valores recomendados para subir com seguranca:
+### Validacao de ambiente
+
+Antes de fazer deploy, valide sua configuracao local:
+
+```bash
+python validate_environment.py
+```
+
+### Railway - Configuracao completa
+
+**⚠️ IMPORTANTE**: Para instrucoes detalhadas de configuracao no Railway, consulte:
+
+📖 **[docs/RAILWAY_SETUP.md](docs/RAILWAY_SETUP.md)** - Guia completo com troubleshooting
+
+#### Variaveis minimas necessarias (Railway):
+
+```env
+ENVIRONMENT=production
+BYBIT_API_KEY=sua_chave_bybit
+BYBIT_API_SECRET=seu_segredo_bybit
+GEMINI_API_KEY=sua_chave_gemini
+GROQ_API_KEY=sua_chave_groq
+TELEGRAM_TOKEN=seu_token_telegram
+TELEGRAM_CHAT_ID=seu_chat_id
+VITE_API_BASE=https://seu-app.railway.app
+```
+
+**⚠️ ATENCAO**: `VITE_API_BASE` deve incluir `https://` no inicio!
+
+#### Volume no Railway
+
+Configure um volume para persistir o banco de dados:
+
+- **Mount Path**: `/app/data`
+- Sem volume = perda de dados a cada deploy
+
+#### Deploy seguro
+
+Para desenvolvimento/testes:
 
 ```env
 ENVIRONMENT=development
@@ -97,11 +137,18 @@ BYBIT_API_KEY=YOUR_BYBIT_API_KEY
 BYBIT_API_SECRET=YOUR_BYBIT_API_SECRET
 ```
 
+Para producao com trading real:
+
+```env
+ENVIRONMENT=production
+# + todas as outras variaveis acima
+```
+
 Depois do deploy:
 
 1. Use o dashboard para alternar entre `paper`, `testnet` e `real`
 2. Cadastre clientes com `Conta Testnet` ou `Conta Real`
-3. Ajuste `ENVIRONMENT` para `production` quando quiser subir com execucao real por padrao
+3. Configure credenciais individuais por cliente no dashboard
 
 ## Como rodar
 

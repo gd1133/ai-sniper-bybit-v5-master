@@ -21,16 +21,9 @@ from src.config import get_bybit_base_url, get_bybit_credentials, get_environmen
 # --- IMPORTAÇÕES DAS PASTAS INTERNAS (SRC) - LAZY LOADING ---
 try:
     from src.database import manager as db
-    try:
-        from src.database.supabase_manager import SupabaseManager
-        cloud_db = SupabaseManager()
-    except Exception as e:
-        print(f"⚠️ Erro ao inicializar Supabase: {e}")
-        cloud_db = None
 except Exception as e:
     print(f"❌ Erro Crítico ao importar Database Manager: {e}")
     db = None
-    cloud_db = None
 
 # Importações pesadas (CCXT, TensorFlow, etc.) carregadas sob demanda
 BybitClient = None
@@ -51,96 +44,71 @@ ENV_CONFIG = get_environment_config()
 ENVIRONMENT = ENV_CONFIG.name
 print(f"[SISTEMA] Iniciando em modo: {ENVIRONMENT}")
 
-VALID_OPERATION_MODES = {'paper', 'testnet', 'real'}
-VALID_ACCOUNT_MODES = {'testnet', 'real'}
+# Sistema fixado em modo REAL apenas
+VALID_OPERATION_MODES = {'real'}
+VALID_ACCOUNT_MODES = {'real'}
 
 
 def _normalize_operation_mode(value):
-    raw = str(value or '').strip().lower()
-    if raw == 'test':
-        return 'paper'
-    if raw in VALID_OPERATION_MODES:
-        return raw
-    return 'paper'
+    """Sempre retorna 'real' - sistema opera apenas em modo real"""
+    return 'real'
 
 
 def _normalize_account_mode(value):
-    raw = str(value or '').strip().lower()
-    if raw in VALID_ACCOUNT_MODES:
-        return raw
-    if value in [True, 1, '1', 'true', 'TRUE', 'True']:
-        return 'testnet'
-    if value in [False, 0, '0', 'false', 'FALSE', 'False']:
-        return 'real'
-    return 'testnet'
+    """Sempre retorna 'real' - apenas contas reais são suportadas"""
+    return 'real'
 
 
 def _is_testnet_account(value):
-    return _normalize_account_mode(value) == 'testnet'
+    """Sempre retorna False - testnet não é mais suportado"""
+    return False
 
 
 def _mode_display_label(mode):
-    labels = {
-        'paper': 'PAPER TRADING',
-        'testnet': 'BYBIT TESTNET',
-        'real': 'CONTA REAL',
-    }
-    return labels.get(_normalize_operation_mode(mode), 'PAPER TRADING')
+    """Retorna label do modo de operação"""
+    return 'CONTA REAL'
 
 
 def _mode_balance_source(mode):
-    return 'broker_testnet_balance' if _normalize_account_mode(mode) == 'testnet' else 'broker_real_balance'
+    """Retorna source do saldo - sempre real"""
+    return 'broker_real_balance'
 
 
 def _mode_uses_testnet(mode):
-    return _normalize_operation_mode(mode) == 'testnet'
+    """Sempre retorna False - testnet não é mais usado"""
+    return False
 
 
 def _resolve_client_testnet_flag(value):
-    if value is None:
-        return resolve_use_testnet(default=ENV_CONFIG.use_testnet)
-    return _normalize_account_mode(value) == 'testnet'
+    """Sempre retorna False - clientes sempre operam em real"""
+    return False
 
 
 def _get_synced_account_mode_for_operation(mode):
-    normalized_mode = _normalize_operation_mode(mode)
-    if normalized_mode == 'testnet':
-        return 'testnet'
-    if normalized_mode == 'real':
-        return 'real'
-    return None
+    """Sempre retorna 'real'"""
+    return 'real'
 
 
 def _filter_balance_items_for_operation_mode(items, mode):
-    target_account_mode = _get_synced_account_mode_for_operation(mode)
-    if target_account_mode is None:
-        return []
-
+    """Filtra itens para modo real apenas"""
     filtered_items = []
     for item in items or []:
-        item_account_mode = _normalize_account_mode(item.get('account_mode', item.get('is_testnet')))
-        if item_account_mode == target_account_mode:
-            filtered_items.append({**item, "account_mode": item_account_mode})
+        # Sempre considera como real
+        filtered_items.append({**item, "account_mode": 'real'})
     return filtered_items
 
 
 def _is_order_execution_enabled(mode):
-    mode = _normalize_operation_mode(mode)
-    if mode == 'paper':
-        return False
+    """Verifica se execução de ordens está habilitada"""
     if not ALLOW_ORDER_EXECUTION:
         return False
-    if mode == 'real' and not ALLOW_REAL_TRADING:
+    if not ALLOW_REAL_TRADING:
         return False
     return True
 
 
 def _execution_status_label(mode):
-    mode = _normalize_operation_mode(mode)
-    if mode == 'paper':
-        return 'Sem ordens reais'
-    if mode == 'testnet':
-        return 'Ordens na testnet ativas' if _is_order_execution_enabled(mode) else 'Ordens na testnet bloqueadas'
+    """Retorna label de status de execução"""
     return 'Ordens reais ativas' if _is_order_execution_enabled(mode) else 'Ordens reais bloqueadas'
 
 
@@ -150,16 +118,7 @@ CORS(app)
 # Inicializa o Banco de Dados Local (Cria tabelas se não existirem)
 db.init_db()
 
-# 🧪 CARREGA CONFIGURAÇÕES DE TESTE
-_raw_test_balance = db.get_test_balance()  # Saldo fictício para treinar
-# Garante que o saldo paper nunca inicie zerado (pode acontecer se sessão anterior
-# esgotou o saldo por perdas e persistiu TEST_BALANCE=0 no banco).
-TEST_BALANCE = _raw_test_balance if _raw_test_balance > 0 else 1000.0
-if _raw_test_balance <= 0:
-    db.set_test_balance(TEST_BALANCE)
-    print(f"⚠️ TEST_BALANCE restaurado para {TEST_BALANCE} USDT (estava zerado/inválido).")
 APP_MODE = _normalize_operation_mode(db.get_operation_mode())
-TEST_MODE_ENABLED = APP_MODE == 'paper'
 ALLOW_ORDER_EXECUTION = ENV_CONFIG.allow_order_execution
 ALLOW_REAL_TRADING = ENV_CONFIG.allow_real_trading
 
@@ -169,7 +128,7 @@ MAX_MOEDAS_ATIVAS = 1            # Conservador: 1 moeda por vez (use /api/config
 
 # Estado Global de Sincronização (O que o Dashboard React consome)
 central_state = {
-    "balance": TEST_BALANCE,  # Carregado do banco de dados
+    "balance": 0.0,  # Será carregado do broker
     "status": "INICIANDO SISTEMA...",
     "symbol": "---",
     "confidence": 0,
@@ -178,8 +137,6 @@ central_state = {
     "trades": [],
     "last_sniper_signal": None,
     "recent_sniper_signals": [],
-    "test_balance": TEST_BALANCE,  # Novo campo para teste
-    "test_mode": TEST_MODE_ENABLED,  # Novo campo para teste
     "operation_mode": APP_MODE,
     "operation_mode_label": _mode_display_label(APP_MODE),
     "execution_enabled": _is_order_execution_enabled(APP_MODE),
@@ -234,25 +191,16 @@ _balance_refresh_in_progress = False
 
 
 def _sync_runtime_mode_state(persist=False):
-    global APP_MODE, TEST_MODE_ENABLED
+    global APP_MODE
     APP_MODE = _normalize_operation_mode(APP_MODE)
-    TEST_MODE_ENABLED = APP_MODE == 'paper'
-    central_state['test_mode'] = TEST_MODE_ENABLED
     central_state['operation_mode'] = APP_MODE
     central_state['operation_mode_label'] = _mode_display_label(APP_MODE)
     central_state['execution_enabled'] = _is_order_execution_enabled(APP_MODE)
     central_state['execution_label'] = _execution_status_label(APP_MODE)
-
-    if TEST_MODE_ENABLED:
-        central_state['balance'] = TEST_BALANCE
-        central_state['test_balance'] = TEST_BALANCE
-        central_state['status'] = f"🧪 {_mode_display_label(APP_MODE)}: {TEST_BALANCE} USDT (preço real, sem ordens)"
-    else:
-        central_state['status'] = f"💼 {_mode_display_label(APP_MODE)}: sincronizando saldo dos clientes"
+    central_state['status'] = f"💼 {_mode_display_label(APP_MODE)}: sincronizando saldo dos clientes"
 
     if persist:
         db.set_operation_mode(APP_MODE)
-        db.set_config('TEST_MODE', 'true' if TEST_MODE_ENABLED else 'false')
 
 
 _sync_runtime_mode_state()
@@ -283,10 +231,6 @@ def start_runtime_services():
         threading.Thread(target=_fetch_active_client_balances, kwargs={'force': True}, daemon=True).start()
         print("⚡ Cache de saldo: aquecendo em background...")
 
-        if cloud_db:
-            print("☁️ Iniciando Sincronização com Supabase Cloud em background...")
-            threading.Thread(target=cloud_db.sync_clients, args=(db,), daemon=True).start()
-
         RUNTIME_STARTED = True
         return True
 
@@ -301,8 +245,6 @@ SNIPER_POSICAO_UNICA = False     # Multi-ativo: permite até MAX_MOEDAS_ATIVAS s
 # Trava atômica para bloquear corrida entre validação e gravação de sinal
 SNIPER_SIGNAL_LOCK = threading.Lock()
 SNIPER_SIGNAL_RESERVATIONS = set()
-PAPER_TRADE_TP_PCT = 100.0       # Fecha somente quando dobrar a margem projetada
-PAPER_TRADE_SL_PCT = -3.0        # Stop de perda em 3% da entrada
 ENABLE_RANDOM_TEST_TRADES = False
 
 # Anti-loop de ativo único (evita ficar preso na mesma moeda por muitos ciclos)
@@ -687,59 +629,13 @@ def _get_master_telegram_config():
     return token, chat_id
 
 
-def _is_supabase_ready():
-    return bool(cloud_db and getattr(cloud_db, "is_available", lambda: False)())
-
-
 def _get_registered_clients(active_only=False):
-    """Fonte de verdade SaaS: Supabase quando disponível; SQLite como fallback.
-
-    Se Supabase retorna lista vazia (possível bloqueio por RLS com chave anon),
-    faz fallback para SQLite local para garantir que clientes cadastrados sempre
-    apareçam no robô e no dashboard.
-    """
-    if _is_supabase_ready():
-        cloud_clients = cloud_db.get_clients(active_only=active_only)
-        if cloud_clients is not None and len(cloud_clients) > 0:
-            normalized_cloud_clients = []
-            for client in cloud_clients:
-                client_with_source = dict(client)
-                client_with_source['storage_source'] = 'supabase'
-                try:
-                    db.upsert_client_local(client_with_source)
-                except Exception as e:
-                    print(f"⚠️ [LOCAL MIRROR] cliente {client.get('id')}: {e}")
-                normalized_cloud_clients.append(client_with_source)
-            return normalized_cloud_clients
-        if cloud_clients is not None and len(cloud_clients) == 0:
-            # Supabase acessível mas retornou vazio — provavelmente RLS bloqueando
-            # a chave anon ou tabela realmente vazia.
-            # Se o SQLite local também estiver vazio, os clientes ficam invisíveis.
-            # SOLUÇÃO: defina SUPABASE_SERVICE_KEY no Railway (chave service_role
-            # bypassa RLS completamente) ou desative RLS na tabela "clientes".
-            print(
-                "⚠️ [Supabase] Nenhum cliente retornado do Supabase. "
-                "Possíveis causas: (1) RLS ativo bloqueando a chave anon — "
-                "configure SUPABASE_SERVICE_KEY no Railway para resolver; "
-                "(2) tabela realmente vazia. Tentando SQLite local..."
-            )
-
+    """Retorna clientes do SQLite local."""
     local_clients = db.get_active_clients() if active_only else db.get_all_clients()
     return [{**dict(client), "storage_source": "local"} for client in local_clients]
 
 
 def _get_registered_client_by_id(client_id):
-    if _is_supabase_ready():
-        cloud_client = cloud_db.get_client_by_id(client_id)
-        if cloud_client is not None:
-            cloud_client = dict(cloud_client)
-            cloud_client['storage_source'] = 'supabase'
-            try:
-                db.upsert_client_local(cloud_client)
-            except Exception as e:
-                print(f"⚠️ [LOCAL MIRROR] cliente {client_id}: {e}")
-            return cloud_client
-
     local_client = db.get_client_by_id(client_id)
     if local_client is None:
         return None
@@ -747,19 +643,11 @@ def _get_registered_client_by_id(client_id):
 
 
 def _save_client_everywhere(client_data):
-    """Persiste o cliente e devolve o registro final + status de sincronização."""
+    """Persiste o cliente no SQLite local e devolve o registro final + status de sincronização."""
     payload = dict(client_data or {})
     payload['account_mode'] = _normalize_account_mode(payload.get('account_mode', payload.get('is_testnet')))
     payload['is_testnet'] = _is_testnet_account(payload.get('account_mode'))
     payload['balance_source'] = payload.get('balance_source') or _mode_balance_source(payload.get('account_mode'))
-    remote_record = None
-    cloud_synced = False
-
-    if _is_supabase_ready():
-        remote_record = cloud_db.save_client(payload)
-        if remote_record is not None:
-            payload.update(remote_record)
-            cloud_synced = True
 
     local_result = db.upsert_client_local(payload) if payload.get('id') is not None else db.add_client(payload)
     local_synced = bool(local_result)
@@ -772,21 +660,18 @@ def _save_client_everywhere(client_data):
             pass
 
     final_record = _get_registered_client_by_id(final_id) if final_id is not None else None
-    if final_record is None and cloud_synced and remote_record is not None:
-        final_record = {**dict(remote_record), "storage_source": "supabase"}
     if final_record is None and local_synced and final_id is not None:
         local_record = db.get_client_by_id(final_id)
         final_record = {**dict(local_record), "storage_source": "local"} if local_record is not None else None
     client_balance_cache.clear()
-    return final_record, cloud_synced, local_synced
+    return final_record, False, local_synced
 
 
 def _delete_client_everywhere(client_id):
-    """Remove o cliente da nuvem e do fallback local."""
-    cloud_deleted = (not _is_supabase_ready()) or cloud_db.delete_client(client_id)
+    """Remove o cliente do SQLite local."""
     local_deleted = db.delete_client(client_id)
     client_balance_cache.clear()
-    return cloud_deleted, local_deleted
+    return True, local_deleted
 
 
 def _resolve_client_balance_payload(raw_data, broker, account_mode, existing_client=None):
@@ -1149,18 +1034,9 @@ def _fetch_active_client_balances(force=False):
 
 def _refresh_real_balance_state(force=False):
     """Atualiza o estado global com o saldo verdadeiro dos clientes."""
-    if TEST_MODE_ENABLED:
-        central_state['test_mode'] = True
-        central_state['operation_mode'] = APP_MODE
-        central_state['operation_mode_label'] = _mode_display_label(APP_MODE)
-        central_state['execution_enabled'] = _is_order_execution_enabled(APP_MODE)
-        central_state['execution_label'] = _execution_status_label(APP_MODE)
-        return
-
     balances = _fetch_active_client_balances(force=force)
     mode_items = _filter_balance_items_for_operation_mode(balances.get("items", []), APP_MODE)
     valid_items = [item for item in mode_items if item.get("saldo_real") is not None]
-    central_state['test_mode'] = False
     central_state['operation_mode'] = APP_MODE
     central_state['operation_mode_label'] = _mode_display_label(APP_MODE)
     central_state['execution_enabled'] = _is_order_execution_enabled(APP_MODE)
@@ -1247,7 +1123,7 @@ def _refresh_last_sniper_signal():
 
 
 def _get_initial_test_balance():
-    """Base fixa do paper trading; não deve oscilar com P&L aberto.
+    """Retorna saldo inicial configurado para referência histórica.
 
     Garante que o valor seja sempre positivo (≥ 1.0 USDT). Se o saldo ficou
     zerado por perdas acumuladas, restaura ao valor padrão de 1000 USDT.
@@ -1255,8 +1131,7 @@ def _get_initial_test_balance():
     _DEFAULT_BALANCE = 1000.0
     configured = db.get_config('INITIAL_BALANCE')
     if configured is None:
-        candidate = float(db.get_test_balance() or TEST_BALANCE or _DEFAULT_BALANCE)
-        initial_balance = round(candidate if candidate > 0 else _DEFAULT_BALANCE, 2)
+        initial_balance = _DEFAULT_BALANCE
         db.set_config('INITIAL_BALANCE', str(initial_balance))
         return initial_balance
 
@@ -1266,7 +1141,6 @@ def _get_initial_test_balance():
             # Saldo esgotado em sessão anterior — reinicia com o padrão.
             initial_balance = _DEFAULT_BALANCE
             db.set_config('INITIAL_BALANCE', str(initial_balance))
-            db.set_test_balance(initial_balance)
             return initial_balance
         return value
     except Exception:
@@ -1395,8 +1269,7 @@ def _calcular_pnl_trades():
         pnl_total = 0.0
         winning = 0
         losing = 0
-        initial_balance = _get_initial_test_balance()
-        
+
         for trade in recent_trades:
             if str(trade.get('status', 'closed')).lower() != 'closed':
                 continue
@@ -1406,37 +1279,19 @@ def _calcular_pnl_trades():
                 winning += 1
             elif profit < 0:
                 losing += 1
-        
+
         total_trades = winning + losing if (winning + losing) > 0 else 1
         win_rate = (winning / total_trades * 100) if total_trades > 0 else 0
-        pnl_percentage = (pnl_total / initial_balance * 100) if initial_balance > 0 else 0
-        
+
         central_state['pnl_total'] = round(pnl_total, 2)
-        central_state['pnl_percentage'] = round(pnl_percentage, 2)
         central_state['winning_trades'] = winning
         central_state['losing_trades'] = losing
         central_state['win_rate'] = round(win_rate, 2)
-        
+
         return pnl_total
     except Exception as e:
         print(f"❌ Erro ao calcular P&L: {e}")
         return 0.0
-
-def _atualizar_saldo_com_pnl(pnl_lucro):
-    """Atualiza o saldo realizado do paper trading."""
-    global TEST_BALANCE
-    try:
-        saldo_inicial = _get_initial_test_balance()
-        
-        novo_saldo = saldo_inicial + pnl_lucro
-        central_state['balance'] = round(novo_saldo, 2)
-        central_state['test_balance'] = round(novo_saldo, 2)
-        TEST_BALANCE = round(novo_saldo, 2)
-        db.set_test_balance(novo_saldo)
-        
-    except Exception as e:
-        print(f"❌ Erro ao atualizar saldo: {e}")
-
 
 
 def _monitor_sl_tp_automatico():
@@ -1620,52 +1475,6 @@ def _close_stale_open_trades(max_age_minutes=180):
         return 0
 
 
-def _settle_paper_trades():
-    """Fecha paper trades apenas por TP/SL real e calcula P&L aberto."""
-    if not TEST_MODE_ENABLED:
-        return 0.0
-
-    open_pnl_total = 0.0
-
-    try:
-        open_trades = db.get_open_trades(100)
-        for trade in open_trades:
-            trade_id = trade.get('id')
-            symbol = trade.get('pair')
-            side = trade.get('side')
-            margin = float(trade.get('profit', 0) or 0)
-            entry_price = _extract_entry_price(trade)
-
-            if margin <= 0 or entry_price <= 0 or not symbol:
-                continue
-
-            live = _get_live_price_snapshot(symbol, entry_price, side)
-            pnl_pct = float(live.get('pnl_pct', 0) or 0)
-            current_price = float(live.get('current_price', 0) or 0)
-            pnl_value = round(margin * (pnl_pct / 100), 2)
-
-            if pnl_pct >= PAPER_TRADE_TP_PCT or pnl_pct <= PAPER_TRADE_SL_PCT:
-                reason = 'PAPER_TP_100' if pnl_pct >= PAPER_TRADE_TP_PCT else 'PAPER_SL_3'
-                notes = f"{trade.get('notes', '')} | {reason} @ {current_price:.8f}"
-                db.close_trade(
-                    trade_id=trade_id,
-                    pnl_pct=round(pnl_pct, 4),
-                    profit=pnl_value,
-                    closed_at=time.strftime("%d/%m %H:%M", time.localtime()),
-                    notes=notes,
-                )
-                print(f"📘 [PAPER CLOSE] {symbol} {side} {pnl_pct:.2f}% => ${pnl_value:.2f} ({reason})")
-                continue
-
-            open_pnl_total += pnl_value
-
-        central_state['paper_open_pnl'] = round(open_pnl_total, 2)
-        return round(open_pnl_total, 2)
-    except Exception as e:
-        print(f"⚠️ [_settle_paper_trades] erro: {e}")
-        return 0.0
-
-
 def _manual_close_open_trades(symbol, requested_by="dashboard"):
     """Fecha manualmente todos os trades abertos do símbolo informado."""
     canonical_symbol = _canonicalize_symbol(symbol)
@@ -1719,17 +1528,6 @@ def _manual_close_open_trades(symbol, requested_by="dashboard"):
             total_pnl_value += pnl_value
             current_price_reference = current_price
             closed_count += 1
-
-    if closed_count and cloud_db and getattr(cloud_db, "is_available", lambda: False)():
-        try:
-            cloud_db.close_open_trades_by_symbol(
-                canonical_symbol,
-                current_price=current_price_reference,
-                closed_at=closed_at,
-                note_suffix=f"MANUAL_CLOSE_{str(requested_by).upper()}",
-            )
-        except Exception as cloud_err:
-            print(f"⚠️ [SUPABASE] Falha ao fechar trades manualmente em nuvem: {cloud_err}")
 
     _sync_active_trades_from_db()
     central_state['trades'] = db.get_recent_trades(20)
@@ -1791,22 +1589,48 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                     if _is_order_execution_enabled(APP_MODE):
                         exec_label = 'TESTNET' if APP_MODE == 'testnet' else 'REAL'
                         print(f"🚀 [EXECUÇÃO {exec_label}] {c.get('nome')} - {side} {qty:.4f} {symbol}")
+
+                        # Validação pré-voo antes da execução
+                        try:
+                            preflight_ok, preflight_category, preflight_msg = broker.pre_flight_check(symbol, side.lower(), qty)
+                            if not preflight_ok:
+                                error_emoji = "🔴" if preflight_category == 'ERRO_CORRETORA' else "⚠️"
+                                print(f"{error_emoji} [PRÉ-VOO FALHOU] {c.get('nome')} | {preflight_category}: {preflight_msg}")
+                                print(f"   Ordem bloqueada por segurança - verifique API e configurações")
+                                # Continua para próximo cliente sem executar
+                                return
+
+                            print(f"✅ [PRÉ-VOO OK] {preflight_msg}")
+                        except AttributeError:
+                            # Broker não tem pre_flight_check (versão antiga)
+                            print(f"⚠️  [AVISO] Broker sem validação pré-voo - continuando execução")
+                        except Exception as preflight_err:
+                            print(f"⚠️  [ERRO PRÉ-VOO] {preflight_err} - continuando execução")
+
                         order_result = broker.execute_market_order(symbol, side.lower(), qty)
-                        
+
                         if order_result:
-                            # ✅ Executa Proteção: TP +100% margem / SL -50% margem (5% preço com 10x)
+                            # ✅ Executa Proteção: TP +100% margem (10% preço) / SL -50% margem (5% preço com 10x leverage)
                             broker.set_tp_sl_sniper(symbol, side.lower(), entry_price, qty)
                             print(f"✅ [ORDEM EXECUTADA] ID: {order_result.get('id', 'N/A')}")
                         else:
                             print(f"⚠️  [ORDEM FALHADA] {c.get('nome')} - Fallback para simulação")
                     else:
-                        if APP_MODE == 'paper':
-                            mode_label = "PAPER TRADING / PREÇO REAL"
-                        elif APP_MODE == 'testnet':
-                            mode_label = "TESTNET / ORDENS BLOQUEADAS"
+                        # Diagnóstico detalhado do bloqueio
+                        block_reasons = []
+                        if not ALLOW_ORDER_EXECUTION:
+                            mode_label = "ORDENS BLOQUEADAS"
+                            block_reasons.append("ALLOW_ORDER_EXECUTION=false")
+                        elif not ALLOW_REAL_TRADING:
+                            mode_label = "ORDENS BLOQUEADAS"
+                            block_reasons.append("ALLOW_REAL_TRADING=false")
                         else:
-                            mode_label = "SALDO REAL / ORDENS BLOQUEADAS"
-                        print(f"📊 [{mode_label}] {c.get('nome')} - execução real bloqueada por segurança")
+                            mode_label = "ORDENS BLOQUEADAS"
+                            block_reasons.append("Configuração de segurança ativa")
+
+                        reason_str = ", ".join(block_reasons)
+                        print(f"🔒 [{mode_label}] {c.get('nome')} - execução bloqueada: {reason_str}")
+                        print(f"💡 DIAGNÓSTICO: API conectada ✅ | Saldo visível ✅ | Execução bloqueada por: {reason_str}")
 
                     # --- NOTIFICAÇÃO PRIVADA EDUCATIVA (SNIPER PROTOCOL) ---
                     c_msg = (f"🎯 *SNIPER GIVALDO v60.1 - DISPARO CONFIRMADO*\n\n"
@@ -1836,24 +1660,6 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                     db.record_trade(c.get('id'), symbol, side, 0.0, round(margem, 2), closed_at, 
                                   notes=f"SNIPER v60.1 - Conf: {res_ia.get('probabilidade')}% | Entrada: {entry_price:.8f}", status="open", entry_price=entry_price)
 
-                    # --- SINCRONIZAÇÃO NUVEM (SUPABASE) ---
-                    if cloud_db:
-                        try:
-                            cloud_db.record_trade({
-                                "client_id": c.get('id'),
-                                "pair": symbol,
-                                "side": side,
-                                "pnl_pct": 0.0,
-                                "profit": round(margem, 2),
-                                "entry_price": round(entry_price, 8),
-                                "closed_at": closed_at,
-                                "notes": f"SNIPER v60.1 - Conf: {res_ia.get('probabilidade')}%",
-                                "status": "open",
-                                "nome_cliente": c.get('nome') # Campo extra para facilitar análise na nuvem
-                            })
-                        except Exception as cloud_err:
-                            print(f"⚠️ [SUPABASE] Falha sync trade {c.get('nome')}: {cloud_err}")
-
                 except Exception as e:
                     print(f"❌ Falha na conta de {c.get('nome')}: {e}")
 
@@ -1882,25 +1688,26 @@ def sniper_worker_loop():
         from src.engine.indicators import IndicatorEngine
         from src.ai_brain.validator import GroqValidator
         print("✅ Dependências carregadas com sucesso")
-    except ImportError as e:
-        print(f"❌ Erro ao carregar: {e}")
+    except Exception as e:
+        print(f"❌ Erro ao carregar dependências: {e}")
         time.sleep(5)
         return
-    
+
     # Scanner Master
-    master_broker = BybitClient(
-        *get_bybit_credentials(),
-        testnet=_mode_uses_testnet(APP_MODE),
-    )
-    validator = GroqValidator(os.getenv("GEMINI_API_KEY"), os.getenv("GROQ_API_KEY"))
+    try:
+        master_broker = BybitClient(
+            *get_bybit_credentials(),
+            testnet=_mode_uses_testnet(APP_MODE),
+        )
+        validator = GroqValidator(os.getenv("GEMINI_API_KEY"), os.getenv("GROQ_API_KEY"))
+    except Exception as e:
+        print(f"❌ Erro ao inicializar broker/validator: {e}")
+        time.sleep(5)
+        return
 
     print(f"🚀 Motor Sniper v60.1 Operante. Rigor: {THRESHOLD_ENTRADA}%")
-    
-    if TEST_MODE_ENABLED:
-        print(f"🧪 {_mode_display_label(APP_MODE)} ATIVO - Saldo base: {TEST_BALANCE} USDT")
-    else:
-        print(f"💼 {_mode_display_label(APP_MODE)} - Saldo inicial sincronizado dos clientes")
-    
+    print(f"💼 {_mode_display_label(APP_MODE)} - Saldo inicial sincronizado dos clientes")
+
     # Cache de tickers com TTL
     tickers_cache = {"data": [], "timestamp": 0}
     TICKERS_CACHE_TTL = 60
@@ -1913,20 +1720,9 @@ def sniper_worker_loop():
     while True:
         try:
             _repair_open_trades()
-            if TEST_MODE_ENABLED:
-                _settle_paper_trades()
-            else:
-                _close_stale_open_trades(max_age_minutes=180)
+            _close_stale_open_trades(max_age_minutes=180)
 
-            if TEST_MODE_ENABLED:
-                central_state['test_balance'] = TEST_BALANCE
-                central_state['test_mode'] = True
-                central_state['operation_mode'] = APP_MODE
-                central_state['operation_mode_label'] = _mode_display_label(APP_MODE)
-                central_state['execution_enabled'] = _is_order_execution_enabled(APP_MODE)
-                central_state['execution_label'] = _execution_status_label(APP_MODE)
-            pnl_lucro = _calcular_pnl_trades()
-            _atualizar_saldo_com_pnl(pnl_lucro)
+            _calcular_pnl_trades()
             _sync_active_trades_from_db()
             if len(central_state['active_trades']) >= MAX_MOEDAS_ATIVAS:
                 central_state['status'] = f'📊 Monitorando {MAX_MOEDAS_ATIVAS} posições abertas...'
@@ -2122,99 +1918,9 @@ def health_check():
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
 
-@app.route('/api/supabase/status', methods=['GET'])
-def get_supabase_status():
-    """Diagnóstico da conexão Supabase: mostra chave usada, contagem de clientes e fallback."""
-    supabase_ready = _is_supabase_ready()
-    key_type = "none"
-    cloud_count = None
-    cloud_error = None
-
-    if supabase_ready:
-        key_type = "service_role (RLS bypass)" if getattr(cloud_db, "_using_service_key", False) else "anon (pode ser bloqueado por RLS)"
-        try:
-            rows = cloud_db.get_clients(active_only=False)
-            cloud_count = len(rows) if rows is not None else None
-            if rows is None:
-                cloud_error = "Supabase indisponível ou erro na query"
-            elif cloud_count == 0:
-                cloud_error = (
-                    "Supabase acessível mas retornou 0 clientes. "
-                    "Causa provável: RLS bloqueando a chave anon. "
-                    "Solução: defina SUPABASE_SERVICE_KEY no Railway."
-                )
-        except Exception:
-            cloud_error = "Erro ao consultar Supabase. Verifique os logs do servidor."
-
-    local_count = 0
-    try:
-        local_count = len(db.get_all_clients() or [])
-    except Exception:
-        pass
-
-    return jsonify({
-        "supabase_ready": supabase_ready,
-        "key_type": key_type,
-        "cloud_client_count": cloud_count,
-        "local_client_count": local_count,
-        "cloud_error": cloud_error,
-        "recommendation": (
-            "Defina SUPABASE_SERVICE_KEY no Railway para contornar o RLS e mostrar os clientes."
-            if (supabase_ready and cloud_count == 0)
-            else ("OK" if cloud_count else "Configure SUPABASE_URL e SUPABASE_KEY nas variáveis de ambiente.")
-        ),
-    })
-
-
-@app.route('/api/supabase/force-sync', methods=['POST'])
-def supabase_force_sync():
-    """Força sincronização Supabase → SQLite local e retorna resultado."""
-    if not _is_supabase_ready():
-        return jsonify({
-            "success": False,
-            "msg": "Supabase não está configurado. Defina SUPABASE_URL e SUPABASE_KEY.",
-        }), 503
-
-    try:
-        cloud_clients = cloud_db.get_clients(active_only=False)
-        if cloud_clients is None:
-            return jsonify({"success": False, "msg": "Erro ao consultar Supabase."}), 502
-
-        if len(cloud_clients) == 0:
-            return jsonify({
-                "success": False,
-                "pulled": 0,
-                "msg": (
-                    "Supabase retornou 0 clientes. "
-                    "Causa provável: RLS bloqueando a chave anon. "
-                    "Defina SUPABASE_SERVICE_KEY no Railway para resolver."
-                ),
-            }), 200
-
-        pulled = 0
-        sync_errors = 0
-        for client in cloud_clients:
-            try:
-                db.upsert_client_local(dict(client))
-                pulled += 1
-            except Exception:
-                sync_errors += 1
-
-        print(f"✅ [force-sync] {pulled} cliente(s) sincronizados Supabase→Local")
-        return jsonify({
-            "success": True,
-            "pulled": pulled,
-            "errors": sync_errors,
-            "msg": f"✅ {pulled} cliente(s) sincronizado(s) com sucesso!",
-        })
-    except Exception as e:
-        print(f"❌ [force-sync] erro: {e}")
-        return jsonify({"success": False, "msg": "Erro interno ao sincronizar."}), 500
-
-
 @app.route('/api/investidores', methods=['GET'])
 def get_investidores():
-    """Lista investidores do Supabase quando disponível, com fallback local."""
+    """Lista investidores cadastrados no banco local."""
     try:
         rows = _get_registered_clients(active_only=False)
         # _fetch_active_client_balances é não-bloqueante: retorna cache imediatamente
@@ -2364,7 +2070,8 @@ def get_status():
         central_state['trades'] = db.get_recent_trades(20)
         _status_cache.set(dict(central_state))
         return jsonify(central_state)
-    except:
+    except Exception as e:
+        print(f"⚠️  Erro ao atualizar status central: {e}")
         return jsonify(central_state)
 
 
@@ -2423,27 +2130,13 @@ def get_neural_performance():
 def update_dashboard_balance():
     """Atualiza saldo do Dashboard em tempo real."""
     try:
-        if TEST_MODE_ENABLED:
-            return jsonify({
-                "balance": TEST_BALANCE,
-                "status": central_state.get('status'),
-                "symbol": central_state['symbol'],
-                "confidence": central_state['confidence'],
-                "test_mode": True,
-                "operation_mode": APP_MODE,
-                "operation_mode_label": _mode_display_label(APP_MODE),
-                "execution_enabled": _is_order_execution_enabled(APP_MODE),
-                "execution_label": _execution_status_label(APP_MODE),
-            })
-        
         _refresh_real_balance_state(force=True)
-        
+
         return jsonify({
             "balance": central_state['balance'],
             "status": central_state['status'],
             "symbol": central_state['symbol'],
             "confidence": central_state['confidence'],
-            "test_mode": False,
             "operation_mode": APP_MODE,
             "operation_mode_label": _mode_display_label(APP_MODE),
             "execution_enabled": _is_order_execution_enabled(APP_MODE),
@@ -2451,13 +2144,12 @@ def update_dashboard_balance():
             "real_client_balances": central_state.get('real_client_balances', []),
         })
     except Exception as e:
-        # Fallback para saldo de teste se broker falhar
+        # Fallback para saldo 0 se broker falhar
         return jsonify({
-            "balance": TEST_BALANCE,
-            "status": f"⚠️ Broker indisponível. Usando saldo teste: {TEST_BALANCE} USDT",
+            "balance": 0.0,
+            "status": f"⚠️ Broker indisponível: {str(e)}",
             "symbol": central_state['symbol'],
             "confidence": central_state['confidence'],
-            "test_mode": True,
             "operation_mode": APP_MODE,
             "operation_mode_label": _mode_display_label(APP_MODE),
             "execution_enabled": _is_order_execution_enabled(APP_MODE),
@@ -2484,51 +2176,6 @@ def test_signal():
         
         result = validator.consensus_predict(tech_data, data.get('symbol', 'BTCUSDT'))
         return jsonify(result)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
-
-@app.route('/api/test/set-balance', methods=['POST'])
-def set_test_balance():
-    """🧪 BOTÃO TESTE: Define saldo inicial para testes.
-    
-    Exemplo:
-    POST /api/test/set-balance
-    {"balance": 1000.50, "currency": "USDT"}
-    """
-    data = request.json
-    try:
-        test_balance = float(data.get('balance', 1000.0))
-        currency = data.get('currency', 'USDT')
-        global TEST_BALANCE
-        TEST_BALANCE = round(test_balance, 2)
-        
-        # Armazena em memória + DB
-        central_state['balance'] = TEST_BALANCE
-        central_state['test_balance'] = TEST_BALANCE
-        central_state['status'] = f"🧪 {_mode_display_label(APP_MODE)}: saldo base {TEST_BALANCE} {currency}"
-        db.set_test_balance(TEST_BALANCE)
-        db.set_config('INITIAL_BALANCE', str(TEST_BALANCE))
-        
-        print(f"🧪 [PAPER] Saldo configurado: {TEST_BALANCE} {currency}")
-        return jsonify({
-            "success": True,
-            "balance": TEST_BALANCE,
-            "currency": currency,
-            "mode": "TEST",
-            "msg": "✅ Saldo base do paper trading configurado com sucesso."
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
-
-@app.route('/api/test/get-balance', methods=['GET'])
-def get_test_balance():
-    """Retorna saldo atual de teste."""
-    try:
-        return jsonify({
-            "balance": central_state.get('balance', 0),
-            "status": central_state.get('status', 'desconhecido'),
-            "mode": "TEST" if "TESTE" in central_state.get('status', '') else "LIVE"
-        })
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
@@ -2612,67 +2259,42 @@ def learn_from_history():
 
 @app.route('/api/mode/toggle', methods=['POST'])
 def toggle_test_mode():
-    """🔄 ALTERNAR ENTRE PAPER, TESTNET E REAL
-    
-    POST /api/mode/toggle
-    {"mode": "paper"} | {"mode": "testnet"} | {"mode": "real"}
-    """
-    global APP_MODE, TEST_BALANCE
-    
-    try:
-        new_mode = _normalize_operation_mode((request.json or {}).get('mode', 'paper'))
-        
-        if new_mode not in VALID_OPERATION_MODES:
-            return jsonify({"error": "Mode deve ser 'paper', 'testnet' ou 'real'"}), 400
-        
-        APP_MODE = new_mode
-        _sync_runtime_mode_state(persist=True)
+    """🔄 Sistema fixado em modo REAL - endpoint mantido para compatibilidade
 
-        if TEST_MODE_ENABLED:
-            TEST_BALANCE = db.get_test_balance()
-            central_state['balance'] = TEST_BALANCE
-            central_state['test_balance'] = TEST_BALANCE
-        else:
-            _refresh_real_balance_state(force=True)
-        
-        # Log
+    POST /api/mode/toggle
+    {"mode": "real"}
+    """
+    try:
+        # Sistema sempre opera em modo real
         mode_name = _mode_display_label(APP_MODE)
-        mode_emoji = "🧪" if APP_MODE == 'paper' else ("🛰️" if APP_MODE == 'testnet' else "💼")
-        print(f"\n{mode_emoji} ALTERNAÇÃO DE MODO: {mode_name}")
-        print(f"   Status: {central_state['status']}")
-        print(f"   Execução: {_execution_status_label(APP_MODE)}")
-        if TEST_MODE_ENABLED:
-            print(f"   Saldo: {TEST_BALANCE} USDT (paper trading)")
-        print()
-        
+
         return jsonify({
             "success": True,
-            "mode": new_mode,
-            "operation_mode": APP_MODE,
+            "mode": "real",
+            "operation_mode": "real",
             "operation_mode_label": mode_name,
-            "status": central_state['status'],
-            "balance": TEST_BALANCE if TEST_MODE_ENABLED else "Broker (será buscado)",
+            "status": central_state.get('status', 'Sistema operando'),
+            "balance": central_state.get('balance', 0.0),
             "execution_enabled": _is_order_execution_enabled(APP_MODE),
             "execution_label": _execution_status_label(APP_MODE),
-            "message": f"✅ Sistema alternado para {mode_name}!"
+            "message": f"✅ Sistema em modo {mode_name} (fixo)"
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
 @app.route('/api/mode/current', methods=['GET'])
 def get_current_mode():
-    """📊 RETORNA MODO ATUAL (PAPER, TESTNET OU REAL)"""
+    """📊 RETORNA MODO ATUAL (SEMPRE REAL)"""
     try:
         return jsonify({
-            "mode": APP_MODE,
-            "operation_mode": APP_MODE,
+            "mode": "real",
+            "operation_mode": "real",
             "operation_mode_label": _mode_display_label(APP_MODE),
-            "is_test": TEST_MODE_ENABLED,
             "status": central_state.get('status', 'desconhecido'),
-            "balance": TEST_BALANCE if TEST_MODE_ENABLED else "Carregando do broker...",
+            "balance": central_state.get('balance', 0.0),
             "execution_enabled": _is_order_execution_enabled(APP_MODE),
             "execution_label": _execution_status_label(APP_MODE),
-            "emoji": "🧪" if APP_MODE == 'paper' else ("🛰️" if APP_MODE == 'testnet' else "💼")
+            "emoji": "💼"
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 400
@@ -2760,7 +2382,7 @@ def broadcast_sniper_signal():
             pair=symbol,
             side=side,
             pnl_pct=0,
-            profit=round(_get_initial_test_balance() * 0.05, 2),
+            profit=round(central_state.get('balance', 1000.0) * 0.05, 2),
             closed_at=time.strftime("%d/%m %H:%M", time.localtime()),
             notes=f"BROADCAST: {side} {symbol} @ {entry_price:.2f} | Conf: {confidence}% | {reason}",
             status="open",
@@ -2802,12 +2424,8 @@ if __name__ == "__main__":
     start_runtime_services()
 
     print(f"✅ DuoIA Maestro v60.1 Online na Porta {render_port}")
-
-    print(f"💰 Saldo Carregado: {TEST_BALANCE} USDT")
     print(f"🧭 Modo operacional: {_mode_display_label(APP_MODE)}")
     print(f"⚡ Execução: {_execution_status_label(APP_MODE)}")
-    if TEST_MODE_ENABLED:
-        print("🧪 Paper ativo - preço real, saldo fictício, sem ordens")
     print(f"📊 Dashboard: http://0.0.0.0:{render_port}")
     print("🧠 Cérebro Triplo: ATIVO (Rigor 50%)")
     app.run(host='0.0.0.0', port=render_port, debug=False, use_reloader=False)

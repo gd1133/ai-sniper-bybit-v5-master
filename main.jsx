@@ -27,19 +27,8 @@ const getApiBase = () => {
 };
 
 const API_BASE = getApiBase();
+// Sistema fixado em modo REAL apenas
 const OPERATION_MODE_META = {
-  paper: {
-    badge: '🧪 PAPER',
-    label: 'PAPER TRADING',
-    dot: 'bg-yellow-500',
-    shell: 'bg-yellow-500/10 border-yellow-500/30 text-yellow-500',
-  },
-  testnet: {
-    badge: '🛰️ TESTNET',
-    label: 'BYBIT TESTNET',
-    dot: 'bg-blue-400',
-    shell: 'bg-blue-500/10 border-blue-500/30 text-blue-300',
-  },
   real: {
     badge: '💼 REAL',
     label: 'CONTA REAL',
@@ -49,28 +38,23 @@ const OPERATION_MODE_META = {
 };
 
 const normalizeOperationMode = (value) => {
-  const normalized = String(value || '').trim().toLowerCase();
-  if (normalized === 'test') return 'paper';
-  return ['paper', 'testnet', 'real'].includes(normalized) ? normalized : 'paper';
+  // Sempre retorna 'real'
+  return 'real';
 };
 
 const normalizeAccountMode = (value) => {
-  const normalized = String(value || '').trim().toLowerCase();
-  if (['testnet', 'real'].includes(normalized)) return normalized;
-  if (value === true || value === 1 || value === '1' || value === 'true') return 'testnet';
-  if (value === false || value === 0 || value === '0' || value === 'false') return 'real';
-  return 'testnet';
+  // Sempre retorna 'real'
+  return 'real';
 };
 
 const normalizeInvestorRecord = (client) => {
-  const accountMode = normalizeAccountMode(client?.account_mode ?? client?.is_testnet);
   return {
     ...client,
     banca: client?.saldo_real ?? client?.saldo_base ?? client?.banca ?? 0,
     saldo_real: client?.saldo_real,
     saldo_configurado: client?.saldo_base ?? client?.saldo_configurado ?? 0,
-    mode: accountMode.toUpperCase(),
-    account_mode: accountMode,
+    mode: 'REAL',
+    account_mode: 'real',
     storage_source: String(client?.storage_source || client?.source || 'local').toUpperCase(),
     pnl: client?.pnl ?? '+0.0%',
   };
@@ -163,7 +147,7 @@ const App = () => {
   const [riskModeUpdating, setRiskModeUpdating] = useState(false);
   const [manualClosingSymbol, setManualClosingSymbol] = useState(null);
   const [addFormFields, setAddFormFields] = useState({
-    id: null, nome: '', saldo_base: 0, bybit_key: '', bybit_secret: '', tg_token: '', chat_id: '', account_mode: 'testnet', exchange: 'bybit'
+    id: null, nome: '', saldo_base: 0, bybit_key: '', bybit_secret: '', tg_token: '', chat_id: '', account_mode: 'real', exchange: 'bybit'
   });
   const [data, setData] = useState({
     balance: 0,  // Será atualizado do backend
@@ -173,17 +157,15 @@ const App = () => {
     opportunities: [],
     active_trades: [],
     trades: [],
-    test_balance: 0,
-    test_mode: false,
-    operation_mode: 'paper',
-    operation_mode_label: 'PAPER TRADING',
+    operation_mode: 'real',
+    operation_mode_label: 'CONTA REAL',
     execution_enabled: false,
-    execution_label: 'Sem ordens reais',
+    execution_label: 'Aguardando configuração',
     last_sniper_signal: null,
     evidence: null,
     max_moedas_ativas: 1,
     risk_mode: 'conservative',
-    ia2_decision: { 
+    ia2_decision: {
       motivo: "Aguardando conexão com o servidor..."
     }
   });
@@ -290,7 +272,7 @@ const App = () => {
   }, []);
 
   const openNewInvestorModal = () => {
-    setAddFormFields({ id: null, nome: '', saldo_base: 0, bybit_key: '', bybit_secret: '', tg_token: '', chat_id: '', account_mode: 'testnet', exchange: 'bybit' });
+    setAddFormFields({ id: null, nome: '', saldo_base: 0, bybit_key: '', bybit_secret: '', tg_token: '', chat_id: '', account_mode: 'real', exchange: 'bybit' });
     setAddFormMsg(null);
     setShowAddForm(true);
   };
@@ -441,42 +423,17 @@ const App = () => {
     });
   };
 
-  const handleSupabaseSync = async () => {
-    if (supabaseSyncing) return;
-    try {
-      setSupabaseSyncing(true);
-      setSupabaseSyncMsg(null);
-      const res = await fetch(`${API_BASE}/api/supabase/force-sync`, { method: 'POST' });
-      const json = await res.json();
-      setSupabaseSyncMsg(json.msg || (json.success ? '✅ Sincronizado!' : '❌ Falha na sincronização'));
-      if (json.success && json.pulled > 0) {
-        // Recarrega lista de investidores após sincronização
-        const r2 = await fetch(`${API_BASE}/api/investidores`);
-        if (r2.ok) {
-          const list = await r2.json();
-          setInvestidores((list || []).map(normalizeInvestorRecord));
-        }
-      }
-    } catch (e) {
-      console.error('Erro ao sincronizar com Supabase', e);
-      setSupabaseSyncMsg('❌ Erro ao conectar com o servidor');
-    } finally {
-      setSupabaseSyncing(false);
-    }
-  };
 
-  // Lista de pessoas (será alimentada pelo banco local futuramente)
+  // Lista de pessoas (alimentada pelo banco SQLite local)
   const [investidores, setInvestidores] = useState([]);
   const [investidoresLoading, setInvestidoresLoading] = useState(true);
-  const [supabaseSyncing, setSupabaseSyncing] = useState(false);
-  const [supabaseSyncMsg, setSupabaseSyncMsg] = useState(null);
   const currentOperationMode = normalizeOperationMode(data.operation_mode);
-  const currentOperationMeta = OPERATION_MODE_META[currentOperationMode] || OPERATION_MODE_META.paper;
+  const currentOperationMeta = OPERATION_MODE_META[currentOperationMode] || OPERATION_MODE_META.real;
   const formAccountMode = normalizeAccountMode(addFormFields.account_mode);
   const formExchange = String(addFormFields.exchange || 'bybit').toLowerCase();
   const formExchangeLabel = formExchange === 'binance' ? 'Binance' : 'Bybit';
-  const formBalanceLabel = formAccountMode === 'testnet' ? `Saldo sincronizado da Testnet (${formExchangeLabel})` : `Saldo sincronizado da Conta Real (${formExchangeLabel})`;
-  const formBalancePlaceholder = formAccountMode === 'testnet' ? `Será lido da ${formExchangeLabel} Testnet` : `Será lido da ${formExchangeLabel} Real`;
+  const formBalanceLabel = `Saldo sincronizado da Conta Real (${formExchangeLabel})`;
+  const formBalancePlaceholder = `Será lido da ${formExchangeLabel} Real`;
 
   // Métricas live derivadas dos trades abertos (atualiza cards do topo em tempo real)
   const activeTrades = data.active_trades || [];
@@ -568,24 +525,6 @@ const App = () => {
               </span>
            </div>
 
-           <div className="flex bg-black p-1 rounded-xl border border-white/10">
-             {['paper', 'testnet', 'real'].map((mode) => (
-               <button
-                 key={mode}
-                 type="button"
-                 disabled={modeUpdating}
-                 onClick={() => handleOperationModeChange(mode)}
-                 className={`px-4 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${
-                   currentOperationMode === mode
-                     ? 'bg-green-500 text-black'
-                     : 'text-zinc-500 hover:text-white hover:bg-white/5'
-                 } ${modeUpdating ? 'opacity-50 cursor-not-allowed' : ''}`}
-               >
-                 {OPERATION_MODE_META[mode].badge}
-               </button>
-             ))}
-           </div>
-           
            <div className="bg-zinc-900/50 px-4 py-1.5 rounded-full border border-green-500/20 flex items-center gap-2">
               <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" />
               <span className="text-[10px] font-black text-green-500 uppercase italic">{data.execution_label || data.status || 'Conectando...'}</span>
@@ -599,14 +538,12 @@ const App = () => {
         {activeTab === 'dashboard' && (
           <div className="animate-in fade-in duration-500 space-y-8">
             <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-              <KpiCard 
-                label={currentOperationMode === 'paper' ? "🧪 SALDO PAPER (USDT)" : `💰 SALDO ${currentOperationMode === 'testnet' ? 'TESTNET' : 'REAL'} (USDT)`} 
-                value={`$${(currentOperationMode === 'paper' ? currentBalanceLive : syncedBalance).toLocaleString('pt-PT', { maximumFractionDigits: 2 })}`}
-                sub={currentOperationMode === 'paper'
-                  ? `Base: $${syncedBalance.toLocaleString('pt-PT', { maximumFractionDigits: 2 })} • Aberto: $${unrealizedPnl.toLocaleString('pt-PT', { maximumFractionDigits: 2 })}`
-                  : (data.status || data.execution_label || data.operation_mode_label || 'Modo Produção')}
-                icon={<Database size={18}/>} 
-                emerald 
+              <KpiCard
+                label={`💰 SALDO REAL (USDT)`}
+                value={`$${syncedBalance.toLocaleString('pt-PT', { maximumFractionDigits: 2 })}`}
+                sub={data.status || data.execution_label || data.operation_mode_label || 'Modo Produção'}
+                icon={<Database size={18}/>}
+                emerald
               />
               {/* Card TRADES ATIVOS com toggle conservador/agressivo */}
               <div className="bg-[#0d0e12] p-8 rounded-[2.5rem] border border-white/5 shadow-xl relative overflow-hidden group hover:border-green-500/20 transition-all">
@@ -980,22 +917,9 @@ const App = () => {
                         <p className="text-zinc-600 text-xs font-black uppercase tracking-widest mb-6">
                           Nenhum investidor encontrado localmente.
                         </p>
-                        {supabaseSyncMsg && (
-                          <p className={`text-xs font-bold mb-4 ${supabaseSyncMsg.startsWith('✅') ? 'text-green-400' : 'text-orange-400'}`}>
-                            {supabaseSyncMsg}
-                          </p>
-                        )}
                         <p className="text-zinc-700 text-[10px] uppercase tracking-widest mb-6">
-                          Se você tem clientes salvos no Supabase, clique em Sincronizar para carregá-los.
+                          Adicione investidores usando o botão "Adicionar Investidor" acima.
                         </p>
-                        <button
-                          type="button"
-                          disabled={supabaseSyncing}
-                          onClick={handleSupabaseSync}
-                          className={`px-8 py-3 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all border border-blue-500/40 text-blue-400 hover:bg-blue-500/10 ${supabaseSyncing ? 'opacity-50 cursor-not-allowed' : ''}`}
-                        >
-                          {supabaseSyncing ? '⏳ Sincronizando...' : '☁️ Sincronizar com Supabase'}
-                        </button>
                       </td>
                     </tr>
                   ) : investidores.map(inv => (
@@ -1003,14 +927,11 @@ const App = () => {
                       <td className="p-8">
                         <div className="font-black italic text-xl uppercase">{inv.nome}</div>
                         <div className="flex items-center gap-2 mt-3 flex-wrap">
-                          <span className={`px-3 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest ${String(inv.account_mode || inv.mode || 'TESTNET').toUpperCase() === 'REAL' ? 'bg-green-500/10 border-green-500/30 text-green-400' : 'bg-blue-500/10 border-blue-500/30 text-blue-300'}`}>
-                            {String(inv.account_mode || inv.mode || 'TESTNET').toUpperCase() === 'REAL' ? 'Conta Real' : 'Conta Testnet'}
+                          <span className="px-3 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest bg-green-500/10 border-green-500/30 text-green-400">
+                            Conta Real
                           </span>
                           <span className={`px-3 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest ${String(inv.exchange || 'bybit').toLowerCase() === 'binance' ? 'bg-orange-500/10 border-orange-500/30 text-orange-300' : 'bg-yellow-500/10 border-yellow-500/30 text-yellow-300'}`}>
                             {String(inv.exchange || 'BYBIT').toUpperCase()}
-                          </span>
-                          <span className={`px-3 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest ${String(inv.storage_source || 'LOCAL').toUpperCase() === 'SUPABASE' ? 'bg-blue-500/10 border-blue-500/30 text-blue-300' : 'bg-zinc-800 border-white/10 text-zinc-300'}`}>
-                            {String(inv.storage_source || 'LOCAL').toUpperCase()}
                           </span>
                         </div>
                       </td>
@@ -1071,8 +992,8 @@ const App = () => {
                   bybit_secret: addFormFields.bybit_secret,
                   tg_token: addFormFields.tg_token,
                   chat_id: addFormFields.chat_id,
-                  account_mode: formAccountMode,
-                  is_testnet: formAccountMode === 'testnet',
+                  account_mode: 'real',
+                  is_testnet: false,
                   exchange: formExchange,
                 };
                 try {
@@ -1135,32 +1056,17 @@ const App = () => {
                       </div>
                       <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest ml-1">
                         {formExchange === 'binance'
-                          ? 'Use suas chaves da Binance Futures (USDM). Testnet = Binance Futures Testnet.'
-                          : 'Use suas chaves da Bybit Perpetual. Testnet = Bybit Testnet Sandbox.'}
+                          ? 'Use suas chaves da Binance Futures (USDM) REAIS.'
+                          : 'Use suas chaves da Bybit Perpetual REAIS.'}
                       </p>
                    </div>
                   <div className="space-y-2 md:col-span-2">
                      <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">Modo da Conta</label>
-                      <div className="grid grid-cols-2 gap-3">
-                         <button
-                           type="button"
-                           onClick={() => handleFieldChange('account_mode', 'testnet')}
-                           className={`px-4 py-3 rounded-2xl border text-sm font-black uppercase italic transition-all ${formAccountMode === 'testnet' ? 'bg-blue-500/15 border-blue-500/40 text-blue-300' : 'bg-black border-white/10 text-zinc-500 hover:text-white'}`}
-                         >
-                           🛰️ Testnet
-                         </button>
-                         <button
-                           type="button"
-                           onClick={() => handleFieldChange('account_mode', 'real')}
-                           className={`px-4 py-3 rounded-2xl border text-sm font-black uppercase italic transition-all ${formAccountMode === 'real' ? 'bg-green-500/15 border-green-500/40 text-green-300' : 'bg-black border-white/10 text-zinc-500 hover:text-white'}`}
-                         >
-                           💼 Conta Real
-                         </button>
+                      <div className="px-4 py-3 rounded-2xl border bg-green-500/15 border-green-500/40 text-green-300 text-sm font-black uppercase italic text-center">
+                        💼 Conta Real (Fixo)
                       </div>
                       <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest ml-1">
-                        {formAccountMode === 'testnet'
-                          ? `A conta testnet valida chaves sandbox e sincroniza saldo da ${formExchangeLabel} Testnet.`
-                          : `A conta real valida chaves reais e sincroniza saldo da ${formExchangeLabel} Real.`}
+                        Sistema opera apenas com contas REAIS da {formExchangeLabel}. Sincroniza saldo automaticamente.
                       </p>
                    </div>
                   <div className="space-y-2">
