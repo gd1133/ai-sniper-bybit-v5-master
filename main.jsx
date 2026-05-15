@@ -28,12 +28,6 @@ const getApiBase = () => {
 
 const API_BASE = getApiBase();
 const OPERATION_MODE_META = {
-  paper: {
-    badge: '🧪 PAPER',
-    label: 'PAPER TRADING',
-    dot: 'bg-yellow-500',
-    shell: 'bg-yellow-500/10 border-yellow-500/30 text-yellow-500',
-  },
   testnet: {
     badge: '🛰️ TESTNET',
     label: 'BYBIT TESTNET',
@@ -50,8 +44,7 @@ const OPERATION_MODE_META = {
 
 const normalizeOperationMode = (value) => {
   const normalized = String(value || '').trim().toLowerCase();
-  if (normalized === 'test') return 'paper';
-  return ['paper', 'testnet', 'real'].includes(normalized) ? normalized : 'paper';
+  return ['testnet', 'real'].includes(normalized) ? normalized : 'real';
 };
 
 const normalizeAccountMode = (value) => {
@@ -173,17 +166,15 @@ const App = () => {
     opportunities: [],
     active_trades: [],
     trades: [],
-    test_balance: 0,
-    test_mode: false,
-    operation_mode: 'paper',
-    operation_mode_label: 'PAPER TRADING',
+    operation_mode: 'real',
+    operation_mode_label: 'CONTA REAL',
     execution_enabled: false,
-    execution_label: 'Sem ordens reais',
+    execution_label: 'Aguardando configuração',
     last_sniper_signal: null,
     evidence: null,
     max_moedas_ativas: 1,
     risk_mode: 'conservative',
-    ia2_decision: { 
+    ia2_decision: {
       motivo: "Aguardando conexão com o servidor..."
     }
   });
@@ -446,7 +437,7 @@ const App = () => {
   const [investidores, setInvestidores] = useState([]);
   const [investidoresLoading, setInvestidoresLoading] = useState(true);
   const currentOperationMode = normalizeOperationMode(data.operation_mode);
-  const currentOperationMeta = OPERATION_MODE_META[currentOperationMode] || OPERATION_MODE_META.paper;
+  const currentOperationMeta = OPERATION_MODE_META[currentOperationMode] || OPERATION_MODE_META.real;
   const formAccountMode = normalizeAccountMode(addFormFields.account_mode);
   const formExchange = String(addFormFields.exchange || 'bybit').toLowerCase();
   const formExchangeLabel = formExchange === 'binance' ? 'Binance' : 'Bybit';
@@ -544,7 +535,7 @@ const App = () => {
            </div>
 
            <div className="flex bg-black p-1 rounded-xl border border-white/10">
-             {['paper', 'testnet', 'real'].map((mode) => (
+             {['testnet', 'real'].map((mode) => (
                <button
                  key={mode}
                  type="button"
@@ -574,14 +565,12 @@ const App = () => {
         {activeTab === 'dashboard' && (
           <div className="animate-in fade-in duration-500 space-y-8">
             <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-              <KpiCard 
-                label={currentOperationMode === 'paper' ? "🧪 SALDO PAPER (USDT)" : `💰 SALDO ${currentOperationMode === 'testnet' ? 'TESTNET' : 'REAL'} (USDT)`} 
-                value={`$${(currentOperationMode === 'paper' ? currentBalanceLive : syncedBalance).toLocaleString('pt-PT', { maximumFractionDigits: 2 })}`}
-                sub={currentOperationMode === 'paper'
-                  ? `Base: $${syncedBalance.toLocaleString('pt-PT', { maximumFractionDigits: 2 })} • Aberto: $${unrealizedPnl.toLocaleString('pt-PT', { maximumFractionDigits: 2 })}`
-                  : (data.status || data.execution_label || data.operation_mode_label || 'Modo Produção')}
-                icon={<Database size={18}/>} 
-                emerald 
+              <KpiCard
+                label={`💰 SALDO ${currentOperationMode === 'testnet' ? 'TESTNET' : 'REAL'} (USDT)`}
+                value={`$${syncedBalance.toLocaleString('pt-PT', { maximumFractionDigits: 2 })}`}
+                sub={data.status || data.execution_label || data.operation_mode_label || 'Modo Produção'}
+                icon={<Database size={18}/>}
+                emerald
               />
               {/* Card TRADES ATIVOS com toggle conservador/agressivo */}
               <div className="bg-[#0d0e12] p-8 rounded-[2.5rem] border border-white/5 shadow-xl relative overflow-hidden group hover:border-green-500/20 transition-all">
