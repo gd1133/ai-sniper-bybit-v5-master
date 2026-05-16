@@ -181,6 +181,7 @@ def get_all_clients() -> List[Dict[str, Any]]:
 def add_client(data: Dict[str, Any]):
     """Adiciona ou espelha um cliente localmente. Retorna o id persistido."""
     try:
+        print(f"🔵 [DATABASE] add_client: Iniciando inserção de cliente: {data.get('nome')}")
         conn = _connect()
         cur = conn.cursor()
         # Sistema sempre opera em modo real
@@ -206,9 +207,11 @@ def add_client(data: Dict[str, Any]):
         explicit_id = data.get('id')
 
         if explicit_id is not None:
+            print(f"🔵 [DATABASE] add_client: Cliente com ID explícito: {explicit_id}")
             existing = get_client_by_id(int(explicit_id))
             if existing:
                 conn.close()
+                print(f"🔵 [DATABASE] add_client: Cliente já existe, atualizando...")
                 return int(explicit_id) if update_client(int(explicit_id), data) else False
 
             cur.execute(
@@ -217,6 +220,7 @@ def add_client(data: Dict[str, Any]):
             )
             inserted_id = int(explicit_id)
         else:
+            print(f"🔵 [DATABASE] add_client: Novo cliente sem ID, gerando automaticamente")
             cur.execute(
                 'INSERT INTO clientes_sniper (nome, bybit_key, bybit_secret, tg_token, tg_api_key, chat_id, status, saldo_base, is_testnet, account_mode, balance_source, exchange) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
                 payload
@@ -224,9 +228,12 @@ def add_client(data: Dict[str, Any]):
             inserted_id = cur.lastrowid
         conn.commit()
         conn.close()
+        print(f"✅ [DATABASE] add_client: Cliente inserido com sucesso! ID: {inserted_id}")
         return inserted_id
     except Exception as e:
-        print(f"⚠️ Erro ao adicionar cliente: {e}")
+        print(f"❌ [DATABASE] add_client: Erro ao adicionar cliente: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 

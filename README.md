@@ -91,6 +91,22 @@ Para ambientes Railway, certifique-se de montar um volume em `/app/data` para pe
 
 ## Deploy no Railway / Render
 
+### 🆕 Problema: Frontend não salva no Railway?
+
+Se o frontend está salvando clientes mas eles não aparecem no servidor/banco de dados:
+
+**📖 Guia Rápido**: [docs/GUIA_RAPIDO_RAILWAY.md](docs/GUIA_RAPIDO_RAILWAY.md)
+
+**Verificar configuração**:
+```bash
+python verify_railway_config.py
+```
+
+Este verificador mostra:
+- ✅ Quais variáveis estão configuradas corretamente
+- ❌ O que está faltando
+- ⚠️  Avisos importantes sobre a configuração
+
 ### Validacao de ambiente
 
 Antes de fazer deploy, valide sua configuracao local:
@@ -104,6 +120,8 @@ python validate_environment.py
 **⚠️ IMPORTANTE**: Para instrucoes detalhadas de configuracao no Railway, consulte:
 
 📖 **[docs/RAILWAY_SETUP.md](docs/RAILWAY_SETUP.md)** - Guia completo com troubleshooting
+📖 **[docs/GUIA_RAPIDO_RAILWAY.md](docs/GUIA_RAPIDO_RAILWAY.md)** - Guia rápido para corrigir problemas de salvamento
+📖 **[docs/RAILWAY_FRONTEND_FIX.md](docs/RAILWAY_FRONTEND_FIX.md)** - Documentação técnica do sistema de logs
 
 #### Variaveis minimas necessarias (Railway):
 

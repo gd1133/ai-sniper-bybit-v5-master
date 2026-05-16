@@ -657,13 +657,18 @@ def _save_client_everywhere(client_data):
     payload['is_testnet'] = _is_testnet_account(payload.get('account_mode'))
     payload['balance_source'] = payload.get('balance_source') or _mode_balance_source(payload.get('account_mode'))
 
+    print(f"🔵 [BACKEND] _save_client_everywhere: payload id={payload.get('id')}, nome={payload.get('nome')}")
+
     local_result = db.upsert_client_local(payload) if payload.get('id') is not None else db.add_client(payload)
     local_synced = bool(local_result)
+
+    print(f"🔵 [BACKEND] _save_client_everywhere: local_result={local_result}, local_synced={local_synced}")
 
     final_id = payload.get('id')
     if final_id is None and local_result:
         try:
             final_id = int(local_result)
+            print(f"🔵 [BACKEND] _save_client_everywhere: Novo ID atribuído: {final_id}")
         except Exception:
             pass
 
@@ -671,6 +676,9 @@ def _save_client_everywhere(client_data):
     if final_record is None and local_synced and final_id is not None:
         local_record = db.get_client_by_id(final_id)
         final_record = {**dict(local_record), "storage_source": "local"} if local_record is not None else None
+
+    print(f"🔵 [BACKEND] _save_client_everywhere: final_record={'presente' if final_record else 'None'}, final_id={final_id}")
+
     client_balance_cache.clear()
     return final_record, False, local_synced
 
@@ -2053,8 +2061,11 @@ def api_delete_cliente(client_id):
 def add_cliente():
     """Recebe novos investidores do formulário SaaS."""
     data = request.json
+    print(f"🔵 [BACKEND] Recebida requisição POST /api/vincular_cliente")
+    print(f"🔵 [BACKEND] Dados recebidos: nome={data.get('nome')}, exchange={data.get('exchange')}")
     try:
         account_mode = _normalize_account_mode(data.get('account_mode', data.get('is_testnet')))
+        print(f"🔵 [BACKEND] Iniciando validação para modo: {account_mode}")
         validation = validar_e_salvar_cliente(
             data.get('bybit_key'),
             data.get('bybit_secret'),
@@ -2066,8 +2077,10 @@ def add_cliente():
         record = validation.get('record')
         cloud_synced = validation.get('synced_to_cloud', False)
         local_synced = validation.get('synced_to_local', False)
+        print(f"🔵 [BACKEND] Validação concluída: valid={ok}, local_synced={local_synced}")
         if record:
-            return jsonify({
+            print(f"✅ [BACKEND] Cliente salvo com ID: {record.get('id')}")
+            response_data = {
                 "status": "sucesso",
                 "msg": f"Investidor conectado! Conta {validation.get('account_mode', account_mode).upper()} validada na {str(validation.get('exchange','bybit')).upper()}.",
                 "valid": ok,
@@ -2077,9 +2090,15 @@ def add_cliente():
                 "client": record,
                 "synced_to_cloud": cloud_synced,
                 "synced_to_local": local_synced,
-            })
+            }
+            print(f"✅ [BACKEND] Enviando resposta de sucesso ao frontend")
+            return jsonify(response_data)
+        print(f"❌ [BACKEND] Falha ao salvar investidor - record é None")
         return jsonify({"status": "erro", "msg": "Falha ao salvar investidor"}), 500
     except Exception as e:
+        print(f"❌ [BACKEND] Exceção ao processar vincular_cliente: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"status": "erro", "msg": str(e)}), 400
 
 
