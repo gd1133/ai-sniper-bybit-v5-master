@@ -224,7 +224,7 @@ def start_runtime_services():
 
         threading.Thread(target=sniper_worker_loop, daemon=True).start()
         threading.Thread(target=_monitor_sl_tp_automatico, daemon=True).start()
-        print("   Monitor SL/TP: ATIVO (-3% SL / +6% TP)")
+        print("   Monitor SL/TP: ATIVO (-5% SL / +100% TP)")
 
         # Aquece o cache de saldo em background imediatamente para que o
         # primeiro poll do dashboard não precise esperar.
@@ -1313,12 +1313,12 @@ def _calcular_pnl_trades():
 def _monitor_sl_tp_automatico():
     """
     Monitora trades abertos e fecha automaticamente quando atingem:
-    - Stop Loss: -3% (perda maxima institucional)
-    - Take Profit: +6% (lucro alvo)
+    - Stop Loss: -5% (perda maxima institucional)
+    - Take Profit: +100% (lucro alvo)
     Executa em background a cada 10 segundos.
     """
-    SL_PCT = -3.0
-    TP_PCT =  6.0
+    SL_PCT = -5.0
+    TP_PCT = 100.0
 
     while True:
         try:
@@ -1337,9 +1337,9 @@ def _monitor_sl_tp_automatico():
 
                 motivo = None
                 if pnl_pct <= SL_PCT:
-                    motivo = f"SL_AUTO -3% (real: {pnl_pct:.2f}%)"
+                    motivo = f"SL_AUTO -5% (real: {pnl_pct:.2f}%)"
                 elif pnl_pct >= TP_PCT:
-                    motivo = f"TP_AUTO +6% (real: {pnl_pct:.2f}%)"
+                    motivo = f"TP_AUTO +100% (real: {pnl_pct:.2f}%)"
 
                 if motivo:
                     try:
@@ -2553,4 +2553,3 @@ if __name__ == "__main__":
     print(f"📊 Dashboard: http://0.0.0.0:{render_port}")
     print("🧠 Cérebro Triplo: ATIVO (Rigor 50%)")
     app.run(host='0.0.0.0', port=render_port, debug=False, use_reloader=False)
-
