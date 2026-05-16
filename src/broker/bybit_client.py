@@ -339,7 +339,11 @@ class BybitClient:
             if not self.authenticated:
                 print(f"[ERRO BROKER] Ordem não executada: cliente sem credenciais.")
                 return None
-            print(f"🔥 [ORDEM SNIPER] {side.upper()} {qty} em {symbol}")
+
+            print(f"🔥 [ORDEM SNIPER BYBIT] {side.upper()} {qty} em {symbol}")
+            print(f"   🌐 Endpoint: {self.active_endpoint}")
+            print(f"   🔐 Autenticado: {self.authenticated}")
+            print(f"   🧪 Modo Testnet: {self.testnet}")
 
             if self.pybit_session is not None:
                 v5_symbol = self._normalize_v5_symbol(symbol)
@@ -350,26 +354,42 @@ class BybitClient:
                     'orderType': 'Market',
                     'qty': str(qty),
                 }
+                print(f"   📤 Enviando ordem via Pybit V5: {payload}")
                 rsp = self.pybit_session.place_order(**payload)
+                print(f"   📥 Resposta da API Bybit: {rsp}")
+
                 ok, error_message = self._handle_v5_ret_code(rsp, 'v5/order/create')
                 if not ok:
-                    print(f"❌ [ERRO EXECUÇÃO] {error_message}")
+                    print(f"❌ [ERRO EXECUÇÃO BYBIT] {error_message}")
                     return None
 
                 result = (rsp or {}).get('result') or {}
+                order_id = result.get('orderId') or result.get('orderLinkId')
+                print(f"✅ [BYBIT] Ordem criada com sucesso - ID: {order_id}")
                 return {
                     **result,
-                    'id': result.get('orderId') or result.get('orderLinkId'),
+                    'id': order_id,
                     'route': 'v5/order/create',
                     'category': 'linear',
                     'symbol': v5_symbol,
                 }
 
+            # Fallback para CCXT se pybit não estiver disponível
             params = {'category': 'linear'}
+            print(f"   📤 Enviando ordem via CCXT: symbol={symbol}, type=market, side={side}, qty={qty}")
             order = self.exchange.create_order(symbol, 'market', side, qty, params=params)
+            print(f"   📥 Resposta CCXT: {order}")
+            print(f"✅ [BYBIT CCXT] Ordem criada - ID: {order.get('id', 'N/A')}")
             return order
         except Exception as e:
-            print(f"❌ [ERRO EXECUÇÃO] Falha crítica na ordem: {e}")
+            error_details = str(e)
+            print(f"❌ [ERRO EXECUÇÃO BYBIT] Falha crítica na ordem: {error_details}")
+            if "10003" in error_details or "Invalid API key" in error_details:
+                print(f"   🔑 ERRO DE AUTENTICAÇÃO: Verifique suas credenciais API")
+            elif "10004" in error_details or "Invalid sign" in error_details:
+                print(f"   🔐 ERRO DE ASSINATURA: Verifique o API Secret")
+            elif "insufficient balance" in error_details.lower():
+                print(f"   💰 SALDO INSUFICIENTE: Deposite fundos na conta")
             return None
 
     def test_connection(self):

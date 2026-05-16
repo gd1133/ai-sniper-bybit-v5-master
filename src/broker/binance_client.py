@@ -244,13 +244,30 @@ class BinanceClient:
             if not self.authenticated:
                 print('[ERRO BINANCE] Ordem não executada: sem credenciais.')
                 return None
+
             print(f"🔥 [BINANCE ORDER] {side.upper()} {qty} em {symbol}")
+            print(f"   🌐 Endpoint: {self.active_endpoint}")
+            print(f"   🔐 Autenticado: {self.authenticated}")
+            print(f"   🧪 Modo Testnet: {self.testnet}")
+
+            print(f"   📤 Enviando ordem via CCXT: symbol={symbol}, type=market, side={side}, qty={qty}")
             order = self._call_with_451_retry(
                 lambda: self.exchange.create_order(symbol, 'market', side, qty)
             )
+            print(f"   📥 Resposta da API Binance: {order}")
+            print(f"✅ [BINANCE] Ordem criada com sucesso - ID: {order.get('id', 'N/A')}")
             return order
         except Exception as e:
-            print(f"❌ [ERRO BINANCE] Falha na ordem: {e}")
+            error_details = str(e)
+            print(f"❌ [ERRO BINANCE] Falha na ordem: {error_details}")
+            if "API-key" in error_details or "Invalid API" in error_details:
+                print(f"   🔑 ERRO DE AUTENTICAÇÃO: Verifique suas credenciais API Binance")
+            elif "Signature" in error_details:
+                print(f"   🔐 ERRO DE ASSINATURA: Verifique o API Secret Binance")
+            elif "insufficient balance" in error_details.lower() or "balance is not enough" in error_details.lower():
+                print(f"   💰 SALDO INSUFICIENTE: Deposite fundos na conta Binance Futures")
+            elif "451" in error_details:
+                print(f"   🚫 HTTP 451: Região bloqueada - tentando endpoints alternativos")
             return None
 
     def set_tp_sl_sniper(self, symbol, side, entry_price, position_qty):
