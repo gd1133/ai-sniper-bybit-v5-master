@@ -576,10 +576,11 @@ def _get_public_price_broker():
         BybitClient = _BybitClient
 
     bybit_api_key, bybit_api_secret = get_bybit_credentials()
+    # FORÇAR MODO REAL para broker público de preços
     public_price_broker = BybitClient(
         bybit_api_key,
         bybit_api_secret,
-        testnet=_mode_uses_testnet(APP_MODE),
+        testnet=False,  # FORÇAR MODO REAL
     )
     return public_price_broker
 
@@ -606,10 +607,17 @@ def _make_broker(client):
     exchange = str(client.get('exchange') or 'bybit').strip().lower()
     broker_cls = _ensure_broker_class(exchange)
     account_mode = _normalize_account_mode(client.get('account_mode', client.get('is_testnet')))
+
+    # FORÇAR MODO REAL: Sistema opera apenas com contas reais
+    # Ignora qualquer flag de testnet do cliente - sempre usa produção
+    use_testnet = False
+
+    print(f"🔧 [BROKER INIT] Cliente: {client.get('nome')} | Exchange: {exchange} | Testnet: {use_testnet} | ALLOW_REAL_TRADING: {ALLOW_REAL_TRADING}")
+
     return broker_cls(
         client.get('bybit_key'),
         client.get('bybit_secret'),
-        testnet=_is_testnet_account(account_mode),
+        testnet=use_testnet,
     )
 
 
@@ -1575,6 +1583,17 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
 
         # 2. Loop de Execução para Clientes Cadastrados
         clientes = _get_registered_clients(active_only=True)
+
+        print(f"\n🔍 [BROADCAST] Iniciando execução para {len(clientes)} cliente(s) ativo(s)")
+        print(f"   💼 ALLOW_ORDER_EXECUTION: {ALLOW_ORDER_EXECUTION}")
+        print(f"   🔐 ALLOW_REAL_TRADING: {ALLOW_REAL_TRADING}")
+        print(f"   🎯 Execução habilitada: {_is_order_execution_enabled(APP_MODE)}")
+
+        if not clientes:
+            print(f"⚠️  [BROADCAST] NENHUM CLIENTE ATIVO ENCONTRADO!")
+            print(f"   💡 Cadastre clientes ativos para executar ordens automáticas")
+            print(f"   📝 Use a interface web em /api/clients para adicionar clientes")
+
         for cliente in clientes:
             def task_cliente(c):
                 try:
@@ -1607,14 +1626,29 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                         except Exception as preflight_err:
                             print(f"⚠️  [ERRO PRÉ-VOO] {preflight_err} - continuando execução")
 
-                        order_result = broker.execute_market_order(symbol, side.lower(), qty)
+                        # Execução real da ordem na exchange
+                        try:
+                            order_result = broker.execute_market_order(symbol, side.lower(), qty)
 
-                        if order_result:
-                            # ✅ Executa Proteção: TP +100% margem (10% preço) / SL -50% margem (5% preço com 10x leverage)
-                            broker.set_tp_sl_sniper(symbol, side.lower(), entry_price, qty)
-                            print(f"✅ [ORDEM EXECUTADA] ID: {order_result.get('id', 'N/A')}")
-                        else:
-                            print(f"⚠️  [ORDEM FALHADA] {c.get('nome')} - Fallback para simulação")
+                            if order_result:
+                                order_id = order_result.get('id', order_result.get('orderId', 'N/A'))
+                                print(f"✅ [ORDEM REAL EXECUTADA NA EXCHANGE] ID: {order_id}")
+                                print(f"   📊 Detalhes: {order_result}")
+
+                                # ✅ Executa Proteção: TP +100% margem (10% preço) / SL -50% margem (5% preço com 10x leverage)
+                                tp_sl_ok = broker.set_tp_sl_sniper(symbol, side.lower(), entry_price, qty)
+                                if tp_sl_ok:
+                                    print(f"✅ [TP/SL CONFIGURADO] Proteção ativa na exchange")
+                                else:
+                                    print(f"⚠️  [TP/SL FALHOU] Ordem aberta SEM proteção - monitore manualmente!")
+                            else:
+                                print(f"❌ [ORDEM FALHOU] {c.get('nome')} - Nenhum retorno da API")
+                                print(f"   🔍 DIAGNÓSTICO: Verifique credenciais API e permissões de trading")
+                        except Exception as order_err:
+                            print(f"❌ [ERRO CRÍTICO NA EXECUÇÃO] {c.get('nome')}")
+                            print(f"   📛 Erro da API: {order_err}")
+                            print(f"   🔍 CAUSA: Provavelmente erro de autenticação, permissões ou saldo insuficiente")
+                            # Não continua - ordem não foi executada
                     else:
                         # Diagnóstico detalhado do bloqueio
                         block_reasons = []
@@ -1693,13 +1727,15 @@ def sniper_worker_loop():
         time.sleep(5)
         return
 
-    # Scanner Master
+    # Scanner Master - FORÇAR MODO REAL
     try:
+        # Sistema sempre opera em modo REAL (testnet=False)
         master_broker = BybitClient(
             *get_bybit_credentials(),
-            testnet=_mode_uses_testnet(APP_MODE),
+            testnet=False,  # FORÇAR MODO REAL - Não usar testnet
         )
         validator = GroqValidator(os.getenv("GEMINI_API_KEY"), os.getenv("GROQ_API_KEY"))
+        print(f"🔧 [MASTER BROKER] Modo: REAL (testnet=False)")
     except Exception as e:
         print(f"❌ Erro ao inicializar broker/validator: {e}")
         time.sleep(5)
@@ -2420,6 +2456,32 @@ def broadcast_sniper_signal():
 
 if __name__ == "__main__":
     render_port = int(os.getenv("PORT", "5000"))
+
+    # DIAGNÓSTICO COMPLETO DE CONFIGURAÇÃO
+    print("\n" + "="*70)
+    print("🔍 DIAGNÓSTICO DE CONFIGURAÇÃO DO SISTEMA")
+    print("="*70)
+    print(f"📌 ENVIRONMENT: {ENV_CONFIG.name}")
+    print(f"📌 ALLOW_ORDER_EXECUTION: {ALLOW_ORDER_EXECUTION}")
+    print(f"📌 ALLOW_REAL_TRADING: {ALLOW_REAL_TRADING}")
+    print(f"📌 USE_TESTNET: {ENV_CONFIG.use_testnet}")
+    print(f"📌 APP_MODE: {APP_MODE}")
+    print(f"📌 Execução de ordens: {'✅ HABILITADA' if _is_order_execution_enabled(APP_MODE) else '❌ BLOQUEADA'}")
+
+    # Verificar clientes cadastrados
+    try:
+        clientes_ativos = _get_registered_clients(active_only=True)
+        print(f"📌 Clientes ativos: {len(clientes_ativos)}")
+        if clientes_ativos:
+            for idx, c in enumerate(clientes_ativos, 1):
+                print(f"   {idx}. {c.get('nome')} - Exchange: {c.get('exchange', 'bybit')}")
+        else:
+            print("   ⚠️  NENHUM CLIENTE ATIVO CADASTRADO!")
+            print("   💡 Cadastre clientes em /api/clients para receber ordens automáticas")
+    except Exception as e:
+        print(f"   ⚠️  Erro ao verificar clientes: {e}")
+
+    print("="*70 + "\n")
 
     start_runtime_services()
 
