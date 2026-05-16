@@ -382,14 +382,46 @@ class BybitClient:
             print(f"✅ [BYBIT CCXT] Ordem criada - ID: {order.get('id', 'N/A')}")
             return order
         except Exception as e:
-            error_details = str(e)
-            print(f"❌ [ERRO EXECUÇÃO BYBIT] Falha crítica na ordem: {error_details}")
-            if "10003" in error_details or "Invalid API key" in error_details:
-                print(f"   🔑 ERRO DE AUTENTICAÇÃO: Verifique suas credenciais API")
-            elif "10004" in error_details or "Invalid sign" in error_details:
-                print(f"   🔐 ERRO DE ASSINATURA: Verifique o API Secret")
-            elif "insufficient balance" in error_details.lower():
-                print(f"   💰 SALDO INSUFICIENTE: Deposite fundos na conta")
+            # Importa ccxt para capturar erros específicos da corretora
+            ccxt = _get_ccxt()
+
+            if isinstance(e, ccxt.BaseError):
+                error_details = str(e)
+                print(f"❌ ERRO REAL DA CORRETORA: {error_details}")
+
+                # Diagnóstico detalhado de erros CCXT
+                if isinstance(e, ccxt.InsufficientFunds):
+                    print(f"   💰 SALDO INSUFICIENTE: Deposite fundos na conta ou reduza o tamanho da ordem")
+                elif isinstance(e, ccxt.InvalidOrder):
+                    print(f"   📏 ORDEM INVÁLIDA: Verifique tamanho mínimo de lote, preço ou quantidade")
+                    if "lot size" in error_details.lower() or "min" in error_details.lower():
+                        print(f"   ⚠️  TAMANHO MÍNIMO DE LOTE INVÁLIDO: Quantidade {qty:.4f} abaixo do mínimo permitido")
+                elif isinstance(e, ccxt.AuthenticationError):
+                    print(f"   🔑 ERRO DE AUTENTICAÇÃO: Verifique suas credenciais API (key/secret)")
+                    if "10003" in error_details or "Invalid API key" in error_details:
+                        print(f"   ⚠️  API Key inválida ou expirada")
+                    elif "10004" in error_details or "Invalid sign" in error_details:
+                        print(f"   ⚠️  Assinatura inválida - verifique o API Secret")
+                elif isinstance(e, ccxt.PermissionDenied):
+                    print(f"   🚫 PERMISSÕES INSUFICIENTES: Habilite permissões de trading na API")
+                elif isinstance(e, ccxt.ExchangeNotAvailable) or isinstance(e, ccxt.NetworkError):
+                    print(f"   🌐 ERRO DE REDE/EXCHANGE: Exchange temporariamente indisponível ou problema de conexão")
+                elif isinstance(e, ccxt.RateLimitExceeded):
+                    print(f"   ⏱️  RATE LIMIT EXCEDIDO: Muitas requisições - aguarde alguns segundos")
+                else:
+                    # Erro CCXT genérico
+                    print(f"   ⚠️  Erro CCXT: {type(e).__name__}")
+            else:
+                # Erro não-CCXT
+                error_details = str(e)
+                print(f"❌ [ERRO EXECUÇÃO BYBIT] Falha crítica na ordem: {error_details}")
+                if "10003" in error_details or "Invalid API key" in error_details:
+                    print(f"   🔑 ERRO DE AUTENTICAÇÃO: Verifique suas credenciais API")
+                elif "10004" in error_details or "Invalid sign" in error_details:
+                    print(f"   🔐 ERRO DE ASSINATURA: Verifique o API Secret")
+                elif "insufficient balance" in error_details.lower():
+                    print(f"   💰 SALDO INSUFICIENTE: Deposite fundos na conta")
+
             return None
 
     def test_connection(self):

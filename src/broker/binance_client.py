@@ -258,16 +258,50 @@ class BinanceClient:
             print(f"✅ [BINANCE] Ordem criada com sucesso - ID: {order.get('id', 'N/A')}")
             return order
         except Exception as e:
-            error_details = str(e)
-            print(f"❌ [ERRO BINANCE] Falha na ordem: {error_details}")
-            if "API-key" in error_details or "Invalid API" in error_details:
-                print(f"   🔑 ERRO DE AUTENTICAÇÃO: Verifique suas credenciais API Binance")
-            elif "Signature" in error_details:
-                print(f"   🔐 ERRO DE ASSINATURA: Verifique o API Secret Binance")
-            elif "insufficient balance" in error_details.lower() or "balance is not enough" in error_details.lower():
-                print(f"   💰 SALDO INSUFICIENTE: Deposite fundos na conta Binance Futures")
-            elif "451" in error_details:
-                print(f"   🚫 HTTP 451: Região bloqueada - tentando endpoints alternativos")
+            # Importa ccxt para capturar erros específicos da corretora
+            ccxt = _get_ccxt()
+
+            if isinstance(e, ccxt.BaseError):
+                error_details = str(e)
+                print(f"❌ ERRO REAL DA CORRETORA: {error_details}")
+
+                # Diagnóstico detalhado de erros CCXT
+                if isinstance(e, ccxt.InsufficientFunds):
+                    print(f"   💰 SALDO INSUFICIENTE: Deposite fundos na conta Binance Futures ou reduza o tamanho da ordem")
+                elif isinstance(e, ccxt.InvalidOrder):
+                    print(f"   📏 ORDEM INVÁLIDA: Verifique tamanho mínimo de lote, preço ou quantidade")
+                    if "lot size" in error_details.lower() or "min" in error_details.lower():
+                        print(f"   ⚠️  TAMANHO MÍNIMO DE LOTE INVÁLIDO: Quantidade {qty:.4f} abaixo do mínimo permitido")
+                elif isinstance(e, ccxt.AuthenticationError):
+                    print(f"   🔑 ERRO DE AUTENTICAÇÃO: Verifique suas credenciais API Binance (key/secret)")
+                    if "API-key" in error_details or "Invalid API" in error_details:
+                        print(f"   ⚠️  API Key inválida ou expirada")
+                    elif "Signature" in error_details:
+                        print(f"   ⚠️  Assinatura inválida - verifique o API Secret")
+                elif isinstance(e, ccxt.PermissionDenied):
+                    print(f"   🚫 PERMISSÕES INSUFICIENTES: Habilite permissões de trading Futures na API Binance")
+                    if "451" in error_details:
+                        print(f"   🚫 HTTP 451: Região bloqueada pela Binance - tentando endpoints alternativos")
+                elif isinstance(e, ccxt.ExchangeNotAvailable) or isinstance(e, ccxt.NetworkError):
+                    print(f"   🌐 ERRO DE REDE/EXCHANGE: Binance temporariamente indisponível ou problema de conexão")
+                elif isinstance(e, ccxt.RateLimitExceeded):
+                    print(f"   ⏱️  RATE LIMIT EXCEDIDO: Muitas requisições - aguarde alguns segundos")
+                else:
+                    # Erro CCXT genérico
+                    print(f"   ⚠️  Erro CCXT: {type(e).__name__}")
+            else:
+                # Erro não-CCXT
+                error_details = str(e)
+                print(f"❌ [ERRO BINANCE] Falha na ordem: {error_details}")
+                if "API-key" in error_details or "Invalid API" in error_details:
+                    print(f"   🔑 ERRO DE AUTENTICAÇÃO: Verifique suas credenciais API Binance")
+                elif "Signature" in error_details:
+                    print(f"   🔐 ERRO DE ASSINATURA: Verifique o API Secret Binance")
+                elif "insufficient balance" in error_details.lower() or "balance is not enough" in error_details.lower():
+                    print(f"   💰 SALDO INSUFICIENTE: Deposite fundos na conta Binance Futures")
+                elif "451" in error_details:
+                    print(f"   🚫 HTTP 451: Região bloqueada - tentando endpoints alternativos")
+
             return None
 
     def set_tp_sl_sniper(self, symbol, side, entry_price, position_qty):

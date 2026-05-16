@@ -1559,8 +1559,9 @@ def _manual_close_open_trades(symbol, requested_by="dashboard"):
 
 def broadcast_ordem_global(symbol, side, entry_price, res_ia):
     """
-    DISPARO EM MASSA: 
+    DISPARO EM MASSA:
     Lê todos os investidores do SQLite e replica a ordem e o sinal.
+    Processa em background para não bloquear o motor sniper.
     """
     slot_reserved = False
     try:
@@ -1580,132 +1581,16 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
         central_state['last_sniper_signal'] = signal_snapshot
         _push_recent_sniper_signal(signal_snapshot)
 
-        # 1. Notificação Master (Para o seu Grupo VIP ou seu Bot de Controle)
-        master_tk, master_chat = _get_master_telegram_config()
-        if master_tk and master_chat:
-            m_msg = (f"🚀 *SINAL SNIPER BROADCAST*\n\n"
-                     f"📦 *Ativo:* {symbol}\n📈 *Lado:* {side}\n"
-                     f"🎯 *Entrada:* ${entry_price}\n🧠 *Confiança:* {res_ia.get('probabilidade')}%")
-            requests.post(f"https://api.telegram.org/bot{master_tk}/sendMessage", 
-                          json={"chat_id": master_chat, "text": m_msg, "parse_mode": "Markdown"})
-
-        # 2. Loop de Execução para Clientes Cadastrados
-        clientes = _get_registered_clients(active_only=True)
-
-        print(f"\n🔍 [BROADCAST] Iniciando execução para {len(clientes)} cliente(s) ativo(s)")
-        print(f"   💼 ALLOW_ORDER_EXECUTION: {ALLOW_ORDER_EXECUTION}")
-        print(f"   🔐 ALLOW_REAL_TRADING: {ALLOW_REAL_TRADING}")
-        print(f"   🎯 Execução habilitada: {_is_order_execution_enabled(APP_MODE)}")
-
-        if not clientes:
-            print(f"⚠️  [BROADCAST] NENHUM CLIENTE ATIVO ENCONTRADO!")
-            print(f"   💡 Cadastre clientes ativos para executar ordens automáticas")
-            print(f"   📝 Use a interface web em /api/clients para adicionar clientes")
-
-        for cliente in clientes:
-            def task_cliente(c):
-                try:
-                    account_mode = _normalize_account_mode(c.get('account_mode', c.get('is_testnet')))
-                    broker = _make_broker(c)
-                    
-                    # Gestão Dinâmica: 5% Banca (GAIN) / 3% (RECOVERY)
-                    margem = float(c.get('saldo_base', 1000.0)) * 0.05
-                    qty = margem / entry_price
-
-                    # --- EXECUÇÃO REAL NA EXCHANGE (PROTOCOLO SNIPER) ---
-                    if _is_order_execution_enabled(APP_MODE):
-                        exec_label = 'TESTNET' if APP_MODE == 'testnet' else 'REAL'
-                        print(f"🚀 [EXECUÇÃO {exec_label}] {c.get('nome')} - {side} {qty:.4f} {symbol}")
-
-                        # Validação pré-voo antes da execução
-                        try:
-                            preflight_ok, preflight_category, preflight_msg = broker.pre_flight_check(symbol, side.lower(), qty)
-                            if not preflight_ok:
-                                error_emoji = "🔴" if preflight_category == 'ERRO_CORRETORA' else "⚠️"
-                                print(f"{error_emoji} [PRÉ-VOO FALHOU] {c.get('nome')} | {preflight_category}: {preflight_msg}")
-                                print(f"   Ordem bloqueada por segurança - verifique API e configurações")
-                                # Continua para próximo cliente sem executar
-                                return
-
-                            print(f"✅ [PRÉ-VOO OK] {preflight_msg}")
-                        except AttributeError:
-                            # Broker não tem pre_flight_check (versão antiga)
-                            print(f"⚠️  [AVISO] Broker sem validação pré-voo - continuando execução")
-                        except Exception as preflight_err:
-                            print(f"⚠️  [ERRO PRÉ-VOO] {preflight_err} - continuando execução")
-
-                        # Execução real da ordem na exchange
-                        try:
-                            order_result = broker.execute_market_order(symbol, side.lower(), qty)
-
-                            if order_result:
-                                order_id = order_result.get('id', order_result.get('orderId', 'N/A'))
-                                print(f"✅ [ORDEM REAL EXECUTADA NA EXCHANGE] ID: {order_id}")
-                                print(f"   📊 Detalhes: {order_result}")
-
-                                # ✅ Executa Proteção: TP +100% margem (10% preço) / SL -50% margem (5% preço com 10x leverage)
-                                tp_sl_ok = broker.set_tp_sl_sniper(symbol, side.lower(), entry_price, qty)
-                                if tp_sl_ok:
-                                    print(f"✅ [TP/SL CONFIGURADO] Proteção ativa na exchange")
-                                else:
-                                    print(f"⚠️  [TP/SL FALHOU] Ordem aberta SEM proteção - monitore manualmente!")
-                            else:
-                                print(f"❌ [ORDEM FALHOU] {c.get('nome')} - Nenhum retorno da API")
-                                print(f"   🔍 DIAGNÓSTICO: Verifique credenciais API e permissões de trading")
-                        except Exception as order_err:
-                            print(f"❌ [ERRO CRÍTICO NA EXECUÇÃO] {c.get('nome')}")
-                            print(f"   📛 Erro da API: {order_err}")
-                            print(f"   🔍 CAUSA: Provavelmente erro de autenticação, permissões ou saldo insuficiente")
-                            # Não continua - ordem não foi executada
-                    else:
-                        # Diagnóstico detalhado do bloqueio
-                        block_reasons = []
-                        if not ALLOW_ORDER_EXECUTION:
-                            mode_label = "ORDENS BLOQUEADAS"
-                            block_reasons.append("ALLOW_ORDER_EXECUTION=false")
-                        elif not ALLOW_REAL_TRADING:
-                            mode_label = "ORDENS BLOQUEADAS"
-                            block_reasons.append("ALLOW_REAL_TRADING=false")
-                        else:
-                            mode_label = "ORDENS BLOQUEADAS"
-                            block_reasons.append("Configuração de segurança ativa")
-
-                        reason_str = ", ".join(block_reasons)
-                        print(f"🔒 [{mode_label}] {c.get('nome')} - execução bloqueada: {reason_str}")
-                        print(f"💡 DIAGNÓSTICO: API conectada ✅ | Saldo visível ✅ | Execução bloqueada por: {reason_str}")
-
-                    # --- NOTIFICAÇÃO PRIVADA EDUCATIVA (SNIPER PROTOCOL) ---
-                    c_msg = (f"🎯 *SNIPER GIVALDO v60.1 - DISPARO CONFIRMADO*\n\n"
-                             f"👤 *Trader:* {c.get('nome')}\n"
-                             f"📦 *Ativo:* {symbol}\n"
-                             f"📈 *Lado:* {side.upper()}\n"
-                             f"💰 *Margem:* ${margem:.2f} (5% da banca)\n"
-                             f"🎯 *Quantidade:* {qty:.4f}\n"
-                             f"📍 *Entrada:* ${entry_price:.2f}\n\n"
-                             f"🧠 *Confiança Cérebro Triplo:* {res_ia.get('probabilidade')}%\n"
-                             f"📝 *Motivo:* {res_ia.get('motivo')}\n"
-                             f"🔐 *Modo:* {_mode_display_label(APP_MODE)} • {_execution_status_label(APP_MODE)}\n"
-                             f"👤 *Conta:* {account_mode.upper()}\n\n"
-                             f"🛡️  *PROTEÇÃO ATIVA:*\n"
-                             f"✅ TP: ${entry_price * 1.10:.2f} (+100% da entrada = +10% preço)\n"
-                             f"❌ SL: ${entry_price * 0.95:.2f} (-50% da entrada = -5% preço)\n\n"
-                             f"⏱️ *Cooldown Institucional:* 10 min após fechamento")
-                    
-                    client_tg_token = str(c.get('tg_token') or '').strip()
-                    client_chat_id = str(c.get('chat_id') or '').strip()
-                    if client_tg_token and client_chat_id:
-                        url_tg = f"https://api.telegram.org/bot{client_tg_token}/sendMessage"
-                        requests.post(url_tg, json={"chat_id": client_chat_id, "text": c_msg, "parse_mode": "Markdown"})
-
-                    # Regista no histórico do cliente (com status OPEN)
-                    closed_at = time.strftime("%d/%m %H:%M", time.localtime())
-                    db.record_trade(c.get('id'), symbol, side, 0.0, round(margem, 2), closed_at, 
-                                  notes=f"SNIPER v60.1 - Conf: {res_ia.get('probabilidade')}% | Entrada: {entry_price:.8f}", status="open", entry_price=entry_price)
-
-                except Exception as e:
-                    print(f"❌ Falha na conta de {c.get('nome')}: {e}")
-
-            threading.Thread(target=task_cliente, args=(cliente,)).start()
+        # 🔥 PROCESSA ORDENS EM BACKGROUND usando a função centralizada
+        confidence = res_ia.get('probabilidade', 0)
+        reason_text = res_ia.get('motivo', '')
+        background_thread = threading.Thread(
+            target=_process_client_orders_background,
+            args=(symbol, side, entry_price, confidence, reason_text),
+            daemon=True
+        )
+        background_thread.start()
+        print(f"✅ [BROADCAST GLOBAL] Thread de processamento iniciada em background")
 
     except Exception as e:
         print(f"⚠️ Erro Crítico no Broadcast: {e}")
@@ -2395,10 +2280,155 @@ def set_risk_mode():
         return jsonify({"error": "Erro ao alterar modo de risco. Verifique os logs."}), 400
 
 
+def _process_client_orders_background(symbol, side, entry_price, confidence, reason):
+    """
+    🔥 PROCESSAMENTO ASSÍNCRONO DO LOOP DE ORDENS DOS CLIENTES
+    Executa em thread separada para não bloquear o webhook do TradingView.
+    """
+    try:
+        # 1. Notificação Master (Para o seu Grupo VIP ou seu Bot de Controle)
+        master_tk, master_chat = _get_master_telegram_config()
+        if master_tk and master_chat:
+            m_msg = (f"🚀 *SINAL SNIPER BROADCAST*\n\n"
+                     f"📦 *Ativo:* {symbol}\n📈 *Lado:* {side}\n"
+                     f"🎯 *Entrada:* ${entry_price}\n🧠 *Confiança:* {confidence}%")
+            requests.post(f"https://api.telegram.org/bot{master_tk}/sendMessage",
+                          json={"chat_id": master_chat, "text": m_msg, "parse_mode": "Markdown"})
+
+        # 2. Loop de Execução para Clientes Cadastrados
+        clientes = _get_registered_clients(active_only=True)
+
+        print(f"\n🔍 [BROADCAST] Iniciando execução para {len(clientes)} cliente(s) ativo(s)")
+        print(f"   💼 ALLOW_ORDER_EXECUTION: {ALLOW_ORDER_EXECUTION}")
+        print(f"   🔐 ALLOW_REAL_TRADING: {ALLOW_REAL_TRADING}")
+        print(f"   🎯 Execução habilitada: {_is_order_execution_enabled(APP_MODE)}")
+
+        if not clientes:
+            print(f"⚠️  [BROADCAST] NENHUM CLIENTE ATIVO ENCONTRADO!")
+            print(f"   💡 Cadastre clientes ativos para executar ordens automáticas")
+            print(f"   📝 Use a interface web em /api/clients para adicionar clientes")
+
+        for cliente in clientes:
+            def task_cliente(c):
+                try:
+                    account_mode = _normalize_account_mode(c.get('account_mode', c.get('is_testnet')))
+                    broker = _make_broker(c)
+
+                    # Gestão Dinâmica: 5% Banca (GAIN) / 3% (RECOVERY)
+                    margem = float(c.get('saldo_base', 1000.0)) * 0.05
+                    qty = margem / entry_price
+
+                    # --- EXECUÇÃO REAL NA EXCHANGE (PROTOCOLO SNIPER) ---
+                    if _is_order_execution_enabled(APP_MODE):
+                        exec_label = 'TESTNET' if APP_MODE == 'testnet' else 'REAL'
+                        print(f"🚀 [EXECUÇÃO {exec_label}] {c.get('nome')} - {side} {qty:.4f} {symbol}")
+
+                        # Validação pré-voo antes da execução
+                        try:
+                            preflight_ok, preflight_category, preflight_msg = broker.pre_flight_check(symbol, side.lower(), qty)
+                            if not preflight_ok:
+                                error_emoji = "🔴" if preflight_category == 'ERRO_CORRETORA' else "⚠️"
+                                print(f"{error_emoji} [PRÉ-VOO FALHOU] {c.get('nome')} | {preflight_category}: {preflight_msg}")
+                                print(f"   Ordem bloqueada por segurança - verifique API e configurações")
+                                # Continua para próximo cliente sem executar
+                                return
+
+                            print(f"✅ [PRÉ-VOO OK] {preflight_msg}")
+                        except AttributeError:
+                            # Broker não tem pre_flight_check (versão antiga)
+                            print(f"⚠️  [AVISO] Broker sem validação pré-voo - continuando execução")
+                        except Exception as preflight_err:
+                            print(f"⚠️  [ERRO PRÉ-VOO] {preflight_err} - continuando execução")
+
+                        # Execução real da ordem na exchange com tratamento CCXT robusto
+                        try:
+                            order_result = broker.execute_market_order(symbol, side.lower(), qty)
+
+                            if order_result:
+                                order_id = order_result.get('id', order_result.get('orderId', 'N/A'))
+                                print(f"✅ [ORDEM REAL EXECUTADA NA EXCHANGE] ID: {order_id}")
+                                print(f"   📊 Detalhes: {order_result}")
+
+                                # ✅ Executa Proteção: TP +100% margem (10% preço) / SL -50% margem (5% preço com 10x leverage)
+                                tp_sl_ok = broker.set_tp_sl_sniper(symbol, side.lower(), entry_price, qty)
+                                if tp_sl_ok:
+                                    print(f"✅ [TP/SL CONFIGURADO] Proteção ativa na exchange")
+                                else:
+                                    print(f"⚠️  [TP/SL FALHOU] Ordem aberta SEM proteção - monitore manualmente!")
+                            else:
+                                print(f"❌ [ORDEM FALHOU] {c.get('nome')} - Nenhum retorno da API")
+                                print(f"   🔍 DIAGNÓSTICO: Verifique credenciais API e permissões de trading")
+                        except Exception as order_err:
+                            # Importa ccxt para capturar erros específicos
+                            try:
+                                import ccxt
+                                if isinstance(order_err, ccxt.BaseError):
+                                    error_msg = str(order_err)
+                                    print(f"❌ ERRO REAL DA CORRETORA para o cliente {c.get('nome')}: {error_msg}")
+
+                                    # Diagnóstico específico de erros comuns
+                                    if "insufficient" in error_msg.lower() or "balance" in error_msg.lower():
+                                        print(f"   💰 SALDO INSUFICIENTE: Deposite fundos ou ajuste o tamanho da ordem")
+                                    elif "min" in error_msg.lower() or "lot size" in error_msg.lower():
+                                        print(f"   📏 TAMANHO MÍNIMO DE LOTE INVÁLIDO: Quantidade {qty:.4f} abaixo do mínimo")
+                                    elif "api" in error_msg.lower() or "auth" in error_msg.lower():
+                                        print(f"   🔑 ERRO DE AUTENTICAÇÃO: Verifique credenciais API")
+                                    elif "permission" in error_msg.lower():
+                                        print(f"   🚫 PERMISSÕES INSUFICIENTES: Habilite permissões de trading na API")
+                                else:
+                                    print(f"❌ [ERRO CRÍTICO NA EXECUÇÃO] {c.get('nome')}")
+                                    print(f"   📛 Erro da API: {order_err}")
+                            except ImportError:
+                                print(f"❌ [ERRO CRÍTICO NA EXECUÇÃO] {c.get('nome')}")
+                                print(f"   📛 Erro da API: {order_err}")
+                            print(f"   🔍 CAUSA: Provavelmente erro de autenticação, permissões ou saldo insuficiente")
+                            # Não continua - ordem não foi executada
+                    else:
+                        # Diagnóstico detalhado do bloqueio
+                        block_reasons = []
+                        if not ALLOW_ORDER_EXECUTION:
+                            mode_label = "ORDENS BLOQUEADAS"
+                            block_reasons.append("ALLOW_ORDER_EXECUTION=false")
+                        elif not ALLOW_REAL_TRADING:
+                            mode_label = "ORDENS BLOQUEADAS"
+                            block_reasons.append("ALLOW_REAL_TRADING=false")
+                        else:
+                            mode_label = "ORDENS BLOQUEADAS"
+                            block_reasons.append("Configuração de segurança ativa")
+
+                        reason_str = ", ".join(block_reasons)
+                        print(f"🔒 [{mode_label}] {c.get('nome')} - execução bloqueada: {reason_str}")
+                        print(f"💡 DIAGNÓSTICO: API conectada ✅ | Saldo visível ✅ | Execução bloqueada por: {reason_str}")
+
+                    # --- NOTIFICAÇÃO PRIVADA EDUCATIVA (SNIPER PROTOCOL) ---
+                    c_msg = (f"🎯 *SNIPER GIVALDO v60.1 - DISPARO CONFIRMADO*\n\n"
+                             f"👤 *Trader:* {c.get('nome')}\n"
+                             f"📦 *Ativo:* {symbol}\n"
+                             f"📈 *Lado:* {side}\n"
+                             f"💰 *Margem Alocada:* ${margem:.2f} (5% da banca)\n"
+                             f"📊 *Quantidade:* {qty:.4f}\n"
+                             f"🎯 *Preço Entrada:* ${entry_price:.2f}\n"
+                             f"🧠 *Confiança IA:* {confidence}%")
+
+                    c_tk = c.get('tg_token') or c.get('tg_api_key')
+                    c_chat = c.get('chat_id')
+                    if c_tk and c_chat:
+                        requests.post(f"https://api.telegram.org/bot{c_tk}/sendMessage",
+                                      json={"chat_id": c_chat, "text": c_msg, "parse_mode": "Markdown"})
+                except Exception as task_err:
+                    print(f"❌ [ERRO LOOP CLIENTE] {c.get('nome', 'DESCONHECIDO')}: {task_err}")
+
+            # Executa a task do cliente
+            task_cliente(cliente)
+
+    except Exception as bg_err:
+        print(f"❌ [ERRO THREAD BACKGROUND] {bg_err}")
+
+
 @app.route('/api/sniper/broadcast', methods=['POST'])
 def broadcast_sniper_signal():
     """🚀 RECEBE SINAL SNIPER BROADCAST E EXECUTA OPERAÇÃO
-    
+
     POST /api/sniper/broadcast
     {
         "symbol": "BTC/USDT",
@@ -2407,6 +2437,9 @@ def broadcast_sniper_signal():
         "confidence": 70,
         "reason": "Confluência 70% detectada"
     }
+
+    NOTA: Responde imediatamente (Status 200) e processa ordens em background
+    para evitar timeout do TradingView quando exchange está lenta.
     """
     slot_reserved = False
     try:
@@ -2421,7 +2454,7 @@ def broadcast_sniper_signal():
             return jsonify({"error": block_reason}), 409
         slot_reserved = True
         signal_snapshot = _build_last_sniper_signal(symbol, side, entry_price, confidence, reason)
-        
+
         # Atualiza central_state
         symbol_limpo = _limpar_simbolo(symbol)
         central_state['symbol'] = symbol_limpo
@@ -2430,7 +2463,7 @@ def broadcast_sniper_signal():
         central_state['last_sniper_signal'] = signal_snapshot
         _push_recent_sniper_signal(signal_snapshot)
         central_state['ia2_decision']['motivo'] = reason
-        
+
         # Registra operação no banco
         db.record_trade(
             client_id=1,
@@ -2446,7 +2479,7 @@ def broadcast_sniper_signal():
 
         # Atualiza ativo em aberto imediatamente para aparecer no frontend sem esperar o loop.
         _sync_active_trades_from_db()
-        
+
         print(f"\n{'='*60}")
         print(f"🚀 SINAL SNIPER BROADCAST RECEBIDO")
         print(f"{'='*60}")
@@ -2456,16 +2489,26 @@ def broadcast_sniper_signal():
         print(f"   🧠 Confiança: {confidence}%")
         print(f"   📝 Motivo: {reason}")
         print(f"{'='*60}\n")
-        
+
+        # 🔥 PROCESSA ORDENS EM BACKGROUND (não bloqueia resposta do webhook)
+        background_thread = threading.Thread(
+            target=_process_client_orders_background,
+            args=(symbol, side, entry_price, confidence, reason),
+            daemon=True
+        )
+        background_thread.start()
+        print(f"✅ [WEBHOOK] Thread de processamento iniciada em background")
+
+        # Responde IMEDIATAMENTE ao TradingView (Status 200: Sinal Recebido)
         return jsonify({
             "success": True,
-            "status": "✅ Sinal Broadcast Executado!",
+            "status": "✅ Sinal Recebido e Processando",
             "symbol": symbol_limpo,
             "side": side,
             "entry_price": entry_price,
             "confidence": confidence,
-            "message": f"Operação {side} {symbol} registrada com sucesso"
-        })
+            "message": f"Sinal {side} {symbol} recebido - Processando ordens dos clientes em background"
+        }), 200
     except Exception as e:
         print(f"❌ Erro ao processar broadcast: {e}")
         return jsonify({"error": str(e)}), 400
