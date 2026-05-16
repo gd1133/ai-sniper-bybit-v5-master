@@ -996,13 +996,18 @@ const App = () => {
                   is_testnet: false,
                   exchange: formExchange,
                 };
+                console.log('🔵 [FRONTEND] Iniciando salvamento do cliente:', { nome: payload.nome, exchange: payload.exchange, api_base: API_BASE });
                 try {
                   // Se id definido, atualiza; caso contrário cria novo
                   if (addFormFields.id) {
+                    console.log('🔵 [FRONTEND] Atualizando cliente existente ID:', addFormFields.id);
                     const res = await fetch(`${API_BASE}/api/cliente/${addFormFields.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                    console.log('🔵 [FRONTEND] Resposta do servidor (PUT):', res.status, res.statusText);
                      const json = await res.json();
+                     console.log('🔵 [FRONTEND] JSON recebido (PUT):', json);
                      if (res.ok) {
                        if (json.client) {
+                         console.log('✅ [FRONTEND] Cliente recebido do servidor:', json.client);
                          upsertInvestor(json.client);
                          setAddFormFields(prev => ({ ...prev, id: json.client.id, saldo_base: json.client.saldo_base ?? prev.saldo_base }));
                        }
@@ -1012,26 +1017,38 @@ const App = () => {
                        setAddFormMsg({ type: json.valid === false ? 'error' : 'success', text: msgAtualiza });
                         const invRes = await fetch(`${API_BASE}/api/investidores`); if (invRes.ok) setInvestidores((await invRes.json()).map(normalizeInvestorRecord));
                      } else {
+                      console.error('❌ [FRONTEND] Erro na resposta do servidor:', json);
                       setAddFormMsg({ type: 'error', text: json.error || 'Erro ao atualizar' });
                     }
                   } else {
+                    console.log('🔵 [FRONTEND] Criando novo cliente via /api/vincular_cliente');
                     const res = await fetch(`${API_BASE}/api/vincular_cliente`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                    console.log('🔵 [FRONTEND] Resposta do servidor (POST):', res.status, res.statusText);
                      const json = await res.json();
+                     console.log('🔵 [FRONTEND] JSON recebido (POST):', json);
                      if (res.ok && json.status === 'sucesso') {
                        if (json.client) {
+                         console.log('✅ [FRONTEND] Cliente criado com sucesso:', json.client);
                          upsertInvestor(json.client);
                          setAddFormFields(prev => ({ ...prev, id: json.client.id, saldo_base: json.client.saldo_base ?? prev.saldo_base }));
+                       } else {
+                         console.warn('⚠️ [FRONTEND] Sucesso mas sem dados do cliente na resposta');
                        }
                        const msgSalvo = json.valid === false
                          ? `Salvo, mas API inválida: ${json.api_error || 'verifique as chaves'}`
                          : (json.msg || 'Investidor salvo com sucesso');
                        setAddFormMsg({ type: json.valid === false ? 'error' : 'success', text: msgSalvo });
-                        try { const invRes = await fetch(`${API_BASE}/api/investidores`); if (invRes.ok) setInvestidores((await invRes.json()).map(normalizeInvestorRecord)); } catch (e) { }
+                        try { const invRes = await fetch(`${API_BASE}/api/investidores`); if (invRes.ok) setInvestidores((await invRes.json()).map(normalizeInvestorRecord)); } catch (e) { console.error('❌ [FRONTEND] Erro ao recarregar lista:', e); }
                      } else {
+                      console.error('❌ [FRONTEND] Erro na resposta do servidor:', json);
                       setAddFormMsg({ type: 'error', text: json.msg || json.error || 'Erro ao salvar investidor' });
                     }
                   }
-                } catch (err) { console.error('Erro ao vincular', err); setAddFormMsg({ type: 'error', text: String(err) }); }
+                } catch (err) {
+                  console.error('❌ [FRONTEND] Erro de rede ou exceção ao vincular:', err);
+                  const errorMsg = err.message || String(err);
+                  setAddFormMsg({ type: 'error', text: `Erro de conexão: ${errorMsg}. Verifique se o servidor está acessível em ${API_BASE}` });
+                }
                 setAddFormSaving(false);
                 // NÃO fecha automaticamente o modal — o usuário pode revisar/editar ou fechar manualmente
               }}>
