@@ -6,29 +6,36 @@ from src.config import get_environment_config
 # DB path with fallback logic for writable locations
 def _get_db_path():
     """
-    Determine writable database path with fallbacks:
-    1. SQLITE_DB_PATH environment variable
-    2. ./database.db (repository root)
-    3. /tmp/ai-sniper/database.db (last resort)
+    Determine writable database path with fallbacks (always returns ABSOLUTE path):
+    1. SQLITE_DB_PATH environment variable (converted to absolute)
+    2. ./database.db (repository root, converted to absolute)
+    3. /tmp/ai-sniper/database.db (absolute path as fallback)
     """
     env_path = os.getenv('SQLITE_DB_PATH')
     if env_path:
-        return env_path
+        # Convert to absolute path if relative
+        abs_env_path = os.path.abspath(env_path)
+        print(f"📂 [DATABASE] Usando SQLITE_DB_PATH: {abs_env_path}")
+        return abs_env_path
 
-    # Try repository root
-    repo_path = os.path.join(os.getcwd(), 'database.db')
+    # Try repository root (convert to absolute)
+    repo_path = os.path.abspath(os.path.join(os.getcwd(), 'database.db'))
     try:
         # Test if we can write to this location
         test_dir = os.path.dirname(repo_path)
         if os.access(test_dir, os.W_OK):
+            print(f"📂 [DATABASE] Usando caminho do repositório: {repo_path}")
             return repo_path
     except (OSError, IOError):
         pass
 
-    # Fallback to /tmp
-    return '/tmp/ai-sniper/database.db'
+    # Fallback to /tmp (absolute path)
+    fallback_path = '/tmp/ai-sniper/database.db'
+    print(f"📂 [DATABASE] Usando caminho de fallback: {fallback_path}")
+    return fallback_path
 
 DB_PATH = _get_db_path()
+print(f"✅ [DATABASE] Caminho absoluto do banco: {DB_PATH}")
 # Sistema opera apenas em modo REAL
 VALID_ACCOUNT_MODES = {'real'}
 VALID_OPERATION_MODES = {'real'}
