@@ -1583,6 +1583,17 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
 
         # 2. Loop de Execução para Clientes Cadastrados
         clientes = _get_registered_clients(active_only=True)
+
+        print(f"\n🔍 [BROADCAST] Iniciando execução para {len(clientes)} cliente(s) ativo(s)")
+        print(f"   💼 ALLOW_ORDER_EXECUTION: {ALLOW_ORDER_EXECUTION}")
+        print(f"   🔐 ALLOW_REAL_TRADING: {ALLOW_REAL_TRADING}")
+        print(f"   🎯 Execução habilitada: {_is_order_execution_enabled(APP_MODE)}")
+
+        if not clientes:
+            print(f"⚠️  [BROADCAST] NENHUM CLIENTE ATIVO ENCONTRADO!")
+            print(f"   💡 Cadastre clientes ativos para executar ordens automáticas")
+            print(f"   📝 Use a interface web em /api/clients para adicionar clientes")
+
         for cliente in clientes:
             def task_cliente(c):
                 try:
@@ -2445,6 +2456,32 @@ def broadcast_sniper_signal():
 
 if __name__ == "__main__":
     render_port = int(os.getenv("PORT", "5000"))
+
+    # DIAGNÓSTICO COMPLETO DE CONFIGURAÇÃO
+    print("\n" + "="*70)
+    print("🔍 DIAGNÓSTICO DE CONFIGURAÇÃO DO SISTEMA")
+    print("="*70)
+    print(f"📌 ENVIRONMENT: {ENV_CONFIG.name}")
+    print(f"📌 ALLOW_ORDER_EXECUTION: {ALLOW_ORDER_EXECUTION}")
+    print(f"📌 ALLOW_REAL_TRADING: {ALLOW_REAL_TRADING}")
+    print(f"📌 USE_TESTNET: {ENV_CONFIG.use_testnet}")
+    print(f"📌 APP_MODE: {APP_MODE}")
+    print(f"📌 Execução de ordens: {'✅ HABILITADA' if _is_order_execution_enabled(APP_MODE) else '❌ BLOQUEADA'}")
+
+    # Verificar clientes cadastrados
+    try:
+        clientes_ativos = _get_registered_clients(active_only=True)
+        print(f"📌 Clientes ativos: {len(clientes_ativos)}")
+        if clientes_ativos:
+            for idx, c in enumerate(clientes_ativos, 1):
+                print(f"   {idx}. {c.get('nome')} - Exchange: {c.get('exchange', 'bybit')}")
+        else:
+            print("   ⚠️  NENHUM CLIENTE ATIVO CADASTRADO!")
+            print("   💡 Cadastre clientes em /api/clients para receber ordens automáticas")
+    except Exception as e:
+        print(f"   ⚠️  Erro ao verificar clientes: {e}")
+
+    print("="*70 + "\n")
 
     start_runtime_services()
 
