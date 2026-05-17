@@ -82,6 +82,15 @@ def _calculate_order_quantity(balance, entry_price):
     margin = _calculate_order_margin(balance)
     safe_entry_price = float(entry_price or 0.0)
     qty = (margin / safe_entry_price) if margin > 0 and safe_entry_price > 0 else 0.0
+
+    # 🛡️ TRAVA DE SEGURANÇA: Valida tamanho mínimo de ordem
+    # Se margem calculada for muito baixa, força mínimo operacional
+    MIN_MARGIN_USD = 5.0  # Piso mínimo de $5 USD de margem
+    if 0 < margin < MIN_MARGIN_USD:
+        print(f"⚠️  [RISK MANAGEMENT] Margem calculada (${margin:.2f}) abaixo do mínimo. Ajustando para ${MIN_MARGIN_USD:.2f}")
+        margin = MIN_MARGIN_USD
+        qty = (margin / safe_entry_price) if safe_entry_price > 0 else 0.0
+
     return margin, qty
 
 
@@ -91,6 +100,15 @@ def _calculate_webhook_order_quantity(balance, entry_price):
     margin = safe_balance * WEBHOOK_ORDER_MARGIN_PCT
     safe_entry_price = float(entry_price or 0.0)
     qty = (margin / safe_entry_price) if margin > 0 and safe_entry_price > 0 else 0.0
+
+    # 🛡️ TRAVA DE SEGURANÇA: Valida tamanho mínimo de ordem
+    # Se margem calculada for muito baixa, força mínimo operacional
+    MIN_MARGIN_USD = 5.0  # Piso mínimo de $5 USD de margem
+    if 0 < margin < MIN_MARGIN_USD:
+        print(f"⚠️  [RISK MANAGEMENT] Margem calculada (${margin:.2f}) abaixo do mínimo. Ajustando para ${MIN_MARGIN_USD:.2f}")
+        margin = MIN_MARGIN_USD
+        qty = (margin / safe_entry_price) if safe_entry_price > 0 else 0.0
+
     return margin, qty
 
 
