@@ -123,6 +123,20 @@ if __name__ == '__main__':
             print(f"❌ Alerta de autenticação não foi impresso: {output}")
             raise SystemExit(6)
 
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            try:
+                auth_client.execute_market_order('BTC/USDT:USDT', 'buy', 0.25, raise_on_error=True)
+            except RuntimeError as exc:
+                raw_error = str(exc)
+            else:
+                print('❌ raise_on_error=True deveria propagar retCode bruto da Bybit')
+                raise SystemExit(7)
+
+        if 'API key is invalid' not in raw_error:
+            print(f"❌ Erro bruto inesperado com raise_on_error=True: {raw_error}")
+            raise SystemExit(8)
+
         print('✅ Fluxo V5 de ordem, insurance e retCode 10003 OK')
         raise SystemExit(0)
     finally:

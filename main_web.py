@@ -46,6 +46,12 @@ ENVIRONMENT = ENV_CONFIG.name
 print(f"[SISTEMA] Iniciando em modo: {ENVIRONMENT}")
 
 DEFAULT_RISK_PER_TRADE_PCT = 15.0
+WEBHOOK_ORDER_MARGIN_PCT = 0.15
+
+
+def _strict_env_bool(name, default):
+    """Converte flags do Railway estritamente: apenas 'true' ativa."""
+    return str(os.getenv(name, default) or default).strip().lower() == 'true'
 
 
 def _load_risk_per_trade_pct():
@@ -77,6 +83,21 @@ def _calculate_order_quantity(balance, entry_price):
     safe_entry_price = float(entry_price or 0.0)
     qty = (margin / safe_entry_price) if margin > 0 and safe_entry_price > 0 else 0.0
     return margin, qty
+
+
+def _calculate_webhook_order_quantity(balance, entry_price):
+    """Força 15% da banca no broadcast do webhook para evitar lotes mínimos."""
+    safe_balance = max(float(balance or 0.0), 0.0)
+    margin = safe_balance * WEBHOOK_ORDER_MARGIN_PCT
+    safe_entry_price = float(entry_price or 0.0)
+    qty = (margin / safe_entry_price) if margin > 0 and safe_entry_price > 0 else 0.0
+    return margin, qty
+
+
+def _log_raw_broker_error(cliente_nome, error, context='ERRO ORDEM REAL'):
+    error_type = type(error).__name__
+    print(f"❌ [{context}] {cliente_nome}: {error_type}: {error}")
+    print(f"   📛 RAW: {repr(error)}")
 
 
 def _log_risk_management_mode():
@@ -161,7 +182,8 @@ db.init_db()
 
 APP_MODE = _normalize_operation_mode(db.get_operation_mode())
 ALLOW_ORDER_EXECUTION = ENV_CONFIG.allow_order_execution
-ALLOW_REAL_TRADING = ENV_CONFIG.allow_real_trading
+ALLOW_REAL_TRADING = _strict_env_bool('ALLOW_REAL_TRADING', 'false')
+USE_TESTNET = _strict_env_bool('USE_TESTNET', 'true')
 
 # --- PROTOCOLO SNIPER - Defaults carregados antes de central_state ---
 RISK_MODE = 'conservative'       # 'conservative' = 1 moeda | 'aggressive' = 5 moedas
@@ -650,9 +672,8 @@ def _make_broker(client):
     broker_cls = _ensure_broker_class(exchange)
     account_mode = _normalize_account_mode(client.get('account_mode', client.get('is_testnet')))
 
-    # FORÇAR MODO REAL: Sistema opera apenas com contas reais
-    # Ignora qualquer flag de testnet do cliente - sempre usa produção
-    use_testnet = False
+    # Respeita estritamente as flags do Railway para evitar execução silenciosa no ambiente errado.
+    use_testnet = USE_TESTNET
 
     print(f"🔧 [BROKER INIT] Cliente: {client.get('nome')} | Exchange: {exchange} | Testnet: {use_testnet} | ALLOW_REAL_TRADING: {ALLOW_REAL_TRADING}")
 
@@ -2353,29 +2374,35 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
         for cliente in clientes:
             def task_cliente(c):
                 try:
-                    account_mode = _normalize_account_mode(c.get('account_mode', c.get('is_testnet')))
+                    cliente_nome = c.get('nome', 'DESCONHECIDO')
+                    ticker = symbol
                     broker = _make_broker(c)
 
-                    saldo_sincronizado = float(c.get('saldo_base', 1000.0) or 0.0)
-                    margem, qty = _calculate_order_quantity(saldo_sincronizado, entry_price)
+                    banca = float(c.get('saldo_base', 1000.0) or 0.0)
+                    margem, qty = _calculate_webhook_order_quantity(banca, entry_price)
                     if margem <= 0 or qty <= 0:
                         print(
-                            f"⚠️  [RISK MANAGEMENT] {c.get('nome')} com cálculo inválido "
-                            f"(saldo={saldo_sincronizado:.2f}, preço={entry_price:.8f}, margem={margem:.8f}, qty={qty:.8f})."
+                            f"⚠️  [RISK MANAGEMENT] {cliente_nome} com cálculo inválido "
+                            f"(saldo={banca:.2f}, preço={entry_price:.8f}, margem={margem:.8f}, qty={qty:.8f})."
                         )
                         return
 
                     # --- EXECUÇÃO REAL NA EXCHANGE (PROTOCOLO SNIPER) ---
                     if _is_order_execution_enabled(APP_MODE):
-                        exec_label = 'TESTNET' if APP_MODE == 'testnet' else 'REAL'
-                        print(f"🚀 [EXECUÇÃO {exec_label}] {c.get('nome')} - {side} {qty:.4f} {symbol}")
+                        exec_label = 'TESTNET' if USE_TESTNET else 'REAL'
+                        print(f"🚀 [EXECUÇÃO {exec_label}] {cliente_nome} - {side} {qty:.4f} {ticker}")
+                        print(f"🔮 Enviando Ordem Real: Cliente={cliente_nome} | Margem={banca * WEBHOOK_ORDER_MARGIN_PCT} | Par={ticker}")
+                        print(
+                            f"   📤 Payload: exchange={str(c.get('exchange') or 'bybit').strip().lower()} "
+                            f"| side={side.lower()} | qty={qty:.8f} | entry={entry_price:.8f} | testnet={USE_TESTNET}"
+                        )
 
                         # Validação pré-voo antes da execução
                         try:
                             preflight_ok, preflight_category, preflight_msg = broker.pre_flight_check(symbol, side.lower(), qty)
                             if not preflight_ok:
                                 error_emoji = "🔴" if preflight_category == 'ERRO_CORRETORA' else "⚠️"
-                                print(f"{error_emoji} [PRÉ-VOO FALHOU] {c.get('nome')} | {preflight_category}: {preflight_msg}")
+                                print(f"{error_emoji} [PRÉ-VOO FALHOU] {cliente_nome} | {preflight_category}: {preflight_msg}")
                                 print(f"   Ordem bloqueada por segurança - verifique API e configurações")
                                 # Continua para próximo cliente sem executar
                                 return
@@ -2385,11 +2412,19 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                             # Broker não tem pre_flight_check (versão antiga)
                             print(f"⚠️  [AVISO] Broker sem validação pré-voo - continuando execução")
                         except Exception as preflight_err:
+                            _log_raw_broker_error(cliente_nome, preflight_err, context='ERRO PRÉ-VOO REAL')
+                            if ALLOW_REAL_TRADING:
+                                return
                             print(f"⚠️  [ERRO PRÉ-VOO] {preflight_err} - continuando execução")
 
                         # Execução real da ordem na exchange com tratamento CCXT robusto
                         try:
-                            order_result = broker.execute_market_order(symbol, side.lower(), qty)
+                            order_result = broker.execute_market_order(
+                                symbol,
+                                side.lower(),
+                                qty,
+                                raise_on_error=ALLOW_REAL_TRADING,
+                            )
 
                             if order_result:
                                 order_id = order_result.get('id', order_result.get('orderId', 'N/A'))
@@ -2403,33 +2438,18 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                                 else:
                                     print(f"⚠️  [TP/SL FALHOU] Ordem aberta SEM proteção - monitore manualmente!")
                             else:
+                                if ALLOW_REAL_TRADING:
+                                    raise RuntimeError(
+                                        f"Resposta vazia da corretora ao enviar ordem real "
+                                        f"({ticker}, side={side.lower()}, qty={qty:.8f})"
+                                    )
                                 print(f"❌ [ORDEM FALHOU] {c.get('nome')} - Nenhum retorno da API")
                                 print(f"   🔍 DIAGNÓSTICO: Verifique credenciais API e permissões de trading")
                         except Exception as order_err:
-                            # Importa ccxt para capturar erros específicos
-                            try:
-                                import ccxt
-                                if isinstance(order_err, ccxt.BaseError):
-                                    error_msg = str(order_err)
-                                    print(f"❌ ERRO REAL DA CORRETORA para o cliente {c.get('nome')}: {error_msg}")
-
-                                    # Diagnóstico específico de erros comuns
-                                    if "insufficient" in error_msg.lower() or "balance" in error_msg.lower():
-                                        print(f"   💰 SALDO INSUFICIENTE: Deposite fundos ou ajuste o tamanho da ordem")
-                                    elif "min" in error_msg.lower() or "lot size" in error_msg.lower():
-                                        print(f"   📏 TAMANHO MÍNIMO DE LOTE INVÁLIDO: Quantidade {qty:.4f} abaixo do mínimo")
-                                    elif "api" in error_msg.lower() or "auth" in error_msg.lower():
-                                        print(f"   🔑 ERRO DE AUTENTICAÇÃO: Verifique credenciais API")
-                                    elif "permission" in error_msg.lower():
-                                        print(f"   🚫 PERMISSÕES INSUFICIENTES: Habilite permissões de trading na API")
-                                else:
-                                    print(f"❌ [ERRO CRÍTICO NA EXECUÇÃO] {c.get('nome')}")
-                                    print(f"   📛 Erro da API: {order_err}")
-                            except ImportError:
-                                print(f"❌ [ERRO CRÍTICO NA EXECUÇÃO] {c.get('nome')}")
-                                print(f"   📛 Erro da API: {order_err}")
+                            _log_raw_broker_error(cliente_nome, order_err)
+                            if ALLOW_REAL_TRADING:
+                                return
                             print(f"   🔍 CAUSA: Provavelmente erro de autenticação, permissões ou saldo insuficiente")
-                            # Não continua - ordem não foi executada
                     else:
                         # Diagnóstico detalhado do bloqueio
                         block_reasons = []
@@ -2463,7 +2483,11 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                         requests.post(f"https://api.telegram.org/bot{c_tk}/sendMessage",
                                       json={"chat_id": c_chat, "text": c_msg, "parse_mode": "Markdown"})
                 except Exception as task_err:
-                    print(f"❌ [ERRO LOOP CLIENTE] {c.get('nome', 'DESCONHECIDO')}: {task_err}")
+                    cliente_nome = c.get('nome', 'DESCONHECIDO')
+                    if ALLOW_REAL_TRADING:
+                        _log_raw_broker_error(cliente_nome, task_err, context='ERRO LOOP CLIENTE REAL')
+                    else:
+                        print(f"❌ [ERRO LOOP CLIENTE] {cliente_nome}: {task_err}")
 
             # Executa a task do cliente
             task_cliente(cliente)
@@ -2573,7 +2597,7 @@ if __name__ == "__main__":
     print(f"📌 ENVIRONMENT: {ENV_CONFIG.name}")
     print(f"📌 ALLOW_ORDER_EXECUTION: {ALLOW_ORDER_EXECUTION}")
     print(f"📌 ALLOW_REAL_TRADING: {ALLOW_REAL_TRADING}")
-    print(f"📌 USE_TESTNET: {ENV_CONFIG.use_testnet}")
+    print(f"📌 USE_TESTNET: {USE_TESTNET}")
     print(f"📌 APP_MODE: {APP_MODE}")
     print(f"📌 Execução de ordens: {'✅ HABILITADA' if _is_order_execution_enabled(APP_MODE) else '❌ BLOQUEADA'}")
 

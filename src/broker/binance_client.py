@@ -238,11 +238,13 @@ class BinanceClient:
             print(f"[ERRO BINANCE] Preço {symbol} falhou: {e}")
             return self.cache_ticker[symbol][0] if symbol in self.cache_ticker else 0.0
 
-    def execute_market_order(self, symbol, side, qty):
+    def execute_market_order(self, symbol, side, qty, raise_on_error=False):
         """Executa ordem a mercado na Binance Futures."""
         try:
             if not self.authenticated:
                 print('[ERRO BINANCE] Ordem não executada: sem credenciais.')
+                if raise_on_error:
+                    raise RuntimeError('Cliente sem credenciais autenticadas para enviar ordem na Binance.')
                 return None
 
             print(f"🔥 [BINANCE ORDER] {side.upper()} {qty} em {symbol}")
@@ -302,6 +304,8 @@ class BinanceClient:
                 elif "451" in error_details:
                     print(f"   🚫 HTTP 451: Região bloqueada - tentando endpoints alternativos")
 
+            if raise_on_error:
+                raise
             return None
 
     def set_tp_sl_sniper(self, symbol, side, entry_price, position_qty):
