@@ -252,17 +252,17 @@ class GroqValidator:
             # ⚙️ MODO NORMAL: Tenta usar Groq + Gemini
             tactical_score, tactical_action = self.get_tactical_signal(tech_data, symbol)
             strategic_score, strategic_motivo, strategic_action, strategic_fallback = self.get_strategic_signal(tech_data, symbol)
-            
-            # Se ambos falharem (rate limit), ativa fallback automático
+
+            # DESATIVADO: Fallback automático removido para expor erros de API real
+            # Se ambos falharem (rate limit), retorna erro ao invés de simular
             if tactical_score <= 45 and strategic_fallback:
-                print(f"🚨 [AUTO-FALLBACK] Ambos APIs retornaram fallback. Ativando 3º Cérebro...")
-                tactical_score = local_score
-                strategic_score = local_score
-                tactical_action = 'WAIT'
-                strategic_action = 'WAIT'
-                strategic_motivo = "Fallback automático: Usando 3º Cérebro (Local)"
-                fallback_local_active = True
-                local_fallback_side = self._resolve_local_fallback_side(tech_data)
+                print(f"❌ [ERRO API] Ambos APIs falharam. Abortando operação para expor erro real.")
+                return {
+                    "probabilidade": 0,
+                    "decisao": "ABORTAR",
+                    "motivo": "Erro de API: Groq e Gemini falharam. Verifique credenciais e rate limits.",
+                    "brain_used": "ERROR"
+                }
 
         tactical_action = self._normalize_side(tactical_action)
         strategic_action = self._normalize_side(strategic_action)

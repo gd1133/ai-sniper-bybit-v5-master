@@ -533,32 +533,41 @@ class BybitClient:
     def set_tp_sl_sniper(self, symbol, side, entry_price, position_qty):
         """
         🎯 REGRA 100/3 PROTOCOL - SETAGEM AUTOMÁTICA DE TP/SL
-        
+
         Take Profit: +100% de lucro sobre a margem
         Stop Loss: -3% de perda fixa (TRAVA INSTITUCIONAL)
-        
+
         Funciona pós-entrada para garantir proteção de capital.
         """
         try:
             if not self.authenticated:
                 print(f"❌ [TP/SL] Não autenticado. Proteção de capital FALHADA.")
                 return False
-            
+
             # Cálculo de TP/SL (Bybit usa preços absolutos, não percentuais)
             tp_price = entry_price * 1.10  # +10% = +100% de margem (alavancagem 10x)
             sl_price = entry_price * 0.97  # -3% = Stop Loss Institucional
-            
+
+            # 🔧 FORMATAÇÃO ESTRITA: Usa price_to_precision do CCXT para evitar rejeição
+            price_to_precision = getattr(self.exchange, 'price_to_precision', None)
+            if callable(price_to_precision):
+                try:
+                    tp_price = float(price_to_precision(symbol, tp_price))
+                    sl_price = float(price_to_precision(symbol, sl_price))
+                except Exception as precision_error:
+                    print(f"⚠️ [TP/SL] price_to_precision falhou: {precision_error} - usando valores brutos")
+
             print(f"🛡️  [PROTEÇÃO SNIPER] {symbol}")
             print(f"   📍 Entrada: ${entry_price:.2f}")
             print(f"   ✅ TP: ${tp_price:.2f} (+100% margem)")
             print(f"   ❌ SL: ${sl_price:.2f} (-3% trava)")
-            
+
             params = {
                 'category': 'linear',
                 'takeProfit': {'triggerPrice': str(tp_price)},
                 'stopLoss': {'triggerPrice': str(sl_price)}
             }
-            
+
             # Executa ordem de TP/SL em posição aberta
             order = self.exchange.create_order(
                 symbol=symbol,
@@ -567,10 +576,10 @@ class BybitClient:
                 amount=position_qty,
                 params=params
             )
-            
+
             print(f"✅ [TP/SL SETADO] Ordem protegida no Sistema Sniper")
             return True
-            
+
         except Exception as e:
             print(f"⚠️  [TP/SL FALHOU] {e}")
             return False

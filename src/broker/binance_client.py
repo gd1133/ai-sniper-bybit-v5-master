@@ -232,6 +232,47 @@ class BinanceClient:
             print(f"[ERRO BINANCE] Preço {symbol} falhou: {e}")
             return self.cache_ticker[symbol][0] if symbol in self.cache_ticker else 0.0
 
+    def _normalize_order_qty(self, symbol, qty):
+        """Normaliza quantidade para precisão aceita pela Binance, evitando Qty invalid."""
+        from decimal import Decimal, ROUND_DOWN
+
+        try:
+            qty_value = float(qty)
+        except (TypeError, ValueError):
+            raise ValueError(f"Quantidade inválida: {qty}")
+
+        if qty_value <= 0:
+            raise ValueError(f"Quantidade deve ser positiva: {qty}")
+
+        amount_to_precision = getattr(self.exchange, 'amount_to_precision', None)
+        if callable(amount_to_precision):
+            try:
+                precise_qty = amount_to_precision(symbol, qty_value)
+                if precise_qty is not None and str(precise_qty).strip():
+                    return str(precise_qty)
+            except (TypeError, ValueError, AttributeError) as precision_error:
+                print(f"⚠️ [BINANCE QTY] amount_to_precision falhou para {symbol}: {precision_error}")
+
+        # Fallback: usa precisão do mercado
+        decimals = 3  # Default para Binance Futures
+        market = None
+        try:
+            market_lookup = getattr(self.exchange, 'market', None)
+            if callable(market_lookup):
+                market = market_lookup(symbol)
+            elif isinstance(getattr(self.exchange, 'markets', None), dict):
+                market = self.exchange.markets.get(symbol)
+            market_precision = (market or {}).get('precision', {}).get('amount')
+            if isinstance(market_precision, (int, float)) and market_precision >= 0:
+                decimals = int(market_precision)
+        except (TypeError, ValueError, AttributeError, KeyError):
+            pass
+
+        step = Decimal('1').scaleb(-decimals)
+        quantized = Decimal(str(qty_value)).quantize(step, rounding=ROUND_DOWN)
+        normalized = format(quantized, 'f')
+        return normalized.rstrip('0').rstrip('.') if '.' in normalized else normalized
+
     def execute_market_order(self, symbol, side, qty, raise_on_error=False):
         """Executa ordem a mercado na Binance Futures."""
         try:
@@ -241,14 +282,17 @@ class BinanceClient:
                     raise RuntimeError('Cliente sem credenciais autenticadas para enviar ordem na Binance.')
                 return None
 
-            print(f"🔥 [BINANCE ORDER] {side.upper()} {qty} em {symbol}")
+            # 🔧 FORMATAÇÃO ESTRITA: Normaliza quantidade usando CCXT precision
+            normalized_qty = self._normalize_order_qty(symbol, qty)
+
+            print(f"🔥 [BINANCE ORDER] {side.upper()} {normalized_qty} em {symbol}")
             print(f"   🌐 Endpoint: {self.active_endpoint}")
             print(f"   🔐 Autenticado: {self.authenticated}")
             print(f"   🧪 Modo Testnet: {self.testnet}")
 
-            print(f"   📤 Enviando ordem via CCXT: symbol={symbol}, type=market, side={side}, qty={qty}")
+            print(f"   📤 Enviando ordem via CCXT: symbol={symbol}, type=market, side={side}, qty={normalized_qty}")
             order = self._call_with_451_retry(
-                lambda: self.exchange.create_order(symbol, 'market', side, qty)
+                lambda: self.exchange.create_order(symbol, 'market', side, float(normalized_qty))
             )
             print(f"   📥 Resposta da API Binance: {order}")
             print(f"✅ [BINANCE] Ordem criada com sucesso - ID: {order.get('id', 'N/A')}")
