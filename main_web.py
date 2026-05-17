@@ -46,7 +46,7 @@ ENVIRONMENT = ENV_CONFIG.name
 print(f"[SISTEMA] Iniciando em modo: {ENVIRONMENT}")
 
 DEFAULT_RISK_PER_TRADE_PCT = 15.0
-WEBHOOK_ORDER_MARGIN_PCT = 0.15
+WEBHOOK_ORDER_MARGIN_PCT = DEFAULT_RISK_PER_TRADE_PCT / 100
 
 
 def _strict_env_bool(name, default):
@@ -2391,7 +2391,7 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                     if _is_order_execution_enabled(APP_MODE):
                         exec_label = 'TESTNET' if USE_TESTNET else 'REAL'
                         print(f"🚀 [EXECUÇÃO {exec_label}] {cliente_nome} - {side} {qty:.4f} {ticker}")
-                        print(f"🔮 Enviando Ordem Real: Cliente={cliente_nome} | Margem={banca * WEBHOOK_ORDER_MARGIN_PCT} | Par={ticker}")
+                        print(f"🔮 Enviando Ordem Real: Cliente={cliente_nome} | Margem={margem} | Par={ticker}")
                         print(
                             f"   📤 Payload: exchange={str(c.get('exchange') or 'bybit').strip().lower()} "
                             f"| side={side.lower()} | qty={qty:.8f} | entry={entry_price:.8f} | testnet={USE_TESTNET}"

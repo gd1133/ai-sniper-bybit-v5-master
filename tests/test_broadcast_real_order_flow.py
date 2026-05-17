@@ -95,7 +95,8 @@ if __name__ == '__main__':
                 raise SystemExit(1)
 
             execute_call = broker.execute_calls[-1]
-            if round(execute_call['qty'], 8) != 0.003:
+            expected_qty = round((1000.0 * 0.15) / 50000.0, 8)
+            if round(execute_call['qty'], 8) != expected_qty:
                 print(f"❌ Quantidade inválida para 15% da banca: {execute_call}")
                 raise SystemExit(2)
 
