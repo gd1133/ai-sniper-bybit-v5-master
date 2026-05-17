@@ -280,6 +280,7 @@ def calculate_entry_qty(client: BybitClient, price: float, entry_pct: float) -> 
       - Valor de entrada = entry_pct do saldo USDT (15 % por padrão)
       - Quantidade = valor_entrada / preço_atual
       - Se saldo ≤ 0 → operação abortada (retorna 0.0)
+      - Piso mínimo de $3 USD de margem (mínimo aceito pela Bybit V5)
     """
     balance = client.get_balance()
 
@@ -289,6 +290,14 @@ def calculate_entry_qty(client: BybitClient, price: float, entry_pct: float) -> 
         return 0.0
 
     entry_value = balance * entry_pct
+
+    # 🛡️ TRAVA DE SEGURANÇA: Valida tamanho mínimo de ordem
+    # Se margem calculada for muito baixa, força mínimo operacional
+    MIN_MARGIN_USD = 3.0  # Piso mínimo de $3 USD de margem (mínimo aceito pela Bybit V5)
+    if 0 < entry_value < MIN_MARGIN_USD:
+        print(f"⚠️  [RISK MANAGEMENT] Margem calculada (${entry_value:.2f}) abaixo do mínimo. Ajustando para ${MIN_MARGIN_USD:.2f}")
+        entry_value = MIN_MARGIN_USD
+
     qty = entry_value / price if price > 0 else 0.0
 
     print(f"💰 [RISCO] Saldo={balance:.2f} USDT | Entrada={entry_value:.2f} USDT ({entry_pct*100:.0f}%) | Qty≈{qty:.4f}")
