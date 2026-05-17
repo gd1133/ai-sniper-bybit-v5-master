@@ -235,12 +235,23 @@ class BybitClient:
                 precise_qty = amount_to_precision(symbol, qty_value)
                 if precise_qty is not None and str(precise_qty).strip():
                     return str(precise_qty)
-            except Exception as precision_error:
+            except (TypeError, ValueError, AttributeError) as precision_error:
                 print(f"⚠️ [BYBIT QTY] amount_to_precision falhou para {symbol}: {precision_error}")
 
         decimals = 2
-        if 'BTC' in str(symbol or '').upper():
-            decimals = 3
+        market = None
+        try:
+            market_lookup = getattr(self.exchange, 'market', None)
+            if callable(market_lookup):
+                market = market_lookup(symbol)
+            elif isinstance(getattr(self.exchange, 'markets', None), dict):
+                market = self.exchange.markets.get(symbol)
+            market_precision = (market or {}).get('precision', {}).get('amount')
+            if isinstance(market_precision, (int, float)) and market_precision >= 0:
+                decimals = int(market_precision)
+        except (TypeError, ValueError, AttributeError, KeyError):
+            pass
+
         step = Decimal('1').scaleb(-decimals)
         quantized = Decimal(str(qty_value)).quantize(step, rounding=ROUND_DOWN)
         normalized = format(quantized, 'f')

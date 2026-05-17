@@ -7,6 +7,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from src.broker import bybit_client
 
+TEST_QTY_WITH_HIGH_PRECISION = 2.6649367268590924
+
 
 class _FakeExchange:
     def __init__(self, cfg):
@@ -123,7 +125,7 @@ if __name__ == '__main__':
             print(f"❌ test_connection deveria validar fundo de seguros: ok={ok} message={message}")
             raise SystemExit(1)
 
-        order = client.execute_market_order('BTC/USDT:USDT', 'buy', 2.6649367268590924)
+        order = client.execute_market_order('BTC/USDT:USDT', 'buy', TEST_QTY_WITH_HIGH_PRECISION)
         if not order or order.get('id') != 'oid-123' or order.get('route') != 'v5/order/create':
             print(f"❌ Ordem V5 inválida: {order}")
             raise SystemExit(2)
@@ -135,7 +137,7 @@ if __name__ == '__main__':
         if order_call.get('qty') != '2.66':
             print(f"❌ Quantidade deveria respeitar amount_to_precision: {order_call}")
             raise SystemExit(10)
-        if client.exchange.amount_to_precision_calls[-1] != ('BTC/USDT:USDT', 2.6649367268590924):
+        if client.exchange.amount_to_precision_calls[-1] != ('BTC/USDT:USDT', TEST_QTY_WITH_HIGH_PRECISION):
             print(f"❌ amount_to_precision não foi usado corretamente: {client.exchange.amount_to_precision_calls}")
             raise SystemExit(11)
 
