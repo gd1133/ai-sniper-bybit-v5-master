@@ -8,9 +8,7 @@ Regras de Negócio:
   - API: pybit.unified_trading.HTTP com recv_window=20000
   - Timeframe de varredura: 30 minutos (30m) — exclusivo
   - Máximo de operações simultâneas: 1 (uma)
-  - Entrada padrão: 5 % do saldo USDT
-  - Entrada reduzida (após Stop Loss): 3 % do saldo USDT
-  - Retorno ao padrão: na primeira operação com Gain
+  - Entrada padrão: 15 % do saldo USDT (ou override via RISK_PER_TRADE_PCT)
   - Stop Loss: 50 % da entrada (≡ 5 % de preço com 10× alavancagem)
   - Take Profit: 100 % de lucro sobre a entrada (≡ 10 % de preço)
   - Alavancagem: 10× | Modo de Margem: Cross
@@ -30,6 +28,25 @@ from dotenv import load_dotenv
 # ─── Carrega variáveis de ambiente ────────────────────────────────────────────
 load_dotenv()
 
+DEFAULT_RISK_PER_TRADE_PCT = 15.0
+
+
+def _load_risk_per_trade_pct() -> float:
+    """Lê o percentual de risco por ordem com fallback seguro."""
+    try:
+        return float(os.getenv('RISK_PER_TRADE_PCT', 15)) / 100
+    except (TypeError, ValueError):
+        print(f"⚠️ [RISK MANAGEMENT] RISK_PER_TRADE_PCT inválido. Usando fallback de {DEFAULT_RISK_PER_TRADE_PCT:.0f}%.")
+        return DEFAULT_RISK_PER_TRADE_PCT / 100
+
+
+RISK_PER_TRADE_PCT = _load_risk_per_trade_pct()
+
+
+def _format_risk_per_trade_pct() -> str:
+    pct_value = RISK_PER_TRADE_PCT * 100
+    return f"{pct_value:.0f}%" if pct_value.is_integer() else f"{pct_value:.2f}%"
+
 # ─── Configurações Globais ─────────────────────────────────────────────────────
 
 # Define se usa testnet ou produção (USE_TESTNET=true → testnet)
@@ -42,8 +59,8 @@ SYMBOL: str = os.getenv("SYMBOL", "ETHUSDT")
 TIMEFRAME: str = "30m"
 
 # Parâmetros de risco
-ENTRY_PCT_DEFAULT: float = 0.05        # 5 % do saldo — entrada padrão
-ENTRY_PCT_AFTER_STOP: float = 0.03     # 3 % do saldo — após Stop Loss
+ENTRY_PCT_DEFAULT: float = RISK_PER_TRADE_PCT
+ENTRY_PCT_AFTER_STOP: float = RISK_PER_TRADE_PCT
 # Com 10× de alavancagem, 5 % de preço = 50 % de perda sobre margem (Stop Loss)
 # Com 10× de alavancagem, 10 % de preço = 100 % de lucro sobre margem (Take Profit)
 STOP_LOSS_PCT: float = 0.05    # 5 % de preço → 50 % da margem (entrada)
@@ -71,9 +88,9 @@ class RiskManager:
     """
     Controla o percentual de entrada de forma dinâmica:
 
-      - Padrão  : 5 % do saldo (ENTRY_PCT_DEFAULT)
-      - Após SL : 3 % do saldo (ENTRY_PCT_AFTER_STOP)
-      - Após Gain: retorna ao padrão de 5 %
+      - Padrão  : 15 % do saldo (ENTRY_PCT_DEFAULT)
+      - Após SL : mantém o mesmo percentual configurado
+      - Após Gain: mantém o mesmo percentual configurado
 
     Uso:
         rm = RiskManager()
@@ -95,7 +112,7 @@ class RiskManager:
         self._last_result = "STOP"
         print(
             f"⚠️  [RISCO] Último trade: STOP LOSS. "
-            f"Próxima entrada reduzida para {ENTRY_PCT_AFTER_STOP * 100:.0f}% do saldo."
+            f"Próxima entrada mantida em {ENTRY_PCT_AFTER_STOP * 100:.0f}% do saldo."
         )
 
     def register_gain(self) -> None:
@@ -103,7 +120,7 @@ class RiskManager:
         self._last_result = "GAIN"
         print(
             f"✅ [RISCO] Último trade: GAIN. "
-            f"Entrada retorna ao padrão de {ENTRY_PCT_DEFAULT * 100:.0f}% do saldo."
+            f"Entrada mantida em {ENTRY_PCT_DEFAULT * 100:.0f}% do saldo."
         )
 
     def status(self) -> str:
@@ -252,7 +269,7 @@ def calculate_entry_qty(client: BybitClient, price: float, entry_pct: float) -> 
     Calcula a quantidade de contratos para a entrada.
 
     Regras:
-      - Valor de entrada = entry_pct do saldo USDT (5 % padrão ou 3 % após SL)
+      - Valor de entrada = entry_pct do saldo USDT (15 % por padrão)
       - Quantidade = valor_entrada / preço_atual
       - Se saldo ≤ 0 → operação abortada (retorna 0.0)
     """
@@ -546,7 +563,7 @@ def run_sniper(symbol: str = SYMBOL):
     Regras de execução:
       - Varredura exclusiva no timeframe de 30 minutos (30m)
       - Máximo de 1 operação ativa simultaneamente
-      - Gestão de risco dinâmica via RiskManager (5% padrão → 3% após SL → 5% após Gain)
+      - Gestão de risco via RiskManager com 15% padrão da banca (override opcional por ambiente)
 
     Fluxo por ciclo:
       1. Verifica posição ativa → bloqueia nova entrada se já houver 1 aberta
@@ -561,7 +578,8 @@ def run_sniper(symbol: str = SYMBOL):
     print("═" * 60)
     print(f"  MOTOR SNIPER V60.7 — iniciando em {'TESTNET' if USE_TESTNET else 'PRODUÇÃO'}")
     print(f"  Par: {symbol} | Timeframe: {TIMEFRAME} | Intervalo: {SCAN_INTERVAL}s")
-    print(f"  Regras: 1 trade ativo | SL=50% entrada | TP=100% lucro | Entrada=5%/3%")
+    print("🔧 [RISK MANAGEMENT] Modo de entrada atualizado para: 15% do valor da banca real." if abs(RISK_PER_TRADE_PCT - 0.15) < 1e-9 else f"🔧 [RISK MANAGEMENT] Modo de entrada atualizado para: {_format_risk_per_trade_pct()} do valor da banca real.")
+    print(f"  Regras: 1 trade ativo | SL=50% entrada | TP=100% lucro | Entrada={ENTRY_PCT_DEFAULT * 100:.0f}%")
     print("═" * 60)
 
     # ── Inicialização dos componentes ──────────────────────────────────────────

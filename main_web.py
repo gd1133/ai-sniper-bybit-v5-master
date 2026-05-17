@@ -44,6 +44,46 @@ ENV_CONFIG = get_environment_config()
 ENVIRONMENT = ENV_CONFIG.name
 print(f"[SISTEMA] Iniciando em modo: {ENVIRONMENT}")
 
+DEFAULT_RISK_PER_TRADE_PCT = 15.0
+
+
+def _load_risk_per_trade_pct():
+    """Lê o percentual de risco por ordem via ambiente com fallback seguro."""
+    try:
+        return float(os.getenv('RISK_PER_TRADE_PCT', 15)) / 100
+    except (TypeError, ValueError):
+        print(f"⚠️ [RISK MANAGEMENT] RISK_PER_TRADE_PCT inválido. Usando fallback de {DEFAULT_RISK_PER_TRADE_PCT:.0f}%.")
+        return DEFAULT_RISK_PER_TRADE_PCT / 100
+
+
+RISK_PER_TRADE_PCT = _load_risk_per_trade_pct()
+
+
+def _format_risk_per_trade_pct():
+    pct_value = RISK_PER_TRADE_PCT * 100
+    return f"{pct_value:.0f}%" if pct_value.is_integer() else f"{pct_value:.2f}%"
+
+
+def _calculate_order_margin(balance):
+    """Calcula a margem exata alocada por ordem com base no saldo sincronizado."""
+    safe_balance = max(float(balance or 0.0), 0.0)
+    return safe_balance * RISK_PER_TRADE_PCT
+
+
+def _calculate_order_quantity(balance, entry_price):
+    """Calcula margem e quantidade a partir do saldo sincronizado do cliente."""
+    margin = _calculate_order_margin(balance)
+    safe_entry_price = float(entry_price or 0.0)
+    qty = (margin / safe_entry_price) if margin > 0 and safe_entry_price > 0 else 0.0
+    return margin, qty
+
+
+def _log_risk_management_mode():
+    if abs(RISK_PER_TRADE_PCT - (DEFAULT_RISK_PER_TRADE_PCT / 100)) < 1e-9:
+        print("🔧 [RISK MANAGEMENT] Modo de entrada atualizado para: 15% do valor da banca real.")
+    else:
+        print(f"🔧 [RISK MANAGEMENT] Modo de entrada atualizado para: {_format_risk_per_trade_pct()} do valor da banca real.")
+
 # Sistema fixado em modo REAL apenas
 VALID_OPERATION_MODES = {'real'}
 VALID_ACCOUNT_MODES = {'real'}
@@ -225,6 +265,7 @@ def start_runtime_services():
         threading.Thread(target=sniper_worker_loop, daemon=True).start()
         threading.Thread(target=_monitor_sl_tp_automatico, daemon=True).start()
         print("   Monitor SL/TP: ATIVO (-5% SL / +100% TP)")
+        _log_risk_management_mode()
 
         # Aquece o cache de saldo em background imediatamente para que o
         # primeiro poll do dashboard não precise esperar.
@@ -2314,9 +2355,11 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                     account_mode = _normalize_account_mode(c.get('account_mode', c.get('is_testnet')))
                     broker = _make_broker(c)
 
-                    # Gestão Dinâmica: 5% Banca (GAIN) / 3% (RECOVERY)
-                    margem = float(c.get('saldo_base', 1000.0)) * 0.05
-                    qty = margem / entry_price
+                    saldo_sincronizado = float(c.get('saldo_base', 1000.0) or 0.0)
+                    margem, qty = _calculate_order_quantity(saldo_sincronizado, entry_price)
+                    if margem <= 0 or qty <= 0:
+                        print(f"⚠️  [RISK MANAGEMENT] {c.get('nome')} sem saldo/preço válido para calcular a ordem.")
+                        return
 
                     # --- EXECUÇÃO REAL NA EXCHANGE (PROTOCOLO SNIPER) ---
                     if _is_order_execution_enabled(APP_MODE):
@@ -2405,7 +2448,7 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                              f"👤 *Trader:* {c.get('nome')}\n"
                              f"📦 *Ativo:* {symbol}\n"
                              f"📈 *Lado:* {side}\n"
-                             f"💰 *Margem Alocada:* ${margem:.2f} (5% da banca)\n"
+                             f"💰 *Margem Alocada:* ${margem:.2f} ({_format_risk_per_trade_pct()} da banca)\n"
                              f"📊 *Quantidade:* {qty:.4f}\n"
                              f"🎯 *Preço Entrada:* ${entry_price:.2f}\n"
                              f"🧠 *Confiança IA:* {confidence}%")
@@ -2470,7 +2513,7 @@ def broadcast_sniper_signal():
             pair=symbol,
             side=side,
             pnl_pct=0,
-            profit=round(central_state.get('balance', 1000.0) * 0.05, 2),
+            profit=round(_calculate_order_margin(central_state.get('balance', 1000.0)), 2),
             closed_at=time.strftime("%d/%m %H:%M", time.localtime()),
             notes=f"BROADCAST: {side} {symbol} @ {entry_price:.2f} | Conf: {confidence}% | {reason}",
             status="open",
