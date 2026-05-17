@@ -85,7 +85,7 @@ def _calculate_order_quantity(balance, entry_price):
 
     # 🛡️ TRAVA DE SEGURANÇA: Valida tamanho mínimo de ordem
     # Se margem calculada for muito baixa, força mínimo operacional
-    MIN_MARGIN_USD = 5.0  # Piso mínimo de $5 USD de margem
+    MIN_MARGIN_USD = 3.0  # Piso mínimo de $3 USD de margem (mínimo aceito pela Bybit V5)
     if 0 < margin < MIN_MARGIN_USD:
         print(f"⚠️  [RISK MANAGEMENT] Margem calculada (${margin:.2f}) abaixo do mínimo. Ajustando para ${MIN_MARGIN_USD:.2f}")
         margin = MIN_MARGIN_USD
@@ -103,7 +103,7 @@ def _calculate_webhook_order_quantity(balance, entry_price):
 
     # 🛡️ TRAVA DE SEGURANÇA: Valida tamanho mínimo de ordem
     # Se margem calculada for muito baixa, força mínimo operacional
-    MIN_MARGIN_USD = 5.0  # Piso mínimo de $5 USD de margem
+    MIN_MARGIN_USD = 3.0  # Piso mínimo de $3 USD de margem (mínimo aceito pela Bybit V5)
     if 0 < margin < MIN_MARGIN_USD:
         print(f"⚠️  [RISK MANAGEMENT] Margem calculada (${margin:.2f}) abaixo do mínimo. Ajustando para ${MIN_MARGIN_USD:.2f}")
         margin = MIN_MARGIN_USD
