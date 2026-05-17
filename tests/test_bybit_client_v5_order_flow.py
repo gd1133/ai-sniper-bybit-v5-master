@@ -37,6 +37,30 @@ class _FakeExchange:
 
 
 class _FakeCcxt:
+    class BaseError(Exception):
+        pass
+
+    class InsufficientFunds(BaseError):
+        pass
+
+    class InvalidOrder(BaseError):
+        pass
+
+    class AuthenticationError(BaseError):
+        pass
+
+    class PermissionDenied(BaseError):
+        pass
+
+    class ExchangeNotAvailable(BaseError):
+        pass
+
+    class NetworkError(BaseError):
+        pass
+
+    class RateLimitExceeded(BaseError):
+        pass
+
     @staticmethod
     def bybit(cfg):
         return _FakeExchange(cfg)
@@ -122,6 +146,21 @@ if __name__ == '__main__':
         if bybit_client.AUTH_10003_ALERT not in output:
             print(f"❌ Alerta de autenticação não foi impresso: {output}")
             raise SystemExit(6)
+
+        strict_client = bybit_client.BybitClient('key', 'secret', testnet=False)
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            try:
+                strict_client.execute_market_order('BTC/USDT:USDT', 'buy', 0.25, raise_on_error=True)
+            except RuntimeError as exc:
+                raw_error = str(exc)
+            else:
+                print('❌ raise_on_error=True deveria propagar retCode bruto da Bybit')
+                raise SystemExit(7)
+
+        if 'API key is invalid' not in raw_error:
+            print(f"❌ Erro bruto inesperado com raise_on_error=True: {raw_error}")
+            raise SystemExit(8)
 
         print('✅ Fluxo V5 de ordem, insurance e retCode 10003 OK')
         raise SystemExit(0)

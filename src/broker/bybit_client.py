@@ -333,11 +333,13 @@ class BybitClient:
             print(f"[ERRO BROKER] Preço {symbol} falhou: {e}")
             return self.cache_ticker[symbol][0] if symbol in self.cache_ticker else 0.0
 
-    def execute_market_order(self, symbol, side, qty):
+    def execute_market_order(self, symbol, side, qty, raise_on_error=False):
         """Executa ordem a mercado para entrada instantânea."""
         try:
             if not self.authenticated:
                 print(f"[ERRO BROKER] Ordem não executada: cliente sem credenciais.")
+                if raise_on_error:
+                    raise RuntimeError('Cliente sem credenciais autenticadas para enviar ordem na Bybit.')
                 return None
 
             print(f"🔥 [ORDEM SNIPER BYBIT] {side.upper()} {qty} em {symbol}")
@@ -361,6 +363,8 @@ class BybitClient:
                 ok, error_message = self._handle_v5_ret_code(rsp, 'v5/order/create')
                 if not ok:
                     print(f"❌ [ERRO EXECUÇÃO BYBIT] {error_message}")
+                    if raise_on_error:
+                        raise RuntimeError(error_message)
                     return None
 
                 result = (rsp or {}).get('result') or {}
@@ -422,6 +426,8 @@ class BybitClient:
                 elif "insufficient balance" in error_details.lower():
                     print(f"   💰 SALDO INSUFICIENTE: Deposite fundos na conta")
 
+            if raise_on_error:
+                raise
             return None
 
     def test_connection(self):
