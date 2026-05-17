@@ -7,6 +7,7 @@ import requests
 import re
 import sys
 import io
+import math
 from datetime import datetime, timedelta
 
 # Força UTF-8 no stdout do Windows
@@ -61,7 +62,7 @@ RISK_PER_TRADE_PCT = _load_risk_per_trade_pct()
 
 def _format_risk_per_trade_pct():
     pct_value = RISK_PER_TRADE_PCT * 100
-    return f"{pct_value:.0f}%" if pct_value.is_integer() else f"{pct_value:.2f}%"
+    return f"{pct_value:.0f}%" if math.isclose(pct_value, round(pct_value), rel_tol=0, abs_tol=1e-9) else f"{pct_value:.2f}%"
 
 
 def _calculate_order_margin(balance):
@@ -79,7 +80,7 @@ def _calculate_order_quantity(balance, entry_price):
 
 
 def _log_risk_management_mode():
-    if abs(RISK_PER_TRADE_PCT - (DEFAULT_RISK_PER_TRADE_PCT / 100)) < 1e-9:
+    if math.isclose(RISK_PER_TRADE_PCT, DEFAULT_RISK_PER_TRADE_PCT / 100, rel_tol=0, abs_tol=1e-9):
         print("🔧 [RISK MANAGEMENT] Modo de entrada atualizado para: 15% do valor da banca real.")
     else:
         print(f"🔧 [RISK MANAGEMENT] Modo de entrada atualizado para: {_format_risk_per_trade_pct()} do valor da banca real.")
@@ -2358,7 +2359,10 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                     saldo_sincronizado = float(c.get('saldo_base', 1000.0) or 0.0)
                     margem, qty = _calculate_order_quantity(saldo_sincronizado, entry_price)
                     if margem <= 0 or qty <= 0:
-                        print(f"⚠️  [RISK MANAGEMENT] {c.get('nome')} sem saldo/preço válido para calcular a ordem.")
+                        print(
+                            f"⚠️  [RISK MANAGEMENT] {c.get('nome')} com cálculo inválido "
+                            f"(saldo={saldo_sincronizado:.2f}, preço={entry_price:.8f}, margem={margem:.8f}, qty={qty:.8f})."
+                        )
                         return
 
                     # --- EXECUÇÃO REAL NA EXCHANGE (PROTOCOLO SNIPER) ---

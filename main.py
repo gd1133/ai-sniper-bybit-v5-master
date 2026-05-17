@@ -22,6 +22,7 @@ import os
 import time
 import sys
 import getpass
+import math
 
 from dotenv import load_dotenv
 
@@ -45,7 +46,14 @@ RISK_PER_TRADE_PCT = _load_risk_per_trade_pct()
 
 def _format_risk_per_trade_pct() -> str:
     pct_value = RISK_PER_TRADE_PCT * 100
-    return f"{pct_value:.0f}%" if pct_value.is_integer() else f"{pct_value:.2f}%"
+    return f"{pct_value:.0f}%" if math.isclose(pct_value, round(pct_value), rel_tol=0, abs_tol=1e-9) else f"{pct_value:.2f}%"
+
+
+def _log_risk_management_mode() -> None:
+    if math.isclose(RISK_PER_TRADE_PCT, 0.15, rel_tol=0, abs_tol=1e-9):
+        print("🔧 [RISK MANAGEMENT] Modo de entrada atualizado para: 15% do valor da banca real.")
+    else:
+        print(f"🔧 [RISK MANAGEMENT] Modo de entrada atualizado para: {_format_risk_per_trade_pct()} do valor da banca real.")
 
 # ─── Configurações Globais ─────────────────────────────────────────────────────
 
@@ -60,7 +68,7 @@ TIMEFRAME: str = "30m"
 
 # Parâmetros de risco
 ENTRY_PCT_DEFAULT: float = RISK_PER_TRADE_PCT
-ENTRY_PCT_AFTER_STOP: float = RISK_PER_TRADE_PCT
+ENTRY_PCT_AFTER_STOP: float = RISK_PER_TRADE_PCT  # Mantido para compatibilidade com o fluxo do RiskManager
 # Com 10× de alavancagem, 5 % de preço = 50 % de perda sobre margem (Stop Loss)
 # Com 10× de alavancagem, 10 % de preço = 100 % de lucro sobre margem (Take Profit)
 STOP_LOSS_PCT: float = 0.05    # 5 % de preço → 50 % da margem (entrada)
@@ -578,7 +586,7 @@ def run_sniper(symbol: str = SYMBOL):
     print("═" * 60)
     print(f"  MOTOR SNIPER V60.7 — iniciando em {'TESTNET' if USE_TESTNET else 'PRODUÇÃO'}")
     print(f"  Par: {symbol} | Timeframe: {TIMEFRAME} | Intervalo: {SCAN_INTERVAL}s")
-    print("🔧 [RISK MANAGEMENT] Modo de entrada atualizado para: 15% do valor da banca real." if abs(RISK_PER_TRADE_PCT - 0.15) < 1e-9 else f"🔧 [RISK MANAGEMENT] Modo de entrada atualizado para: {_format_risk_per_trade_pct()} do valor da banca real.")
+    _log_risk_management_mode()
     print(f"  Regras: 1 trade ativo | SL=50% entrada | TP=100% lucro | Entrada={ENTRY_PCT_DEFAULT * 100:.0f}%")
     print("═" * 60)
 
