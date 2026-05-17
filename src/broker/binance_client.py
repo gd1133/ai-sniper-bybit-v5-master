@@ -33,13 +33,12 @@ class BinanceClient:
     """
 
     TESTNET_URL = 'https://testnet.binancefuture.com'
-    BINANCE_API_HOSTS = (
-        'https://api1.binance.com',
-        'https://api2.binance.com',
-        'https://api3.binance.com',
+    BINANCE_FUTURES_HOSTS = (
+        'https://fapi.binance.com',
+        'https://fapi1.binance.com',
+        'https://fapi2.binance.com',
     )
-    REAL_URL = BINANCE_API_HOSTS[0]
-    FUTURES_URL = 'https://fapi.binance.com'
+    REAL_URL = BINANCE_FUTURES_HOSTS[0]
 
     def __init__(self, api_key=None, api_secret=None, testnet=False):
         api_key = str(api_key or '').strip()
@@ -48,7 +47,7 @@ class BinanceClient:
         self.api_secret = api_secret
         self.testnet = bool(testnet)
         self.endpoint_index = 0
-        self.api_hosts = [self.TESTNET_URL] if self.testnet else list(self.BINANCE_API_HOSTS)
+        self.api_hosts = [self.TESTNET_URL] if self.testnet else list(self.BINANCE_FUTURES_HOSTS)
         self.active_endpoint = self.TESTNET_URL if self.testnet else self.REAL_URL
 
         self.exchange = self._create_exchange()
@@ -80,12 +79,8 @@ class BinanceClient:
     def _build_exchange_urls(self, api_host):
         return {
             'api': {
-                'public': f'{api_host}/sapi/v1',
-                'private': f'{api_host}/sapi/v1',
-            },
-            'fapi': {
-                'public': self.FUTURES_URL,
-                'private': self.FUTURES_URL,
+                'fapiPublic': api_host,
+                'fapiPrivate': api_host,
             },
         }
 
@@ -112,7 +107,6 @@ class BinanceClient:
         urls = self._build_exchange_urls(api_host)
         exchange.urls = getattr(exchange, 'urls', {}) or {}
         exchange.urls['api'] = dict(urls['api'])
-        exchange.urls['fapi'] = dict(urls['fapi'])
         exchange.options = getattr(exchange, 'options', {}) or {}
         exchange.options['adjustForTimeDifference'] = True
 

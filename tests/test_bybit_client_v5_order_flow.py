@@ -18,12 +18,17 @@ class _FakeExchange:
             }
         }
         self.sandbox_enabled = False
+        self.amount_to_precision_calls = []
 
     def set_sandbox_mode(self, enabled):
         self.sandbox_enabled = bool(enabled)
 
     def fetch_balance(self, params=None):
         return {'total': {'USDT': 25.5}}
+
+    def amount_to_precision(self, symbol, amount):
+        self.amount_to_precision_calls.append((symbol, amount))
+        return f"{float(amount):.2f}"
 
     def create_order(self, symbol, order_type, side, qty, params=None):
         return {
@@ -118,7 +123,7 @@ if __name__ == '__main__':
             print(f"❌ test_connection deveria validar fundo de seguros: ok={ok} message={message}")
             raise SystemExit(1)
 
-        order = client.execute_market_order('BTC/USDT:USDT', 'buy', 0.25)
+        order = client.execute_market_order('BTC/USDT:USDT', 'buy', 2.6649367268590924)
         if not order or order.get('id') != 'oid-123' or order.get('route') != 'v5/order/create':
             print(f"❌ Ordem V5 inválida: {order}")
             raise SystemExit(2)
@@ -127,6 +132,12 @@ if __name__ == '__main__':
         if order_call.get('category') != 'linear' or order_call.get('symbol') != 'BTCUSDT' or order_call.get('side') != 'Buy':
             print(f"❌ Payload V5 incorreto: {order_call}")
             raise SystemExit(3)
+        if order_call.get('qty') != '2.66':
+            print(f"❌ Quantidade deveria respeitar amount_to_precision: {order_call}")
+            raise SystemExit(10)
+        if client.exchange.amount_to_precision_calls[-1] != ('BTC/USDT:USDT', 2.6649367268590924):
+            print(f"❌ amount_to_precision não foi usado corretamente: {client.exchange.amount_to_precision_calls}")
+            raise SystemExit(11)
 
         insurance_call = client.pybit_session.insurance_calls[-1]
         if insurance_call.get('coin') != 'USDT':
