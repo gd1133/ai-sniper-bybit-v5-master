@@ -86,7 +86,7 @@ def _calculate_order_quantity(balance, entry_price):
 
 
 def _calculate_webhook_order_quantity(balance, entry_price):
-    """Força 15% da banca no broadcast do webhook para evitar lotes mínimos."""
+    """Usa o sizing fixo do broadcast/webhook para evitar rejeição por lote mínimo."""
     safe_balance = max(float(balance or 0.0), 0.0)
     margin = safe_balance * WEBHOOK_ORDER_MARGIN_PCT
     safe_entry_price = float(entry_price or 0.0)
@@ -2412,9 +2412,9 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                             # Broker não tem pre_flight_check (versão antiga)
                             print(f"⚠️  [AVISO] Broker sem validação pré-voo - continuando execução")
                         except Exception as preflight_err:
-                            _log_raw_broker_error(cliente_nome, preflight_err, context='ERRO PRÉ-VOO REAL')
                             if ALLOW_REAL_TRADING:
-                                return
+                                raise
+                            _log_raw_broker_error(cliente_nome, preflight_err, context='ERRO PRÉ-VOO REAL')
                             print(f"⚠️  [ERRO PRÉ-VOO] {preflight_err} - continuando execução")
 
                         # Execução real da ordem na exchange com tratamento CCXT robusto
@@ -2446,9 +2446,9 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                                 print(f"❌ [ORDEM FALHOU] {c.get('nome')} - Nenhum retorno da API")
                                 print(f"   🔍 DIAGNÓSTICO: Verifique credenciais API e permissões de trading")
                         except Exception as order_err:
-                            _log_raw_broker_error(cliente_nome, order_err)
                             if ALLOW_REAL_TRADING:
-                                return
+                                raise
+                            _log_raw_broker_error(cliente_nome, order_err)
                             print(f"   🔍 CAUSA: Provavelmente erro de autenticação, permissões ou saldo insuficiente")
                     else:
                         # Diagnóstico detalhado do bloqueio
