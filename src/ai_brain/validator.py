@@ -133,18 +133,22 @@ class GroqValidator:
         Com retry logic e rate limit handling.
         """
         if self.groq_client is None:
-            return 45, "WAIT"
+            print("⚠️ [GROQ] Cliente não disponível")
+            return 45, "WAIT", "Cliente Groq não inicializado"
 
         if time.time() < self.groq_cooldown_until:
-            return 45, "WAIT"
+            remaining = int(self.groq_cooldown_until - time.time())
+            print(f"⏸️ [GROQ] Em cooldown (restam {remaining}s)")
+            return 45, "WAIT", f"Rate limit cooldown ({remaining}s restantes)"
 
         max_retries = 2
         retry_delay = 1
-        
+        last_error = ""
+
         for attempt in range(max_retries):
             try:
                 prompt = (f"Analise {symbol}: {tech_data}. JSON: {{\"score\": 0-100, \"action\": \"BUY|SELL|WAIT\"}}")
-                
+
                 res = self.groq_client.chat.completions.create(
                     messages=[{"role": "user", "content": prompt}],
                     model="llama-3.3-70b-versatile",
@@ -153,9 +157,11 @@ class GroqValidator:
                 )
                 data = json.loads(res.choices[0].message.content)
                 action = self._normalize_side(data.get('action', 'WAIT'))
-                return int(data.get('score', 45)), action
+                return int(data.get('score', 45)), action, ""
             except Exception as e:
                 error_str = str(e)
+                last_error = error_str[:100]
+
                 if '429' in error_str or 'rate' in error_str.lower():
                     if attempt == 0:
                         wait_time = retry_delay
@@ -164,14 +170,15 @@ class GroqValidator:
                         continue
 
                     self.groq_cooldown_until = time.time() + 90
-                    print("⚠️ [GROQ] Rate limit. Cooldown 90s")
-                    return 45, 'WAIT'
+                    print(f"⚠️ [GROQ] Rate limit detectado: {last_error}")
+                    return 45, 'WAIT', f"Rate limit: {last_error}"
                 else:
                     # Outro erro - usar fallback
-                    print(f"⚠️ [GROQ] Fallback (tentativa {attempt+1}/{max_retries})")
-                    return 45, 'WAIT'
-        
-        return 45, 'WAIT'  # Fallback final
+                    print(f"⚠️ [GROQ] Erro (tentativa {attempt+1}/{max_retries}): {last_error}")
+                    if attempt == max_retries - 1:
+                        return 45, 'WAIT', f"Falha após {max_retries} tentativas: {last_error}"
+
+        return 45, 'WAIT', last_error or "Erro desconhecido"  # Fallback final
 
     def get_strategic_signal(self, tech_data, symbol):
         """
@@ -180,7 +187,10 @@ class GroqValidator:
         Com rate limit detection e cooldown automático.
         """
         if time.time() < self.global_cooldown_until:
-            return self.gemini_min_confidence, "⏸️ Gemini em cooldown...", "WAIT", True
+            remaining = int(self.global_cooldown_until - time.time())
+            error_msg = f"Rate limit cooldown ({remaining}s restantes)"
+            print(f"⏸️ [GEMINI] {error_msg}")
+            return self.gemini_min_confidence, error_msg, "WAIT", True
 
         try:
             history = self.memory.get_context()
@@ -188,10 +198,10 @@ class GroqValidator:
                 f"Trader: {symbol} | Trend: {tech_data.get('trend')} | Data: {tech_data} | History: {history} | "
                 f"JSON: {{\"probabilidade\": 0-100, \"lado\": \"BUY|SELL|WAIT\", \"motivo\": \"string\"}}"
             )
-            
+
             payload = {"contents": [{"parts": [{"text": prompt}]}]}
             res = requests.post(self.gemini_url, json=payload, timeout=5)
-            
+
             if res.status_code == 200:
                 try:
                     raw = self._limpar_json(res.json()['candidates'][0]['content']['parts'][0]['text'])
@@ -200,20 +210,30 @@ class GroqValidator:
                     score = self._normalize_gemini_score(data.get('probabilidade', self.gemini_min_confidence))
                     return score, data.get('motivo', '✅ Processado'), lado, False
                 except Exception as parse_err:
-                    return self.gemini_min_confidence, f"Resposta inválida: {str(parse_err)[:20]}", "WAIT", True
+                    error_detail = f"Parse error: {str(parse_err)[:50]}"
+                    print(f"⚠️ [GEMINI] {error_detail}")
+                    return self.gemini_min_confidence, error_detail, "WAIT", True
             elif res.status_code == 429:
-                print(f"⚠️ [GEMINI] Rate limit 429. Cooldown 120s")
+                error_msg = "Rate limit 429 - muitas requisições"
+                print(f"⚠️ [GEMINI] {error_msg}. Cooldown 120s")
                 self.global_cooldown_until = time.time() + 120
-                return self.gemini_min_confidence, "Rate limit", "WAIT", True
+                return self.gemini_min_confidence, error_msg, "WAIT", True
             else:
-                print(f"⚠️ [GEMINI] Status {res.status_code}")
-                return self.gemini_min_confidence, f"Erro {res.status_code}", "WAIT", True
+                error_msg = f"HTTP {res.status_code}: {res.text[:100]}" if hasattr(res, 'text') else f"HTTP {res.status_code}"
+                print(f"⚠️ [GEMINI] {error_msg}")
+                return self.gemini_min_confidence, error_msg, "WAIT", True
         except requests.Timeout:
-            print(f"⏱️ [GEMINI] Timeout 5s")
-            return self.gemini_min_confidence, "Timeout", "WAIT", True
+            error_msg = "Timeout após 5s - API não respondeu"
+            print(f"⏱️ [GEMINI] {error_msg}")
+            return self.gemini_min_confidence, error_msg, "WAIT", True
+        except requests.ConnectionError as e:
+            error_msg = f"Erro de conexão: {str(e)[:50]}"
+            print(f"⚠️ [GEMINI] {error_msg}")
+            return self.gemini_min_confidence, error_msg, "WAIT", True
         except Exception as e:
-            print(f"⚠️ [GEMINI] {type(e).__name__}: {str(e)[:30]}")
-            return self.gemini_min_confidence, "Erro", "WAIT", True
+            error_msg = f"{type(e).__name__}: {str(e)[:50]}"
+            print(f"⚠️ [GEMINI] {error_msg}")
+            return self.gemini_min_confidence, error_msg, "WAIT", True
 
     def consensus_predict(self, tech_data, symbol, force_local_only=False):
         """
@@ -245,23 +265,36 @@ class GroqValidator:
             strategic_score = local_score  # Espelha o local
             tactical_action = 'WAIT'
             strategic_action = 'WAIT'
+            tactical_error = ""
             strategic_motivo = "🧠 3º Cérebro (Matemática Pura) ativado"
             fallback_local_active = True
             local_fallback_side = self._resolve_local_fallback_side(tech_data)
         else:
             # ⚙️ MODO NORMAL: Tenta usar Groq + Gemini
-            tactical_score, tactical_action = self.get_tactical_signal(tech_data, symbol)
+            tactical_score, tactical_action, tactical_error = self.get_tactical_signal(tech_data, symbol)
             strategic_score, strategic_motivo, strategic_action, strategic_fallback = self.get_strategic_signal(tech_data, symbol)
 
-            # DESATIVADO: Fallback automático removido para expor erros de API real
-            # Se ambos falharem (rate limit), retorna erro ao invés de simular
+            # Se ambos falharem, mostra diagnóstico detalhado
             if tactical_score <= 45 and strategic_fallback:
-                print(f"❌ [ERRO API] Ambos APIs falharam. Abortando operação para expor erro real.")
+                error_details = []
+                if tactical_error:
+                    error_details.append(f"Groq: {tactical_error}")
+                if strategic_motivo and "error" in strategic_motivo.lower() or "timeout" in strategic_motivo.lower() or "cooldown" in strategic_motivo.lower():
+                    error_details.append(f"Gemini: {strategic_motivo}")
+
+                diagnostic_msg = " | ".join(error_details) if error_details else "Ambas APIs falharam sem fornecer detalhes"
+
+                print(f"❌ [ERRO API] {diagnostic_msg}")
+                print(f"💡 Dica: Verifique se as chaves GEMINI_API_KEY e GROQ_API_KEY estão configuradas corretamente")
+                print(f"💡 Dica: Verifique se você não atingiu o limite de requisições das APIs")
+
                 return {
                     "probabilidade": 0,
                     "decisao": "ABORTAR",
-                    "motivo": "Erro de API: Groq e Gemini falharam. Verifique credenciais e rate limits.",
-                    "brain_used": "ERROR"
+                    "motivo": f"Erro de API: {diagnostic_msg}. Verifique credenciais e rate limits.",
+                    "brain_used": "ERROR",
+                    "groq_error": tactical_error,
+                    "gemini_error": strategic_motivo
                 }
 
         tactical_action = self._normalize_side(tactical_action)
