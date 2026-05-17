@@ -37,6 +37,30 @@ class _FakeExchange:
 
 
 class _FakeCcxt:
+    class BaseError(Exception):
+        pass
+
+    class InsufficientFunds(BaseError):
+        pass
+
+    class InvalidOrder(BaseError):
+        pass
+
+    class AuthenticationError(BaseError):
+        pass
+
+    class PermissionDenied(BaseError):
+        pass
+
+    class ExchangeNotAvailable(BaseError):
+        pass
+
+    class NetworkError(BaseError):
+        pass
+
+    class RateLimitExceeded(BaseError):
+        pass
+
     @staticmethod
     def bybit(cfg):
         return _FakeExchange(cfg)
@@ -123,10 +147,11 @@ if __name__ == '__main__':
             print(f"❌ Alerta de autenticação não foi impresso: {output}")
             raise SystemExit(6)
 
+        strict_client = bybit_client.BybitClient('key', 'secret', testnet=False)
         stdout = io.StringIO()
         with redirect_stdout(stdout):
             try:
-                auth_client.execute_market_order('BTC/USDT:USDT', 'buy', 0.25, raise_on_error=True)
+                strict_client.execute_market_order('BTC/USDT:USDT', 'buy', 0.25, raise_on_error=True)
             except RuntimeError as exc:
                 raw_error = str(exc)
             else:
