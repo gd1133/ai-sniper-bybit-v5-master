@@ -61,8 +61,9 @@ if __name__ == '__main__':
             original_app_mode = main_web.APP_MODE
 
             try:
+                client_balance = 1000.0
                 main_web._get_registered_clients = lambda active_only=False: [
-                    {'nome': 'Cliente Alpha', 'saldo_base': 1000.0, 'exchange': 'bybit'}
+                    {'nome': 'Cliente Alpha', 'saldo_base': client_balance, 'exchange': 'bybit'}
                 ]
                 main_web._make_broker = lambda client: broker
                 main_web.requests.post = lambda *args, **kwargs: None
@@ -95,7 +96,7 @@ if __name__ == '__main__':
                 raise SystemExit(1)
 
             execute_call = broker.execute_calls[-1]
-            expected_qty = round((1000.0 * main_web.WEBHOOK_ORDER_MARGIN_PCT) / 50000.0, 8)
+            expected_qty = round((client_balance * main_web.WEBHOOK_ORDER_MARGIN_PCT) / 50000.0, 8)
             if round(execute_call['qty'], 8) != expected_qty:
                 print(f"❌ Quantidade inválida para 15% da banca: {execute_call}")
                 raise SystemExit(2)
