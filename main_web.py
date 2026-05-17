@@ -45,7 +45,7 @@ ENV_CONFIG = get_environment_config()
 ENVIRONMENT = ENV_CONFIG.name
 print(f"[SISTEMA] Iniciando em modo: {ENVIRONMENT}")
 
-DEFAULT_RISK_PER_TRADE_PCT = 15.0
+DEFAULT_RISK_PER_TRADE_PCT = 5.0
 WEBHOOK_ORDER_MARGIN_PCT = DEFAULT_RISK_PER_TRADE_PCT / 100
 
 
@@ -57,7 +57,7 @@ def _strict_env_bool(name, default):
 def _load_risk_per_trade_pct():
     """Lê o percentual de risco por ordem via ambiente com fallback seguro."""
     try:
-        return float(os.getenv('RISK_PER_TRADE_PCT', 15)) / 100
+        return float(os.getenv('RISK_PER_TRADE_PCT', 5)) / 100
     except (TypeError, ValueError):
         print(f"⚠️ [RISK MANAGEMENT] RISK_PER_TRADE_PCT inválido. Usando fallback de {DEFAULT_RISK_PER_TRADE_PCT:.0f}%.")
         return DEFAULT_RISK_PER_TRADE_PCT / 100
@@ -120,7 +120,7 @@ def _log_raw_broker_error(cliente_nome, error, context='ERRO ORDEM REAL'):
 
 def _log_risk_management_mode():
     if math.isclose(RISK_PER_TRADE_PCT, DEFAULT_RISK_PER_TRADE_PCT / 100, rel_tol=0, abs_tol=1e-9):
-        print("🔧 [RISK MANAGEMENT] Modo de entrada atualizado para: 15% do valor da banca real.")
+        print("🔧 [RISK MANAGEMENT] Modo de entrada atualizado para: 5% do valor da banca real.")
     else:
         print(f"🔧 [RISK MANAGEMENT] Modo de entrada atualizado para: {_format_risk_per_trade_pct()} do valor da banca real.")
 

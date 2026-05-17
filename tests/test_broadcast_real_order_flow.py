@@ -98,18 +98,18 @@ if __name__ == '__main__':
             execute_call = broker.execute_calls[-1]
             expected_qty = round((client_balance * main_web.WEBHOOK_ORDER_MARGIN_PCT) / 50000.0, 8)
             if round(execute_call['qty'], 8) != expected_qty:
-                print(f"❌ Quantidade inválida para 15% da banca: {execute_call}")
+                print(f"❌ Quantidade inválida para 5% da banca: {execute_call}")
                 raise SystemExit(2)
 
             if execute_call['raise_on_error'] is not True:
                 print(f"❌ raise_on_error deveria ser True no modo real: {execute_call}")
                 raise SystemExit(3)
 
-            if '🔮 Enviando Ordem Real: Cliente=Cliente Alpha | Margem=150.0 | Par=BTC/USDT:USDT' not in output:
+            if '🔮 Enviando Ordem Real: Cliente=Cliente Alpha | Margem=50.0 | Par=BTC/USDT:USDT' not in output:
                 print(f"❌ Log detalhado do payload não encontrado: {output}")
                 raise SystemExit(4)
 
-            print('✅ Broadcast real força 15% da banca e desativa fallback silencioso')
+            print('✅ Broadcast real força 5% da banca e desativa fallback silencioso')
             raise SystemExit(0)
         finally:
             db.DB_PATH = original_db_path

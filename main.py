@@ -8,7 +8,7 @@ Regras de Negócio:
   - API: pybit.unified_trading.HTTP com recv_window=20000
   - Timeframe de varredura: 30 minutos (30m) — exclusivo
   - Máximo de operações simultâneas: 1 (uma)
-  - Entrada padrão: 15 % do saldo USDT (ou override via RISK_PER_TRADE_PCT)
+  - Entrada padrão: 5% do saldo USDT (ou override via RISK_PER_TRADE_PCT)
   - Stop Loss: 50 % da entrada (≡ 5 % de preço com 10× alavancagem)
   - Take Profit: 100 % de lucro sobre a entrada (≡ 10 % de preço)
   - Alavancagem: 10× | Modo de Margem: Cross
@@ -29,13 +29,13 @@ from dotenv import load_dotenv
 # ─── Carrega variáveis de ambiente ────────────────────────────────────────────
 load_dotenv()
 
-DEFAULT_RISK_PER_TRADE_PCT = 15.0
+DEFAULT_RISK_PER_TRADE_PCT = 5.0
 
 
 def _load_risk_per_trade_pct() -> float:
     """Lê o percentual de risco por ordem com fallback seguro."""
     try:
-        return float(os.getenv('RISK_PER_TRADE_PCT', 15)) / 100
+        return float(os.getenv('RISK_PER_TRADE_PCT', 5)) / 100
     except (TypeError, ValueError):
         print(f"⚠️ [RISK MANAGEMENT] RISK_PER_TRADE_PCT inválido. Usando fallback de {DEFAULT_RISK_PER_TRADE_PCT:.0f}%.")
         return DEFAULT_RISK_PER_TRADE_PCT / 100
@@ -50,8 +50,8 @@ def _format_risk_per_trade_pct() -> str:
 
 
 def _log_risk_management_mode() -> None:
-    if math.isclose(RISK_PER_TRADE_PCT, 0.15, rel_tol=0, abs_tol=1e-9):
-        print("🔧 [RISK MANAGEMENT] Modo de entrada atualizado para: 15% do valor da banca real.")
+    if math.isclose(RISK_PER_TRADE_PCT, 0.05, rel_tol=0, abs_tol=1e-9):
+        print("🔧 [RISK MANAGEMENT] Modo de entrada atualizado para: 5% do valor da banca real.")
     else:
         print(f"🔧 [RISK MANAGEMENT] Modo de entrada atualizado para: {_format_risk_per_trade_pct()} do valor da banca real.")
 
@@ -580,7 +580,7 @@ def run_sniper(symbol: str = SYMBOL):
     Regras de execução:
       - Varredura exclusiva no timeframe de 30 minutos (30m)
       - Máximo de 1 operação ativa simultaneamente
-      - Gestão de risco via RiskManager com 15% padrão da banca (override opcional por ambiente)
+      - Gestão de risco via RiskManager com 5% padrão da banca (override opcional por ambiente)
 
     Fluxo por ciclo:
       1. Verifica posição ativa → bloqueia nova entrada se já houver 1 aberta
