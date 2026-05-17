@@ -1,4 +1,5 @@
 import time
+from decimal import Decimal, ROUND_DOWN
 from datetime import datetime
 
 from src.config import get_bybit_base_url, get_bybit_credentials, resolve_use_testnet
@@ -218,6 +219,44 @@ class BybitClient:
         normalized = str(side or '').strip().lower()
         return 'Buy' if normalized == 'buy' else 'Sell'
 
+    def _normalize_order_qty(self, symbol, qty):
+        """Normaliza quantidade para precisão aceita pela corretora, evitando Qty invalid."""
+        try:
+            qty_value = float(qty)
+        except (TypeError, ValueError):
+            raise ValueError(f"Quantidade inválida: {qty}")
+
+        if qty_value <= 0:
+            raise ValueError(f"Quantidade deve ser positiva: {qty}")
+
+        amount_to_precision = getattr(self.exchange, 'amount_to_precision', None)
+        if callable(amount_to_precision):
+            try:
+                precise_qty = amount_to_precision(symbol, qty_value)
+                if precise_qty is not None and str(precise_qty).strip():
+                    return str(precise_qty)
+            except (TypeError, ValueError, AttributeError) as precision_error:
+                print(f"⚠️ [BYBIT QTY] amount_to_precision falhou para {symbol}: {precision_error}")
+
+        decimals = 2
+        market = None
+        try:
+            market_lookup = getattr(self.exchange, 'market', None)
+            if callable(market_lookup):
+                market = market_lookup(symbol)
+            elif isinstance(getattr(self.exchange, 'markets', None), dict):
+                market = self.exchange.markets.get(symbol)
+            market_precision = (market or {}).get('precision', {}).get('amount')
+            if isinstance(market_precision, (int, float)) and market_precision >= 0:
+                decimals = int(market_precision)
+        except (TypeError, ValueError, AttributeError, KeyError):
+            pass
+
+        step = Decimal('1').scaleb(-decimals)
+        quantized = Decimal(str(qty_value)).quantize(step, rounding=ROUND_DOWN)
+        normalized = format(quantized, 'f')
+        return normalized.rstrip('0').rstrip('.') if '.' in normalized else normalized
+
     def _validate_insurance_fund(self):
         """Consulta o fundo de seguros V5 apenas para validar conectividade inicial."""
         if self.pybit_session is None:
@@ -342,7 +381,10 @@ class BybitClient:
                     raise RuntimeError('Cliente sem credenciais autenticadas para enviar ordem na Bybit.')
                 return None
 
-            print(f"🔥 [ORDEM SNIPER BYBIT] {side.upper()} {qty} em {symbol}")
+            normalized_qty = self._normalize_order_qty(symbol, qty)
+            ccxt_qty = float(normalized_qty)
+
+            print(f"🔥 [ORDEM SNIPER BYBIT] {side.upper()} {normalized_qty} em {symbol}")
             print(f"   🌐 Endpoint: {self.active_endpoint}")
             print(f"   🔐 Autenticado: {self.authenticated}")
             print(f"   🧪 Modo Testnet: {self.testnet}")
@@ -354,7 +396,7 @@ class BybitClient:
                     'symbol': v5_symbol,
                     'side': self._normalize_v5_side(side),
                     'orderType': 'Market',
-                    'qty': str(qty),
+                    'qty': normalized_qty,
                 }
                 print(f"   📤 Enviando ordem via Pybit V5: {payload}")
                 rsp = self.pybit_session.place_order(**payload)
@@ -380,8 +422,8 @@ class BybitClient:
 
             # Fallback para CCXT se pybit não estiver disponível
             params = {'category': 'linear'}
-            print(f"   📤 Enviando ordem via CCXT: symbol={symbol}, type=market, side={side}, qty={qty}")
-            order = self.exchange.create_order(symbol, 'market', side, qty, params=params)
+            print(f"   📤 Enviando ordem via CCXT: symbol={symbol}, type=market, side={side}, qty={normalized_qty}")
+            order = self.exchange.create_order(symbol, 'market', side, ccxt_qty, params=params)
             print(f"   📥 Resposta CCXT: {order}")
             print(f"✅ [BYBIT CCXT] Ordem criada - ID: {order.get('id', 'N/A')}")
             return order

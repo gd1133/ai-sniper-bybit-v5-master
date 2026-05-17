@@ -27,9 +27,9 @@ class _FakeExchange:
         self.sandbox_enabled = bool(enabled)
 
     def fetch_tickers(self):
-        public_url = self.urls['api']['public']
+        public_url = self.urls['api']['fapiPublic']
         self.public_hosts_tried.append(public_url)
-        if 'api3.binance.com' not in public_url:
+        if 'fapi2.binance.com' not in public_url:
             raise Exception('451 Unavailable For Legal Reasons')
         return {'BTC/USDT': {'last': 100000.0}}
 
@@ -47,8 +47,8 @@ if __name__ == '__main__':
 
         client = binance_client.BinanceClient(testnet=False)
         expected_initial_urls = {
-            'public': 'https://api1.binance.com/sapi/v1',
-            'private': 'https://api1.binance.com/sapi/v1',
+            'fapiPublic': 'https://fapi.binance.com',
+            'fapiPrivate': 'https://fapi.binance.com',
         }
         if client.exchange.cfg.get('urls', {}).get('api') != expected_initial_urls:
             print(f"❌ URLs iniciais incorretas: {client.exchange.cfg.get('urls')}")
@@ -59,24 +59,24 @@ if __name__ == '__main__':
             print(f"❌ Conexão pública deveria funcionar após rotação: {message}")
             raise SystemExit(2)
 
-        if client.active_endpoint != 'https://api3.binance.com':
-            print(f"❌ Endpoint ativo deveria terminar em api3: {client.active_endpoint}")
+        if client.active_endpoint != 'https://fapi2.binance.com':
+            print(f"❌ Endpoint ativo deveria terminar em fapi2: {client.active_endpoint}")
             raise SystemExit(3)
 
         expected_hosts = [
-            'https://api1.binance.com/sapi/v1',
-            'https://api2.binance.com/sapi/v1',
-            'https://api3.binance.com/sapi/v1',
+            'https://fapi.binance.com',
+            'https://fapi1.binance.com',
+            'https://fapi2.binance.com',
         ]
         if client.exchange.public_hosts_tried != expected_hosts:
             print(f"❌ Rotação incorreta: {client.exchange.public_hosts_tried}")
             raise SystemExit(4)
 
-        if client.exchange.urls.get('fapi', {}).get('public') != 'https://fapi.binance.com':
+        if client.exchange.urls.get('api', {}).get('fapiPublic') != 'https://fapi2.binance.com':
             print(f"❌ Endpoint futures não deveria mudar: {client.exchange.urls}")
             raise SystemExit(5)
 
-        print('✅ Binance alterna automaticamente entre api1/api2/api3 em HTTP 451')
+        print('✅ Binance alterna automaticamente entre fapi/fapi1/fapi2 em HTTP 451')
         raise SystemExit(0)
     finally:
         binance_client._ccxt_instance = original_ccxt
