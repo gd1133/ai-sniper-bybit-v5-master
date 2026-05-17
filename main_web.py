@@ -334,7 +334,7 @@ BLOQUEIO_REPETICAO_MOEDA_SECS = 60       # 1 min para girar moedas rápido
 PENALIDADE_MOEDA_JA_ABERTA = 25           # Reduz score de ativo já aberto
 PENALIDADE_STREAK_MESMA_MOEDA = 10      # Penalidade por repetição consecutiva
 SCAN_TOP_COINS = 8                       # Menos ativos por ciclo para responder mais rápido
-SCAN_INTER_SYMBOL_DELAY_SECS = 0.25      # Respiro curto sem travar o radar
+SCAN_INTER_SYMBOL_DELAY_SECS = 5.0       # Pausa de 5s entre análises para evitar rate limit das APIs de IA
 
 
 def _frontend_index_path():
@@ -2430,10 +2430,11 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                             # Broker não tem pre_flight_check (versão antiga)
                             print(f"⚠️  [AVISO] Broker sem validação pré-voo - continuando execução")
                         except Exception as preflight_err:
-                            if ALLOW_REAL_TRADING:
-                                raise
-                            _log_raw_broker_error(cliente_nome, preflight_err, context='ERRO PRÉ-VOO REAL')
-                            print(f"⚠️  [ERRO PRÉ-VOO] {preflight_err} - continuando execução")
+                            # 🚫 FALLBACK DESATIVADO: Sempre joga erro bruto no log
+                            print(f"❌ [ERRO PRÉ-VOO REAL] Cliente: {cliente_nome}")
+                            print(f"   🔍 ERRO BRUTO DA CORRETORA: {preflight_err}")
+                            print(f"   📋 TIPO DO ERRO: {type(preflight_err).__name__}")
+                            raise  # Força propagação do erro sem silenciar
 
                         # Execução real da ordem na exchange com tratamento CCXT robusto
                         try:
@@ -2456,18 +2457,21 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                                 else:
                                     print(f"⚠️  [TP/SL FALHOU] Ordem aberta SEM proteção - monitore manualmente!")
                             else:
-                                if ALLOW_REAL_TRADING:
-                                    raise RuntimeError(
-                                        f"Resposta vazia da corretora ao enviar ordem real "
-                                        f"({ticker}, side={side.lower()}, qty={qty:.8f})"
-                                    )
-                                print(f"❌ [ORDEM FALHOU] {c.get('nome')} - Nenhum retorno da API")
-                                print(f"   🔍 DIAGNÓSTICO: Verifique credenciais API e permissões de trading")
+                                # 🚫 FALLBACK DESATIVADO: Sempre joga erro bruto no log
+                                print(f"❌ [ORDEM FALHOU] {c.get('nome')} - Resposta vazia da corretora")
+                                print(f"   🔍 DIAGNÓSTICO: Ticker={ticker}, side={side.lower()}, qty={qty:.8f}")
+                                print(f"   ⚠️  Verifique credenciais API e permissões de trading")
+                                raise RuntimeError(
+                                    f"Resposta vazia da corretora ao enviar ordem "
+                                    f"({ticker}, side={side.lower()}, qty={qty:.8f})"
+                                )
                         except Exception as order_err:
-                            if ALLOW_REAL_TRADING:
-                                raise
-                            _log_raw_broker_error(cliente_nome, order_err)
-                            print(f"   🔍 CAUSA: Provavelmente erro de autenticação, permissões ou saldo insuficiente")
+                            # 🚫 FALLBACK DESATIVADO: Sempre joga erro bruto no log
+                            print(f"❌ [ERRO EXECUÇÃO ORDEM REAL] Cliente: {cliente_nome}")
+                            print(f"   🔍 ERRO BRUTO DA CORRETORA: {order_err}")
+                            print(f"   📋 TIPO DO ERRO: {type(order_err).__name__}")
+                            print(f"   💡 CAUSA PROVÁVEL: Autenticação, permissões ou saldo insuficiente")
+                            raise  # Força propagação do erro sem silenciar
                     else:
                         # Diagnóstico detalhado do bloqueio
                         block_reasons = []
@@ -2502,10 +2506,11 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                                       json={"chat_id": c_chat, "text": c_msg, "parse_mode": "Markdown"})
                 except Exception as task_err:
                     cliente_nome = c.get('nome', 'DESCONHECIDO')
-                    if ALLOW_REAL_TRADING:
-                        _log_raw_broker_error(cliente_nome, task_err, context='ERRO LOOP CLIENTE REAL')
-                    else:
-                        print(f"❌ [ERRO LOOP CLIENTE] {cliente_nome}: {task_err}")
+                    # 🚫 FALLBACK DESATIVADO: Sempre joga erro bruto no log
+                    print(f"❌ [ERRO LOOP CLIENTE] Cliente: {cliente_nome}")
+                    print(f"   🔍 ERRO BRUTO: {task_err}")
+                    print(f"   📋 TIPO DO ERRO: {type(task_err).__name__}")
+                    raise  # Força propagação do erro sem silenciar
 
             # Executa a task do cliente
             task_cliente(cliente)
