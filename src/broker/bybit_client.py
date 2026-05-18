@@ -71,7 +71,7 @@ class BybitClient:
                 'defaultType': 'swap', # Foco em Perpétuos
                 'defaultSubType': 'linear',
                 'adjustForTimeDifference': True,
-                'recvWindow': 5000,  # Janela de 5s conforme documentação oficial para evitar rejeição por dessincronização
+                'recvWindow': 20000,  # Janela de 20s para ambientes com dessincronização de relógio (evita erro InvalidNonce)
             }
         }
         if api_key and api_secret:
@@ -132,7 +132,7 @@ class BybitClient:
             )
 
     def _init_pybit_session(self, api_key, api_secret):
-        """Inicializa sessão pybit V5 com recv_window ampliado para ambientes com latência."""
+        """Inicializa sessão pybit V5 com recv_window ampliado para ambientes com latência e dessincronização de relógio."""
         try:
             HTTP = _get_pybit_http()
             self.pybit_sdk_module = getattr(HTTP, '__module__', '')
@@ -144,10 +144,10 @@ class BybitClient:
                 testnet=self.testnet,
                 api_key=api_key,
                 api_secret=api_secret,
-                recv_window=5000,  # Janela de 5s conforme documentação oficial para evitar rejeição por dessincronização
+                recv_window=20000,  # Janela de 20s para ambientes com dessincronização de relógio (evita erro InvalidNonce)
             )
             self.pybit_session.endpoint = self.active_endpoint
-            print(f"🔌 [PYBIT V5] módulo={self.pybit_sdk_module} endpoint={self.active_endpoint}")
+            print(f"🔌 [PYBIT V5] módulo={self.pybit_sdk_module} endpoint={self.active_endpoint} recv_window=20000ms")
         except Exception as e:
             print(f"⚠️ [PYBIT] Sessão HTTP indisponível: {e}")
             self.pybit_session = None
@@ -181,11 +181,13 @@ class BybitClient:
         return (
             '10003' in msg          # Invalid API Key
             or '10004' in msg       # Invalid sign / timestamp mismatch
+            or '10002' in msg       # Invalid request / timestamp issue / InvalidNonce
             or 'API key is invalid' in msg
             or '403' in msg
             or 'Forbidden' in msg
             or 'CloudFront' in msg
             or 'timestamp' in msg.lower()
+            or 'nonce' in msg.lower()
         )
         # Nota: retCode genérico NÃO está aqui — erros como 10016 (account type
         # not found) são erros de parâmetro, não de autenticação.
@@ -458,6 +460,10 @@ class BybitClient:
                     elif "10004" in error_details or "Invalid sign" in error_details:
                         print(f"   ⚠️  Assinatura inválida - verifique o API Secret")
                         print(f"   💡 SOLUÇÃO: Verifique se API Secret está correto e recvWindow está configurado")
+                    elif "10002" in error_details or "InvalidNonce" in error_details or "timestamp" in error_details.lower():
+                        print(f"   ⏰ ERRO DE TIMESTAMP/NONCE: Dessincronização entre relógio local e servidor")
+                        print(f"   💡 SOLUÇÃO: Sincronize o relógio do sistema ou use NTP. recvWindow aumentado para 20000ms")
+                        print(f"   ℹ️  Este erro ocorre quando a diferença de tempo excede a janela de recepção permitida")
                 elif isinstance(e, ccxt.PermissionDenied):
                     print(f"   🚫 PERMISSÕES INSUFICIENTES: Habilite permissões de trading na API")
                 elif isinstance(e, ccxt.ExchangeNotAvailable) or isinstance(e, ccxt.NetworkError):
@@ -477,7 +483,11 @@ class BybitClient:
                     print(f"   💡 SOLUÇÃO: Desative 2FA na API Key e gere novas credenciais")
                 elif "10004" in error_details or "Invalid sign" in error_details:
                     print(f"   🔐 ERRO DE ASSINATURA: Verifique o API Secret")
-                    print(f"   💡 SOLUÇÃO: Confirme que timestamp está sincronizado e recvWindow=5000")
+                    print(f"   💡 SOLUÇÃO: Confirme que timestamp está sincronizado e recvWindow=20000ms")
+                elif "10002" in error_details or "InvalidNonce" in error_details or "timestamp" in error_details.lower():
+                    print(f"   ⏰ ERRO DE TIMESTAMP/NONCE: Dessincronização entre relógio local e servidor")
+                    print(f"   💡 SOLUÇÃO: Sincronize o relógio do sistema ou use NTP. recvWindow aumentado para 20000ms")
+                    print(f"   ℹ️  Este erro ocorre quando a diferença de tempo excede a janela de recepção permitida")
                 elif "insufficient balance" in error_details.lower():
                     print(f"   💰 SALDO INSUFICIENTE: Deposite fundos na conta")
 
