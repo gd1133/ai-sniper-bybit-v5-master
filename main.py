@@ -404,7 +404,7 @@ def place_order_with_protection(
             "slTriggerBy": "MarkPrice",
         }
 
-        print(f"   📦 Qty ajustado: {qty_value}")
+        print(f"   📦 Adjusted qty: {qty_value}")
         rsp = client.pybit_session.place_order(**payload)
         ok, err = client._handle_v5_ret_code(rsp, "place_order (Sniper)")
 
