@@ -274,8 +274,8 @@ class GroqValidator:
             tactical_score, tactical_action, tactical_error = self.get_tactical_signal(tech_data, symbol)
             strategic_score, strategic_motivo, strategic_action, strategic_fallback = self.get_strategic_signal(tech_data, symbol)
 
-            # 🚫 FALLBACK AUTOMÁTICO DESATIVADO - Força log de erro bruto
-            # Se ambos falharem, loga o erro mas não ativa fallback
+            # ✅ FALLBACK AUTOMÁTICO ATIVADO - Ativa 3º Cérebro quando clouds falham
+            # Se ambos falharem, ativa automaticamente o Local Brain
             if tactical_score <= 45 and strategic_fallback:
                 error_details = []
                 if tactical_error:
@@ -286,17 +286,18 @@ class GroqValidator:
                 diagnostic_msg = " | ".join(error_details) if error_details else "Ambas APIs falharam sem fornecer detalhes"
 
                 print(f"❌ [ERRO API] {diagnostic_msg}")
-                print(f"⚠️  [FALLBACK DESATIVADO] Fallback automático para 3º Cérebro está DESLIGADO")
+                print(f"✅ [FALLBACK ATIVADO] Fallback automático para 3º Cérebro está LIGADO")
+                print(f"🧠 [3º CÉREBRO ATIVO] Continuando operação com análise matemática local")
                 print(f"🔍 [DIAGNÓSTICO] Erro bruto das APIs: {diagnostic_msg}")
 
-                # 🚫 FALLBACK AUTOMÁTICO REMOVIDO - Não ativa Local Brain
-                # fallback_local_active = True
-                # tactical_score = local_score
-                # strategic_score = local_score
-                # tactical_action = 'WAIT'
-                # strategic_action = 'WAIT'
-                # strategic_motivo = f"🧠 Fallback automático ativado. APIs falharam: {diagnostic_msg}"
-                # local_fallback_side = self._resolve_local_fallback_side(tech_data)
+                # ✅ FALLBACK AUTOMÁTICO ATIVADO - Ativa Local Brain
+                fallback_local_active = True
+                tactical_score = local_score
+                strategic_score = local_score
+                tactical_action = 'WAIT'
+                strategic_action = 'WAIT'
+                strategic_motivo = f"🧠 Fallback automático ativado. APIs falharam: {diagnostic_msg}"
+                local_fallback_side = self._resolve_local_fallback_side(tech_data)
 
         tactical_action = self._normalize_side(tactical_action)
         strategic_action = self._normalize_side(strategic_action)
