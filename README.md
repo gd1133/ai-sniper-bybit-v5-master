@@ -1,6 +1,21 @@
-# Motor Sniper v60.7
+# Motor Sniper v60.9
 
 Bot de trading com dashboard web em tempo real, operacao multiativo e integracao com Bybit e IA para validacao de sinais.
+
+## ⚠️ IMPORTANTE: Configuração Modo Real vs Testnet
+
+**Problema comum:** Ordens aparecem no bot mas não nas exchanges reais.
+
+**Solução:** Configure corretamente as variáveis de ambiente:
+```bash
+ALLOW_ORDER_EXECUTION=true
+ALLOW_REAL_TRADING=true
+USE_TESTNET=false  # ⚠️ CRÍTICO: false para contas reais!
+```
+
+**Diagnóstico:** Execute `python diagnostico_modo_real.py` para validar a configuração.
+
+📖 **Documentação completa:** Ver `CORRECAO_MODO_REAL_TESTNET.md`
 
 ## Documentacao completa
 

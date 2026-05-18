@@ -55,8 +55,9 @@ class BybitClient:
         ccxt = _get_ccxt()
 
         env_api_key, env_api_secret = get_bybit_credentials()
-        api_key = str(api_key or env_api_key or '').strip()
-        api_secret = str(api_secret or env_api_secret or '').strip()
+        # 🔧 SANITIZAÇÃO: Remove espaços, quebras de linha e caracteres invisíveis
+        api_key = str(api_key or env_api_key or '').strip().replace('\n', '').replace('\r', '')
+        api_secret = str(api_secret or env_api_secret or '').strip().replace('\n', '').replace('\r', '')
         self.testnet = resolve_use_testnet(testnet)
         self.active_endpoint = get_bybit_base_url(self.testnet)
         self.pybit_session = None
@@ -70,8 +71,8 @@ class BybitClient:
             'options': {
                 'defaultType': 'swap', # Foco em Perpétuos
                 'defaultSubType': 'linear',
-                'adjustForTimeDifference': True,
-                'recvWindow': 20000,  # Janela de 20s para ambientes com dessincronização de relógio (evita erro InvalidNonce)
+                'adjustForTimeDifference': True,  # 🔧 ATIVA: Ajuste automático de diferença de tempo
+                'recvWindow': 10000,  # 🔧 AUMENTADO: 10s para evitar erros de dessincronização (InvalidNonce)
             }
         }
         if api_key and api_secret:
@@ -80,6 +81,15 @@ class BybitClient:
 
         self.exchange = ccxt.bybit(cfg)
         self._configure_exchange_endpoint()
+
+        # 🔧 SINCRONIZAÇÃO DE TEMPO: Executa ao inicializar para evitar erros de timestamp
+        if api_key and api_secret:
+            try:
+                self.exchange.load_time_difference()
+                print(f"✅ [BYBIT TIME SYNC] Diferença de tempo sincronizada com servidor")
+            except Exception as sync_err:
+                print(f"⚠️ [BYBIT TIME SYNC] Aviso: {sync_err}")
+
         self.pybit_api_version = 'v5'
         self.pybit_sdk_module = ''
 
@@ -144,10 +154,10 @@ class BybitClient:
                 testnet=self.testnet,
                 api_key=api_key,
                 api_secret=api_secret,
-                recv_window=20000,  # Janela de 20s para ambientes com dessincronização de relógio (evita erro InvalidNonce)
+                recv_window=10000,  # 🔧 AUMENTADO: 10s para evitar erros de dessincronização (InvalidNonce)
             )
             self.pybit_session.endpoint = self.active_endpoint
-            print(f"🔌 [PYBIT V5] módulo={self.pybit_sdk_module} endpoint={self.active_endpoint} recv_window=20000ms")
+            print(f"🔌 [PYBIT V5] módulo={self.pybit_sdk_module} endpoint={self.active_endpoint} recv_window=10000ms")
         except Exception as e:
             print(f"⚠️ [PYBIT] Sessão HTTP indisponível: {e}")
             self.pybit_session = None
@@ -222,7 +232,12 @@ class BybitClient:
         return 'Buy' if normalized == 'buy' else 'Sell'
 
     def _normalize_order_qty(self, symbol, qty):
-        """Normaliza quantidade para precisão aceita pela corretora, evitando Qty invalid."""
+        """
+        Normaliza quantidade para precisão aceita pela corretora, evitando Qty invalid.
+        🔧 CORREÇÃO: Considera simultaneamente min amount e min notional.
+        """
+        from decimal import Decimal, ROUND_UP
+
         try:
             qty_value = float(qty)
         except (TypeError, ValueError):
@@ -231,33 +246,64 @@ class BybitClient:
         if qty_value <= 0:
             raise ValueError(f"Quantidade deve ser positiva: {qty}")
 
-        amount_to_precision = getattr(self.exchange, 'amount_to_precision', None)
-        if callable(amount_to_precision):
-            try:
-                precise_qty = amount_to_precision(symbol, qty_value)
-                if precise_qty is not None and str(precise_qty).strip():
-                    return str(precise_qty)
-            except (TypeError, ValueError, AttributeError) as precision_error:
-                print(f"⚠️ [BYBIT QTY] amount_to_precision falhou para {symbol}: {precision_error}")
+        # 🔧 PASSO 1: Busca preço atual do ativo
+        current_price = self.get_last_price(symbol)
+        if current_price <= 0:
+            raise ValueError(f"Não foi possível obter preço atual para {symbol}")
 
-        decimals = 2
-        market = None
+        # 🔧 PASSO 2: Carrega limites do mercado (min amount e min notional)
         try:
-            market_lookup = getattr(self.exchange, 'market', None)
-            if callable(market_lookup):
-                market = market_lookup(symbol)
-            elif isinstance(getattr(self.exchange, 'markets', None), dict):
-                market = self.exchange.markets.get(symbol)
-            market_precision = (market or {}).get('precision', {}).get('amount')
-            if isinstance(market_precision, (int, float)) and market_precision >= 0:
-                decimals = int(market_precision)
-        except (TypeError, ValueError, AttributeError, KeyError):
-            pass
+            self.exchange.load_markets()
+            market = self.exchange.market(symbol)
+            limits = market.get('limits', {})
 
-        step = Decimal('1').scaleb(-decimals)
-        quantized = Decimal(str(qty_value)).quantize(step, rounding=ROUND_DOWN)
+            # Min amount (quantidade mínima em contratos/moedas)
+            min_amount = limits.get('amount', {}).get('min', 0.001)
+
+            # Min notional (valor mínimo em USDT) - Bybit geralmente exige >= 5 USDT
+            min_cost = limits.get('cost', {}).get('min', 5.0)
+
+            # Precisão da quantidade
+            amount_precision = market.get('precision', {}).get('amount', 2)
+
+            print(f"   📊 [BYBIT LIMITS] {symbol}: min_amount={min_amount}, min_notional={min_cost} USDT, precision={amount_precision}")
+        except Exception as market_err:
+            print(f"⚠️ [BYBIT MARKET] Erro ao carregar limites: {market_err}, usando defaults")
+            min_amount = 0.001
+            min_cost = 5.0
+            amount_precision = 2
+
+        # 🔧 PASSO 3: Calcula quantidade mínima para satisfazer min notional
+        min_qty_for_notional = Decimal(str(min_cost)) / Decimal(str(current_price))
+
+        # 🔧 PASSO 4: Usa o maior entre min_amount e min_qty_for_notional
+        required_min_qty = max(Decimal(str(min_amount)), min_qty_for_notional)
+
+        # Se quantidade fornecida for menor que o mínimo, usa o mínimo
+        if Decimal(str(qty_value)) < required_min_qty:
+            print(f"⚠️ [BYBIT QTY] Quantidade {qty_value} abaixo do mínimo. Ajustando para {required_min_qty}")
+            qty_value = float(required_min_qty)
+
+        # 🔧 PASSO 5: Arredonda para cima respeitando precisão da exchange
+        step = Decimal('1').scaleb(-amount_precision)
+        quantized = Decimal(str(qty_value)).quantize(step, rounding=ROUND_UP)
+
+        # Garante que após arredondamento ainda atende min notional
+        notional_value = float(quantized) * current_price
+        if notional_value < min_cost:
+            # Arredonda para cima até atingir min notional
+            quantized = (Decimal(str(min_cost)) / Decimal(str(current_price))).quantize(step, rounding=ROUND_UP)
+            notional_value = float(quantized) * current_price
+            print(f"   🔧 [BYBIT NOTIONAL] Ajustado para qty={quantized} (notional={notional_value:.2f} USDT >= {min_cost} USDT)")
+
         normalized = format(quantized, 'f')
-        return normalized.rstrip('0').rstrip('.') if '.' in normalized else normalized
+        final_qty = normalized.rstrip('0').rstrip('.') if '.' in normalized else normalized
+
+        # 🔧 PASSO 6: Exibe informações de validação
+        final_notional = float(final_qty) * current_price
+        print(f"   ✅ [BYBIT ORDER] qty={final_qty} (notional={final_notional:.2f} USDT, min_amount={min_amount}, min_notional={min_cost} USDT)")
+
+        return final_qty
 
     def _validate_insurance_fund(self):
         """Consulta o fundo de seguros V5 apenas para validar conectividade inicial."""
@@ -513,20 +559,36 @@ class BybitClient:
                     print(f"   📏 ORDEM INVÁLIDA: Verifique tamanho mínimo de lote, preço ou quantidade")
                     if "lot size" in error_details.lower() or "min" in error_details.lower():
                         print(f"   ⚠️  TAMANHO MÍNIMO DE LOTE INVÁLIDO: Quantidade {qty:.4f} abaixo do mínimo permitido")
+                    if "notional" in error_details.lower() or "order cost" in error_details.lower():
+                        print(f"   ⚠️  NOCIONAL MÍNIMO: Valor da ordem abaixo do mínimo exigido (geralmente >= 5 USDT)")
+                        print(f"   💡 SOLUÇÃO: Aumente a quantidade ou escolha um ativo com preço mais alto")
+                    if "category" in error_details.lower():
+                        print(f"   ⚠️  CATEGORIA INVÁLIDA: Use category=linear para derivativos perpétuos/futuros")
+                        print(f"   💡 SOLUÇÃO: O sistema já força category=linear, mas a API pode estar rejeitando")
                 elif isinstance(e, ccxt.AuthenticationError):
                     print(f"   🔑 ERRO DE AUTENTICAÇÃO: Verifique suas credenciais API (key/secret)")
                     if "10003" in error_details or "Invalid API key" in error_details:
                         print(f"   ⚠️  API Key inválida ou expirada")
-                        print(f"   💡 SOLUÇÃO: Desative 2FA na API Key (não na conta) e gere novas credenciais")
+                        print(f"   💡 SOLUÇÃO:")
+                        print(f"      1. Verifique se API Key e Secret estão corretos (sem espaços extras)")
+                        print(f"      2. Desative 2FA na API Key (não na conta principal!)")
+                        print(f"      3. Verifique se a chave é de PRODUÇÃO e não de testnet")
+                        print(f"      4. Gere novas credenciais se necessário")
                     elif "10004" in error_details or "Invalid sign" in error_details:
                         print(f"   ⚠️  Assinatura inválida - verifique o API Secret")
                         print(f"   💡 SOLUÇÃO: Verifique se API Secret está correto e recvWindow está configurado")
                     elif "10002" in error_details or "InvalidNonce" in error_details or "timestamp" in error_details.lower():
                         print(f"   ⏰ ERRO DE TIMESTAMP/NONCE: Dessincronização entre relógio local e servidor")
-                        print(f"   💡 SOLUÇÃO: Sincronize o relógio do sistema ou use NTP. recvWindow aumentado para 20000ms")
+                        print(f"   💡 SOLUÇÃO: Sincronize o relógio do sistema ou use NTP. recvWindow aumentado para 10000ms")
                         print(f"   ℹ️  Este erro ocorre quando a diferença de tempo excede a janela de recepção permitida")
                 elif isinstance(e, ccxt.PermissionDenied):
                     print(f"   🚫 PERMISSÕES INSUFICIENTES: Habilite permissões de trading na API")
+                    if "positionIdx" in error_details or "position idx" in error_details.lower():
+                        print(f"   ⚠️  ERRO DE POSITION IDX: Modo de posição (one-way/hedge) incompatível")
+                        print(f"   💡 SOLUÇÃO: Verifique Position Mode na Bybit:")
+                        print(f"      - One-Way Mode: positionIdx=0")
+                        print(f"      - Hedge Mode Long: positionIdx=1")
+                        print(f"      - Hedge Mode Short: positionIdx=2")
                 elif isinstance(e, ccxt.ExchangeNotAvailable) or isinstance(e, ccxt.NetworkError):
                     print(f"   🌐 ERRO DE REDE/EXCHANGE: Exchange temporariamente indisponível ou problema de conexão")
                 elif isinstance(e, ccxt.RateLimitExceeded):
@@ -541,16 +603,32 @@ class BybitClient:
                 print(f"❌ [ERRO EXECUÇÃO BYBIT] Falha crítica na ordem: {error_details}")
                 if "10003" in error_details or "Invalid API key" in error_details:
                     print(f"   🔑 ERRO DE AUTENTICAÇÃO: Verifique suas credenciais API")
-                    print(f"   💡 SOLUÇÃO: Desative 2FA na API Key e gere novas credenciais")
+                    print(f"   💡 SOLUÇÃO:")
+                    print(f"      1. Verifique se API Key e Secret estão corretos (sem espaços extras)")
+                    print(f"      2. Desative 2FA na API Key (não na conta principal!)")
+                    print(f"      3. Verifique se a chave é de PRODUÇÃO e não de testnet")
+                    print(f"      4. Gere novas credenciais se necessário")
                 elif "10004" in error_details or "Invalid sign" in error_details:
                     print(f"   🔐 ERRO DE ASSINATURA: Verifique o API Secret")
-                    print(f"   💡 SOLUÇÃO: Confirme que timestamp está sincronizado e recvWindow=20000ms")
+                    print(f"   💡 SOLUÇÃO: Confirme que timestamp está sincronizado e recvWindow=10000ms")
                 elif "10002" in error_details or "InvalidNonce" in error_details or "timestamp" in error_details.lower():
                     print(f"   ⏰ ERRO DE TIMESTAMP/NONCE: Dessincronização entre relógio local e servidor")
-                    print(f"   💡 SOLUÇÃO: Sincronize o relógio do sistema ou use NTP. recvWindow aumentado para 20000ms")
+                    print(f"   💡 SOLUÇÃO: Sincronize o relógio do sistema ou use NTP. recvWindow aumentado para 10000ms")
                     print(f"   ℹ️  Este erro ocorre quando a diferença de tempo excede a janela de recepção permitida")
                 elif "insufficient balance" in error_details.lower():
                     print(f"   💰 SALDO INSUFICIENTE: Deposite fundos na conta")
+                elif "category" in error_details.lower():
+                    print(f"   📊 ERRO DE CATEGORIA: Use category=linear para derivativos perpétuos")
+                    print(f"   💡 O sistema já força category=linear automaticamente")
+                elif "positionIdx" in error_details or "position idx" in error_details.lower():
+                    print(f"   ⚠️  ERRO DE POSITION IDX: Modo de posição (one-way/hedge) incompatível")
+                    print(f"   💡 SOLUÇÃO: Verifique Position Mode na Bybit:")
+                    print(f"      - One-Way Mode: positionIdx=0")
+                    print(f"      - Hedge Mode Long: positionIdx=1")
+                    print(f"      - Hedge Mode Short: positionIdx=2")
+                elif "notional" in error_details.lower() or "order cost" in error_details.lower():
+                    print(f"   📊 NOCIONAL MÍNIMO: Valor da ordem abaixo do mínimo exigido")
+                    print(f"   💡 SOLUÇÃO: Aumente a quantidade ou escolha um ativo com preço mais alto")
 
             if raise_on_error:
                 raise
@@ -670,29 +748,89 @@ class BybitClient:
 
     def close_position_with_sl(self, symbol, position_side):
         """
-        Encerra posição se Stop Loss for acionado (Fallback se TP/SL falhar).
-        Implementa o Protocolo Sniper de Rigor Máximo.
+        Encerra posição de emergência com fallback robusto para positionIdx.
+        🔧 CORREÇÃO: Busca posições abertas e usa positionIdx real + reduceOnly.
         """
         try:
             if not self.authenticated:
+                print("❌ [CLOSE POSITION] Não autenticado")
                 return False
-            
+
             # Identifica lado oposto para fechar
             close_side = "sell" if position_side.lower() == "buy" else "buy"
-            
-            # Busca tamanho da posição aberta
+
+            print(f"🔒 [CLOSE POSITION] Tentando fechar {symbol} (lado original: {position_side})")
+
+            # 🔧 PASSO 1: Busca posições abertas com category=linear
             positions = self.exchange.fetch_positions(params={'category': 'linear'})
-            pos_size = next(
-                (p['contracts'] for p in positions if symbol in p.get('symbol', '')), 
-                0
+
+            # 🔧 PASSO 2: Encontra a posição correta e extrai positionIdx real
+            target_position = None
+            for p in positions:
+                pos_symbol = p.get('symbol', '')
+                pos_contracts = float(p.get('contracts') or 0)
+                pos_side = str(p.get('side', '')).lower()
+
+                # Verifica se é a posição que queremos fechar
+                if symbol in pos_symbol and pos_contracts > 0:
+                    # Verifica se o lado bate (long/buy ou short/sell)
+                    if (position_side.lower() in ('buy', 'long') and pos_side == 'long') or \
+                       (position_side.lower() in ('sell', 'short') and pos_side == 'short'):
+                        target_position = p
+                        break
+
+            if not target_position:
+                print(f"⚠️ [CLOSE POSITION] Nenhuma posição aberta encontrada para {symbol} no lado {position_side}")
+                return False
+
+            pos_size = float(target_position.get('contracts') or 0)
+            if pos_size <= 0:
+                print(f"⚠️ [CLOSE POSITION] Tamanho da posição é zero")
+                return False
+
+            # 🔧 PASSO 3: Extrai positionIdx da posição real (se disponível)
+            position_info = target_position.get('info', {})
+            position_idx = position_info.get('positionIdx')
+
+            print(f"   📊 [CLOSE POSITION] Tamanho: {pos_size}, positionIdx: {position_idx}")
+
+            # 🔧 PASSO 4: Monta params com category=linear, reduceOnly e positionIdx
+            params = {
+                'category': 'linear',  # Obrigatório para derivativos lineares
+                'reduceOnly': True,     # Garante que só fecha posição existente
+            }
+
+            # Adiciona positionIdx apenas se estiver disponível
+            if position_idx is not None:
+                params['positionIdx'] = position_idx
+
+            # 🔧 PASSO 5: Normaliza quantidade
+            normalized_qty = self._normalize_order_qty(symbol, pos_size)
+
+            print(f"   📤 [CLOSE POSITION] Enviando ordem: side={close_side}, qty={normalized_qty}, params={params}")
+
+            # 🔧 PASSO 6: Envia ordem de fechamento via create_order (não create_market_order)
+            order = self.exchange.create_order(
+                symbol=symbol,
+                type='market',
+                side=close_side,
+                amount=float(normalized_qty),
+                params=params  # 🔧 CORREÇÃO: params como argumento nomeado
             )
-            
-            if pos_size > 0:
-                order = self.exchange.create_market_order(symbol, close_side, pos_size)
-                print(f"🔒 [SL EXECUTADO] Posição {symbol} fechada com proteção")
-                return True
-            
-            return False
+
+            print(f"✅ [CLOSE POSITION] Posição {symbol} fechada com sucesso - Order ID: {order.get('id', 'N/A')}")
+            return True
+
         except Exception as e:
-            print(f"❌ [SL FALLBACK] Erro ao fechar: {e}")
+            error_msg = str(e)
+            print(f"❌ [CLOSE POSITION] Erro ao fechar: {error_msg}")
+
+            # 🔧 DIAGNÓSTICO: Trata erro de position idx mismatch
+            if 'position idx' in error_msg.lower() or 'positionIdx' in error_msg:
+                print(f"   ⚠️ ERRO DE POSITION IDX: O modo de posição (one-way/hedge) não corresponde ao positionIdx usado")
+                print(f"   💡 SOLUÇÃO: Verifique o modo de posição na Bybit (Position Mode) e use positionIdx correto:")
+                print(f"      - One-Way Mode: positionIdx=0")
+                print(f"      - Hedge Mode Long: positionIdx=1")
+                print(f"      - Hedge Mode Short: positionIdx=2")
+
             return False
