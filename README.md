@@ -1,4 +1,4 @@
-# Motor Sniper v60.7
+# Motor Sniper v60.8
 
 Bot de trading com dashboard web em tempo real, operacao multiativo e integracao com Bybit e IA para validacao de sinais.
 

@@ -10,9 +10,10 @@ from src.ai_brain.learning import TradeLearner
 
 class GroqValidator:
     """
-    🧠 CÉREBRO TRIPLO v60.1 - GIVALDO SUPREME
+    🧠 CÉREBRO TRIPLO v60.8 - GIVALDO SUPREME
     Lógica: Consenso Ponderado (Gemini 40% | Groq 35% | Local 25%)
     Rigor: 60% Mínimo para autorizar o Ponto Zero.
+    Fallback Automático: ✅ ATIVADO (3º Cérebro quando APIs falham)
     """
     def __init__(self, api_key_gemini, api_key_groq):
         self.gemini_key = api_key_gemini
