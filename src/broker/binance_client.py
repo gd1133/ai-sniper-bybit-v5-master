@@ -92,6 +92,7 @@ class BinanceClient:
             'options': {
                 'defaultType': 'future',
                 'adjustForTimeDifference': True,
+                'recvWindow': 5000,  # Janela de 5s conforme documentação oficial para evitar rejeição por dessincronização
             },
         }
         if self.api_key and self.api_secret:
@@ -303,7 +304,14 @@ class BinanceClient:
 
             if isinstance(e, ccxt.BaseError):
                 error_details = str(e)
-                print(f"❌ ERRO REAL DA CORRETORA: {error_details}")
+                print(f"❌ ERRO REAL DA CORRETORA BINANCE: {error_details}")
+
+                # Extrai código HTTP se disponível
+                http_status = getattr(e, 'status', None) or getattr(e, 'http_status_code', None)
+                if http_status:
+                    print(f"   🌐 HTTP STATUS CODE: {http_status}")
+                    if http_status in [400, 429, 451]:
+                        print(f"   ⚠️  ERRO CRÍTICO HTTP {http_status} - Verifique configurações da API")
 
                 # Diagnóstico detalhado de erros CCXT
                 if isinstance(e, ccxt.InsufficientFunds):
@@ -316,8 +324,10 @@ class BinanceClient:
                     print(f"   🔑 ERRO DE AUTENTICAÇÃO: Verifique suas credenciais API Binance (key/secret)")
                     if "API-key" in error_details or "Invalid API" in error_details:
                         print(f"   ⚠️  API Key inválida ou expirada")
+                        print(f"   💡 SOLUÇÃO: Gere novas credenciais e habilite permissões de Futures")
                     elif "Signature" in error_details:
                         print(f"   ⚠️  Assinatura inválida - verifique o API Secret")
+                        print(f"   💡 SOLUÇÃO: Verifique se API Secret está correto e recvWindow está configurado")
                 elif isinstance(e, ccxt.PermissionDenied):
                     print(f"   🚫 PERMISSÕES INSUFICIENTES: Habilite permissões de trading Futures na API Binance")
                     if "451" in error_details:
@@ -326,6 +336,7 @@ class BinanceClient:
                     print(f"   🌐 ERRO DE REDE/EXCHANGE: Binance temporariamente indisponível ou problema de conexão")
                 elif isinstance(e, ccxt.RateLimitExceeded):
                     print(f"   ⏱️  RATE LIMIT EXCEDIDO: Muitas requisições - aguarde alguns segundos")
+                    print(f"   💡 SOLUÇÃO: Implementar backoff exponencial ou reduzir frequência de requisições")
                 else:
                     # Erro CCXT genérico
                     print(f"   ⚠️  Erro CCXT: {type(e).__name__}")
@@ -335,8 +346,10 @@ class BinanceClient:
                 print(f"❌ [ERRO BINANCE] Falha na ordem: {error_details}")
                 if "API-key" in error_details or "Invalid API" in error_details:
                     print(f"   🔑 ERRO DE AUTENTICAÇÃO: Verifique suas credenciais API Binance")
+                    print(f"   💡 SOLUÇÃO: Gere novas credenciais e habilite permissões de Futures")
                 elif "Signature" in error_details:
                     print(f"   🔐 ERRO DE ASSINATURA: Verifique o API Secret Binance")
+                    print(f"   💡 SOLUÇÃO: Confirme que timestamp está sincronizado e recvWindow=5000")
                 elif "insufficient balance" in error_details.lower() or "balance is not enough" in error_details.lower():
                     print(f"   💰 SALDO INSUFICIENTE: Deposite fundos na conta Binance Futures")
                 elif "451" in error_details:
