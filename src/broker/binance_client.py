@@ -362,14 +362,24 @@ class BinanceClient:
                     print(f"   📏 ORDEM INVÁLIDA: Verifique tamanho mínimo de lote, preço ou quantidade")
                     if "lot size" in error_details.lower() or "min" in error_details.lower():
                         print(f"   ⚠️  TAMANHO MÍNIMO DE LOTE INVÁLIDO: Quantidade {qty:.4f} abaixo do mínimo permitido")
+                    if "notional" in error_details.lower():
+                        print(f"   ⚠️  NOCIONAL MÍNIMO: Valor da ordem abaixo do mínimo exigido (geralmente >= 5 USDT)")
+                        print(f"   💡 SOLUÇÃO: Aumente a quantidade ou escolha um ativo com preço mais alto")
                 elif isinstance(e, ccxt.AuthenticationError):
                     print(f"   🔑 ERRO DE AUTENTICAÇÃO: Verifique suas credenciais API Binance (key/secret)")
-                    if "API-key" in error_details or "Invalid API" in error_details:
+                    if "API-key" in error_details or "Invalid API" in error_details or "Invalid Api-Key ID" in error_details:
                         print(f"   ⚠️  API Key inválida ou expirada")
-                        print(f"   💡 SOLUÇÃO: Gere novas credenciais e habilite permissões de Futures")
+                        print(f"   💡 SOLUÇÃO:")
+                        print(f"      1. Verifique se API Key e Secret estão corretos (sem espaços extras)")
+                        print(f"      2. Confirme que as permissões de FUTURES estão habilitadas")
+                        print(f"      3. Verifique se seu IP está na whitelist (se configurado)")
+                        print(f"      4. Gere novas credenciais se necessário")
                     elif "Signature" in error_details:
                         print(f"   ⚠️  Assinatura inválida - verifique o API Secret")
                         print(f"   💡 SOLUÇÃO: Verifique se API Secret está correto e recvWindow está configurado")
+                    elif "Timestamp" in error_details or "recvWindow" in error_details:
+                        print(f"   ⏰ ERRO DE TIMESTAMP: Dessincronização de relógio")
+                        print(f"   💡 SOLUÇÃO: Sincronize o relógio do sistema com NTP")
                 elif isinstance(e, ccxt.PermissionDenied):
                     print(f"   🚫 PERMISSÕES INSUFICIENTES: Habilite permissões de trading Futures na API Binance")
                     if "451" in error_details:
@@ -386,14 +396,21 @@ class BinanceClient:
                 # Erro não-CCXT
                 error_details = str(e)
                 print(f"❌ [ERRO BINANCE] Falha na ordem: {error_details}")
-                if "API-key" in error_details or "Invalid API" in error_details:
+                if "API-key" in error_details or "Invalid API" in error_details or "Invalid Api-Key ID" in error_details:
                     print(f"   🔑 ERRO DE AUTENTICAÇÃO: Verifique suas credenciais API Binance")
-                    print(f"   💡 SOLUÇÃO: Gere novas credenciais e habilite permissões de Futures")
+                    print(f"   💡 SOLUÇÃO:")
+                    print(f"      1. Verifique se API Key e Secret estão corretos (sem espaços extras)")
+                    print(f"      2. Confirme que as permissões de FUTURES estão habilitadas")
+                    print(f"      3. Verifique se seu IP está na whitelist (se configurado)")
+                    print(f"      4. Gere novas credenciais se necessário")
                 elif "Signature" in error_details:
                     print(f"   🔐 ERRO DE ASSINATURA: Verifique o API Secret Binance")
-                    print(f"   💡 SOLUÇÃO: Confirme que timestamp está sincronizado e recvWindow=5000")
+                    print(f"   💡 SOLUÇÃO: Confirme que timestamp está sincronizado e recvWindow=10000")
                 elif "insufficient balance" in error_details.lower() or "balance is not enough" in error_details.lower():
                     print(f"   💰 SALDO INSUFICIENTE: Deposite fundos na conta Binance Futures")
+                elif "notional" in error_details.lower():
+                    print(f"   📊 NOCIONAL MÍNIMO: Valor da ordem abaixo do mínimo exigido")
+                    print(f"   💡 SOLUÇÃO: Aumente a quantidade ou escolha um ativo com preço mais alto")
                 elif "451" in error_details:
                     print(f"   🚫 HTTP 451: Região bloqueada - tentando endpoints alternativos")
 
