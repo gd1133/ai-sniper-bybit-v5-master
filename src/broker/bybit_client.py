@@ -71,7 +71,7 @@ class BybitClient:
                 'defaultType': 'swap', # Foco em Perpétuos
                 'defaultSubType': 'linear',
                 'adjustForTimeDifference': True,
-                'recvWindow': 20000,
+                'recvWindow': 5000,  # Janela de 5s conforme documentação oficial para evitar rejeição por dessincronização
             }
         }
         if api_key and api_secret:
@@ -144,7 +144,7 @@ class BybitClient:
                 testnet=self.testnet,
                 api_key=api_key,
                 api_secret=api_secret,
-                recv_window=20000,
+                recv_window=5000,  # Janela de 5s conforme documentação oficial para evitar rejeição por dessincronização
             )
             self.pybit_session.endpoint = self.active_endpoint
             print(f"🔌 [PYBIT V5] módulo={self.pybit_sdk_module} endpoint={self.active_endpoint}")
@@ -392,19 +392,20 @@ class BybitClient:
             if self.pybit_session is not None:
                 v5_symbol = self._normalize_v5_symbol(symbol)
                 payload = {
-                    'category': 'linear',
+                    'category': 'linear',  # Obrigatório para futuros/perpétuos USDT conforme Bybit V5 API
                     'symbol': v5_symbol,
                     'side': self._normalize_v5_side(side),
                     'orderType': 'Market',
                     'qty': normalized_qty,
                 }
-                print(f"   📤 Enviando ordem via Pybit V5: {payload}")
+                print(f"   📤 Enviando ordem via Pybit V5 (/v5/order/create): {payload}")
                 rsp = self.pybit_session.place_order(**payload)
                 print(f"   📥 Resposta da API Bybit: {rsp}")
 
                 ok, error_message = self._handle_v5_ret_code(rsp, 'v5/order/create')
                 if not ok:
                     print(f"❌ [ERRO EXECUÇÃO BYBIT] {error_message}")
+                    print(f"   🔍 ERRO BRUTO DA CORRETORA: retCode={rsp.get('retCode')}, retMsg={rsp.get('retMsg')}")
                     if raise_on_error:
                         raise RuntimeError(error_message)
                     return None
@@ -421,8 +422,8 @@ class BybitClient:
                 }
 
             # Fallback para CCXT se pybit não estiver disponível
-            params = {'category': 'linear'}
-            print(f"   📤 Enviando ordem via CCXT: symbol={symbol}, type=market, side={side}, qty={normalized_qty}")
+            params = {'category': 'linear'}  # Obrigatório para futuros/perpétuos USDT conforme Bybit V5 API
+            print(f"   📤 Enviando ordem via CCXT: symbol={symbol}, type=market, side={side}, qty={normalized_qty}, params={params}")
             order = self.exchange.create_order(symbol, 'market', side, ccxt_qty, params=params)
             print(f"   📥 Resposta CCXT: {order}")
             print(f"✅ [BYBIT CCXT] Ordem criada - ID: {order.get('id', 'N/A')}")
@@ -433,7 +434,14 @@ class BybitClient:
 
             if isinstance(e, ccxt.BaseError):
                 error_details = str(e)
-                print(f"❌ ERRO REAL DA CORRETORA: {error_details}")
+                print(f"❌ ERRO REAL DA CORRETORA BYBIT: {error_details}")
+
+                # Extrai código HTTP se disponível
+                http_status = getattr(e, 'status', None) or getattr(e, 'http_status_code', None)
+                if http_status:
+                    print(f"   🌐 HTTP STATUS CODE: {http_status}")
+                    if http_status in [400, 429, 451]:
+                        print(f"   ⚠️  ERRO CRÍTICO HTTP {http_status} - Verifique configurações da API")
 
                 # Diagnóstico detalhado de erros CCXT
                 if isinstance(e, ccxt.InsufficientFunds):
@@ -446,14 +454,17 @@ class BybitClient:
                     print(f"   🔑 ERRO DE AUTENTICAÇÃO: Verifique suas credenciais API (key/secret)")
                     if "10003" in error_details or "Invalid API key" in error_details:
                         print(f"   ⚠️  API Key inválida ou expirada")
+                        print(f"   💡 SOLUÇÃO: Desative 2FA na API Key (não na conta) e gere novas credenciais")
                     elif "10004" in error_details or "Invalid sign" in error_details:
                         print(f"   ⚠️  Assinatura inválida - verifique o API Secret")
+                        print(f"   💡 SOLUÇÃO: Verifique se API Secret está correto e recvWindow está configurado")
                 elif isinstance(e, ccxt.PermissionDenied):
                     print(f"   🚫 PERMISSÕES INSUFICIENTES: Habilite permissões de trading na API")
                 elif isinstance(e, ccxt.ExchangeNotAvailable) or isinstance(e, ccxt.NetworkError):
                     print(f"   🌐 ERRO DE REDE/EXCHANGE: Exchange temporariamente indisponível ou problema de conexão")
                 elif isinstance(e, ccxt.RateLimitExceeded):
                     print(f"   ⏱️  RATE LIMIT EXCEDIDO: Muitas requisições - aguarde alguns segundos")
+                    print(f"   💡 SOLUÇÃO: Implementar backoff exponencial ou reduzir frequência de requisições")
                 else:
                     # Erro CCXT genérico
                     print(f"   ⚠️  Erro CCXT: {type(e).__name__}")
@@ -463,8 +474,10 @@ class BybitClient:
                 print(f"❌ [ERRO EXECUÇÃO BYBIT] Falha crítica na ordem: {error_details}")
                 if "10003" in error_details or "Invalid API key" in error_details:
                     print(f"   🔑 ERRO DE AUTENTICAÇÃO: Verifique suas credenciais API")
+                    print(f"   💡 SOLUÇÃO: Desative 2FA na API Key e gere novas credenciais")
                 elif "10004" in error_details or "Invalid sign" in error_details:
                     print(f"   🔐 ERRO DE ASSINATURA: Verifique o API Secret")
+                    print(f"   💡 SOLUÇÃO: Confirme que timestamp está sincronizado e recvWindow=5000")
                 elif "insufficient balance" in error_details.lower():
                     print(f"   💰 SALDO INSUFICIENTE: Deposite fundos na conta")
 
