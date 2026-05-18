@@ -262,7 +262,7 @@ class BybitClient:
                             return str(floor_qty)
                     return str(precise_qty)
             except (TypeError, ValueError, AttributeError) as precision_error:
-                print(f"⚠️ [BYBIT QTY] amount_to_precision falhou para {symbol}: {precision_error}")
+                print(f"⚠️ [BYBIT QTY] amount_to_precision failed for {symbol}: {precision_error}")
 
         decimals = 2
         try:

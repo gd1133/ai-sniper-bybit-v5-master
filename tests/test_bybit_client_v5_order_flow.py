@@ -147,10 +147,10 @@ if __name__ == '__main__':
             print(f"❌ Payload V5 incorreto: {order_call}")
             raise SystemExit(3)
         if order_call.get('qty') != '2.66':
-            print(f"❌ Quantidade deveria respeitar amount_to_precision: {order_call}")
+            print(f"❌ Qty should respect amount_to_precision: {order_call}")
             raise SystemExit(10)
         if client.exchange.amount_to_precision_calls[-1] != ('BTC/USDT:USDT', TEST_QTY_WITH_HIGH_PRECISION):
-            print(f"❌ amount_to_precision não foi usado corretamente: {client.exchange.amount_to_precision_calls}")
+            print(f"❌ amount_to_precision was not used correctly: {client.exchange.amount_to_precision_calls}")
             raise SystemExit(11)
 
         previous_precision_call_count = len(client.exchange.amount_to_precision_calls)
@@ -165,7 +165,7 @@ if __name__ == '__main__':
 
         insurance_call = client.pybit_session.insurance_calls[-1]
         if insurance_call.get('coin') != 'USDT':
-            print(f"❌ Consulta insurance incorreta: {insurance_call}")
+            print(f"❌ Incorrect insurance query: {insurance_call}")
             raise SystemExit(4)
 
         bybit_client._pybit_http_class = _AuthFailingHTTP
