@@ -34,26 +34,13 @@ signature = hmac.new(secret.encode(), query_string.encode(), hashlib.sha256).hex
 
 ## ✅ 2. AJUSTE DE TIMESTAMP E RECVWINDOW
 
-### Status: ✅ CORRIGIDO
+### Status: ✅ ATUALIZADO (v60.9 - 2026-05-18)
 
 **Mudanças implementadas:**
 
 ### Bybit V5 (`src/broker/bybit_client.py`)
 
-**Antes:**
-```python
-cfg = {
-    'options': {
-        'recvWindow': 20000,  # 20 segundos
-    }
-}
-
-self.pybit_session = HTTP(
-    recv_window=20000,  # 20 segundos
-)
-```
-
-**Depois:**
+**Versão Anterior (v60.7):**
 ```python
 cfg = {
     'options': {
@@ -67,19 +54,23 @@ self.pybit_session = HTTP(
 )
 ```
 
-### Binance Futures (`src/broker/binance_client.py`)
-
-**Antes:**
+**Versão Atual (v60.9):**
 ```python
 cfg = {
     'options': {
-        'adjustForTimeDifference': True,
-        # recvWindow não estava explícito
+        'recvWindow': 20000,  # 20 segundos para ambientes com dessincronização de relógio
+        'adjustForTimeDifference': True,  # Sincronização automática de timestamp
     }
 }
+
+self.pybit_session = HTTP(
+    recv_window=20000,  # 20 segundos para ambientes com dessincronização de relógio
+)
 ```
 
-**Depois:**
+### Binance Futures (`src/broker/binance_client.py`)
+
+**Mantido:**
 ```python
 cfg = {
     'options': {
@@ -89,15 +80,23 @@ cfg = {
 }
 ```
 
-**Justificativa:**
-A documentação oficial de ambas as exchanges recomenda `recvWindow=5000` (5 segundos) para:
-- Evitar rejeições por dessincronização de relógio
-- Reduzir janela de replay attack
-- Conformidade com ambientes Railway/cloud com possível latência
+**Justificativa da mudança:**
+- ❌ **Problema identificado**: Erro `InvalidNonce` (retCode 10002) ocorre quando a diferença entre `req_timestamp` e `server_timestamp` excede o `recv_window`
+- 🔍 **Causa raiz**: Ambientes com dessincronização de relógio superior a 5 segundos (observado: diferença de ~9 segundos)
+- ✅ **Solução**: Aumentar `recvWindow` para 20000ms (20 segundos) para acomodar:
+  - Dessincronização de relógio em sistemas locais sem NTP
+  - Latência de rede em ambientes cloud/Railway
+  - Ambientes Windows com sincronização de tempo desabilitada
+
+**Erro típico antes da correção:**
+```
+! InvalidNonce : bybit {"retCode":10002,"retMsg":"solicitação inválida, verifique o timestamp do seu servidor ou o parâmetro recv_window: req_timestamp[1779123899105],server_timestamp[1779123908029],recv_window[5000]"}
+```
 
 **Timestamp automático:**
 - ✅ CCXT: `adjustForTimeDifference: true` sincroniza timestamp automaticamente
 - ✅ pybit: Gera timestamp em milissegundos automaticamente em cada chamada
+- ⚠️ **Nota**: `adjustForTimeDifference` pode falhar na primeira requisição antes de calibrar o offset
 
 ---
 
@@ -271,13 +270,14 @@ except Exception as order_err:
 
 | Item | Antes | Depois | Status |
 |------|-------|--------|--------|
-| recvWindow (Bybit) | 20000ms | 5000ms | ✅ Corrigido |
+| recvWindow (Bybit) | 5000ms | 20000ms | ✅ Atualizado (v60.9) |
 | recvWindow (Binance) | Padrão CCXT | 5000ms explícito | ✅ Corrigido |
 | category linear (Bybit) | Presente | Documentado nos logs | ✅ Verificado |
 | Assinatura HMAC SHA256 | CCXT/pybit | CCXT/pybit (confirmado) | ✅ Verificado |
 | Logs HTTP 400/429/451 | Genéricos | Detalhados com soluções | ✅ Implementado |
 | Fallback simulação | N/A | Desativado (raise_on_error) | ✅ Confirmado |
 | timestamp automático | adjustForTimeDifference | adjustForTimeDifference + recvWindow | ✅ Otimizado |
+| Detecção InvalidNonce (10002) | Genérica | Específica com diagnóstico | ✅ Implementado (v60.9) |
 
 ---
 
