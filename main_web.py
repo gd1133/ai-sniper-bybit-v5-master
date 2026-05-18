@@ -201,7 +201,61 @@ db.init_db()
 APP_MODE = _normalize_operation_mode(db.get_operation_mode())
 ALLOW_ORDER_EXECUTION = ENV_CONFIG.allow_order_execution
 ALLOW_REAL_TRADING = _strict_env_bool('ALLOW_REAL_TRADING', 'false')
-USE_TESTNET = _strict_env_bool('USE_TESTNET', 'true')
+USE_TESTNET = _strict_env_bool('USE_TESTNET', 'false')  # 🔧 CORREÇÃO: Default false para produção
+
+# 🚨 VALIDAÇÃO CRÍTICA: Detecta configuração incorreta de modo real vs testnet
+if ALLOW_REAL_TRADING and USE_TESTNET:
+    print("=" * 80)
+    print("⚠️  ⚠️  ⚠️  ATENÇÃO: CONFIGURAÇÃO CONFLITANTE DETECTADA ⚠️  ⚠️  ⚠️")
+    print("=" * 80)
+    print("   ALLOW_REAL_TRADING=true mas USE_TESTNET=true")
+    print("   Sistema vai enviar ordens para TESTNET, não contas reais!")
+    print()
+    print("   Para usar contas REAIS, configure:")
+    print("   USE_TESTNET=false")
+    print("=" * 80)
+    print()
+
+if not ALLOW_ORDER_EXECUTION:
+    print("=" * 80)
+    print("🔒 MODO SEGURO: Execução de ordens DESABILITADA")
+    print("=" * 80)
+    print("   ALLOW_ORDER_EXECUTION=false")
+    print("   Sistema vai simular ordens mas NÃO vai enviar para exchanges")
+    print("   Configure ALLOW_ORDER_EXECUTION=true para habilitar execução")
+    print("=" * 80)
+    print()
+elif not ALLOW_REAL_TRADING:
+    print("=" * 80)
+    print("🔒 TRADING REAL BLOQUEADO")
+    print("=" * 80)
+    print("   ALLOW_REAL_TRADING=false")
+    print("   Ordens serão bloqueadas por segurança")
+    print("   Configure ALLOW_REAL_TRADING=true para habilitar trading real")
+    print("=" * 80)
+    print()
+elif USE_TESTNET:
+    print("=" * 80)
+    print("🧪 MODO TESTNET ATIVO")
+    print("=" * 80)
+    print("   USE_TESTNET=true")
+    print("   ⚠️  Ordens vão para contas de TESTE, não contas reais!")
+    print("   ⚠️  Ordens NÃO aparecerão nas exchanges reais!")
+    print()
+    print("   Para usar contas REAIS, configure:")
+    print("   USE_TESTNET=false")
+    print("=" * 80)
+    print()
+else:
+    print("=" * 80)
+    print("✅ MODO PRODUÇÃO: Trading real HABILITADO")
+    print("=" * 80)
+    print("   ALLOW_ORDER_EXECUTION=true")
+    print("   ALLOW_REAL_TRADING=true")
+    print("   USE_TESTNET=false")
+    print("   🚀 Ordens serão executadas nas exchanges REAIS!")
+    print("=" * 80)
+    print()
 
 # --- PROTOCOLO SNIPER - Defaults carregados antes de central_state ---
 RISK_MODE = 'conservative'       # 'conservative' = 1 moeda | 'aggressive' = 5 moedas
