@@ -34,6 +34,7 @@ GroqValidator = None
 public_price_broker = None
 RUNTIME_START_LOCK = threading.Lock()
 RUNTIME_STARTED = False
+AI_RATE_LIMIT_STATUS_MESSAGE = '⚠️ Limite das IAs atingido. Aguardando cooldown de 60s...'
 
 # ==============================================================================
 # 🔘 TACTICAL v60.1 PRO - MAESTRO SAAS (FULL EDITION)
@@ -1855,7 +1856,7 @@ def sniper_worker_loop():
                                 )
                             except Exception as e:
                                 if _apply_ai_rate_limit_cooldown(e):
-                                    central_state['status'] = '⚠️ Limite das IAs atingido. Aguardando cooldown de 60s...'
+                                    central_state['status'] = AI_RATE_LIMIT_STATUS_MESSAGE
                                     ai_rate_limit_hit = True
                                     break
                                 raise
@@ -1993,15 +1994,16 @@ def sniper_worker_loop():
                         central_state['opportunities'] = []
                         central_state['status'] = f'✅ Analisados {len(top_coins)} ativos. Sem confluência no rigor atual.'
 
+                    # Espaçamento fixo entre ciclos para reduzir pressão preventiva nas APIs cloud.
                     time.sleep(15)
                 except Exception as e:
                     if _apply_ai_rate_limit_cooldown(e):
-                        central_state['status'] = '⚠️ Limite das IAs atingido. Aguardando cooldown de 60s...'
+                        central_state['status'] = AI_RATE_LIMIT_STATUS_MESSAGE
                         continue
                     time.sleep(15)
         except Exception as e:
             if _apply_ai_rate_limit_cooldown(e):
-                central_state['status'] = '⚠️ Limite das IAs atingido. Aguardando cooldown de 60s...'
+                central_state['status'] = AI_RATE_LIMIT_STATUS_MESSAGE
                 continue
             print(f'⚠️ [LOOP ERRO] {e}')
             time.sleep(15)

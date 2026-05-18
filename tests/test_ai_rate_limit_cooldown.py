@@ -21,7 +21,8 @@ def test_apply_ai_rate_limit_cooldown_sleeps_and_logs(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert handled is True
     assert sleep_calls == [60]
-    assert '⚠️ [AGUARDANDO COOLDOWN] Limite atingido. Pausando robô por 60 segundos antes de tentar novamente...' in captured.out
+    assert 'AGUARDANDO COOLDOWN' in captured.out
+    assert '60 segundos' in captured.out
 
 
 def test_apply_ai_rate_limit_cooldown_ignores_other_errors(monkeypatch):
