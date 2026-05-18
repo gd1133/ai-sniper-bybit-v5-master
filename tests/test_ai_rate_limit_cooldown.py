@@ -33,3 +33,17 @@ def test_apply_ai_rate_limit_cooldown_ignores_other_errors(monkeypatch):
 
     assert handled is False
     assert sleep_calls == []
+
+
+def test_handle_ai_rate_limit_updates_worker_status(monkeypatch):
+    original_status = main_web.central_state.get('status')
+    sleep_calls = []
+    monkeypatch.setattr(main_web.time, 'sleep', lambda seconds: sleep_calls.append(seconds))
+
+    try:
+        handled = main_web._handle_ai_rate_limit(Exception('Rate limit hit'))
+        assert handled is True
+        assert sleep_calls == [60]
+        assert main_web.central_state['status'] == main_web.AI_RATE_LIMIT_STATUS_MESSAGE
+    finally:
+        main_web.central_state['status'] = original_status

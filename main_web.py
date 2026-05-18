@@ -145,6 +145,14 @@ def _apply_ai_rate_limit_cooldown(error):
     time.sleep(60)
     return True
 
+
+def _handle_ai_rate_limit(error):
+    """Atualiza estado do worker quando a análise cloud entra em cooldown."""
+    if not _apply_ai_rate_limit_cooldown(error):
+        return False
+    central_state['status'] = AI_RATE_LIMIT_STATUS_MESSAGE
+    return True
+
 # Sistema fixado em modo REAL apenas
 VALID_OPERATION_MODES = {'real'}
 VALID_ACCOUNT_MODES = {'real'}
@@ -1827,7 +1835,7 @@ def sniper_worker_loop():
                         tickers_cache['timestamp'] = current_time
                     top_coins = tickers_cache['data']
                     oportunidades = []
-                    ai_rate_limit_hit = False
+                    skip_remaining_symbol_analysis = False
 
                     for idx_loop, t in enumerate(top_coins):
                         sym = t['symbol']
@@ -1855,9 +1863,8 @@ def sniper_worker_loop():
                                     force_local_only=USE_LOCAL_BRAIN_ONLY
                                 )
                             except Exception as e:
-                                if _apply_ai_rate_limit_cooldown(e):
-                                    central_state['status'] = AI_RATE_LIMIT_STATUS_MESSAGE
-                                    ai_rate_limit_hit = True
+                                if _handle_ai_rate_limit(e):
+                                    skip_remaining_symbol_analysis = True
                                     break
                                 raise
 
@@ -1896,7 +1903,7 @@ def sniper_worker_loop():
 
                         time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
 
-                    if ai_rate_limit_hit:
+                    if skip_remaining_symbol_analysis:
                         continue
 
                     # Publica o ranking para o dashboard (Top 5)
@@ -1994,16 +2001,14 @@ def sniper_worker_loop():
                         central_state['opportunities'] = []
                         central_state['status'] = f'✅ Analisados {len(top_coins)} ativos. Sem confluência no rigor atual.'
 
-                    # Espaçamento fixo entre ciclos para reduzir pressão preventiva nas APIs cloud.
+                    # Espaçamento fixo de 15s entre ciclos bem-sucedidos; o cooldown de 60s fica só para 429.
                     time.sleep(15)
                 except Exception as e:
-                    if _apply_ai_rate_limit_cooldown(e):
-                        central_state['status'] = AI_RATE_LIMIT_STATUS_MESSAGE
+                    if _handle_ai_rate_limit(e):
                         continue
                     time.sleep(15)
         except Exception as e:
-            if _apply_ai_rate_limit_cooldown(e):
-                central_state['status'] = AI_RATE_LIMIT_STATUS_MESSAGE
+            if _handle_ai_rate_limit(e):
                 continue
             print(f'⚠️ [LOOP ERRO] {e}')
             time.sleep(15)
