@@ -8,6 +8,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from src.broker import bybit_client
 
 TEST_QTY_WITH_HIGH_PRECISION = 2.6649367268590924
+TEST_SMALL_QTY_BELOW_MIN_LOT = 0.004
+TEST_MIN_LOT_QTY = 0.01
+EXPECTED_MIN_LOT_PRECISION_CALLS = [('BTC/USDT:USDT', TEST_SMALL_QTY_BELOW_MIN_LOT), ('BTC/USDT:USDT', TEST_MIN_LOT_QTY)]
 
 
 class _FakeExchange:
@@ -151,12 +154,12 @@ if __name__ == '__main__':
             raise SystemExit(11)
 
         previous_precision_call_count = len(client.exchange.amount_to_precision_calls)
-        small_order = client.execute_market_order('BTC/USDT:USDT', 'buy', 0.004)
+        small_order = client.execute_market_order('BTC/USDT:USDT', 'buy', TEST_SMALL_QTY_BELOW_MIN_LOT)
         small_order_call = client.pybit_session.place_order_calls[-1]
-        if not small_order or small_order_call.get('qty') != '0.01':
-            print(f"❌ Qty below the min lot should be floored to 0.01: {small_order_call}")
+        if not small_order or small_order_call.get('qty') != f'{TEST_MIN_LOT_QTY:.2f}':
+            print(f"❌ Qty below the min lot should be floored to {TEST_MIN_LOT_QTY:.2f}: {small_order_call}")
             raise SystemExit(12)
-        if client.exchange.amount_to_precision_calls[previous_precision_call_count:] != [('BTC/USDT:USDT', 0.004), ('BTC/USDT:USDT', 0.01)]:
+        if client.exchange.amount_to_precision_calls[previous_precision_call_count:] != EXPECTED_MIN_LOT_PRECISION_CALLS:
             print(f"❌ amount_to_precision should apply both the raw qty and the min-lot floor: {client.exchange.amount_to_precision_calls}")
             raise SystemExit(13)
 

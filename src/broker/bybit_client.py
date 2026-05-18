@@ -258,7 +258,7 @@ class BybitClient:
                         floor_qty = amount_to_precision(symbol, min_amount)
                         floor_qty_value = float(floor_qty)
                         if floor_qty is not None and str(floor_qty).strip() and floor_qty_value > 0:
-                            print(f"⚠️ [BYBIT QTY] Qty {precise_qty_value} is below min amount {min_amount} on {symbol}. Applying exchange minimum lot size.")
+                            print(f"⚠️ [BYBIT QTY] Qty {precise_qty_value} is below min amount {min_amount} on {symbol}. Applying normalized exchange minimum {floor_qty}.")
                             return str(floor_qty)
                     return str(precise_qty)
             except (TypeError, ValueError, AttributeError) as precision_error:
@@ -275,6 +275,7 @@ class BybitClient:
         step = Decimal('1').scaleb(-decimals)
         quantized = Decimal(str(qty_value)).quantize(step, rounding=ROUND_DOWN)
         if min_amount is not None and float(quantized) < min_amount:
+            # The fallback must stay at or above the exchange minimum after precision is applied.
             quantized = Decimal(str(min_amount)).quantize(step, rounding=ROUND_UP)
         normalized = format(quantized, 'f')
         return normalized.rstrip('0').rstrip('.') if '.' in normalized else normalized
