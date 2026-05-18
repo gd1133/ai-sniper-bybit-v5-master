@@ -1,5 +1,5 @@
 import time
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from datetime import datetime
 
 from src.config import get_bybit_base_url, get_bybit_credentials, resolve_use_testnet
@@ -272,12 +272,10 @@ class BybitClient:
         except (TypeError, ValueError, AttributeError, KeyError):
             pass
 
-        normalized_source = qty_value
-        if min_amount is not None and qty_value < min_amount:
-            normalized_source = min_amount
-
         step = Decimal('1').scaleb(-decimals)
-        quantized = Decimal(str(normalized_source)).quantize(step, rounding=ROUND_DOWN)
+        quantized = Decimal(str(qty_value)).quantize(step, rounding=ROUND_DOWN)
+        if min_amount is not None and float(quantized) < min_amount:
+            quantized = Decimal(str(min_amount)).quantize(step, rounding=ROUND_UP)
         normalized = format(quantized, 'f')
         return normalized.rstrip('0').rstrip('.') if '.' in normalized else normalized
 

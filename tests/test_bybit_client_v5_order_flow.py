@@ -150,12 +150,13 @@ if __name__ == '__main__':
             print(f"❌ amount_to_precision não foi usado corretamente: {client.exchange.amount_to_precision_calls}")
             raise SystemExit(11)
 
+        previous_precision_call_count = len(client.exchange.amount_to_precision_calls)
         small_order = client.execute_market_order('BTC/USDT:USDT', 'buy', 0.004)
         small_order_call = client.pybit_session.place_order_calls[-1]
         if not small_order or small_order_call.get('qty') != '0.01':
             print(f"❌ Qty below the min lot should be floored to 0.01: {small_order_call}")
             raise SystemExit(12)
-        if client.exchange.amount_to_precision_calls[-2:] != [('BTC/USDT:USDT', 0.004), ('BTC/USDT:USDT', 0.01)]:
+        if client.exchange.amount_to_precision_calls[previous_precision_call_count:] != [('BTC/USDT:USDT', 0.004), ('BTC/USDT:USDT', 0.01)]:
             print(f"❌ amount_to_precision should apply both the raw qty and the min-lot floor: {client.exchange.amount_to_precision_calls}")
             raise SystemExit(13)
 
