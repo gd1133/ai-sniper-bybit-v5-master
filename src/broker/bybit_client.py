@@ -55,8 +55,9 @@ class BybitClient:
         ccxt = _get_ccxt()
 
         env_api_key, env_api_secret = get_bybit_credentials()
-        api_key = str(api_key or env_api_key or '').strip()
-        api_secret = str(api_secret or env_api_secret or '').strip()
+        # 🔧 SANITIZAÇÃO: Remove espaços, quebras de linha e caracteres invisíveis
+        api_key = str(api_key or env_api_key or '').strip().replace('\n', '').replace('\r', '')
+        api_secret = str(api_secret or env_api_secret or '').strip().replace('\n', '').replace('\r', '')
         self.testnet = resolve_use_testnet(testnet)
         self.active_endpoint = get_bybit_base_url(self.testnet)
         self.pybit_session = None
@@ -70,8 +71,8 @@ class BybitClient:
             'options': {
                 'defaultType': 'swap', # Foco em Perpétuos
                 'defaultSubType': 'linear',
-                'adjustForTimeDifference': True,
-                'recvWindow': 20000,  # Janela de 20s para ambientes com dessincronização de relógio (evita erro InvalidNonce)
+                'adjustForTimeDifference': True,  # 🔧 ATIVA: Ajuste automático de diferença de tempo
+                'recvWindow': 10000,  # 🔧 AUMENTADO: 10s para evitar erros de dessincronização (InvalidNonce)
             }
         }
         if api_key and api_secret:
@@ -80,6 +81,15 @@ class BybitClient:
 
         self.exchange = ccxt.bybit(cfg)
         self._configure_exchange_endpoint()
+
+        # 🔧 SINCRONIZAÇÃO DE TEMPO: Executa ao inicializar para evitar erros de timestamp
+        if api_key and api_secret:
+            try:
+                self.exchange.load_time_difference()
+                print(f"✅ [BYBIT TIME SYNC] Diferença de tempo sincronizada com servidor")
+            except Exception as sync_err:
+                print(f"⚠️ [BYBIT TIME SYNC] Aviso: {sync_err}")
+
         self.pybit_api_version = 'v5'
         self.pybit_sdk_module = ''
 
@@ -144,10 +154,10 @@ class BybitClient:
                 testnet=self.testnet,
                 api_key=api_key,
                 api_secret=api_secret,
-                recv_window=20000,  # Janela de 20s para ambientes com dessincronização de relógio (evita erro InvalidNonce)
+                recv_window=10000,  # 🔧 AUMENTADO: 10s para evitar erros de dessincronização (InvalidNonce)
             )
             self.pybit_session.endpoint = self.active_endpoint
-            print(f"🔌 [PYBIT V5] módulo={self.pybit_sdk_module} endpoint={self.active_endpoint} recv_window=20000ms")
+            print(f"🔌 [PYBIT V5] módulo={self.pybit_sdk_module} endpoint={self.active_endpoint} recv_window=10000ms")
         except Exception as e:
             print(f"⚠️ [PYBIT] Sessão HTTP indisponível: {e}")
             self.pybit_session = None
@@ -222,7 +232,12 @@ class BybitClient:
         return 'Buy' if normalized == 'buy' else 'Sell'
 
     def _normalize_order_qty(self, symbol, qty):
-        """Normaliza quantidade para precisão aceita pela corretora, evitando Qty invalid."""
+        """
+        Normaliza quantidade para precisão aceita pela corretora, evitando Qty invalid.
+        🔧 CORREÇÃO: Considera simultaneamente min amount e min notional.
+        """
+        from decimal import Decimal, ROUND_UP
+
         try:
             qty_value = float(qty)
         except (TypeError, ValueError):
@@ -231,33 +246,64 @@ class BybitClient:
         if qty_value <= 0:
             raise ValueError(f"Quantidade deve ser positiva: {qty}")
 
-        amount_to_precision = getattr(self.exchange, 'amount_to_precision', None)
-        if callable(amount_to_precision):
-            try:
-                precise_qty = amount_to_precision(symbol, qty_value)
-                if precise_qty is not None and str(precise_qty).strip():
-                    return str(precise_qty)
-            except (TypeError, ValueError, AttributeError) as precision_error:
-                print(f"⚠️ [BYBIT QTY] amount_to_precision falhou para {symbol}: {precision_error}")
+        # 🔧 PASSO 1: Busca preço atual do ativo
+        current_price = self.get_last_price(symbol)
+        if current_price <= 0:
+            raise ValueError(f"Não foi possível obter preço atual para {symbol}")
 
-        decimals = 2
-        market = None
+        # 🔧 PASSO 2: Carrega limites do mercado (min amount e min notional)
         try:
-            market_lookup = getattr(self.exchange, 'market', None)
-            if callable(market_lookup):
-                market = market_lookup(symbol)
-            elif isinstance(getattr(self.exchange, 'markets', None), dict):
-                market = self.exchange.markets.get(symbol)
-            market_precision = (market or {}).get('precision', {}).get('amount')
-            if isinstance(market_precision, (int, float)) and market_precision >= 0:
-                decimals = int(market_precision)
-        except (TypeError, ValueError, AttributeError, KeyError):
-            pass
+            self.exchange.load_markets()
+            market = self.exchange.market(symbol)
+            limits = market.get('limits', {})
 
-        step = Decimal('1').scaleb(-decimals)
-        quantized = Decimal(str(qty_value)).quantize(step, rounding=ROUND_DOWN)
+            # Min amount (quantidade mínima em contratos/moedas)
+            min_amount = limits.get('amount', {}).get('min', 0.001)
+
+            # Min notional (valor mínimo em USDT) - Bybit geralmente exige >= 5 USDT
+            min_cost = limits.get('cost', {}).get('min', 5.0)
+
+            # Precisão da quantidade
+            amount_precision = market.get('precision', {}).get('amount', 2)
+
+            print(f"   📊 [BYBIT LIMITS] {symbol}: min_amount={min_amount}, min_notional={min_cost} USDT, precision={amount_precision}")
+        except Exception as market_err:
+            print(f"⚠️ [BYBIT MARKET] Erro ao carregar limites: {market_err}, usando defaults")
+            min_amount = 0.001
+            min_cost = 5.0
+            amount_precision = 2
+
+        # 🔧 PASSO 3: Calcula quantidade mínima para satisfazer min notional
+        min_qty_for_notional = Decimal(str(min_cost)) / Decimal(str(current_price))
+
+        # 🔧 PASSO 4: Usa o maior entre min_amount e min_qty_for_notional
+        required_min_qty = max(Decimal(str(min_amount)), min_qty_for_notional)
+
+        # Se quantidade fornecida for menor que o mínimo, usa o mínimo
+        if Decimal(str(qty_value)) < required_min_qty:
+            print(f"⚠️ [BYBIT QTY] Quantidade {qty_value} abaixo do mínimo. Ajustando para {required_min_qty}")
+            qty_value = float(required_min_qty)
+
+        # 🔧 PASSO 5: Arredonda para cima respeitando precisão da exchange
+        step = Decimal('1').scaleb(-amount_precision)
+        quantized = Decimal(str(qty_value)).quantize(step, rounding=ROUND_UP)
+
+        # Garante que após arredondamento ainda atende min notional
+        notional_value = float(quantized) * current_price
+        if notional_value < min_cost:
+            # Arredonda para cima até atingir min notional
+            quantized = (Decimal(str(min_cost)) / Decimal(str(current_price))).quantize(step, rounding=ROUND_UP)
+            notional_value = float(quantized) * current_price
+            print(f"   🔧 [BYBIT NOTIONAL] Ajustado para qty={quantized} (notional={notional_value:.2f} USDT >= {min_cost} USDT)")
+
         normalized = format(quantized, 'f')
-        return normalized.rstrip('0').rstrip('.') if '.' in normalized else normalized
+        final_qty = normalized.rstrip('0').rstrip('.') if '.' in normalized else normalized
+
+        # 🔧 PASSO 6: Exibe informações de validação
+        final_notional = float(final_qty) * current_price
+        print(f"   ✅ [BYBIT ORDER] qty={final_qty} (notional={final_notional:.2f} USDT, min_amount={min_amount}, min_notional={min_cost} USDT)")
+
+        return final_qty
 
     def _validate_insurance_fund(self):
         """Consulta o fundo de seguros V5 apenas para validar conectividade inicial."""

@@ -41,8 +41,9 @@ class BinanceClient:
     REAL_URL = BINANCE_FUTURES_HOSTS[0]
 
     def __init__(self, api_key=None, api_secret=None, testnet=False):
-        api_key = str(api_key or '').strip()
-        api_secret = str(api_secret or '').strip()
+        # 🔧 SANITIZAÇÃO: Remove espaços, quebras de linha e caracteres invisíveis
+        api_key = str(api_key or '').strip().replace('\n', '').replace('\r', '')
+        api_secret = str(api_secret or '').strip().replace('\n', '').replace('\r', '')
         self.api_key = api_key
         self.api_secret = api_secret
         self.testnet = bool(testnet)
@@ -51,6 +52,14 @@ class BinanceClient:
         self.active_endpoint = self.TESTNET_URL if self.testnet else self.REAL_URL
 
         self.exchange = self._create_exchange()
+
+        # 🔧 SINCRONIZAÇÃO DE TEMPO: Executa ao inicializar para evitar erros de timestamp
+        if api_key and api_secret:
+            try:
+                self.exchange.load_time_difference()
+                print(f"✅ [BINANCE TIME SYNC] Diferença de tempo sincronizada com servidor")
+            except Exception as sync_err:
+                print(f"⚠️ [BINANCE TIME SYNC] Aviso: {sync_err}")
 
         self.authenticated = bool(api_key and api_secret)
 
@@ -91,8 +100,8 @@ class BinanceClient:
             'timeout': 8000,
             'options': {
                 'defaultType': 'future',
-                'adjustForTimeDifference': True,
-                'recvWindow': 5000,  # Janela de 5s conforme documentação oficial para evitar rejeição por dessincronização
+                'adjustForTimeDifference': True,  # 🔧 ATIVA: Ajuste automático de diferença de tempo
+                'recvWindow': 10000,  # 🔧 AUMENTADO: 10s para evitar rejeição por dessincronização de relógio
             },
         }
         if self.api_key and self.api_secret:
@@ -234,8 +243,11 @@ class BinanceClient:
             return self.cache_ticker[symbol][0] if symbol in self.cache_ticker else 0.0
 
     def _normalize_order_qty(self, symbol, qty):
-        """Normaliza quantidade para precisão aceita pela Binance, evitando Qty invalid."""
-        from decimal import Decimal, ROUND_DOWN
+        """
+        Normaliza quantidade para precisão aceita pela Binance, evitando Qty invalid.
+        🔧 CORREÇÃO: Considera simultaneamente min amount e min notional.
+        """
+        from decimal import Decimal, ROUND_UP
 
         try:
             qty_value = float(qty)
@@ -245,34 +257,64 @@ class BinanceClient:
         if qty_value <= 0:
             raise ValueError(f"Quantidade deve ser positiva: {qty}")
 
-        amount_to_precision = getattr(self.exchange, 'amount_to_precision', None)
-        if callable(amount_to_precision):
-            try:
-                precise_qty = amount_to_precision(symbol, qty_value)
-                if precise_qty is not None and str(precise_qty).strip():
-                    return str(precise_qty)
-            except (TypeError, ValueError, AttributeError) as precision_error:
-                print(f"⚠️ [BINANCE QTY] amount_to_precision falhou para {symbol}: {precision_error}")
+        # 🔧 PASSO 1: Busca preço atual do ativo
+        current_price = self.get_last_price(symbol)
+        if current_price <= 0:
+            raise ValueError(f"Não foi possível obter preço atual para {symbol}")
 
-        # Fallback: usa precisão do mercado
-        decimals = 3  # Default para Binance Futures
-        market = None
+        # 🔧 PASSO 2: Carrega limites do mercado (min amount e min notional)
         try:
-            market_lookup = getattr(self.exchange, 'market', None)
-            if callable(market_lookup):
-                market = market_lookup(symbol)
-            elif isinstance(getattr(self.exchange, 'markets', None), dict):
-                market = self.exchange.markets.get(symbol)
-            market_precision = (market or {}).get('precision', {}).get('amount')
-            if isinstance(market_precision, (int, float)) and market_precision >= 0:
-                decimals = int(market_precision)
-        except (TypeError, ValueError, AttributeError, KeyError):
-            pass
+            self.exchange.load_markets()
+            market = self.exchange.market(symbol)
+            limits = market.get('limits', {})
 
-        step = Decimal('1').scaleb(-decimals)
-        quantized = Decimal(str(qty_value)).quantize(step, rounding=ROUND_DOWN)
+            # Min amount (quantidade mínima em contratos/moedas)
+            min_amount = limits.get('amount', {}).get('min', 0.001)
+
+            # Min notional (valor mínimo em USDT)
+            min_cost = limits.get('cost', {}).get('min', 5.0)  # Binance Futures geralmente exige >= 5 USDT
+
+            # Precisão da quantidade
+            amount_precision = market.get('precision', {}).get('amount', 3)
+
+            print(f"   📊 [BINANCE LIMITS] {symbol}: min_amount={min_amount}, min_notional={min_cost} USDT, precision={amount_precision}")
+        except Exception as market_err:
+            print(f"⚠️ [BINANCE MARKET] Erro ao carregar limites: {market_err}, usando defaults")
+            min_amount = 0.001
+            min_cost = 5.0
+            amount_precision = 3
+
+        # 🔧 PASSO 3: Calcula quantidade mínima para satisfazer min notional
+        min_qty_for_notional = Decimal(str(min_cost)) / Decimal(str(current_price))
+
+        # 🔧 PASSO 4: Usa o maior entre min_amount e min_qty_for_notional
+        required_min_qty = max(Decimal(str(min_amount)), min_qty_for_notional)
+
+        # Se quantidade fornecida for menor que o mínimo, usa o mínimo
+        if Decimal(str(qty_value)) < required_min_qty:
+            print(f"⚠️ [BINANCE QTY] Quantidade {qty_value} abaixo do mínimo. Ajustando para {required_min_qty}")
+            qty_value = float(required_min_qty)
+
+        # 🔧 PASSO 5: Arredonda para cima respeitando precisão da exchange
+        step = Decimal('1').scaleb(-amount_precision)
+        quantized = Decimal(str(qty_value)).quantize(step, rounding=ROUND_UP)
+
+        # Garante que após arredondamento ainda atende min notional
+        notional_value = float(quantized) * current_price
+        if notional_value < min_cost:
+            # Arredonda para cima até atingir min notional
+            quantized = (Decimal(str(min_cost)) / Decimal(str(current_price))).quantize(step, rounding=ROUND_UP)
+            notional_value = float(quantized) * current_price
+            print(f"   🔧 [BINANCE NOTIONAL] Ajustado para qty={quantized} (notional={notional_value:.2f} USDT >= {min_cost} USDT)")
+
         normalized = format(quantized, 'f')
-        return normalized.rstrip('0').rstrip('.') if '.' in normalized else normalized
+        final_qty = normalized.rstrip('0').rstrip('.') if '.' in normalized else normalized
+
+        # 🔧 PASSO 6: Exibe informações de validação
+        final_notional = float(final_qty) * current_price
+        print(f"   ✅ [BINANCE ORDER] qty={final_qty} (notional={final_notional:.2f} USDT, min_amount={min_amount}, min_notional={min_cost} USDT)")
+
+        return final_qty
 
     def execute_market_order(self, symbol, side, qty, raise_on_error=False):
         """Executa ordem a mercado na Binance Futures."""
