@@ -21,12 +21,21 @@ class _FakeExchange:
         }
         self.sandbox_enabled = False
         self.amount_to_precision_calls = []
+        self.markets = {
+            'BTC/USDT:USDT': {
+                'precision': {'amount': 2},
+                'limits': {'amount': {'min': 0.01}},
+            }
+        }
 
     def set_sandbox_mode(self, enabled):
         self.sandbox_enabled = bool(enabled)
 
     def fetch_balance(self, params=None):
         return {'total': {'USDT': 25.5}}
+
+    def market(self, symbol):
+        return self.markets.get(symbol, {})
 
     def amount_to_precision(self, symbol, amount):
         self.amount_to_precision_calls.append((symbol, amount))
@@ -140,6 +149,15 @@ if __name__ == '__main__':
         if client.exchange.amount_to_precision_calls[-1] != ('BTC/USDT:USDT', TEST_QTY_WITH_HIGH_PRECISION):
             print(f"❌ amount_to_precision não foi usado corretamente: {client.exchange.amount_to_precision_calls}")
             raise SystemExit(11)
+
+        small_order = client.execute_market_order('BTC/USDT:USDT', 'buy', 0.004)
+        small_order_call = client.pybit_session.place_order_calls[-1]
+        if not small_order or small_order_call.get('qty') != '0.01':
+            print(f"❌ Qty abaixo do lote mínimo deveria subir para 0.01: {small_order_call}")
+            raise SystemExit(12)
+        if client.exchange.amount_to_precision_calls[-2:] != [('BTC/USDT:USDT', 0.004), ('BTC/USDT:USDT', 0.01)]:
+            print(f"❌ amount_to_precision deveria aplicar qty original e piso mínimo: {client.exchange.amount_to_precision_calls}")
+            raise SystemExit(13)
 
         insurance_call = client.pybit_session.insurance_calls[-1]
         if insurance_call.get('coin') != 'USDT':

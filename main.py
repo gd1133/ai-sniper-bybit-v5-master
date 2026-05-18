@@ -301,7 +301,7 @@ def calculate_entry_qty(client: BybitClient, price: float, entry_pct: float) -> 
     qty = entry_value / price if price > 0 else 0.0
 
     print(f"💰 [RISCO] Saldo={balance:.2f} USDT | Entrada={entry_value:.2f} USDT ({entry_pct*100:.0f}%) | Qty≈{qty:.4f}")
-    return round(qty, 4)
+    return qty
 
 
 # ─── Verificação das 5 Confluências ───────────────────────────────────────────
@@ -388,19 +388,23 @@ def place_order_with_protection(
         return False
 
     try:
+        normalized_qty = client._normalize_order_qty(symbol, qty)
+        qty_value = float(normalized_qty)
+
         # Coloca ordem a mercado com TP/SL embutidos (V5 suporta na mesma chamada)
         payload = {
             "category": "linear",
             "symbol": v5_symbol,
             "side": v5_side,
             "orderType": "Market",
-            "qty": str(qty),
+            "qty": normalized_qty,
             "takeProfit": str(tp_price),
             "stopLoss": str(sl_price),
             "tpTriggerBy": "MarkPrice",
             "slTriggerBy": "MarkPrice",
         }
 
+        print(f"   📦 Qty ajustado: {qty_value}")
         rsp = client.pybit_session.place_order(**payload)
         ok, err = client._handle_v5_ret_code(rsp, "place_order (Sniper)")
 

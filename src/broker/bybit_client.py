@@ -219,6 +219,18 @@ class BybitClient:
         normalized = str(side or '').strip().lower()
         return 'Buy' if normalized == 'buy' else 'Sell'
 
+    def _get_market_metadata(self, symbol):
+        market = None
+        try:
+            market_lookup = getattr(self.exchange, 'market', None)
+            if callable(market_lookup):
+                market = market_lookup(symbol)
+            elif isinstance(getattr(self.exchange, 'markets', None), dict):
+                market = self.exchange.markets.get(symbol)
+        except (TypeError, ValueError, AttributeError, KeyError):
+            market = None
+        return market or {}
+
     def _normalize_order_qty(self, symbol, qty):
         """Normaliza quantidade para precisão aceita pela corretora, evitando Qty invalid."""
         try:
@@ -229,31 +241,43 @@ class BybitClient:
         if qty_value <= 0:
             raise ValueError(f"Quantidade deve ser positiva: {qty}")
 
+        market = self._get_market_metadata(symbol)
+        min_amount = (market.get('limits') or {}).get('amount', {}).get('min')
+        try:
+            min_amount = float(min_amount) if min_amount is not None else None
+        except (TypeError, ValueError):
+            min_amount = None
+
         amount_to_precision = getattr(self.exchange, 'amount_to_precision', None)
         if callable(amount_to_precision):
             try:
                 precise_qty = amount_to_precision(symbol, qty_value)
                 if precise_qty is not None and str(precise_qty).strip():
+                    precise_qty_value = float(precise_qty)
+                    if min_amount is not None and precise_qty_value < min_amount:
+                        floor_qty = amount_to_precision(symbol, min_amount)
+                        floor_qty_value = float(floor_qty)
+                        if floor_qty is not None and str(floor_qty).strip() and floor_qty_value > 0:
+                            print(f"⚠️ [BYBIT QTY] Qty {precise_qty_value} abaixo do mínimo {min_amount} em {symbol}. Ajustando para o lote mínimo.")
+                            return str(floor_qty)
                     return str(precise_qty)
             except (TypeError, ValueError, AttributeError) as precision_error:
                 print(f"⚠️ [BYBIT QTY] amount_to_precision falhou para {symbol}: {precision_error}")
 
         decimals = 2
-        market = None
         try:
-            market_lookup = getattr(self.exchange, 'market', None)
-            if callable(market_lookup):
-                market = market_lookup(symbol)
-            elif isinstance(getattr(self.exchange, 'markets', None), dict):
-                market = self.exchange.markets.get(symbol)
             market_precision = (market or {}).get('precision', {}).get('amount')
             if isinstance(market_precision, (int, float)) and market_precision >= 0:
                 decimals = int(market_precision)
         except (TypeError, ValueError, AttributeError, KeyError):
             pass
 
+        normalized_source = qty_value
+        if min_amount is not None and qty_value < min_amount:
+            normalized_source = min_amount
+
         step = Decimal('1').scaleb(-decimals)
-        quantized = Decimal(str(qty_value)).quantize(step, rounding=ROUND_DOWN)
+        quantized = Decimal(str(normalized_source)).quantize(step, rounding=ROUND_DOWN)
         normalized = format(quantized, 'f')
         return normalized.rstrip('0').rstrip('.') if '.' in normalized else normalized
 
