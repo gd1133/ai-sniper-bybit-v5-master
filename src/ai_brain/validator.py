@@ -7,12 +7,16 @@ try:
 except Exception:
     Groq = None
 from src.ai_brain.learning import TradeLearner
+from src.ai_brain.local_ml_engine import LocalMLEngine
 
 class GroqValidator:
     """
-    🧠 CÉREBRO TRIPLO v60.1 - GIVALDO SUPREME
+    🧠 CÉREBRO TRIPLO v61.0 - GIVALDO SUPREME
     Lógica: Consenso Ponderado (Gemini 40% | Groq 35% | Local 25%)
-    Rigor: 60% Mínimo para autorizar o Ponto Zero.
+    Rigor: 60% Mínimo para autorizar o Ponto Zero (80% para 3º Cérebro autônomo)
+    
+    NOVO: 3º Cérebro promovido a EXECUTOR PRINCIPAL quando APIs falham.
+    Executa ordens reais no mercado com aprendizado local adaptativo.
     """
     def __init__(self, api_key_gemini, api_key_groq):
         self.gemini_key = api_key_gemini
@@ -28,11 +32,13 @@ class GroqValidator:
         else:
             print("⚠️ [GROQ INIT] SDK indisponivel ou chave ausente; usando fallback local.")
         self.memory = TradeLearner()
+        self.local_ml = LocalMLEngine()  # 🧠 3º CÉREBRO - ML Local
         self.model = "gemini-2.5-flash"
         self.gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.gemini_key}"
         self.global_cooldown_until = 0
         self.groq_cooldown_until = 0
         self.gemini_min_confidence = 60
+        self.local_brain_active = False  # Flag para rastrear quando 3º Cérebro está operando
 
     def _limpar_json(self, texto):
         """Limpa marcações de markdown e espaços para evitar erros de parsing."""
@@ -130,7 +136,7 @@ class GroqValidator:
         """
         🟡 CÉREBRO 2: RADAR TÁTICO (GROQ)
         Focado em risco e velocidade do candle.
-        Com retry logic e rate limit handling.
+        Com retry logic e rate limit handling (429 → 60s cooldown).
         """
         if self.groq_client is None:
             print("⚠️ [GROQ] Cliente não disponível")
@@ -169,9 +175,11 @@ class GroqValidator:
                         time.sleep(wait_time)
                         continue
 
-                    self.groq_cooldown_until = time.time() + 90
-                    print(f"⚠️ [GROQ] Rate limit detectado: {last_error}")
-                    return 45, 'WAIT', f"Rate limit: {last_error}"
+                    # 🔴 RATE LIMIT 429 DETECTADO - Aplicar cooldown de 60s
+                    self.groq_cooldown_until = time.time() + 60
+                    print(f"🔴 [GROQ 429] Rate limit detectado. Cooldown 60s ativado. 3º Cérebro operará sozinho.")
+                    print(f"⚠️ Erro: {last_error}")
+                    return 45, 'WAIT', f"429_RATE_LIMIT"
                 else:
                     # Outro erro - usar fallback
                     print(f"⚠️ [GROQ] Erro (tentativa {attempt+1}/{max_retries}): {last_error}")
@@ -184,7 +192,7 @@ class GroqValidator:
         """
         🔵 CÉREBRO 3: ESTRATEGISTA CLOUD (GEMINI)
         Analisa contexto histórico e Smart Money.
-        Com rate limit detection e cooldown automático.
+        Com rate limit detection e cooldown automático (429 → 60s).
         """
         if time.time() < self.global_cooldown_until:
             remaining = int(self.global_cooldown_until - time.time())
@@ -214,10 +222,11 @@ class GroqValidator:
                     print(f"⚠️ [GEMINI] {error_detail}")
                     return self.gemini_min_confidence, error_detail, "WAIT", True
             elif res.status_code == 429:
+                # 🔴 RATE LIMIT 429 DETECTADO - Aplicar cooldown de 60s
                 error_msg = "Rate limit 429 - muitas requisições"
-                print(f"⚠️ [GEMINI] {error_msg}. Cooldown 120s")
-                self.global_cooldown_until = time.time() + 120
-                return self.gemini_min_confidence, error_msg, "WAIT", True
+                print(f"🔴 [GEMINI 429] {error_msg}. Cooldown 60s ativado. 3º Cérebro operará sozinho.")
+                self.global_cooldown_until = time.time() + 60
+                return self.gemini_min_confidence, "429_RATE_LIMIT", "WAIT", True
             else:
                 error_msg = f"HTTP {res.status_code}: {res.text[:100]}" if hasattr(res, 'text') else f"HTTP {res.status_code}"
                 print(f"⚠️ [GEMINI] {error_msg}")
@@ -240,6 +249,12 @@ class GroqValidator:
         ⚖️ O GRANDE TRIBUNAL: UNIFICAÇÃO DOS 3 CÉREBROS
         Aplica os pesos e decide se autoriza o Ponto Zero.
         
+        🧠 NOVO: Promove 3º Cérebro a EXECUTOR PRINCIPAL quando APIs retornam 429.
+        Ativa real_execution_trigger quando:
+        - Groq retorna 429_RATE_LIMIT E
+        - Gemini retorna 429_RATE_LIMIT E
+        - Local Brain confiança >= 80%
+        
         force_local_only: Se True, usa APENAS o 3º Cérebro (Local Brain)
         """
         # 1. Executa as 3 camadas (ou apenas local se rate limit)
@@ -257,6 +272,7 @@ class GroqValidator:
         
         fallback_local_active = False
         local_fallback_side = "WAIT"
+        real_execution_trigger = False  # 🔴 FLAG: Ativa execução real do 3º Cérebro
 
         if force_local_only:
             # 🧠 MODO FALLBACK: Apenas 3º Cérebro (Local)
@@ -274,13 +290,21 @@ class GroqValidator:
             tactical_score, tactical_action, tactical_error = self.get_tactical_signal(tech_data, symbol)
             strategic_score, strategic_motivo, strategic_action, strategic_fallback = self.get_strategic_signal(tech_data, symbol)
 
+            # 🔴 DETECÇÃO: Ambas APIs retornaram 429? Ativar execução real do 3º Cérebro
+            if tactical_error == "429_RATE_LIMIT" and strategic_motivo == "429_RATE_LIMIT":
+                print(f"🔴 [AMBAS 429] Groq E Gemini em Rate Limit. Ativando 3º Cérebro EXECUTOR!")
+                print(f"⏸️ Cooldown 60s ativado. Operação autônoma local iniciada.")
+                self.local_brain_active = True
+                real_execution_trigger = True
+                fallback_local_active = True
+                local_fallback_side = self._resolve_local_fallback_side(tech_data)
             # ✅ FALLBACK AUTOMÁTICO ATIVADO - Ativa 3º Cérebro quando clouds falham
             # Se ambos falharem, ativa automaticamente o Local Brain
-            if tactical_score <= 45 and strategic_fallback:
+            elif tactical_score <= 45 and strategic_fallback:
                 error_details = []
                 if tactical_error:
                     error_details.append(f"Groq: {tactical_error}")
-                if strategic_motivo and "error" in strategic_motivo.lower() or "timeout" in strategic_motivo.lower() or "cooldown" in strategic_motivo.lower():
+                if strategic_motivo and ("error" in strategic_motivo.lower() or "timeout" in strategic_motivo.lower() or "cooldown" in strategic_motivo.lower()):
                     error_details.append(f"Gemini: {strategic_motivo}")
 
                 diagnostic_msg = " | ".join(error_details) if error_details else "Ambas APIs falharam sem fornecer detalhes"
@@ -308,7 +332,8 @@ class GroqValidator:
             return {
                 "probabilidade": 0, "decisao": "SCANNER", 
                 "motivo": "Abortado: Sem confluência macro na SMA 200.",
-                "brain_used": "LOCAL"
+                "brain_used": "LOCAL",
+                "real_execution_trigger": False
             }
 
         # 2. Cálculo Ponderado
@@ -367,7 +392,10 @@ class GroqValidator:
 
         # Logging para o Telegram (Educational Purpose)
         if final_prob >= required_confidence and decisao in ["COMPRAR", "VENDER"]:
-            print(f"✅ [CONSENSUS ALERT] {final_prob}% - {decisao}")
+            if real_execution_trigger:
+                print(f"🧠 [3º CÉREBRO EXECUTOR] {final_prob}% - {decisao} - EXECUTANDO ORDEM REAL!")
+            else:
+                print(f"✅ [CONSENSUS ALERT] {final_prob}% - {decisao}")
         
         return {
             "probabilidade": final_prob,
@@ -384,6 +412,7 @@ class GroqValidator:
             "cloud_side": cloud_side,
             "fallback_local_side": local_fallback_side,
             "fallback_local_active": fallback_local_active,
+            "real_execution_trigger": real_execution_trigger,  # 🔴 FLAG para execução real
             "strategic_reason": strategic_motivo,
             "weights": {"local": 100, "groq": 0, "gemini": 0} if fallback_local_active else {"local": 25, "groq": 35, "gemini": 40},
             "required_confidence": required_confidence,
