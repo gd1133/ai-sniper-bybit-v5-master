@@ -36,6 +36,25 @@ RUNTIME_START_LOCK = threading.Lock()
 RUNTIME_STARTED = False
 AI_RATE_LIMIT_STATUS_MESSAGE = '⚠️ Limite das IAs atingido. Aguardando cooldown de 60s...'
 AI_COOLDOWN_ACTIVE = False
+AI_COOLDOWN_LOCK = threading.Lock()
+
+
+def _is_ai_cooldown_active():
+    with AI_COOLDOWN_LOCK:
+        return AI_COOLDOWN_ACTIVE
+
+
+def _set_ai_cooldown_active(value: bool):
+    global AI_COOLDOWN_ACTIVE
+    with AI_COOLDOWN_LOCK:
+        AI_COOLDOWN_ACTIVE = bool(value)
+
+
+def _activate_global_ai_cooldown(symbol_label=''):
+    _set_ai_cooldown_active(True)
+    central_state['status'] = AI_RATE_LIMIT_STATUS_MESSAGE
+    suffix = f" em {symbol_label}" if symbol_label else ""
+    print(f"🔴 [COOLDOWN GLOBAL] 429 detectado{suffix}. Próximas moedas usarão somente o 3º Cérebro REAL.")
 
 # ==============================================================================
 # 🔘 TACTICAL v60.1 PRO - MAESTRO SAAS (FULL EDITION)
@@ -1866,7 +1885,7 @@ def _executar_trade_teste():
 
 def sniper_worker_loop():
     """Motor Sniper que varre o mercado e atualiza o Dashboard sem travar."""
-    global central_state, BybitClient, IndicatorEngine, GroqValidator, AI_COOLDOWN_ACTIVE
+    global central_state, BybitClient, IndicatorEngine, GroqValidator
     
     # ⏳ Carregamento Lazy (apenas quando worker inicia)
     print("⏳ Carregando dependências pesadas (primeira vez)...")
@@ -1884,21 +1903,22 @@ def sniper_worker_loop():
     try:
         validator = GroqValidator(os.getenv("GEMINI_API_KEY"), os.getenv("GROQ_API_KEY"))
         while True:
-            active_client_id, api_key, api_secret = _get_active_investor_bybit_credentials()
-            if api_key and api_secret:
+            active_client_id, client_key, client_secret = _get_active_investor_bybit_credentials()
+            if client_key and client_secret:
                 master_broker = BybitClient(
-                    api_key,
-                    api_secret,
+                    client_key,
+                    client_secret,
                     testnet=False,  # FORÇAR MODO REAL - Não usar testnet
                 )
-                print(f"🔧 [MASTER BROKER] Modo: REAL (testnet=False) | Investidor ativo ID: {active_client_id}")
+                print("🔧 [MASTER BROKER] Modo REAL inicializado com investidor ativo do SQLite.")
                 break
 
-            central_state['status'] = '⏳ Aguardando cadastro de investidor ativo com API Key/Secret no SQLite...'
+            central_state['status'] = '⏳ Aguardando cadastro de investidor ativo com credenciais no SQLite...'
             print("⏳ [MASTER BROKER] Nenhum investidor ativo com credenciais no SQLite. Aguardando formulário...")
             time.sleep(10)
     except Exception as e:
-        print(f"❌ Erro ao inicializar broker/validator: {e}")
+        print("❌ Erro ao inicializar broker/validator")
+        print(f"   Tipo: {type(e).__name__}")
         time.sleep(5)
         return
 
@@ -1961,7 +1981,7 @@ def sniper_worker_loop():
                                 continue
 
                             try:
-                                use_local_only = USE_LOCAL_BRAIN_ONLY or AI_COOLDOWN_ACTIVE
+                                use_local_only = USE_LOCAL_BRAIN_ONLY or _is_ai_cooldown_active()
                                 res = validator.consensus_predict(
                                     signals,
                                     sym,
@@ -1969,10 +1989,8 @@ def sniper_worker_loop():
                                 )
                             except Exception as e:
                                 if _is_rate_limit_error(e):
-                                    AI_COOLDOWN_ACTIVE = True
                                     scan_had_ai_cooldown = True
-                                    central_state['status'] = AI_RATE_LIMIT_STATUS_MESSAGE
-                                    print(f"🔴 [COOLDOWN GLOBAL] 429 detectado em {clean_sym}. Ativando 3º Cérebro local para os próximos ativos deste ciclo.")
+                                    _activate_global_ai_cooldown(clean_sym)
                                     res = validator.consensus_predict(
                                         signals,
                                         sym,
@@ -1984,10 +2002,8 @@ def sniper_worker_loop():
                                     raise
 
                             if res.get('ai_rate_limit_detected'):
-                                AI_COOLDOWN_ACTIVE = True
                                 scan_had_ai_cooldown = True
-                                central_state['status'] = AI_RATE_LIMIT_STATUS_MESSAGE
-                                print(f"🔴 [COOLDOWN GLOBAL] 429 detectado em {clean_sym}. Próximas moedas usarão somente o 3º Cérebro REAL.")
+                                _activate_global_ai_cooldown(clean_sym)
 
                             prob = float(res.get('probabilidade', 0))
                             decisao = str(res.get('decisao', 'ABORTAR')).upper()
@@ -2131,11 +2147,11 @@ def sniper_worker_loop():
                         central_state['opportunities'] = []
                         central_state['status'] = f'✅ Analisados {len(top_coins)} ativos. Sem confluência no rigor atual.'
 
-                    if AI_COOLDOWN_ACTIVE or scan_had_ai_cooldown:
+                    if _is_ai_cooldown_active() or scan_had_ai_cooldown:
                         central_state['status'] = AI_RATE_LIMIT_STATUS_MESSAGE
                         print("⏸️ [COOLDOWN GLOBAL] Fim da varredura. Pausando 60s para resetar IAs cloud...")
                         time.sleep(60)
-                        AI_COOLDOWN_ACTIVE = False
+                        _set_ai_cooldown_active(False)
                     else:
                         # Espaçamento fixo de 15s entre ciclos bem-sucedidos.
                         time.sleep(15)
