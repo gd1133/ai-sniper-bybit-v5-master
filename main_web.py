@@ -110,55 +110,70 @@ def _calculate_webhook_order_quantity(balance, entry_price):
 
 def _calculate_dynamic_order_quantity(broker, symbol, balance):
     """
-    🆕 v2.0: Calcula quantidade de ordem usando limites dinâmicos da exchange.
+    🆕 v3.0: Executor focado ESTRITAMENTE no piso nocional mínimo da corretora.
 
-    ELIMINA completamente o modelo de percentual fixo (5%, 15%, etc.).
-    Busca dinamicamente market["limits"]["amount"]["min"] e market["limits"]["cost"]["min"].
-    Calcula quantidade EXATA para atingir o nocional mínimo + margem de segurança.
+    IGNORA totalmente percentuais fixos (5%, 15%, etc.).
+    Consulta preço atual e calcula quantidade EXATA para atingir:
+      - Binance: $5.50 USDT (mínimo + margem)
+      - Bybit: $2.50 USDT (mínimo + margem)
+
+    Passa pelo amount_to_precision do CCXT para arredondar decimais corretamente.
 
     Args:
         broker: Instância de BybitClient ou BinanceClient
         symbol: Par de negociação (ex: 'DOGEUSDT', 'BTC/USDT:USDT')
-        balance: Saldo disponível em USDT
+        balance: Saldo disponível (IGNORADO - usa apenas o mínimo absoluto)
 
     Returns:
         Tuple (margin_used, quantity) onde:
             - margin_used: Valor nocional da ordem em USDT
             - quantity: Quantidade de contratos/moedas
-
-    Raises:
-        ValueError: Se o broker não tiver o método calculate_dynamic_order_qty
     """
-    if not hasattr(broker, 'calculate_dynamic_order_qty'):
-        raise ValueError(
-            f"Broker {type(broker).__name__} não suporta cálculo dinâmico. "
-            "Atualize o broker client para versão com OrderCalculator."
-        )
-
     try:
-        safe_balance = max(float(balance or 0.0), 0.0)
-
-        if safe_balance <= 0:
-            print("🚫 [ORDEM DINÂMICA] Saldo zero ou inválido. Operação abortada.")
+        # 1. Consulta preço atual do ativo
+        current_price = broker.get_last_price(symbol)
+        if current_price <= 0:
+            print(f"❌ [EXECUTOR] Preço inválido para {symbol}: {current_price}")
             return 0.0, 0.0
 
-        print(f"💰 [ORDEM DINÂMICA] Calculando para saldo: ${safe_balance:.2f} USDT")
+        print(f"💰 [EXECUTOR MÍNIMO] Preço atual {symbol}: ${current_price:.8f}")
 
-        # Calcula quantidade usando os limites dinâmicos da exchange
-        qty, metadata = broker.calculate_dynamic_order_qty(symbol, safe_balance)
+        # 2. Define piso nocional mínimo por corretora
+        exchange_name = broker.exchange.id.lower() if hasattr(broker, 'exchange') else 'bybit'
+        if 'binance' in exchange_name:
+            min_notional = 5.50  # $5.50 USDT para Binance
+        else:
+            min_notional = 2.50  # $2.50 USDT para Bybit
 
-        margin_used = metadata['calculated_cost']
+        print(f"   📏 Piso nocional mínimo ({exchange_name}): ${min_notional:.2f} USDT")
 
-        print(f"   ✅ Quantidade: {qty:.4f}")
-        print(f"   📊 Nocional: ${margin_used:.2f} USDT")
-        print(f"   📏 Mínimo exchange: ${metadata['min_cost']:.2f} USDT")
-        print(f"   🛡️ Margem segurança: ${metadata['safety_margin']:.2f} USDT")
+        # 3. Calcula quantidade exata para atingir o piso nocional
+        # qty = min_notional / current_price
+        raw_qty = min_notional / current_price
 
-        return margin_used, qty
+        # 4. Passa pelo amount_to_precision do CCXT para arredondar corretamente
+        try:
+            if hasattr(broker.exchange, 'amount_to_precision'):
+                final_qty = float(broker.exchange.amount_to_precision(symbol, raw_qty))
+            else:
+                # Fallback: arredonda para 4 casas decimais
+                final_qty = round(raw_qty, 4)
+        except Exception as precision_err:
+            print(f"⚠️ [CCXT PRECISION] Erro ao aplicar amount_to_precision: {precision_err}")
+            final_qty = round(raw_qty, 4)
+
+        # 5. Calcula valor nocional final
+        margin_used = final_qty * current_price
+
+        print(f"   ✅ Quantidade calculada: {final_qty:.8f}")
+        print(f"   📊 Nocional final: ${margin_used:.2f} USDT")
+
+        return margin_used, final_qty
 
     except Exception as calc_err:
-        print(f"❌ [ERRO ORDEM DINÂMICA] Falha no cálculo: {calc_err}")
-        print(f"   Operação ABORTADA por segurança")
+        print(f"❌ [ERRO EXECUTOR] Falha no cálculo: {calc_err}")
+        print(f"   TIPO DO ERRO: {type(calc_err).__name__}")
+        print(f"   ERRO BRUTO: {calc_err}")
         return 0.0, 0.0
 
 
