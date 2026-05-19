@@ -339,6 +339,10 @@ else:
 RISK_MODE = 'conservative'       # 'conservative' = 1 moeda | 'aggressive' = 5 moedas
 MAX_MOEDAS_ATIVAS = 1            # Conservador: 1 moeda por vez (use /api/config/risk-mode para trocar)
 
+# --- PROTOCOLO SNIPER RIGOROSO v60.1 --- (defaults; restaurados do banco abaixo)
+RISK_MODE = 'conservative'       # 'conservative' = 1 moeda | 'aggressive' = 5 moedas
+MAX_MOEDAS_ATIVAS = 1            # Conservador: 1 moeda por vez (use /api/config/risk-mode para trocar)
+
 # Estado Global de Sincronização (O que o Dashboard React consome)
 central_state = {
     "balance": 0.0,  # Será carregado do broker
