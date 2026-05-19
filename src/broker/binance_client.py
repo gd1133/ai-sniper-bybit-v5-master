@@ -25,6 +25,10 @@ def _get_pd():
     return _pd_instance
 
 
+# Import order calculator
+from src.broker.order_calculator import OrderCalculator, sanitize_numeric_string
+
+
 class BinanceClient:
     """
     Broker Client para Binance Futures USDM.
@@ -100,8 +104,8 @@ class BinanceClient:
             'timeout': 8000,
             'options': {
                 'defaultType': 'future',
-                'adjustForTimeDifference': True,  # 🔧 ATIVA: Ajuste automático de diferença de tempo
-                'recvWindow': 10000,  # 🔧 AUMENTADO: 10s para evitar rejeição por dessincronização de relógio
+                'adjustForTimeDifference': True,  # 🔧 OBRIGATÓRIO: Ajuste automático de diferença de tempo
+                'recvWindow': 10000,  # 🔧 OBRIGATÓRIO: 10s de tolerância para evitar erros InvalidNonce
             },
         }
         if self.api_key and self.api_secret:
@@ -109,6 +113,11 @@ class BinanceClient:
             cfg['secret'] = self.api_secret
         if not self.testnet:
             cfg['urls'] = self._build_exchange_urls(self.active_endpoint)
+
+        # Inicializa calculadora de ordens dinâmica
+        if not hasattr(self, 'order_calculator'):
+            self.order_calculator = OrderCalculator(exchange_name='binance')
+
         return cfg
 
     def _apply_exchange_urls(self, exchange, api_host):

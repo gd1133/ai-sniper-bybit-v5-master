@@ -3,6 +3,7 @@ from decimal import Decimal, ROUND_DOWN
 from datetime import datetime
 
 from src.config import get_bybit_base_url, get_bybit_credentials, resolve_use_testnet
+from src.broker.order_calculator import OrderCalculator, sanitize_numeric_string
 
 AUTH_10003_ALERT = (
     "ERRO DE AUTENTICAÇÃO: Verifique se a chave de API é de produção e se o 2FA está ativo na Bybit"
@@ -71,10 +72,13 @@ class BybitClient:
             'options': {
                 'defaultType': 'swap', # Foco em Perpétuos
                 'defaultSubType': 'linear',
-                'adjustForTimeDifference': True,  # 🔧 ATIVA: Ajuste automático de diferença de tempo
-                'recvWindow': 10000,  # 🔧 AUMENTADO: 10s para evitar erros de dessincronização (InvalidNonce)
+                'adjustForTimeDifference': True,  # 🔧 OBRIGATÓRIO: Ajuste automático de diferença de tempo
+                'recvWindow': 10000,  # 🔧 OBRIGATÓRIO: 10s de tolerância para evitar erros InvalidNonce
             }
         }
+
+        # Inicializa calculadora de ordens dinâmica
+        self.order_calculator = OrderCalculator(exchange_name='bybit')
         if api_key and api_secret:
             cfg['apiKey'] = api_key
             cfg['secret'] = api_secret
@@ -230,6 +234,41 @@ class BybitClient:
     def _normalize_v5_side(self, side):
         normalized = str(side or '').strip().lower()
         return 'Buy' if normalized == 'buy' else 'Sell'
+
+    def calculate_dynamic_order_qty(self, symbol: str, balance=None):
+        """
+        🆕 CALCULADORA DINÂMICA DE ORDENS v1.0
+
+        Calcula a quantidade de uma ordem baseada nos limites ESTRITOS da corretora,
+        eliminando completamente o modelo de percentual fixo (5%, 15%, etc.).
+
+        Fluxo:
+        1. Busca dinamicamente: market["limits"]["amount"]["min"] e market["limits"]["cost"]["min"]
+        2. Calcula quantidade EXATA para atingir o nocional mínimo + margem de segurança
+        3. Aplica amount_to_precision do CCXT obrigatoriamente
+        4. Se saldo fornecido, pode usar múltiplo do mínimo (opcional)
+
+        Args:
+            symbol: Par de negociação (ex: 'DOGEUSDT', 'BTC/USDT:USDT')
+            balance: Saldo disponível em USDT (opcional). Se None, usa apenas valor mínimo
+
+        Returns:
+            Tuple (quantidade_final, metadata)
+        """
+        current_price = self.get_last_price(symbol)
+        if current_price <= 0:
+            raise ValueError(f"Não foi possível obter preço atual para {symbol}")
+
+        if balance is None or balance <= 0:
+            # Usa apenas o valor mínimo absoluto da corretora
+            return self.order_calculator.calculate_minimum_order_qty(
+                self.exchange, symbol, current_price
+            )
+        else:
+            # Usa saldo para calcular com possível múltiplo do mínimo
+            return self.order_calculator.calculate_order_qty_from_balance(
+                self.exchange, symbol, current_price, balance, risk_multiplier=1.0
+            )
 
     def _normalize_order_qty(self, symbol, qty):
         """
