@@ -323,7 +323,7 @@ class TradeLearner:
         try:
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT block_until FROM symbol_blocks 
+                SELECT block_until, reason FROM symbol_blocks 
                 WHERE symbol = ?
             ''', (symbol,))
             row = cursor.fetchone()
@@ -331,12 +331,15 @@ class TradeLearner:
             if not row:
                 return False, ""
             
-            block_until = datetime.fromisoformat(row['block_until'])
+            # Acessa valores da sqlite3.Row
+            block_until_str = row[0]  # Primeiro valor (block_until)
+            reason = row[1] if len(row) > 1 else 'Bloqueio temporário ativo'  # Segundo valor (reason)
+            
+            block_until = datetime.fromisoformat(block_until_str)
             now = datetime.utcnow()
             
             if now < block_until:
                 remaining = (block_until - now).total_seconds()
-                reason = row.get('reason', 'Bloqueio temporário ativo')
                 return True, f"{reason} (restam {remaining:.0f}s)"
             else:
                 # Desbloqueia automaticamente
