@@ -34,6 +34,7 @@ GroqValidator = None
 public_price_broker = None
 RUNTIME_START_LOCK = threading.Lock()
 RUNTIME_STARTED = False
+AI_RATE_LIMIT_STATUS_MESSAGE = '⚠️ Limite das IAs atingido. Aguardando cooldown de 60s...'
 
 # ==============================================================================
 # 🔘 TACTICAL v60.1 PRO - MAESTRO SAAS (FULL EDITION)
@@ -123,6 +124,34 @@ def _log_risk_management_mode():
         print("🔧 [RISK MANAGEMENT] Modo de entrada atualizado para: 15% do valor da banca real.")
     else:
         print(f"🔧 [RISK MANAGEMENT] Modo de entrada atualizado para: {_format_risk_per_trade_pct()} do valor da banca real.")
+
+
+def _is_rate_limit_error(error):
+    """Detecta mensagens de rate limit das clouds sem depender do tipo exato."""
+    error_message = str(error or "")
+    lowered_message = error_message.lower()
+    return (
+        "429" in error_message
+        or "rate limit" in lowered_message
+        or "rate_limit" in lowered_message
+    )
+
+
+def _apply_ai_rate_limit_cooldown(error):
+    """Aplica cooldown resiliente quando Groq/Gemini atingem limite de requisição."""
+    if not _is_rate_limit_error(error):
+        return False
+    print("⚠️ [AGUARDANDO COOLDOWN] Limite atingido. Pausando robô por 60 segundos antes de tentar novamente...")
+    time.sleep(60)
+    return True
+
+
+def _handle_ai_rate_limit(error):
+    """Atualiza estado do worker quando a análise cloud entra em cooldown."""
+    if not _apply_ai_rate_limit_cooldown(error):
+        return False
+    central_state['status'] = AI_RATE_LIMIT_STATUS_MESSAGE
+    return True
 
 # Sistema fixado em modo REAL apenas
 VALID_OPERATION_MODES = {'real'}
@@ -1806,6 +1835,7 @@ def sniper_worker_loop():
                         tickers_cache['timestamp'] = current_time
                     top_coins = tickers_cache['data']
                     oportunidades = []
+                    skip_remaining_symbol_analysis = False
 
                     for idx_loop, t in enumerate(top_coins):
                         sym = t['symbol']
@@ -1826,11 +1856,17 @@ def sniper_worker_loop():
                             if local_score < 25:
                                 continue
 
-                            res = validator.consensus_predict(
-                                signals,
-                                sym,
-                                force_local_only=USE_LOCAL_BRAIN_ONLY
-                            )
+                            try:
+                                res = validator.consensus_predict(
+                                    signals,
+                                    sym,
+                                    force_local_only=USE_LOCAL_BRAIN_ONLY
+                                )
+                            except Exception as e:
+                                if _handle_ai_rate_limit(e):
+                                    skip_remaining_symbol_analysis = True
+                                    break
+                                raise
 
                             prob = float(res.get('probabilidade', 0))
                             decisao = str(res.get('decisao', 'ABORTAR')).upper()
@@ -1866,6 +1902,9 @@ def sniper_worker_loop():
                             continue
 
                         time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
+
+                    if skip_remaining_symbol_analysis:
+                        continue
 
                     # Publica o ranking para o dashboard (Top 5)
                     oportunidades_ordenadas = sorted(oportunidades, key=lambda x: x['score'], reverse=True)
@@ -1962,10 +2001,15 @@ def sniper_worker_loop():
                         central_state['opportunities'] = []
                         central_state['status'] = f'✅ Analisados {len(top_coins)} ativos. Sem confluência no rigor atual.'
 
-                    time.sleep(60)
-                except Exception:
+                    # Espaçamento fixo de 15s entre ciclos bem-sucedidos; o cooldown de 60s fica só para 429.
+                    time.sleep(15)
+                except Exception as e:
+                    if _handle_ai_rate_limit(e):
+                        continue
                     time.sleep(15)
         except Exception as e:
+            if _handle_ai_rate_limit(e):
+                continue
             print(f'⚠️ [LOOP ERRO] {e}')
             time.sleep(15)
 
