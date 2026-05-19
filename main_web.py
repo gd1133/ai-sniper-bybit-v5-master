@@ -17,7 +17,7 @@ if sys.platform == 'win32':
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
-from src.config import get_bybit_base_url, get_bybit_credentials, get_environment_config, resolve_use_testnet
+from src.config import get_bybit_base_url, get_environment_config, resolve_use_testnet
 
 # --- IMPORTAÇÕES DAS PASTAS INTERNAS (SRC) - LAZY LOADING ---
 try:
@@ -35,6 +35,7 @@ public_price_broker = None
 RUNTIME_START_LOCK = threading.Lock()
 RUNTIME_STARTED = False
 AI_RATE_LIMIT_STATUS_MESSAGE = '⚠️ Limite das IAs atingido. Aguardando cooldown de 60s...'
+AI_COOLDOWN_ACTIVE = False
 
 # ==============================================================================
 # 🔘 TACTICAL v60.1 PRO - MAESTRO SAAS (FULL EDITION)
@@ -804,7 +805,9 @@ def _get_public_price_broker():
         from src.broker.bybit_client import BybitClient as _BybitClient
         BybitClient = _BybitClient
 
-    bybit_api_key, bybit_api_secret = get_bybit_credentials()
+    _, bybit_api_key, bybit_api_secret = _get_active_investor_bybit_credentials()
+    if not bybit_api_key or not bybit_api_secret:
+        raise RuntimeError("Nenhum investidor ativo com credenciais Bybit encontrado no SQLite.")
     # FORÇAR MODO REAL para broker público de preços
     public_price_broker = BybitClient(
         bybit_api_key,
@@ -836,6 +839,11 @@ def _make_broker(client):
     exchange = str(client.get('exchange') or 'bybit').strip().lower()
     broker_cls = _ensure_broker_class(exchange)
     account_mode = _normalize_account_mode(client.get('account_mode', client.get('is_testnet')))
+    client_id = client.get('id')
+    api_key = str(client.get('bybit_key') or '').strip()
+    api_secret = str(client.get('bybit_secret') or '').strip()
+    if not api_key or not api_secret:
+        raise RuntimeError(f"Cliente ativo sem credenciais no SQLite (id={client_id})")
 
     # Respeita estritamente as flags do Railway para evitar execução silenciosa no ambiente errado.
     use_testnet = USE_TESTNET
@@ -843,8 +851,8 @@ def _make_broker(client):
     print(f"🔧 [BROKER INIT] Cliente: {client.get('nome')} | Exchange: {exchange} | Testnet: {use_testnet} | ALLOW_REAL_TRADING: {ALLOW_REAL_TRADING}")
 
     return broker_cls(
-        client.get('bybit_key'),
-        client.get('bybit_secret'),
+        api_key,
+        api_secret,
         testnet=use_testnet,
     )
 
@@ -876,6 +884,30 @@ def _get_registered_client_by_id(client_id):
     if local_client is None:
         return None
     return {**dict(local_client), "storage_source": "local"}
+
+
+def _get_active_investor_bybit_credentials():
+    """
+    Busca credenciais Bybit EXCLUSIVAMENTE no SQLite, filtrando pelo ID do investidor ativo.
+    Retorna (client_id, api_key, api_secret) ou (None, '', '') quando não houver investidor elegível.
+    """
+    active_clients = _get_registered_clients(active_only=True)
+    for client in active_clients:
+        try:
+            client_id = int(client.get('id'))
+        except Exception:
+            continue
+
+        persisted_client = _get_registered_client_by_id(client_id)
+        if not persisted_client:
+            continue
+
+        api_key = str(persisted_client.get('bybit_key') or '').strip()
+        api_secret = str(persisted_client.get('bybit_secret') or '').strip()
+        if api_key and api_secret:
+            return client_id, api_key, api_secret
+
+    return None, '', ''
 
 
 def _save_client_everywhere(client_data):
@@ -1834,7 +1866,7 @@ def _executar_trade_teste():
 
 def sniper_worker_loop():
     """Motor Sniper que varre o mercado e atualiza o Dashboard sem travar."""
-    global central_state, BybitClient, IndicatorEngine, GroqValidator
+    global central_state, BybitClient, IndicatorEngine, GroqValidator, AI_COOLDOWN_ACTIVE
     
     # ⏳ Carregamento Lazy (apenas quando worker inicia)
     print("⏳ Carregando dependências pesadas (primeira vez)...")
@@ -1850,13 +1882,21 @@ def sniper_worker_loop():
 
     # Scanner Master - FORÇAR MODO REAL
     try:
-        # Sistema sempre opera em modo REAL (testnet=False)
-        master_broker = BybitClient(
-            *get_bybit_credentials(),
-            testnet=False,  # FORÇAR MODO REAL - Não usar testnet
-        )
         validator = GroqValidator(os.getenv("GEMINI_API_KEY"), os.getenv("GROQ_API_KEY"))
-        print(f"🔧 [MASTER BROKER] Modo: REAL (testnet=False)")
+        while True:
+            active_client_id, api_key, api_secret = _get_active_investor_bybit_credentials()
+            if api_key and api_secret:
+                master_broker = BybitClient(
+                    api_key,
+                    api_secret,
+                    testnet=False,  # FORÇAR MODO REAL - Não usar testnet
+                )
+                print(f"🔧 [MASTER BROKER] Modo: REAL (testnet=False) | Investidor ativo ID: {active_client_id}")
+                break
+
+            central_state['status'] = '⏳ Aguardando cadastro de investidor ativo com API Key/Secret no SQLite...'
+            print("⏳ [MASTER BROKER] Nenhum investidor ativo com credenciais no SQLite. Aguardando formulário...")
+            time.sleep(10)
     except Exception as e:
         print(f"❌ Erro ao inicializar broker/validator: {e}")
         time.sleep(5)
@@ -1899,7 +1939,7 @@ def sniper_worker_loop():
                         tickers_cache['timestamp'] = current_time
                     top_coins = tickers_cache['data']
                     oportunidades = []
-                    skip_remaining_symbol_analysis = False
+                    scan_had_ai_cooldown = False
 
                     for idx_loop, t in enumerate(top_coins):
                         sym = t['symbol']
@@ -1921,16 +1961,33 @@ def sniper_worker_loop():
                                 continue
 
                             try:
+                                use_local_only = USE_LOCAL_BRAIN_ONLY or AI_COOLDOWN_ACTIVE
                                 res = validator.consensus_predict(
                                     signals,
                                     sym,
-                                    force_local_only=USE_LOCAL_BRAIN_ONLY
+                                    force_local_only=use_local_only
                                 )
                             except Exception as e:
-                                if _handle_ai_rate_limit(e):
-                                    skip_remaining_symbol_analysis = True
-                                    break
-                                raise
+                                if _is_rate_limit_error(e):
+                                    AI_COOLDOWN_ACTIVE = True
+                                    scan_had_ai_cooldown = True
+                                    central_state['status'] = AI_RATE_LIMIT_STATUS_MESSAGE
+                                    print(f"🔴 [COOLDOWN GLOBAL] 429 detectado em {clean_sym}. Ativando 3º Cérebro local para os próximos ativos deste ciclo.")
+                                    res = validator.consensus_predict(
+                                        signals,
+                                        sym,
+                                        force_local_only=True
+                                    )
+                                elif _handle_ai_rate_limit(e):
+                                    continue
+                                else:
+                                    raise
+
+                            if res.get('ai_rate_limit_detected'):
+                                AI_COOLDOWN_ACTIVE = True
+                                scan_had_ai_cooldown = True
+                                central_state['status'] = AI_RATE_LIMIT_STATUS_MESSAGE
+                                print(f"🔴 [COOLDOWN GLOBAL] 429 detectado em {clean_sym}. Próximas moedas usarão somente o 3º Cérebro REAL.")
 
                             prob = float(res.get('probabilidade', 0))
                             decisao = str(res.get('decisao', 'ABORTAR')).upper()
@@ -1966,9 +2023,6 @@ def sniper_worker_loop():
                             continue
 
                         time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
-
-                    if skip_remaining_symbol_analysis:
-                        continue
 
                     # Publica o ranking para o dashboard (Top 5)
                     oportunidades_ordenadas = sorted(oportunidades, key=lambda x: x['score'], reverse=True)
@@ -2077,8 +2131,14 @@ def sniper_worker_loop():
                         central_state['opportunities'] = []
                         central_state['status'] = f'✅ Analisados {len(top_coins)} ativos. Sem confluência no rigor atual.'
 
-                    # Espaçamento fixo de 15s entre ciclos bem-sucedidos; o cooldown de 60s fica só para 429.
-                    time.sleep(15)
+                    if AI_COOLDOWN_ACTIVE or scan_had_ai_cooldown:
+                        central_state['status'] = AI_RATE_LIMIT_STATUS_MESSAGE
+                        print("⏸️ [COOLDOWN GLOBAL] Fim da varredura. Pausando 60s para resetar IAs cloud...")
+                        time.sleep(60)
+                        AI_COOLDOWN_ACTIVE = False
+                    else:
+                        # Espaçamento fixo de 15s entre ciclos bem-sucedidos.
+                        time.sleep(15)
                 except Exception as e:
                     if _handle_ai_rate_limit(e):
                         continue

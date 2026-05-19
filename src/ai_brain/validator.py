@@ -418,6 +418,8 @@ class GroqValidator:
             "fallback_local_active": fallback_local_active,
             "real_execution_trigger": real_execution_trigger,  # 🔴 FLAG para execução real
             "strategic_reason": strategic_motivo,
+            "tactical_error": tactical_error,
+            "ai_rate_limit_detected": (tactical_error == "429_RATE_LIMIT" or strategic_motivo == "429_RATE_LIMIT"),
             "weights": {"local": 100, "groq": 0, "gemini": 0} if fallback_local_active else {"local": 25, "groq": 35, "gemini": 40},
             "required_confidence": required_confidence,
             "local_checks": local_checks,
