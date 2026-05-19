@@ -88,6 +88,8 @@ from src.broker.bybit_client import BybitClient
 from src.engine.indicators import IndicatorEngine
 from src.ai_brain.validator import GroqValidator
 from src.ai_brain.learning import TradeLearner
+from src.ai_brain.local_ml_engine import LocalMLEngine
+
 
 
 # ─── Gestão de Risco Dinâmica ─────────────────────────────────────────────────
@@ -575,26 +577,30 @@ def run_diagnostics(client: BybitClient, symbol: str) -> None:
 
 def run_sniper(symbol: str = SYMBOL):
     """
-    Loop principal do Motor Sniper V60.7.
+    Loop principal do Motor Sniper V61.0.
 
     Regras de execução:
       - Varredura exclusiva no timeframe de 30 minutos (30m)
       - Máximo de 1 operação ativa simultaneamente
       - Gestão de risco via RiskManager com 15% padrão da banca (override opcional por ambiente)
+      - ⏸️ NOVO: Espaçamento de 15s entre ciclos para anti-rate-limit
+      - 🧠 NOVO: 3º Cérebro EXECUTOR PRINCIPAL quando APIs falham com 429
 
     Fluxo por ciclo:
       1. Verifica posição ativa → bloqueia nova entrada se já houver 1 aberta
       2. Detecta fechamento de posição → atualiza RiskManager com resultado (SL/Gain)
       3. Busca OHLCV 30m e calcula indicadores (Cérebro 1 — Local/Matemático)
-      4. Consulta Groq/LLaMA (Cérebro 2 — Tático)
-      5. Consulta Gemini (Cérebro 3 — Estratégico / Histórico)
+      4. Consulta Groq/LLaMA (Cérebro 2 — Tático) com tratamento 429
+      5. Consulta Gemini (Cérebro 3 — Estratégico) com tratamento 429
       6. Gera consenso ponderado (Gemini 40% | Groq 35% | Local 25%)
       7. Valida 5 confluências simultâneas
-      8. Se confiança ≥ 60 % e todas as confluências OK → executa Ponto Zero
+      8. Se confiança ≥ 60% (80% para 3º Cérebro) e confluências OK → executa Ponto Zero
+      9. Aguarda 15s entre ciclos para respeitar rate limits de API
     """
     print("═" * 60)
-    print(f"  MOTOR SNIPER V60.7 — iniciando em {'TESTNET' if USE_TESTNET else 'PRODUÇÃO'}")
+    print(f"  MOTOR SNIPER V61.0 — iniciando em {'TESTNET' if USE_TESTNET else 'PRODUÇÃO'}")
     print(f"  Par: {symbol} | Timeframe: {TIMEFRAME} | Intervalo: {SCAN_INTERVAL}s")
+    print(f"  🧠 3º CÉREBRO: EXECUTOR PRINCIPAL (ATIVO REAL)")
     _log_risk_management_mode()
     print(f"  Regras: 1 trade ativo | SL=50% entrada | TP=100% lucro | Entrada={ENTRY_PCT_DEFAULT * 100:.0f}%")
     print("═" * 60)
@@ -602,6 +608,7 @@ def run_sniper(symbol: str = SYMBOL):
     # ── Inicialização dos componentes ──────────────────────────────────────────
     client = build_client()
     learner = TradeLearner()
+    local_ml = LocalMLEngine()  # 🧠 3º Cérebro - ML Local
     risk_manager = RiskManager()
 
     gemini_key = str(os.getenv("GEMINI_API_KEY", "")).strip()
@@ -629,6 +636,7 @@ def run_sniper(symbol: str = SYMBOL):
     # ── Estado de controle do ciclo ────────────────────────────────────────────
     cycle = 0
     _had_position_last_cycle: bool = False
+    ANTI_RATE_LIMIT_SLEEP = 15  # ⏸️ Espaçamento entre ciclos para respeitar rate limits
 
     # ── Loop de varredura ──────────────────────────────────────────────────────
     while True:
@@ -747,8 +755,13 @@ def run_sniper(symbol: str = SYMBOL):
                 # Pausa após execução para evitar entradas duplicadas
                 print(f"✅ [PONTO ZERO ATIVADO] Aguardando 60s antes do próximo ciclo...")
                 time.sleep(60)
+                # ⏸️ Espaçamento anti-rate-limit após execução
+                print(f"⏸️  [ANTI-RATE-LIMIT] Aguardando {ANTI_RATE_LIMIT_SLEEP}s para respeitar rate limits...")
+                time.sleep(ANTI_RATE_LIMIT_SLEEP)
             else:
-                time.sleep(SCAN_INTERVAL)
+                # ⏸️ Espaçamento anti-rate-limit mesmo sem execução
+                print(f"⏸️  [ANTI-RATE-LIMIT] Aguardando {ANTI_RATE_LIMIT_SLEEP}s para respeitar rate limits...")
+                time.sleep(ANTI_RATE_LIMIT_SLEEP)
 
         except KeyboardInterrupt:
             print("\n🛑 Motor Sniper encerrado pelo usuário (Ctrl+C).")
@@ -764,7 +777,9 @@ def run_sniper(symbol: str = SYMBOL):
                 client.authenticated = False
                 sys.exit(1)
             print(f"⚠️  [CICLO #{cycle}] Erro inesperado no ciclo de varredura.")
-            time.sleep(SCAN_INTERVAL)
+            # ⏸️ Espaçamento anti-rate-limit após erro
+            print(f"⏸️  [ANTI-RATE-LIMIT] Aguardando {ANTI_RATE_LIMIT_SLEEP}s para respeitar rate limits...")
+            time.sleep(ANTI_RATE_LIMIT_SLEEP)
 
 
 # ─── Ponto de entrada ─────────────────────────────────────────────────────────

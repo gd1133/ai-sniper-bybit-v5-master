@@ -1,11 +1,13 @@
 import sqlite3
 import os
 import time
-from datetime import datetime
+import json
+from datetime import datetime, timedelta
 
 class TradeLearner:
     """
-    🧠 MEMÓRIA NEURAL v60.1 - GIVALDO SUPREME (THREAD-SAFE)
+    🧠 MEMÓRIA NEURAL v61.0 - GIVALDO SUPREME (THREAD-SAFE)
+    Com 3º Cérebro Executor Principal e aprendizado adaptativo local.
     Otimizado para evitar travamentos no Dashboard através de conexões síncronas.
     """
     def __init__(self, db_path="database.db"):
@@ -19,11 +21,11 @@ class TradeLearner:
         return conn
 
     def _ensure_table(self):
-        """Garante que a estrutura de memória neural e trades existe."""
+        """Garante que a estrutura de memória neural, trades e ML local existe."""
         conn = self._get_conn()
         try:
             cursor = conn.cursor()
-            # Tabela de Aprendizado IA
+            # Tabela de Aprendizado IA (existente)
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS neural_memory (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -37,6 +39,42 @@ class TradeLearner:
                     status TEXT DEFAULT 'OPEN'
                 )
             ''')
+            
+            # 🧠 NOVA TABELA: Aprendizado Local ML do 3º Cérebro
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS local_ml_trades (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    entry_price REAL,
+                    entry_indicators TEXT,
+                    sma_200_price REAL,
+                    supertrend_value REAL,
+                    rsi_value REAL,
+                    entry_margin REAL,
+                    entry_qty REAL,
+                    exit_price REAL,
+                    exit_time DATETIME,
+                    pnl_pct REAL,
+                    block_reason TEXT,
+                    status TEXT DEFAULT 'OPEN',
+                    brain_mode TEXT DEFAULT 'LOCAL'
+                )
+            ''')
+            
+            # Tabela de bloqueio temporário por padrão de falha
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS symbol_blocks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL UNIQUE,
+                    block_until DATETIME NOT NULL,
+                    reason TEXT,
+                    consecutive_losses INTEGER DEFAULT 0,
+                    last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
             conn.commit()
         finally:
             conn.close()
@@ -170,5 +208,231 @@ class TradeLearner:
         except sqlite3.DatabaseError as e:
             print(f"❌ [SQLite] Erro get_performance_report: {e}")
             return "⚠️ Erro no relatório."
+        finally:
+            conn.close()
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # 🧠 LOCAL ML ENGINE - 3º CÉREBRO EXECUTOR PRINCIPAL
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def record_local_entry(self, symbol, side, indicators_dict, entry_price, entry_qty, entry_margin):
+        """Registra entrada do 3º Cérebro com todos os indicadores técnicos."""
+        def _operation(cursor):
+            indicators_json = json.dumps(indicators_dict) if indicators_dict else "{}"
+            cursor.execute('''
+                INSERT INTO local_ml_trades 
+                (symbol, side, entry_price, entry_indicators, sma_200_price, 
+                 supertrend_value, rsi_value, entry_qty, entry_margin, status, brain_mode)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', 'LOCAL')
+            ''', (
+                symbol,
+                side,
+                entry_price,
+                indicators_json,
+                indicators_dict.get('sma_200', 0),
+                indicators_dict.get('supertrend', 0),
+                indicators_dict.get('rsi', 50),
+                entry_qty,
+                entry_margin
+            ))
+
+        if self._execute_write_with_retry("record_local_entry", _operation):
+            print(f"🧠 [3º CÉREBRO] Entrada Local registrada: {symbol} {side} @ {entry_price} (Qtd: {entry_qty})")
+
+    def finalize_local_trade(self, symbol, exit_price, pnl_pct, exit_time=None):
+        """Finaliza trade do 3º Cérebro com resultado."""
+        exit_time = exit_time or datetime.utcnow().isoformat()
+        
+        def _operation(cursor):
+            cursor.execute('''
+                UPDATE local_ml_trades 
+                SET exit_price = ?, pnl_pct = ?, exit_time = ?, status = 'CLOSED'
+                WHERE symbol = ? AND status = 'OPEN'
+                ORDER BY timestamp DESC LIMIT 1
+            ''', (exit_price, pnl_pct, exit_time, symbol))
+
+        if self._execute_write_with_retry("finalize_local_trade", _operation):
+            result_label = "✅ LUCRO" if pnl_pct > 0 else "❌ PERDA"
+            print(f"🧠 [3º CÉREBRO] Trade finalizado: {symbol} {result_label} {pnl_pct:.2f}%")
+
+    def get_last_50_trades(self, symbol):
+        """Retorna últimas 50 operações do símbolo para análise de padrões."""
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT * FROM local_ml_trades 
+                WHERE symbol = ? AND status = 'CLOSED'
+                ORDER BY timestamp DESC LIMIT 50
+            ''', (symbol,))
+            return [dict(r) for r in cursor.fetchall()]
+        except sqlite3.DatabaseError as e:
+            print(f"❌ [SQLite] Erro get_last_50_trades: {e}")
+            return []
+        finally:
+            conn.close()
+
+    def analyze_failure_patterns(self, symbol):
+        """
+        Analisa últimas 50 operações e detecta 3+ perdas consecutivas
+        sob as mesmas condições de SMA/Supertrend.
+        Retorna: (should_block, reason, consecutive_losses)
+        """
+        trades = self.get_last_50_trades(symbol)
+        if len(trades) < 3:
+            return False, "Histórico insuficiente", 0
+
+        consecutive_losses = 0
+        last_sma_200 = None
+        loss_pattern = []
+
+        for trade in trades[:10]:  # Verificar últimas 10 operações
+            try:
+                pnl = float(trade.get('pnl_pct', 0) or 0)
+                indicators = json.loads(trade.get('entry_indicators', '{}'))
+                sma_200 = float(indicators.get('sma_200', 0))
+
+                if pnl < 0:  # Perda
+                    if last_sma_200 is None or abs(sma_200 - last_sma_200) / last_sma_200 < 0.02:
+                        consecutive_losses += 1
+                        loss_pattern.append({
+                            'symbol': symbol,
+                            'pnl': pnl,
+                            'sma_200': sma_200
+                        })
+                    else:
+                        consecutive_losses = 1
+                        last_sma_200 = sma_200
+                else:  # Lucro - reseta contador
+                    consecutive_losses = 0
+                    last_sma_200 = None
+
+                if consecutive_losses >= 3:
+                    reason = f"3+ perdas consecutivas sob SMA 200 ≈ {sma_200:.2f}"
+                    print(f"⛔ [3º CÉREBRO] Bloqueio ativado para {symbol}: {reason}")
+                    return True, reason, consecutive_losses
+
+            except (ValueError, TypeError, KeyError):
+                continue
+
+        return False, "", 0
+
+    def is_symbol_blocked(self, symbol):
+        """Verifica se símbolo está temporariamente bloqueado."""
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT block_until, reason FROM symbol_blocks 
+                WHERE symbol = ?
+            ''', (symbol,))
+            row = cursor.fetchone()
+            
+            if not row:
+                return False, ""
+            
+            # Acessa valores da sqlite3.Row
+            block_until_str = row[0]  # Primeiro valor (block_until)
+            reason = row[1] if len(row) > 1 else 'Bloqueio temporário ativo'  # Segundo valor (reason)
+            
+            block_until = datetime.fromisoformat(block_until_str)
+            now = datetime.utcnow()
+            
+            if now < block_until:
+                remaining = (block_until - now).total_seconds()
+                return True, f"{reason} (restam {remaining:.0f}s)"
+            else:
+                # Desbloqueia automaticamente
+                cursor.execute('DELETE FROM symbol_blocks WHERE symbol = ?', (symbol,))
+                conn.commit()
+                return False, ""
+        except Exception as e:
+            print(f"❌ [SQLite] Erro is_symbol_blocked: {e}")
+            return False, ""
+        finally:
+            conn.close()
+
+    def block_symbol_temporarily(self, symbol, reason, duration_seconds=3600):
+        """Bloqueia símbolo temporariamente por N segundos."""
+        def _operation(cursor):
+            block_until = (datetime.utcnow() + timedelta(seconds=duration_seconds)).isoformat()
+            cursor.execute('''
+                INSERT OR REPLACE INTO symbol_blocks (symbol, block_until, reason)
+                VALUES (?, ?, ?)
+            ''', (symbol, block_until, reason))
+
+        if self._execute_write_with_retry("block_symbol_temporarily", _operation):
+            print(f"⛔ [3º CÉREBRO] {symbol} bloqueado por {duration_seconds}s: {reason}")
+
+    def should_allow_entry(self, symbol):
+        """
+        Verifica se entrada é permitida baseado em aprendizado local.
+        Combina: bloqueio temporário + análise de padrões.
+        """
+        # Verificar bloqueio temporário
+        is_blocked, block_reason = self.is_symbol_blocked(symbol)
+        if is_blocked:
+            return False, f"Símbolo bloqueado: {block_reason}"
+
+        # Analisar padrões de falha
+        should_block, failure_reason, consecutive_losses = self.analyze_failure_patterns(symbol)
+        if should_block:
+            self.block_symbol_temporarily(symbol, failure_reason, duration_seconds=1800)
+            return False, f"Padrão de perda detectado: {failure_reason}"
+
+        return True, "✅ Entrada autorizada pelo 3º Cérebro"
+
+    def get_local_ml_stats(self, symbol=None):
+        """Retorna estatísticas do 3º Cérebro (Local ML)."""
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            
+            if symbol:
+                cursor.execute('''
+                    SELECT COUNT(*) FROM local_ml_trades WHERE symbol = ? AND status = 'CLOSED'
+                ''', (symbol,))
+            else:
+                cursor.execute('SELECT COUNT(*) FROM local_ml_trades WHERE status = "CLOSED"')
+            
+            total = cursor.fetchone()[0]
+            
+            if symbol:
+                cursor.execute('''
+                    SELECT COUNT(*) FROM local_ml_trades 
+                    WHERE symbol = ? AND pnl_pct > 0 AND status = 'CLOSED'
+                ''', (symbol,))
+            else:
+                cursor.execute('''
+                    SELECT COUNT(*) FROM local_ml_trades 
+                    WHERE pnl_pct > 0 AND status = 'CLOSED'
+                ''')
+            
+            wins = cursor.fetchone()[0]
+            
+            if symbol:
+                cursor.execute('''
+                    SELECT SUM(pnl_pct) FROM local_ml_trades 
+                    WHERE symbol = ? AND status = 'CLOSED'
+                ''', (symbol,))
+            else:
+                cursor.execute('''
+                    SELECT SUM(pnl_pct) FROM local_ml_trades WHERE status = 'CLOSED'
+                ''')
+            
+            total_pnl = cursor.fetchone()[0] or 0.0
+            win_rate = (wins / total * 100) if total > 0 else 0
+
+            symbol_filter = f" {symbol}" if symbol else ""
+            return {
+                'total_trades': total,
+                'wins': wins,
+                'win_rate': win_rate,
+                'total_pnl': total_pnl,
+                'summary': f"3º Cérebro{symbol_filter}: {total} trades | ✅ {wins} wins | 🎯 {win_rate:.1f}% | 💰 {total_pnl:.2f}%"
+            }
+        except sqlite3.DatabaseError as e:
+            print(f"❌ [SQLite] Erro get_local_ml_stats: {e}")
+            return {'total_trades': 0, 'wins': 0, 'win_rate': 0, 'total_pnl': 0, 'summary': '⚠️ Erro ao carregar stats'}
         finally:
             conn.close()

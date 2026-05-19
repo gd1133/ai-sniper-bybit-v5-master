@@ -10,3 +10,4 @@ httpx==0.27.2
 gunicorn==22.0.0
 pybit==5.12.0
 pyotp==2.9.0
+streamlit>=1.28.0
