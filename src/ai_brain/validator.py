@@ -294,6 +294,8 @@ class GroqValidator:
             if tactical_error == "429_RATE_LIMIT" and strategic_motivo == "429_RATE_LIMIT":
                 print(f"🔴 [AMBAS 429] Groq E Gemini em Rate Limit. Ativando 3º Cérebro EXECUTOR!")
                 print(f"⏸️ Cooldown 60s ativado. Operação autônoma local iniciada.")
+                print(f"🧠 [MODO REAL] 3º Cérebro agora irá EXECUTAR ORDENS REAIS com 80% de confiança mínima!")
+                print(f"📊 [DEBUG] Symbol: {symbol} | Local Score: {local_score}")
                 self.local_brain_active = True
                 real_execution_trigger = True
                 fallback_local_active = True
@@ -394,6 +396,8 @@ class GroqValidator:
         if final_prob >= required_confidence and decisao in ["COMPRAR", "VENDER"]:
             if real_execution_trigger:
                 print(f"🧠 [3º CÉREBRO EXECUTOR] {final_prob}% - {decisao} - EXECUTANDO ORDEM REAL!")
+                print(f"🎯 [DETALHES] Symbol: {symbol} | Side: {decision_side} | Confiança Mínima: {required_confidence}%")
+                print(f"📊 [BREAKDOWN] Local: {local_score} | Groq: {tactical_score} | Gemini: {strategic_score}")
             else:
                 print(f"✅ [CONSENSUS ALERT] {final_prob}% - {decisao}")
         
