@@ -1,14 +1,15 @@
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║           MOTOR SNIPER V60.7 — GIVALDO SUPREME                  ║
+║           MOTOR SNIPER V61.1 — GIVALDO SUPREME                  ║
 ║        Sistema de Entrada Ponto Zero (Triple Brain)              ║
 ╚══════════════════════════════════════════════════════════════════╝
 
 Regras de Negócio:
-  - API: pybit.unified_trading.HTTP com recv_window=20000
+  - API: pybit.unified_trading.HTTP com recv_window=10000
   - Timeframe de varredura: 30 minutos (30m) — exclusivo
   - Máximo de operações simultâneas: 1 (uma)
-  - Entrada padrão: 15 % do saldo USDT (ou override via RISK_PER_TRADE_PCT)
+  - 🆕 CÁLCULO DINÂMICO: Baseado em limites mínimos da exchange (sem percentual fixo)
+  - 🆕 COOLDOWN: 15s entre ciclos de varredura (anti-rate-limit)
   - Stop Loss: 50 % da entrada (≡ 5 % de preço com 10× alavancagem)
   - Take Profit: 100 % de lucro sobre a entrada (≡ 10 % de preço)
   - Alavancagem: 10× | Modo de Margem: Cross
@@ -276,13 +277,25 @@ def configure_leverage_and_margin(client: BybitClient, symbol: str) -> bool:
 
 def calculate_entry_qty(client: BybitClient, price: float, entry_pct: float) -> float:
     """
-    Calcula a quantidade de contratos para a entrada.
+    🆕 REFATORADO v2.0: Calcula quantidade usando limites dinâmicos da exchange.
 
-    Regras:
-      - Valor de entrada = entry_pct do saldo USDT (15 % por padrão)
-      - Quantidade = valor_entrada / preço_atual
-      - Se saldo ≤ 0 → operação abortada (retorna 0.0)
-      - Piso mínimo de $3 USD de margem (mínimo aceito pela Bybit V5)
+    REMOVIDO: Cálculo baseado em percentual fixo (5%, 15%, etc.) da banca.
+    IMPLEMENTADO: Cálculo baseado nos limites estritos da corretora.
+
+    Fluxo:
+      1. Consulta saldo USDT disponível
+      2. Busca dinamicamente market["limits"]["amount"]["min"] e market["limits"]["cost"]["min"]
+      3. Calcula quantidade EXATA para atingir nocional mínimo + margem de segurança
+      4. Aplica amount_to_precision do CCXT obrigatoriamente
+      5. Se saldo permitir, pode usar múltiplo do mínimo
+
+    Args:
+        client: Cliente Bybit inicializado
+        price: Preço atual do ativo (usado apenas para logging legacy)
+        entry_pct: Percentual de entrada (DEPRECADO - mantido apenas para compatibilidade)
+
+    Returns:
+        Quantidade calculada dinamicamente ou 0.0 se houver erro
     """
     balance = client.get_balance()
 
@@ -291,19 +304,28 @@ def calculate_entry_qty(client: BybitClient, price: float, entry_pct: float) -> 
         print("🚫 [SEGURANÇA] Saldo USDT inválido ou zero. Operação ABORTADA.")
         return 0.0
 
-    entry_value = balance * entry_pct
+    # Usa a nova calculadora dinâmica de ordens
+    try:
+        # O símbolo será obtido do contexto global SYMBOL
+        symbol = SYMBOL
 
-    # 🛡️ TRAVA DE SEGURANÇA: Valida tamanho mínimo de ordem
-    # Se margem calculada for muito baixa, força mínimo operacional
-    MIN_MARGIN_USD = 3.0  # Piso mínimo de $3 USD de margem (mínimo aceito pela Bybit V5)
-    if 0 < entry_value < MIN_MARGIN_USD:
-        print(f"⚠️  [RISK MANAGEMENT] Margem calculada (${entry_value:.2f}) abaixo do mínimo. Ajustando para ${MIN_MARGIN_USD:.2f}")
-        entry_value = MIN_MARGIN_USD
+        print(f"💰 [RISCO DINÂMICO] Saldo={balance:.2f} USDT")
+        print(f"   🔄 Calculando quantidade baseada nos limites da corretora...")
 
-    qty = entry_value / price if price > 0 else 0.0
+        # Calcula quantidade dinamicamente
+        qty, metadata = client.calculate_dynamic_order_qty(symbol, balance)
 
-    print(f"💰 [RISCO] Saldo={balance:.2f} USDT | Entrada={entry_value:.2f} USDT ({entry_pct*100:.0f}%) | Qty≈{qty:.4f}")
-    return round(qty, 4)
+        print(f"   ✅ Quantidade calculada: {qty:.4f}")
+        print(f"   📊 Nocional: ${metadata['calculated_cost']:.2f} USDT")
+        print(f"   📏 Mínimo exchange: ${metadata['min_cost']:.2f} USDT")
+        print(f"   🛡️ Margem segurança: ${metadata['safety_margin']:.2f} USDT")
+
+        return qty
+
+    except Exception as calc_err:
+        print(f"❌ [ERRO CÁLCULO] Falha ao calcular quantidade dinâmica: {calc_err}")
+        print(f"   Operação ABORTADA por segurança")
+        return 0.0
 
 
 # ─── Verificação das 5 Confluências ───────────────────────────────────────────
@@ -577,14 +599,14 @@ def run_diagnostics(client: BybitClient, symbol: str) -> None:
 
 def run_sniper(symbol: str = SYMBOL):
     """
-    Loop principal do Motor Sniper V61.0.
+    Loop principal do Motor Sniper V61.1.
 
     Regras de execução:
       - Varredura exclusiva no timeframe de 30 minutos (30m)
       - Máximo de 1 operação ativa simultaneamente
-      - Gestão de risco via RiskManager com 15% padrão da banca (override opcional por ambiente)
-      - ⏸️ NOVO: Espaçamento de 15s entre ciclos para anti-rate-limit
-      - 🧠 NOVO: 3º Cérebro EXECUTOR PRINCIPAL quando APIs falham com 429
+      - 🆕 Cálculo dinâmico de quantidade baseado em limites da exchange
+      - ⏸️ OBRIGATÓRIO: Espaçamento de 15s entre ciclos para anti-rate-limit
+      - 🧠 3º Cérebro EXECUTOR PRINCIPAL quando APIs falham com 429
 
     Fluxo por ciclo:
       1. Verifica posição ativa → bloqueia nova entrada se já houver 1 aberta
@@ -595,14 +617,16 @@ def run_sniper(symbol: str = SYMBOL):
       6. Gera consenso ponderado (Gemini 40% | Groq 35% | Local 25%)
       7. Valida 5 confluências simultâneas
       8. Se confiança ≥ 60% (80% para 3º Cérebro) e confluências OK → executa Ponto Zero
-      9. Aguarda 15s entre ciclos para respeitar rate limits de API
+      9. 🆕 AGUARDA 15s OBRIGATÓRIOS entre ciclos (anti-rate-limit Groq/Gemini)
     """
     print("═" * 60)
-    print(f"  MOTOR SNIPER V61.0 — iniciando em {'TESTNET' if USE_TESTNET else 'PRODUÇÃO'}")
+    print(f"  MOTOR SNIPER V61.1 — iniciando em {'TESTNET' if USE_TESTNET else 'PRODUÇÃO'}")
     print(f"  Par: {symbol} | Timeframe: {TIMEFRAME} | Intervalo: {SCAN_INTERVAL}s")
     print(f"  🧠 3º CÉREBRO: EXECUTOR PRINCIPAL (ATIVO REAL)")
+    print(f"  🆕 CÁLCULO DINÂMICO: Baseado em limites da exchange (sem % fixo)")
+    print(f"  ⏸️  COOLDOWN: 15s entre ciclos (anti-rate-limit)")
     _log_risk_management_mode()
-    print(f"  Regras: 1 trade ativo | SL=50% entrada | TP=100% lucro | Entrada={ENTRY_PCT_DEFAULT * 100:.0f}%")
+    print(f"  Regras: 1 trade ativo | SL=50% entrada | TP=100% lucro")
     print("═" * 60)
 
     # ── Inicialização dos componentes ──────────────────────────────────────────
