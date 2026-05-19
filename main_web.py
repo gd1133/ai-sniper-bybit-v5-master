@@ -2044,13 +2044,25 @@ def sniper_worker_loop():
                         central_state['symbol'] = melhor['clean_symbol']
                         central_state['confidence'] = melhor['probabilidade']
                         central_state['ia2_decision']['motivo'] = melhor['res'].get('motivo', 'Confluência detectada')
+
+                        # 🧠 Verifica se o 3º Cérebro está executando autonomamente (real_execution_trigger)
+                        real_execution_trigger = melhor['res'].get('real_execution_trigger', False)
+                        if real_execution_trigger:
+                            print(f"🧠 [3º CÉREBRO EXECUTOR ATIVO] Executando ordem REAL com análise local!")
+                            print(f"   Symbol: {melhor['clean_symbol']} | Confiança Local: {melhor['probabilidade']}%")
+                            print(f"   Motivo: {melhor['res'].get('motivo', 'Confluência detectada')}")
+
                         broadcast_ordem_global(
                             melhor['symbol'],
                             melhor['res'].get('decisao', 'ABORTAR'),
                             master_broker.get_last_price(melhor['symbol']),
                             melhor['res']
                         )
-                        central_state['status'] = f"📊 SINAL ABERTO: {melhor['clean_symbol']} ({melhor['probabilidade']:.0f}%)"
+
+                        status_msg = f"📊 SINAL ABERTO: {melhor['clean_symbol']} ({melhor['probabilidade']:.0f}%)"
+                        if real_execution_trigger:
+                            status_msg = f"🧠 3º CÉREBRO ATIVO: {melhor['clean_symbol']} ({melhor['probabilidade']:.0f}%)"
+                        central_state['status'] = status_msg
 
                         # Atualiza memória anti-repetição
                         if melhor['clean_symbol'] == last_signal_symbol:
