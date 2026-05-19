@@ -73,44 +73,93 @@ def _format_risk_per_trade_pct():
 
 
 def _calculate_order_margin(balance):
-    """Calcula a margem exata alocada por ordem com base no saldo sincronizado."""
-    safe_balance = max(float(balance or 0.0), 0.0)
-    return safe_balance * RISK_PER_TRADE_PCT
+    """
+    DEPRECADO v2.0: Função mantida para compatibilidade com código legado.
+
+    NOVO COMPORTAMENTO: Retorna o saldo completo para que a função
+    _calculate_dynamic_order_quantity() possa calcular baseado nos limites da exchange.
+
+    O cálculo por percentual fixo (5%, 15%, etc.) foi REMOVIDO.
+    """
+    return float(balance or 0.0)
 
 
 def _calculate_order_quantity(balance, entry_price):
-    """Calcula margem e quantidade a partir do saldo sincronizado do cliente."""
-    margin = _calculate_order_margin(balance)
-    safe_entry_price = float(entry_price or 0.0)
-    qty = (margin / safe_entry_price) if margin > 0 and safe_entry_price > 0 else 0.0
+    """
+    DEPRECADO v2.0: Use _calculate_dynamic_order_quantity() para novas implementações.
 
-    # 🛡️ TRAVA DE SEGURANÇA: Valida tamanho mínimo de ordem
-    # Se margem calculada for muito baixa, força mínimo operacional
-    MIN_MARGIN_USD = 3.0  # Piso mínimo de $3 USD de margem (mínimo aceito pela Bybit V5)
-    if 0 < margin < MIN_MARGIN_USD:
-        print(f"⚠️  [RISK MANAGEMENT] Margem calculada (${margin:.2f}) abaixo do mínimo. Ajustando para ${MIN_MARGIN_USD:.2f}")
-        margin = MIN_MARGIN_USD
-        qty = (margin / safe_entry_price) if safe_entry_price > 0 else 0.0
-
-    return margin, qty
+    Mantida apenas para compatibilidade com código legado.
+    Retorna margem = saldo completo e qty = 0 para forçar uso de cálculo dinâmico.
+    """
+    print(f"⚠️ [DEPRECATION WARNING] _calculate_order_quantity() está obsoleto")
+    print(f"   Use _calculate_dynamic_order_quantity() para cálculo baseado em limites da exchange")
+    return float(balance or 0.0), 0.0
 
 
 def _calculate_webhook_order_quantity(balance, entry_price):
-    """Usa o sizing fixo do broadcast/webhook para evitar rejeição por lote mínimo."""
-    safe_balance = max(float(balance or 0.0), 0.0)
-    margin = safe_balance * WEBHOOK_ORDER_MARGIN_PCT
-    safe_entry_price = float(entry_price or 0.0)
-    qty = (margin / safe_entry_price) if margin > 0 and safe_entry_price > 0 else 0.0
+    """
+    DEPRECADO v2.0: Use _calculate_dynamic_order_quantity() para novas implementações.
 
-    # 🛡️ TRAVA DE SEGURANÇA: Valida tamanho mínimo de ordem
-    # Se margem calculada for muito baixa, força mínimo operacional
-    MIN_MARGIN_USD = 3.0  # Piso mínimo de $3 USD de margem (mínimo aceito pela Bybit V5)
-    if 0 < margin < MIN_MARGIN_USD:
-        print(f"⚠️  [RISK MANAGEMENT] Margem calculada (${margin:.2f}) abaixo do mínimo. Ajustando para ${MIN_MARGIN_USD:.2f}")
-        margin = MIN_MARGIN_USD
-        qty = (margin / safe_entry_price) if safe_entry_price > 0 else 0.0
+    Mantida apenas para compatibilidade com código legado.
+    Retorna margem = saldo completo e qty = 0 para forçar uso de cálculo dinâmico.
+    """
+    print(f"⚠️ [DEPRECATION WARNING] _calculate_webhook_order_quantity() está obsoleto")
+    print(f"   Use _calculate_dynamic_order_quantity() para cálculo baseado em limites da exchange")
+    return float(balance or 0.0), 0.0
 
-    return margin, qty
+
+def _calculate_dynamic_order_quantity(broker, symbol, balance):
+    """
+    🆕 v2.0: Calcula quantidade de ordem usando limites dinâmicos da exchange.
+
+    ELIMINA completamente o modelo de percentual fixo (5%, 15%, etc.).
+    Busca dinamicamente market["limits"]["amount"]["min"] e market["limits"]["cost"]["min"].
+    Calcula quantidade EXATA para atingir o nocional mínimo + margem de segurança.
+
+    Args:
+        broker: Instância de BybitClient ou BinanceClient
+        symbol: Par de negociação (ex: 'DOGEUSDT', 'BTC/USDT:USDT')
+        balance: Saldo disponível em USDT
+
+    Returns:
+        Tuple (margin_used, quantity) onde:
+            - margin_used: Valor nocional da ordem em USDT
+            - quantity: Quantidade de contratos/moedas
+
+    Raises:
+        ValueError: Se o broker não tiver o método calculate_dynamic_order_qty
+    """
+    if not hasattr(broker, 'calculate_dynamic_order_qty'):
+        raise ValueError(
+            f"Broker {type(broker).__name__} não suporta cálculo dinâmico. "
+            "Atualize o broker client para versão com OrderCalculator."
+        )
+
+    try:
+        safe_balance = max(float(balance or 0.0), 0.0)
+
+        if safe_balance <= 0:
+            print("🚫 [ORDEM DINÂMICA] Saldo zero ou inválido. Operação abortada.")
+            return 0.0, 0.0
+
+        print(f"💰 [ORDEM DINÂMICA] Calculando para saldo: ${safe_balance:.2f} USDT")
+
+        # Calcula quantidade usando os limites dinâmicos da exchange
+        qty, metadata = broker.calculate_dynamic_order_qty(symbol, safe_balance)
+
+        margin_used = metadata['calculated_cost']
+
+        print(f"   ✅ Quantidade: {qty:.4f}")
+        print(f"   📊 Nocional: ${margin_used:.2f} USDT")
+        print(f"   📏 Mínimo exchange: ${metadata['min_cost']:.2f} USDT")
+        print(f"   🛡️ Margem segurança: ${metadata['safety_margin']:.2f} USDT")
+
+        return margin_used, qty
+
+    except Exception as calc_err:
+        print(f"❌ [ERRO ORDEM DINÂMICA] Falha no cálculo: {calc_err}")
+        print(f"   Operação ABORTADA por segurança")
+        return 0.0, 0.0
 
 
 def _log_raw_broker_error(cliente_nome, error, context='ERRO ORDEM REAL'):
@@ -2495,11 +2544,15 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                     broker = _make_broker(c)
 
                     banca = float(c.get('saldo_base', 1000.0) or 0.0)
-                    margem, qty = _calculate_webhook_order_quantity(banca, entry_price)
+
+                    # 🆕 v2.0: Usa cálculo dinâmico baseado em limites da exchange
+                    print(f"🆕 [CÁLCULO DINÂMICO] Cliente: {cliente_nome}, Saldo: ${banca:.2f}")
+                    margem, qty = _calculate_dynamic_order_quantity(broker, ticker, banca)
+
                     if margem <= 0 or qty <= 0:
                         print(
-                            f"⚠️  [RISK MANAGEMENT] {cliente_nome} com cálculo inválido "
-                            f"(saldo={banca:.2f}, preço={entry_price:.8f}, margem={margem:.8f}, qty={qty:.8f})."
+                            f"⚠️  [RISK MANAGEMENT] {cliente_nome} com cálculo dinâmico inválido "
+                            f"(saldo={banca:.2f}, margem={margem:.8f}, qty={qty:.8f})."
                         )
                         return
 
