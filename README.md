@@ -13,9 +13,39 @@ ALLOW_REAL_TRADING=true
 USE_TESTNET=false  # ⚠️ CRÍTICO: false para contas reais!
 ```
 
-**Diagnóstico:** Execute `python diagnostico_modo_real.py` para validar a configuração.
+### 🔧 Scripts de Diagnóstico
 
-📖 **Documentação completa:** Ver `CORRECAO_MODO_REAL_TESTNET.md`
+**Antes de ligar o robô, teste se tudo está funcionando:**
+
+```bash
+# RECOMENDADO: Teste completo de APIs (Bybit + Binance)
+python api_tester.py
+
+# Testa apenas uma exchange específica
+python api_tester.py --bybit
+python api_tester.py --binance
+
+# Testes completos com dados de mercado
+python api_tester.py --full
+```
+
+O `api_tester.py` é o "MECÂNICO" do sistema - verifica se:
+- ✅ O motor (API) está funcionando
+- ✅ O combustível (Saldo) está disponível
+- ✅ Conectividade está OK
+- ✅ IP está na whitelist
+
+**Outros scripts de diagnóstico:**
+
+```bash
+python diagnostico_modo_real.py      # Valida modo testnet vs produção
+python diagnostico_config.py         # Verifica variáveis de ambiente
+python diagnostico_execucao_ordens.py # Diagnostica por que ordens não executam
+```
+
+📖 **Documentação completa:**
+- `docs/API_TESTER_GUIA.md` - Guia completo do API Tester
+- `CORRECAO_MODO_REAL_TESTNET.md` - Configuração testnet vs produção
 
 ## Documentacao completa
 
