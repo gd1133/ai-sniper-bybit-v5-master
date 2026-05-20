@@ -2791,6 +2791,188 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
         print(f"❌ [ERRO THREAD BACKGROUND] {bg_err}")
 
 
+@app.route('/api/trade/manual-entry', methods=['POST'])
+def api_manual_entry_trade():
+    """🎯 ENTRADA MANUAL COM ANÁLISE DE IA
+
+    POST /api/trade/manual-entry
+    {
+        "symbol": "BTC/USDT",
+        "side": "buy" ou "sell",
+        "entry_price": 74486.1 (opcional, usa preço de mercado se não informado)
+    }
+
+    Retorna análise de IA sobre a operação e executa se aprovado pelo usuário.
+    """
+    try:
+        data = request.json or {}
+        symbol = data.get('symbol', '').strip()
+        side = data.get('side', '').strip().upper()
+        entry_price = data.get('entry_price')
+        force_execute = data.get('force_execute', False)  # Se True, executa sem pedir confirmação
+
+        if not symbol:
+            return jsonify({"success": False, "error": "Símbolo é obrigatório"}), 400
+
+        if side not in ['BUY', 'SELL', 'COMPRAR', 'VENDER']:
+            return jsonify({"success": False, "error": "Side deve ser 'buy', 'sell', 'comprar' ou 'vender'"}), 400
+
+        # Normaliza side
+        side_normalized = 'COMPRAR' if side in ['BUY', 'COMPRAR'] else 'VENDER'
+
+        # Importa os módulos necessários (lazy loading)
+        global IndicatorEngine, GroqValidator
+        if IndicatorEngine is None:
+            from src.indicators import IndicatorEngine
+        if GroqValidator is None:
+            from src.ai_brain.validator import GroqValidator
+
+        # Busca preço atual se não foi fornecido
+        if not entry_price:
+            try:
+                public_ticker = public_price_broker.fetch_ticker(symbol)
+                entry_price = float(public_ticker.get('last', 0))
+            except Exception as e:
+                return jsonify({
+                    "success": False,
+                    "error": f"Não foi possível obter preço de mercado: {str(e)}"
+                }), 400
+
+        entry_price = float(entry_price)
+
+        # Busca análise técnica via IndicatorEngine
+        try:
+            indicator_engine = IndicatorEngine()
+            tech_data = indicator_engine.analyze(symbol, timeframe='15m', limit=300)
+        except Exception as e:
+            tech_data = {
+                'trend': 'DESCONHECIDO',
+                'price': entry_price,
+                'sma_200': entry_price,
+                'rsi': 50,
+                'fib_618': entry_price,
+                'volume_trend': 'NORMAL'
+            }
+            print(f"⚠️  [ENTRADA MANUAL] Erro ao obter indicadores técnicos: {e}")
+
+        # Busca análise de IA
+        ai_analysis = {
+            "groq_decision": "NEUTRO",
+            "gemini_decision": "NEUTRO",
+            "local_decision": "NEUTRO",
+            "confidence": 50,
+            "reason": "Análise de IA indisponível para entrada manual"
+        }
+
+        try:
+            # Tenta obter análise de IA se disponível
+            groq_key = os.getenv("GROQ_API_KEY")
+            gemini_key = os.getenv("GEMINI_API_KEY")
+
+            if groq_key and gemini_key:
+                validator = GroqValidator(gemini_key, groq_key)
+                ai_result = validator.consensus_predict(tech_data, symbol)
+                ai_analysis = {
+                    "groq_decision": ai_result.get('groq_decision', 'NEUTRO'),
+                    "gemini_decision": ai_result.get('gemini_decision', 'NEUTRO'),
+                    "local_decision": ai_result.get('local_decision', 'NEUTRO'),
+                    "confidence": ai_result.get('confidence', 50),
+                    "reason": ai_result.get('reason', 'Análise completa realizada')
+                }
+        except Exception as e:
+            print(f"⚠️  [ENTRADA MANUAL] Erro ao obter análise de IA: {e}")
+
+        # Se force_execute=True, executa a ordem imediatamente
+        if force_execute:
+            # Executa usando o mesmo fluxo do broadcast
+            can_open, block_reason = _reserve_signal_slot(symbol)
+            if not can_open:
+                return jsonify({"success": False, "error": block_reason}), 409
+
+            slot_reserved = True
+            try:
+                signal_snapshot = _build_last_sniper_signal(
+                    symbol,
+                    side_normalized,
+                    entry_price,
+                    ai_analysis['confidence'],
+                    f"ENTRADA MANUAL: {ai_analysis['reason']}"
+                )
+
+                # Atualiza central_state
+                symbol_limpo = _limpar_simbolo(symbol)
+                central_state['symbol'] = symbol_limpo
+                central_state['confidence'] = ai_analysis['confidence']
+                central_state['status'] = f"🎯 ENTRADA MANUAL: {side_normalized} {symbol_limpo} @ ${entry_price:.2f}"
+                central_state['last_sniper_signal'] = signal_snapshot
+                _push_recent_sniper_signal(signal_snapshot)
+                central_state['ia2_decision']['motivo'] = f"ENTRADA MANUAL - {ai_analysis['reason']}"
+
+                # Registra operação no banco
+                db.record_trade(
+                    client_id=1,
+                    pair=symbol,
+                    side=side_normalized,
+                    pnl_pct=0,
+                    profit=round(_calculate_order_margin(central_state.get('balance', 1000.0)), 2),
+                    closed_at=time.strftime("%d/%m %H:%M", time.localtime()),
+                    notes=f"ENTRADA MANUAL: {side_normalized} {symbol} @ {entry_price:.2f} | Conf: {ai_analysis['confidence']}% | {ai_analysis['reason']}",
+                    status="open",
+                    entry_price=entry_price,
+                )
+
+                # Atualiza ativo em aberto
+                _sync_active_trades_from_db()
+
+                print(f"\n{'='*60}")
+                print(f"🎯 ENTRADA MANUAL EXECUTADA")
+                print(f"{'='*60}")
+                print(f"   📦 Ativo: {symbol}")
+                print(f"   📈 Lado: {side_normalized}")
+                print(f"   🎯 Entrada: ${entry_price:.2f}")
+                print(f"   🧠 Confiança IA: {ai_analysis['confidence']}%")
+                print(f"   📝 Motivo: {ai_analysis['reason']}")
+                print(f"{'='*60}\n")
+
+                # Processa ordens em background
+                background_thread = threading.Thread(
+                    target=_process_client_orders_background,
+                    args=(symbol, side_normalized, entry_price, ai_analysis['confidence'], f"ENTRADA MANUAL - {ai_analysis['reason']}"),
+                    daemon=True
+                )
+                background_thread.start()
+
+                return jsonify({
+                    "success": True,
+                    "message": "Entrada manual executada com sucesso",
+                    "symbol": symbol_limpo,
+                    "side": side_normalized,
+                    "entry_price": entry_price,
+                    "ai_analysis": ai_analysis,
+                    "tech_data": tech_data
+                }), 200
+            finally:
+                if slot_reserved:
+                    _release_signal_slot(symbol)
+        else:
+            # Retorna apenas a análise para o usuário decidir
+            return jsonify({
+                "success": True,
+                "analysis_only": True,
+                "message": "Análise concluída. Use force_execute=true para executar.",
+                "symbol": symbol,
+                "side": side_normalized,
+                "entry_price": entry_price,
+                "ai_analysis": ai_analysis,
+                "tech_data": tech_data,
+                "recommendation": "EXECUTAR" if ai_analysis['confidence'] >= 60 else "AGUARDAR"
+            }), 200
+
+    except Exception as e:
+        print(f"❌ [ENTRADA MANUAL] Erro: {e}")
+        return jsonify({"success": False, "error": str(e)}), 400
+
+
 @app.route('/api/sniper/broadcast', methods=['POST'])
 def broadcast_sniper_signal():
     """🚀 RECEBE SINAL SNIPER BROADCAST E EXECUTA OPERAÇÃO
