@@ -492,8 +492,6 @@ else:
     print("   🚀 Ordens serão executadas nas exchanges REAIS!")
     print("=" * 80)
     print()
->>>>>>> 202d6db (Remove cloud AI dependencies from sniper engine)
-
 # --- PROTOCOLO SNIPER - Defaults carregados antes de central_state ---
 RISK_MODE = 'conservative'       # 'conservative' = 1 moeda | 'aggressive' = 5 moedas
 MAX_MOEDAS_ATIVAS = 1            # Conservador: 1 moeda por vez (use /api/config/risk-mode para trocar)
