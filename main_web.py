@@ -1082,7 +1082,11 @@ def _save_client_everywhere(client_data):
 
 
 def _delete_client_everywhere(client_id):
-    """Remove o cliente do SQLite local."""
+    """Remove o cliente do SQLite local e invalida o cache do broker."""
+    # Invalida o cache do broker antes de deletar
+    broker_manager = _get_broker_manager()
+    broker_manager.invalidate_client(client_id)
+
     local_deleted = db.delete_client(client_id)
     client_balance_cache.clear()
     return True, local_deleted
@@ -1342,6 +1346,11 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
     local_synced = False
     if client_payload is not None:
         record, cloud_synced, local_synced = _save_client_everywhere(payload)
+        # Invalida o cache do broker quando credenciais são atualizadas
+        if record and client_id is not None:
+            broker_manager = _get_broker_manager()
+            broker_manager.invalidate_client(client_id)
+            print(f"🔄 [BROKER MANAGER] Cache invalidado para cliente {client_id} após atualização de credenciais")
 
     return {
         'valid': valid,
