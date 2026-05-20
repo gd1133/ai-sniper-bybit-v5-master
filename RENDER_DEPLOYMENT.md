@@ -64,6 +64,12 @@ TOTP_SECRET=
 TOTP_CODE=
 ```
 
+### **CRITICAL: Database Path**
+```
+SQLITE_DB_PATH=/tmp/ai-sniper/database.db
+```
+⚠️ **IMPORTANT**: Render's `/app` directory is READ-ONLY. You MUST set this variable or database initialization will fail with "Permission denied" error.
+
 ## Instance Types
 
 - **Free ($0/mo)**: 512 MB RAM, 0.1 CPU - Testing only
@@ -72,10 +78,33 @@ TOTP_CODE=
 
 ## Important Notes
 
+### ⚠️ CRITICAL: Fix "Permission denied: '/app'" Error
+
+**The Problem:**
+Render's `/app` directory is READ-ONLY. The default database path `/app/data/database.db` will fail with:
+```
+PermissionError: [Errno 13] Permission denied: '/app'
+```
+
+**The Solution:**
+Add this environment variable:
+```
+SQLITE_DB_PATH=/tmp/ai-sniper/database.db
+```
+
 ### Data Persistence
-Render uses ephemeral disk storage. For SQLite persistence:
-- Enable Render Persistent Disks (paid feature)
-- Or migrate to PostgreSQL (recommended for production)
+⚠️ **WARNING**: `/tmp` storage is EPHEMERAL - all data is lost on restart!
+
+For production with persistent data, you have two options:
+
+**Option 1: Render Persistent Disk (Recommended)**
+1. Go to your service → "Disks" tab
+2. Add new disk: Name: `data`, Mount Path: `/data`, Size: 1GB
+3. Set environment variable: `SQLITE_DB_PATH=/data/database.db`
+
+**Option 2: External Database**
+- Migrate to PostgreSQL or other managed database
+- Use Render's free PostgreSQL addon
 
 ### Blueprint Deployment
 Use Infrastructure as Code with existing `render.yaml`:

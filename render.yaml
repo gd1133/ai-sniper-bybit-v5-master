@@ -2,9 +2,30 @@ services:
   - type: web
     name: ai-sniper-bybit-v5-mestre
     env: python
-    plan: free
+    plan: starter
     envVars:
       - key: ENVIRONMENT
-        value: development
+        value: production
+      - key: ALLOW_ORDER_EXECUTION
+        value: true
+      - key: ALLOW_REAL_TRADING
+        value: true
+      - key: USE_TESTNET
+        value: false
+      - key: SQLITE_DB_PATH
+        value: /tmp/ai-sniper/database.db
+      # Add your API keys below (do not commit with real values!)
+      - key: BYBIT_API_KEY
+        sync: false
+      - key: BYBIT_API_SECRET
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
     buildCommand: pip install -r requirements.txt && npm ci && npm run build
-    startCommand: gunicorn -w 2 -k gthread --threads 8 -b 0.0.0.0:$PORT main_web:app
+    startCommand: gunicorn -w 1 -k gthread --threads 4 -b 0.0.0.0:$PORT --timeout 120 main_web:app
