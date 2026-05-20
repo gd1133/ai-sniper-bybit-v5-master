@@ -38,6 +38,113 @@ AI_RATE_LIMIT_STATUS_MESSAGE = '⚠️ Limite das IAs atingido. Aguardando coold
 AI_COOLDOWN_ACTIVE = False
 AI_COOLDOWN_LOCK = threading.Lock()
 
+# ==============================================================================
+# 🔄 BROKER MANAGER SINGLETON - Previne rate limiting da Bybit
+# ==============================================================================
+class BrokerManager:
+    """
+    Singleton que gerencia instâncias de broker (Bybit/Binance) globalmente.
+    Garante que cada cliente tenha apenas UMA instância de broker na memória,
+    evitando múltiplas inicializações HTTP e sincronizações de tempo desnecessárias.
+    """
+    _instance = None
+    _lock = threading.Lock()
+
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super(BrokerManager, cls).__new__(cls)
+                    cls._instance._initialized = False
+        return cls._instance
+
+    def __init__(self):
+        if self._initialized:
+            return
+        self._broker_cache = {}  # Formato: {cache_key: broker_instance}
+        self._cache_lock = threading.Lock()
+        self._initialized = True
+        print("🔄 [BROKER MANAGER] Singleton inicializado")
+
+    def _generate_cache_key(self, client_id, exchange, testnet):
+        """Gera chave única para cache baseada em client_id, exchange e modo testnet."""
+        return f"{exchange}_{client_id}_{testnet}"
+
+    def get_broker(self, client, broker_cls, testnet):
+        """
+        Retorna uma instância de broker em cache ou cria uma nova se necessário.
+
+        Args:
+            client: dict com dados do cliente (id, nome, credenciais, etc)
+            broker_cls: classe do broker (BybitClient ou BinanceClient)
+            testnet: bool indicando se é testnet ou real
+
+        Returns:
+            Instância do broker (cached ou nova)
+        """
+        client_id = client.get('id')
+        exchange = str(client.get('exchange') or 'bybit').strip().lower()
+        cache_key = self._generate_cache_key(client_id, exchange, testnet)
+
+        with self._cache_lock:
+            # Verifica se já existe instância em cache
+            if cache_key in self._broker_cache:
+                cached_broker = self._broker_cache[cache_key]
+                # Valida se as credenciais ainda são as mesmas
+                api_key = str(client.get('bybit_key') or '').strip()
+                if hasattr(cached_broker, 'exchange') and hasattr(cached_broker.exchange, 'apiKey'):
+                    if cached_broker.exchange.apiKey == api_key:
+                        return cached_broker
+                # Se credenciais mudaram, remove do cache
+                print(f"🔄 [BROKER MANAGER] Credenciais alteradas para cliente {client_id}, recriando broker")
+                del self._broker_cache[cache_key]
+
+            # Cria nova instância
+            api_key = str(client.get('bybit_key') or '').strip()
+            api_secret = str(client.get('bybit_secret') or '').strip()
+
+            if not api_key or not api_secret:
+                raise RuntimeError(f"Cliente ativo sem credenciais no SQLite (id={client_id})")
+
+            print(f"🔧 [BROKER INIT] Cliente: {client.get('nome')} | Exchange: {exchange} | Testnet: {testnet} | Cache Key: {cache_key}")
+
+            broker_instance = broker_cls(
+                api_key,
+                api_secret,
+                testnet=testnet,
+            )
+
+            # Armazena no cache
+            self._broker_cache[cache_key] = broker_instance
+            print(f"💾 [BROKER MANAGER] Broker cached para cliente {client_id} ({exchange})")
+
+            return broker_instance
+
+    def invalidate_client(self, client_id):
+        """Remove todas as instâncias de broker de um cliente específico do cache."""
+        with self._cache_lock:
+            keys_to_remove = [key for key in self._broker_cache.keys() if key.startswith(f"_{client_id}_") or key.endswith(f"_{client_id}_")]
+            for key in keys_to_remove:
+                del self._broker_cache[key]
+                print(f"🗑️ [BROKER MANAGER] Broker removido do cache: {key}")
+
+    def clear_cache(self):
+        """Limpa todo o cache de brokers (usar com cuidado)."""
+        with self._cache_lock:
+            count = len(self._broker_cache)
+            self._broker_cache.clear()
+            print(f"🗑️ [BROKER MANAGER] Cache limpo ({count} brokers removidos)")
+
+# Instância global do BrokerManager
+_broker_manager = None
+
+def _get_broker_manager():
+    """Retorna a instância singleton do BrokerManager."""
+    global _broker_manager
+    if _broker_manager is None:
+        _broker_manager = BrokerManager()
+    return _broker_manager
+
 
 def _is_ai_cooldown_active():
     with AI_COOLDOWN_LOCK:
@@ -872,26 +979,20 @@ def _ensure_broker_class(exchange='bybit'):
 
 
 def _make_broker(client):
-    """Instancia o broker correto usando as credenciais e exchange do cliente."""
+    """
+    Retorna a instância de broker do cliente usando o BrokerManager singleton.
+    O broker é criado apenas uma vez e reutilizado em chamadas subsequentes,
+    evitando múltiplas inicializações HTTP e sincronizações de tempo com a exchange.
+    """
     exchange = str(client.get('exchange') or 'bybit').strip().lower()
     broker_cls = _ensure_broker_class(exchange)
-    account_mode = _normalize_account_mode(client.get('account_mode', client.get('is_testnet')))
-    client_id = client.get('id')
-    api_key = str(client.get('bybit_key') or '').strip()
-    api_secret = str(client.get('bybit_secret') or '').strip()
-    if not api_key or not api_secret:
-        raise RuntimeError(f"Cliente ativo sem credenciais no SQLite (id={client_id})")
 
     # Respeita estritamente as flags do Railway para evitar execução silenciosa no ambiente errado.
     use_testnet = USE_TESTNET
 
-    print(f"🔧 [BROKER INIT] Cliente: {client.get('nome')} | Exchange: {exchange} | Testnet: {use_testnet} | ALLOW_REAL_TRADING: {ALLOW_REAL_TRADING}")
-
-    return broker_cls(
-        api_key,
-        api_secret,
-        testnet=use_testnet,
-    )
+    # Usa o BrokerManager para obter ou criar o broker em cache
+    broker_manager = _get_broker_manager()
+    return broker_manager.get_broker(client, broker_cls, use_testnet)
 
 
 def _ensure_pybit_http_class():
