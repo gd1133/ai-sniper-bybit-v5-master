@@ -150,6 +150,19 @@ def _calculate_dynamic_order_quantity(broker, symbol, balance):
             - quantity: Quantidade de contratos/moedas
     """
     try:
+        # Usa o método do broker que já tem a lógica completa e correta
+        # incluindo conversão de símbolos e precisão CCXT
+        if hasattr(broker, 'calculate_dynamic_order_qty'):
+            print(f"💰 [EXECUTOR MÍNIMO] Usando calculate_dynamic_order_qty do broker")
+            quantity, metadata = broker.calculate_dynamic_order_qty(symbol, balance=None)
+            margin_used = metadata.get('calculated_cost', quantity * broker.get_last_price(symbol))
+
+            print(f"   ✅ Quantidade calculada: {quantity:.8f}")
+            print(f"   📊 Nocional final: ${margin_used:.2f} USDT")
+
+            return margin_used, quantity
+
+        # Fallback para brokers antigos sem o método
         # 1. Consulta preço atual do ativo
         current_price = broker.get_last_price(symbol)
         if current_price <= 0:
@@ -171,15 +184,17 @@ def _calculate_dynamic_order_quantity(broker, symbol, balance):
         # qty = min_notional / current_price
         raw_qty = min_notional / current_price
 
-        # 4. Passa pelo amount_to_precision do CCXT para arredondar corretamente
-        try:
-            if hasattr(broker.exchange, 'amount_to_precision'):
-                final_qty = float(broker.exchange.amount_to_precision(symbol, raw_qty))
-            else:
+        # 4. Normaliza usando o método do broker se disponível
+        final_qty = raw_qty
+        if hasattr(broker, '_normalize_order_qty'):
+            try:
+                final_qty = float(broker._normalize_order_qty(symbol, raw_qty))
+            except Exception as norm_err:
+                print(f"⚠️ [NORMALIZE QTY] Erro ao normalizar: {norm_err}")
                 # Fallback: arredonda para 4 casas decimais
                 final_qty = round(raw_qty, 4)
-        except Exception as precision_err:
-            print(f"⚠️ [CCXT PRECISION] Erro ao aplicar amount_to_precision: {precision_err}")
+        else:
+            # Fallback: arredonda para 4 casas decimais
             final_qty = round(raw_qty, 4)
 
         # 5. Calcula valor nocional final
@@ -194,6 +209,9 @@ def _calculate_dynamic_order_quantity(broker, symbol, balance):
         print(f"❌ [ERRO EXECUTOR] Falha no cálculo: {calc_err}")
         print(f"   TIPO DO ERRO: {type(calc_err).__name__}")
         print(f"   ERRO BRUTO: {calc_err}")
+        import traceback
+        print(f"   📋 STACK TRACE:")
+        traceback.print_exc()
         return 0.0, 0.0
 
 
