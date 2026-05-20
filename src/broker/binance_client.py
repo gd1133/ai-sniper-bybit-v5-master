@@ -251,6 +251,41 @@ class BinanceClient:
             print(f"[ERRO BINANCE] Preço {symbol} falhou: {e}")
             return self.cache_ticker[symbol][0] if symbol in self.cache_ticker else 0.0
 
+    def calculate_dynamic_order_qty(self, symbol: str, balance=None):
+        """
+        🆕 CALCULADORA DINÂMICA DE ORDENS v1.0
+
+        Calcula a quantidade de uma ordem baseada nos limites ESTRITOS da corretora,
+        eliminando completamente o modelo de percentual fixo (5%, 15%, etc.).
+
+        Fluxo:
+        1. Busca dinamicamente: market["limits"]["amount"]["min"] e market["limits"]["cost"]["min"]
+        2. Calcula quantidade EXATA para atingir o nocional mínimo + margem de segurança
+        3. Aplica amount_to_precision do CCXT obrigatoriamente
+        4. Se saldo fornecido, pode usar múltiplo do mínimo (opcional)
+
+        Args:
+            symbol: Par de negociação (ex: 'BTCUSDT', 'ETH/USDT')
+            balance: Saldo disponível em USDT (opcional). Se None, usa apenas valor mínimo
+
+        Returns:
+            Tuple (quantidade_final, metadata)
+        """
+        current_price = self.get_last_price(symbol)
+        if current_price <= 0:
+            raise ValueError(f"Não foi possível obter preço atual para {symbol}")
+
+        if balance is None or balance <= 0:
+            # Usa apenas o valor mínimo absoluto da corretora
+            return self.order_calculator.calculate_minimum_order_qty(
+                self.exchange, symbol, current_price
+            )
+        else:
+            # Usa saldo para calcular com possível múltiplo do mínimo
+            return self.order_calculator.calculate_order_qty_from_balance(
+                self.exchange, symbol, current_price, balance, risk_multiplier=1.0
+            )
+
     def _normalize_order_qty(self, symbol, qty):
         """
         Normaliza quantidade para precisão aceita pela Binance, evitando Qty invalid.
