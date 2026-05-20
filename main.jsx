@@ -283,9 +283,15 @@ const App = () => {
 
   const openEditInvestor = async (id) => {
     try {
+      console.log(`🔵 [FRONTEND] Carregando dados do cliente ID: ${id}`);
       const res = await fetch(`${API_BASE}/api/cliente/${id}`);
-      if (!res.ok) return;
+      if (!res.ok) {
+        console.error(`❌ [FRONTEND] Erro ao buscar cliente ${id}: ${res.status}`);
+        alert(`Erro ao carregar dados do investidor (status ${res.status})`);
+        return;
+      }
       const c = await res.json();
+      console.log(`✅ [FRONTEND] Dados do cliente ${id} carregados:`, c);
       setAddFormFields({
         id: c.id,
         nome: c.nome || '',
@@ -299,7 +305,10 @@ const App = () => {
       });
       setAddFormMsg(null);
       setShowAddForm(true);
-    } catch (e) { console.error('Erro ao carregar cliente', e); }
+    } catch (e) {
+      console.error('❌ [FRONTEND] Exceção ao carregar cliente', e);
+      alert('Erro ao conectar com o servidor ao carregar investidor');
+    }
   };
 
   const handleDeleteInvestor = async (id) => {
@@ -1076,7 +1085,11 @@ const App = () => {
                      <small className="text-xs font-black uppercase">{addFormMsg.text}</small>
                    </div>
                  )}
-                 <button onClick={() => { setShowAddForm(false); setAddFormMsg(null); }} className="p-4 hover:bg-zinc-800 rounded-full transition-all text-zinc-500 hover:text-white"><X size={28}/></button>
+                 <button onClick={() => {
+                   setShowAddForm(false);
+                   setAddFormMsg(null);
+                   setAddFormFields({ id: null, nome: '', saldo_base: 0, bybit_key: '', bybit_secret: '', tg_token: '', chat_id: '', account_mode: 'real', exchange: 'bybit' });
+                 }} className="p-4 hover:bg-zinc-800 rounded-full transition-all text-zinc-500 hover:text-white"><X size={28}/></button>
                </div>
             </div>
             <form className="p-5 space-y-4 overflow-y-auto flex-1" onSubmit={async (e) => {
@@ -1228,7 +1241,11 @@ const App = () => {
                     <button type="submit" disabled={addFormSaving} className="flex-1 bg-green-500 hover:bg-green-400 text-black font-black py-4 rounded-2xl transition-all shadow-lg shadow-green-900/30 flex items-center justify-center gap-3 uppercase italic disabled:opacity-50">
                       <Save size={18} /> {addFormSaving ? 'Salvando...' : 'Guardar Investidor'}
                     </button>
-                    <button type="button" onClick={() => { setShowAddForm(false); setAddFormMsg(null); }} className="px-5 py-4 bg-zinc-900/30 border border-white/5 rounded-2xl text-zinc-300 uppercase font-black text-sm">Fechar</button>
+                    <button type="button" onClick={() => {
+                      setShowAddForm(false);
+                      setAddFormMsg(null);
+                      setAddFormFields({ id: null, nome: '', saldo_base: 0, bybit_key: '', bybit_secret: '', tg_token: '', chat_id: '', account_mode: 'real', exchange: 'bybit' });
+                    }} className="px-5 py-4 bg-zinc-900/30 border border-white/5 rounded-2xl text-zinc-300 uppercase font-black text-sm">Fechar</button>
                </div>
             </form>
           </div>
