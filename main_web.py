@@ -2064,6 +2064,9 @@ def sniper_worker_loop():
 
     while True:
         try:
+            # 🔄 HEARTBEAT - Log de batimento cardíaco para monitoramento ativo
+            print("🔄 [MOTOR CHAVE] Iniciando novo ciclo de varredura do mercado...", flush=True)
+
             _repair_open_trades()
             _close_stale_open_trades(max_age_minutes=180)
 
@@ -2288,10 +2291,23 @@ def sniper_worker_loop():
                         continue
                     time.sleep(15)
         except Exception as e:
+            # 🛡️ CRASH-PROOFING TOTAL - Captura TODOS os erros e mantém o motor rodando
+            error_type = type(e).__name__
+            error_msg = str(e)
+
+            print(f"❌ [MOTOR CHAVE - ERRO CAPTURADO] Tipo: {error_type}", flush=True)
+            print(f"   Detalhes: {error_msg}", flush=True)
+            print(f"   🔄 Recuperando em 10 segundos e continuando operação...", flush=True)
+
+            # Verifica se é erro de rate limit das IAs para tratamento específico
             if _handle_ai_rate_limit(e):
                 continue
-            print(f'⚠️ [LOOP ERRO] {e}')
-            time.sleep(15)
+
+            # Pausa de 10 segundos antes de continuar (conforme requisito)
+            time.sleep(10)
+
+            # NUNCA deixa a Thread morrer - sempre continua o loop
+            print(f"✅ [MOTOR CHAVE - RECUPERADO] Thread retomando operação normal", flush=True)
 
 def health_check():
     """Health check para monitorar worker thread."""
