@@ -13,6 +13,12 @@ def _get_db_path():
     """
     env_path = os.getenv('SQLITE_DB_PATH')
     if env_path:
+        # Corrige caminhos do Docker/Railway se estiver rodando localmente (Windows)
+        if "/app/data/" in env_path and os.name == 'nt':
+            repo_path = os.path.abspath(os.path.join(os.getcwd(), 'database.db'))
+            print(f"📂 [DATABASE] Detectado caminho Docker em Windows. Usando local: {repo_path}")
+            return repo_path
+            
         # Convert to absolute path if relative
         abs_env_path = os.path.abspath(env_path)
         print(f"📂 [DATABASE] Usando SQLITE_DB_PATH: {abs_env_path}")

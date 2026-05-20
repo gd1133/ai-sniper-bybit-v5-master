@@ -611,10 +611,10 @@ def run_sniper(symbol: str = SYMBOL):
     Fluxo por ciclo:
       1. Verifica posição ativa → bloqueia nova entrada se já houver 1 aberta
       2. Detecta fechamento de posição → atualiza RiskManager com resultado (SL/Gain)
-      3. Busca OHLCV 30m e calcula indicadores (Cérebro 1 — Local/Matemático)
-      4. Consulta Groq/LLaMA (Cérebro 2 — Tático) com tratamento 429
-      5. Consulta Gemini (Cérebro 3 — Estratégico) com tratamento 429
-      6. Gera consenso ponderado (Gemini 40% | Groq 35% | Local 25%)
+        3. Busca OHLCV 30m e calcula indicadores locais
+        4. Consulta o Agente Analista de Dados local
+        5. Consulta o Agente de Aprendizado com histórico local
+        6. Gera consenso ponderado local (Analista 40% | Aprendizado 35% | Local 25%)
       7. Valida 5 confluências simultâneas
       8. Se confiança ≥ 60% (80% para 3º Cérebro) e confluências OK → executa Ponto Zero
       9. 🆕 AGUARDA 15s OBRIGATÓRIOS entre ciclos (anti-rate-limit Groq/Gemini)
@@ -635,9 +635,7 @@ def run_sniper(symbol: str = SYMBOL):
     local_ml = LocalMLEngine()  # 🧠 3º Cérebro - ML Local
     risk_manager = RiskManager()
 
-    gemini_key = str(os.getenv("GEMINI_API_KEY", "")).strip()
-    groq_key = str(os.getenv("GROQ_API_KEY", "")).strip()
-    validator = GroqValidator(api_key_gemini=gemini_key, api_key_groq=groq_key)
+    validator = GroqValidator()
 
     # ── Teste de conexão inicial ───────────────────────────────────────────────
     ok, msg = client.test_connection()
@@ -719,16 +717,14 @@ def run_sniper(symbol: str = SYMBOL):
                 f"| SuperTrend={'▲' if tech_data['supertrend_signal'] == 1 else '▼'}"
             )
 
-            # ── ETAPA 5: Cérebro 2 + 3 — Groq e Gemini → Consenso Triplo ─────
+            # ── ETAPA 5: Consenso local autonomo ──────────────────────────────
             consensus = validator.consensus_predict(tech_data, symbol)
             confidence = consensus.get("probabilidade", 0)
             decisao = consensus.get("decisao", "SCANNER")
 
             print(
-                f"🧠 [TRIBUNAL] Confiança={confidence}% | Decisão={decisao} "
-                f"| Local={consensus.get('breakdown',{}).get('local',0)}% "
-                f"| Groq={consensus.get('breakdown',{}).get('groq',0)}% "
-                f"| Gemini={consensus.get('breakdown',{}).get('gemini',0)}%"
+                f"🧠 [TRIBUNAL LOCAL] Confiança={confidence}% | Decisão={decisao} "
+                f"| Motivo={consensus.get('motivo', 'Sem motivo')}"
             )
 
             # ── ETAPA 6: Filtro de Confiança Mínima ──────────────────────────

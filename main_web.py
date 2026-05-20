@@ -438,10 +438,8 @@ db.init_db()
 
 APP_MODE = _normalize_operation_mode(db.get_operation_mode())
 ALLOW_ORDER_EXECUTION = ENV_CONFIG.allow_order_execution
-ALLOW_REAL_TRADING = _strict_env_bool('ALLOW_REAL_TRADING', 'false')
-USE_TESTNET = _strict_env_bool('USE_TESTNET', 'false')  # 🔧 CORREÇÃO: Default false para produção
-
-# 🚨 VALIDAÇÃO CRÍTICA: Detecta configuração incorreta de modo real vs testnet
+ALLOW_REAL_TRADING = ENV_CONFIG.allow_real_trading
+USE_TESTNET = ENV_CONFIG.use_testnet
 if ALLOW_REAL_TRADING and USE_TESTNET:
     print("=" * 80)
     print("⚠️  ⚠️  ⚠️  ATENÇÃO: CONFIGURAÇÃO CONFLITANTE DETECTADA ⚠️  ⚠️  ⚠️")
@@ -494,6 +492,7 @@ else:
     print("   🚀 Ordens serão executadas nas exchanges REAIS!")
     print("=" * 80)
     print()
+>>>>>>> 202d6db (Remove cloud AI dependencies from sniper engine)
 
 # --- PROTOCOLO SNIPER - Defaults carregados antes de central_state ---
 RISK_MODE = 'conservative'       # 'conservative' = 1 moeda | 'aggressive' = 5 moedas
@@ -520,8 +519,8 @@ central_state = {
     "losing_trades": 0,  # Número de trades perdedores
     "win_rate": 0.0,  # % de trades vencedores
     "ia2_decision": {
-        "motivo": "Varrendo o mercado em busca de confluência 60%...",
-        "brains": {"local": "online", "groq": "online", "gemini": "online"}
+        "motivo": "Varrendo o mercado com analise local, estatistica e historico...",
+        "brains": {"local": "online", "analyst": "online", "learner": "online"}
     },
     "max_moedas_ativas": MAX_MOEDAS_ATIVAS,
     "risk_mode": RISK_MODE,
@@ -608,7 +607,7 @@ def start_runtime_services():
         RUNTIME_STARTED = True
         return True
 
-# Modo Fallback: Se True, usa APENAS o 3º Cérebro (Local Brain)
+# Compatibilidade legada: a rota antiga ainda existe, mas o motor ja e local.
 USE_LOCAL_BRAIN_ONLY = False
 
 # --- PROTOCOLO SNIPER RIGOROSO v60.1 ---
@@ -1013,8 +1012,13 @@ def _get_master_telegram_config():
 
 def _get_registered_clients(active_only=False):
     """Retorna clientes do SQLite local."""
-    local_clients = db.get_active_clients() if active_only else db.get_all_clients()
-    return [{**dict(client), "storage_source": "local"} for client in local_clients]
+    try:
+        local_clients = db.get_active_clients() if active_only else db.get_all_clients()
+        print(f"📊 [DB] Clientes recuperados (active_only={active_only}): {len(local_clients)}")
+        return [{**dict(client), "storage_source": "local"} for client in local_clients]
+    except Exception as e:
+        print(f"❌ [DB] Erro ao buscar clientes: {e}")
+        return []
 
 
 def _get_registered_client_by_id(client_id):
@@ -1412,23 +1416,28 @@ def _fetch_active_client_balances(force=False):
         return client_balance_cache.get() or {"items": [], "total": 0.0}
 
     # force=True: executa a busca bloqueante (background thread ou warm-up)
+    print("🚀 [_fetch_active_client_balances] INICIANDO BUSCA BLOQUEANTE (force=True)")
     items = []
     total = 0.0
 
     try:
         active_clients = _get_registered_clients(active_only=True)
+        print(f"🔍 [_fetch_active_client_balances] Encontrados {len(active_clients)} clientes ativos")
         for client in active_clients:
+            print(f"⏳ [_fetch_active_client_balances] Buscando saldo para {client.get('nome')}...")
             balance = None
             error = None
             account_mode = _normalize_account_mode(client.get('account_mode', client.get('is_testnet')))
             try:
                 broker = _make_broker(client)
                 balance = broker.get_balance()
+                print(f"✅ [_fetch_active_client_balances] Saldo para {client.get('nome')}: {balance}")
                 if balance is not None:
                     balance = round(float(balance), 2)
                     total += balance
             except Exception as e:
                 error = str(e)
+                print(f"❌ [_fetch_active_client_balances] Erro ao buscar saldo para {client.get('nome')}: {e}")
 
             items.append({
                 "id": client.get('id'),
@@ -1459,6 +1468,12 @@ def _refresh_real_balance_state(force=False):
     """Atualiza o estado global com o saldo verdadeiro dos clientes."""
     balances = _fetch_active_client_balances(force=force)
     mode_items = _filter_balance_items_for_operation_mode(balances.get("items", []), APP_MODE)
+    
+    # Fallback: se saldo_real for None, tenta usar saldo_base para visualização no dashboard
+    for item in mode_items:
+        if item.get("saldo_real") is None:
+            item["saldo_real"] = item.get("saldo_base")
+            
     valid_items = [item for item in mode_items if item.get("saldo_real") is not None]
     central_state['operation_mode'] = APP_MODE
     central_state['operation_mode_label'] = _mode_display_label(APP_MODE)
@@ -2029,7 +2044,7 @@ def sniper_worker_loop():
 
     # Scanner Master - FORÇAR MODO REAL
     try:
-        validator = GroqValidator(os.getenv("GEMINI_API_KEY"), os.getenv("GROQ_API_KEY"))
+        validator = GroqValidator()
         while True:
             active_client_id, client_key, client_secret = _get_active_investor_bybit_credentials()
             if client_key and client_secret:
@@ -2050,7 +2065,7 @@ def sniper_worker_loop():
         time.sleep(5)
         return
 
-    print(f"🚀 Motor Sniper v60.1 Operante. Rigor: {THRESHOLD_ENTRADA}%")
+    print(f"🚀 Motor Sniper v60.2 Operante. Rigor: {THRESHOLD_ENTRADA}%")
     print(f"💼 {_mode_display_label(APP_MODE)} - Saldo inicial sincronizado dos clientes")
 
     # Cache de tickers com TTL
@@ -2107,34 +2122,25 @@ def sniper_worker_loop():
                             
                             print(f"DEBUG {clean_sym}: Trend {signals['trend']} | Price {signals['price']} | SMA {signals['sma_200']}")
 
-                            # Filtro rápido local: não chama cloud em ativo sem confluência mínima.
+                            # 🛡️ 1. PRÉ-FILTRO MATEMÁTICO ESTRITO (REGRA DO USUÁRIO)
+                            # Não chama "Cérebro" se a tendência for Neutra
+                            if signals['trend'] == 'NEUTRO':
+                                continue
+
+                            # Filtro rápido local: não chama cérebro analítico se a pontuação base for muito baixa
                             if local_score < 25:
                                 continue
 
-                            try:
-                                use_local_only = USE_LOCAL_BRAIN_ONLY or _is_ai_cooldown_active()
-                                res = validator.consensus_predict(
-                                    signals,
-                                    sym,
-                                    force_local_only=use_local_only
-                                )
-                            except Exception as e:
-                                if _is_rate_limit_error(e):
-                                    scan_had_ai_cooldown = True
-                                    _activate_global_ai_cooldown(clean_sym)
-                                    res = validator.consensus_predict(
-                                        signals,
-                                        sym,
-                                        force_local_only=True
-                                    )
-                                elif _handle_ai_rate_limit(e):
-                                    continue
-                                else:
-                                    raise
-
-                            if res.get('ai_rate_limit_detected'):
-                                scan_had_ai_cooldown = True
-                                _activate_global_ai_cooldown(clean_sym)
+                            # 🧠 CHAMADA DOS AGENTES AUTÔNOMOS (Analista + Aprendizado)
+                            res = validator.consensus_predict(
+                                signals,
+                                sym,
+                                force_local_only=True # Sempre local agora
+                            )
+                            
+                            # ⏳ PACING/MICRO-DELAY DE SEGURANÇA
+                            # Mesmo sem IA Cloud, o delay evita sobrecarga de processamento e API Bybit
+                            time.sleep(2)
 
                             prob = float(res.get('probabilidade', 0))
                             decisao = str(res.get('decisao', 'ABORTAR')).upper()
@@ -2532,7 +2538,7 @@ def get_client_trades(client_id):
 
 @app.route('/api/performance/neural_memory', methods=['GET'])
 def get_neural_performance():
-    """Retorna relatório de performance do Cérebro Triplo."""
+    """Retorna relatório de performance do motor autônomo local."""
     try:
         from src.ai_brain.learning import TradeLearner
         learner = TradeLearner()
@@ -2577,7 +2583,7 @@ def test_signal():
     """Testa um sinal manualmente (para debugging)."""
     data = request.json
     try:
-        validator = GroqValidator(os.getenv("GEMINI_API_KEY"), os.getenv("GROQ_API_KEY"))
+        validator = GroqValidator()
         
         # Simula dados técnicos
         tech_data = {
@@ -2596,26 +2602,23 @@ def test_signal():
 
 @app.route('/api/brain/only-local', methods=['POST'])
 def force_local_brain():
-    """🧠 FORÇAR 3º CÉREBRO APENAS: Usa só análise local (SMA 200, Fibonacci, RSI).
-    
-    Útil quando Groq/Gemini estão no limite. O sistema aprende com histórico.
-    """
+    """Mantém compatibilidade da rota antiga, agora apontando para o motor local autônomo."""
     global USE_LOCAL_BRAIN_ONLY
     try:
         action = request.json.get('action', 'toggle')
         
         if action == 'enable':
             USE_LOCAL_BRAIN_ONLY = True
-            central_state['ia2_decision']['brains']['groq'] = 'disabled'
-            central_state['ia2_decision']['brains']['gemini'] = 'disabled'
-            central_state['ia2_decision']['brains']['local'] = 'ONLY'
-            msg = "🧠 [3º CÉREBRO] Sistema usando APENAS análise LOCAL (matemática pura)"
+            central_state['ia2_decision']['brains']['analyst'] = 'online'
+            central_state['ia2_decision']['brains']['learner'] = 'online'
+            central_state['ia2_decision']['brains']['local'] = 'only'
+            msg = "🧠 [MOTOR LOCAL] Sistema operando apenas com analise autonoma local"
         elif action == 'disable':
             USE_LOCAL_BRAIN_ONLY = False
-            central_state['ia2_decision']['brains']['local'] = 'enabled'
-            central_state['ia2_decision']['brains']['groq'] = 'online'
-            central_state['ia2_decision']['brains']['gemini'] = 'online'
-            msg = "🧠 [CÉREBRO TRIPLO] Sistema voltou ao consenso ponderado (Gemini 40% | Groq 35% | Local 25%)"
+            central_state['ia2_decision']['brains']['local'] = 'online'
+            central_state['ia2_decision']['brains']['analyst'] = 'online'
+            central_state['ia2_decision']['brains']['learner'] = 'online'
+            msg = "🧠 [MOTOR AUTONOMO] Sistema em consenso local: analista + aprendizado + matematica"
         
         print(msg)
         return jsonify({
@@ -3234,9 +3237,9 @@ if __name__ == "__main__":
 
     start_runtime_services()
 
-    print(f"✅ DuoIA Maestro v60.1 Online na Porta {render_port}")
+    print(f"✅ DuoIA Maestro v60.2 Online na Porta {render_port}")
     print(f"🧭 Modo operacional: {_mode_display_label(APP_MODE)}")
     print(f"⚡ Execução: {_execution_status_label(APP_MODE)}")
     print(f"📊 Dashboard: http://0.0.0.0:{render_port}")
-    print("🧠 Cérebro Triplo: ATIVO (Rigor 50%)")
+    print("🧠 Motor autonomo local: ATIVO (analista + aprendizado + matematica)")
     app.run(host='0.0.0.0', port=render_port, debug=False, use_reloader=False)

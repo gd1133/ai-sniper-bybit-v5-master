@@ -14,7 +14,7 @@ sinal = {
     "side": "VENDER",
     "entry_price": 74486.1,
     "confidence": 70,
-    "reason": "Confluência 70% detectada - Gemini: 70 | Groq: 70 | Local: 70"
+    "reason": "Confluencia 70% detectada - Analista: 70 | Aprendizado: 70 | Local: 70"
 }
 
 print("\n" + "="*70)

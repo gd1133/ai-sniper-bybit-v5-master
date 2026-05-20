@@ -68,12 +68,12 @@ class BybitClient:
         cfg = {
             'enableRateLimit': True,
             'rateLimit': 100,  # Delay mínimo entre requisições
-            'timeout': 8000,   # Timeout HTTP de 8s para evitar travamento dos workers
+            'timeout': 15000,   # Timeout HTTP de 15s para evitar travamento
             'options': {
                 'defaultType': 'swap', # Foco em Perpétuos
                 'defaultSubType': 'linear',
-                'adjustForTimeDifference': True,  # 🔧 OBRIGATÓRIO: Ajuste automático de diferença de tempo
-                'recvWindow': 10000,  # 🔧 OBRIGATÓRIO: 10s de tolerância para evitar erros InvalidNonce
+                'adjustForTimeDifference': True,
+                'recvWindow': 20000,  # Janela de 20s para tolerar drift de relógio
             }
         }
 
@@ -158,10 +158,10 @@ class BybitClient:
                 testnet=self.testnet,
                 api_key=api_key,
                 api_secret=api_secret,
-                recv_window=10000,  # 🔧 AUMENTADO: 10s para evitar erros de dessincronização (InvalidNonce)
+                recv_window=20000,  # Janela de 20s para compensar latências de servidores em nuvem
             )
             self.pybit_session.endpoint = self.active_endpoint
-            print(f"🔌 [PYBIT V5] módulo={self.pybit_sdk_module} endpoint={self.active_endpoint} recv_window=10000ms")
+            print(f"🔌 [PYBIT V5] módulo={self.pybit_sdk_module} endpoint={self.active_endpoint} recv_window=20000ms")
         except Exception as e:
             print(f"⚠️ [PYBIT] Sessão HTTP indisponível: {e}")
             self.pybit_session = None
@@ -375,12 +375,14 @@ class BybitClient:
 
         # Tentativa 1: Conta Unificada (UTA)
         try:
+            print(f"📊 [BYBIT] Tentando fetch_balance (UNIFIED) para {self.exchange.apiKey[:4]}...")
             balance = self.exchange.fetch_balance(params={'accountType': 'UNIFIED'})
             usdt = _usdt_from(balance)
             if usdt is not None:
                 return usdt
         except Exception as e:
             msg = str(e)
+            print(f"⚠️ [BYBIT] Erro (UNIFIED): {msg}")
             if self._is_auth_error(msg):
                 self.authenticated = False
                 return None
@@ -388,24 +390,28 @@ class BybitClient:
 
         # Tentativa 2: Conta de Contratos Clássica (não-UTA)
         try:
+            print(f"📊 [BYBIT] Tentando fetch_balance (CONTRACT)...")
             balance = self.exchange.fetch_balance(params={'accountType': 'CONTRACT'})
             usdt = _usdt_from(balance)
             if usdt is not None:
                 return usdt
         except Exception as e:
             msg = str(e)
+            print(f"⚠️ [BYBIT] Erro (CONTRACT): {msg}")
             if self._is_auth_error(msg):
                 self.authenticated = False
                 return None
 
         # Tentativa 3: Swap/Linear (parâmetro legado)
         try:
+            print(f"📊 [BYBIT] Tentando fetch_balance (type=swap)...")
             balance = self.exchange.fetch_balance(params={'type': 'swap'})
             usdt = _usdt_from(balance)
             if usdt is not None:
                 return usdt
         except Exception as e:
             msg = str(e)
+            print(f"⚠️ [BYBIT] Erro (SWAP): {msg}")
             if self._is_auth_error(msg):
                 self.authenticated = False
                 return None
