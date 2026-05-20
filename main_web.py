@@ -358,14 +358,15 @@ def start_runtime_services():
             return False
 
         threading.Thread(target=sniper_worker_loop, daemon=True).start()
+        print("🔄 [THREADING] Motor Sniper inicializado em thread daemon", flush=True)
         threading.Thread(target=_monitor_sl_tp_automatico, daemon=True).start()
-        print("   Monitor SL/TP: ATIVO (-5% SL / +100% TP)")
+        print("   Monitor SL/TP: ATIVO (-5% SL / +100% TP)", flush=True)
         _log_risk_management_mode()
 
         # Aquece o cache de saldo em background imediatamente para que o
         # primeiro poll do dashboard não precise esperar.
         threading.Thread(target=_fetch_active_client_balances, kwargs={'force': True}, daemon=True).start()
-        print("⚡ Cache de saldo: aquecendo em background...")
+        print("⚡ Cache de saldo: aquecendo em background...", flush=True)
 
         RUNTIME_STARTED = True
         return True
@@ -1744,14 +1745,14 @@ def sniper_worker_loop():
     global central_state, BybitClient, IndicatorEngine, GroqValidator
     
     # ⏳ Carregamento Lazy (apenas quando worker inicia)
-    print("⏳ Carregando dependências pesadas (primeira vez)...")
+    print("⏳ Carregando dependências pesadas (primeira vez)...", flush=True)
     try:
         from src.broker.bybit_client import BybitClient
         from src.engine.indicators import IndicatorEngine
         from src.ai_brain.validator import GroqValidator
-        print("✅ Dependências carregadas com sucesso")
+        print("✅ Dependências carregadas com sucesso", flush=True)
     except Exception as e:
-        print(f"❌ Erro ao carregar dependências: {e}")
+        print(f"❌ Erro ao carregar dependências: {e}", flush=True)
         time.sleep(5)
         return
 
@@ -1763,14 +1764,14 @@ def sniper_worker_loop():
             testnet=False,  # FORÇAR MODO REAL - Não usar testnet
         )
         validator = GroqValidator(os.getenv("GEMINI_API_KEY"), os.getenv("GROQ_API_KEY"))
-        print(f"🔧 [MASTER BROKER] Modo: REAL (testnet=False)")
+        print(f"🔧 [MASTER BROKER] Modo: REAL (testnet=False)", flush=True)
     except Exception as e:
-        print(f"❌ Erro ao inicializar broker/validator: {e}")
+        print(f"❌ Erro ao inicializar broker/validator: {e}", flush=True)
         time.sleep(5)
         return
 
-    print(f"🚀 Motor Sniper v60.1 Operante. Rigor: {THRESHOLD_ENTRADA}%")
-    print(f"💼 {_mode_display_label(APP_MODE)} - Saldo inicial sincronizado dos clientes")
+    print(f"🚀 Motor Sniper v60.1 Operante. Rigor: {THRESHOLD_ENTRADA}%", flush=True)
+    print(f"💼 {_mode_display_label(APP_MODE)} - Saldo inicial sincronizado dos clientes", flush=True)
 
     # Cache de tickers com TTL
     tickers_cache = {"data": [], "timestamp": 0}
@@ -1783,6 +1784,9 @@ def sniper_worker_loop():
 
     while True:
         try:
+            # Log de heartbeat para confirmar que o loop está rodando
+            print(f"🔄 [MOTOR] Varrendo o mercado em busca de sinais... [{datetime.now().strftime('%H:%M:%S')}]", flush=True)
+
             _repair_open_trades()
             _close_stale_open_trades(max_age_minutes=180)
 
@@ -1819,8 +1823,8 @@ def sniper_worker_loop():
                             engine = IndicatorEngine(df)
                             signals = engine.get_signals()
                             local_score = validator.local_signal(signals)
-                            
-                            print(f"DEBUG {clean_sym}: Trend {signals['trend']} | Price {signals['price']} | SMA {signals['sma_200']}")
+
+                            print(f"DEBUG {clean_sym}: Trend {signals['trend']} | Price {signals['price']} | SMA {signals['sma_200']}", flush=True)
 
                             # Filtro rápido local: não chama cloud em ativo sem confluência mínima.
                             if local_score < 25:
@@ -1963,10 +1967,11 @@ def sniper_worker_loop():
                         central_state['status'] = f'✅ Analisados {len(top_coins)} ativos. Sem confluência no rigor atual.'
 
                     time.sleep(60)
-                except Exception:
+                except Exception as e:
+                    print(f"⚠️ [LOOP SCAN] Erro durante varredura: {e}", flush=True)
                     time.sleep(15)
         except Exception as e:
-            print(f'⚠️ [LOOP ERRO] {e}')
+            print(f'⚠️ [LOOP ERRO] {e}', flush=True)
             time.sleep(15)
 
 def health_check():
@@ -2433,10 +2438,10 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
         # 2. Loop de Execução para Clientes Cadastrados
         clientes = _get_registered_clients(active_only=True)
 
-        print(f"\n🔍 [BROADCAST] Iniciando execução para {len(clientes)} cliente(s) ativo(s)")
-        print(f"   💼 ALLOW_ORDER_EXECUTION: {ALLOW_ORDER_EXECUTION}")
-        print(f"   🔐 ALLOW_REAL_TRADING: {ALLOW_REAL_TRADING}")
-        print(f"   🎯 Execução habilitada: {_is_order_execution_enabled(APP_MODE)}")
+        print(f"\n🔍 [BROADCAST] Iniciando execução para {len(clientes)} cliente(s) ativo(s)", flush=True)
+        print(f"   💼 ALLOW_ORDER_EXECUTION: {ALLOW_ORDER_EXECUTION}", flush=True)
+        print(f"   🔐 ALLOW_REAL_TRADING: {ALLOW_REAL_TRADING}", flush=True)
+        print(f"   🎯 Execução habilitada: {_is_order_execution_enabled(APP_MODE)}", flush=True)
 
         if not clientes:
             print(f"⚠️  [BROADCAST] NENHUM CLIENTE ATIVO ENCONTRADO!")
@@ -2668,36 +2673,36 @@ if __name__ == "__main__":
     render_port = int(os.getenv("PORT", "5000"))
 
     # DIAGNÓSTICO COMPLETO DE CONFIGURAÇÃO
-    print("\n" + "="*70)
-    print("🔍 DIAGNÓSTICO DE CONFIGURAÇÃO DO SISTEMA")
-    print("="*70)
-    print(f"📌 ENVIRONMENT: {ENV_CONFIG.name}")
-    print(f"📌 ALLOW_ORDER_EXECUTION: {ALLOW_ORDER_EXECUTION}")
-    print(f"📌 ALLOW_REAL_TRADING: {ALLOW_REAL_TRADING}")
-    print(f"📌 USE_TESTNET: {USE_TESTNET}")
-    print(f"📌 APP_MODE: {APP_MODE}")
-    print(f"📌 Execução de ordens: {'✅ HABILITADA' if _is_order_execution_enabled(APP_MODE) else '❌ BLOQUEADA'}")
+    print("\n" + "="*70, flush=True)
+    print("🔍 DIAGNÓSTICO DE CONFIGURAÇÃO DO SISTEMA", flush=True)
+    print("="*70, flush=True)
+    print(f"📌 ENVIRONMENT: {ENV_CONFIG.name}", flush=True)
+    print(f"📌 ALLOW_ORDER_EXECUTION: {ALLOW_ORDER_EXECUTION}", flush=True)
+    print(f"📌 ALLOW_REAL_TRADING: {ALLOW_REAL_TRADING}", flush=True)
+    print(f"📌 USE_TESTNET: {USE_TESTNET}", flush=True)
+    print(f"📌 APP_MODE: {APP_MODE}", flush=True)
+    print(f"📌 Execução de ordens: {'✅ HABILITADA' if _is_order_execution_enabled(APP_MODE) else '❌ BLOQUEADA'}", flush=True)
 
     # Verificar clientes cadastrados
     try:
         clientes_ativos = _get_registered_clients(active_only=True)
-        print(f"📌 Clientes ativos: {len(clientes_ativos)}")
+        print(f"📌 Clientes ativos: {len(clientes_ativos)}", flush=True)
         if clientes_ativos:
             for idx, c in enumerate(clientes_ativos, 1):
-                print(f"   {idx}. {c.get('nome')} - Exchange: {c.get('exchange', 'bybit')}")
+                print(f"   {idx}. {c.get('nome')} - Exchange: {c.get('exchange', 'bybit')}", flush=True)
         else:
-            print("   ⚠️  NENHUM CLIENTE ATIVO CADASTRADO!")
-            print("   💡 Cadastre clientes em /api/clients para receber ordens automáticas")
+            print("   ⚠️  NENHUM CLIENTE ATIVO CADASTRADO!", flush=True)
+            print("   💡 Cadastre clientes em /api/clients para receber ordens automáticas", flush=True)
     except Exception as e:
-        print(f"   ⚠️  Erro ao verificar clientes: {e}")
+        print(f"   ⚠️  Erro ao verificar clientes: {e}", flush=True)
 
-    print("="*70 + "\n")
+    print("="*70 + "\n", flush=True)
 
     start_runtime_services()
 
-    print(f"✅ DuoIA Maestro v60.1 Online na Porta {render_port}")
-    print(f"🧭 Modo operacional: {_mode_display_label(APP_MODE)}")
-    print(f"⚡ Execução: {_execution_status_label(APP_MODE)}")
-    print(f"📊 Dashboard: http://0.0.0.0:{render_port}")
-    print("🧠 Cérebro Triplo: ATIVO (Rigor 50%)")
+    print(f"✅ DuoIA Maestro v60.1 Online na Porta {render_port}", flush=True)
+    print(f"🧭 Modo operacional: {_mode_display_label(APP_MODE)}", flush=True)
+    print(f"⚡ Execução: {_execution_status_label(APP_MODE)}", flush=True)
+    print(f"📊 Dashboard: http://0.0.0.0:{render_port}", flush=True)
+    print("🧠 Cérebro Triplo: ATIVO (Rigor 50%)", flush=True)
     app.run(host='0.0.0.0', port=render_port, debug=False, use_reloader=False)
