@@ -2933,7 +2933,7 @@ def api_manual_entry_trade():
         # Importa os módulos necessários (lazy loading)
         global IndicatorEngine, GroqValidator
         if IndicatorEngine is None:
-            from src.indicators import IndicatorEngine
+            from src.engine.indicators import IndicatorEngine
         if GroqValidator is None:
             from src.ai_brain.validator import GroqValidator
 
@@ -2952,8 +2952,21 @@ def api_manual_entry_trade():
 
         # Busca análise técnica via IndicatorEngine
         try:
-            indicator_engine = IndicatorEngine()
-            tech_data = indicator_engine.analyze(symbol, timeframe='15m', limit=300)
+            # Busca dados OHLCV para análise técnica
+            df = public_price_broker.fetch_ohlcv(symbol, timeframe='15m')
+            if df is not None and len(df) >= 200:
+                indicator_engine = IndicatorEngine(df)
+                tech_data = indicator_engine.get_signals()
+            else:
+                # Se não houver dados suficientes, usa valores padrão
+                tech_data = {
+                    'trend': 'DESCONHECIDO',
+                    'price': entry_price,
+                    'sma_200': entry_price,
+                    'rsi': 50,
+                    'fib_618': entry_price,
+                    'volume_trend': 'NORMAL'
+                }
         except Exception as e:
             tech_data = {
                 'trend': 'DESCONHECIDO',
