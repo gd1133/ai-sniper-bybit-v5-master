@@ -1,4 +1,30 @@
 # -*- coding: utf-8 -*-
+"""
+🚀 AI SNIPER BYBIT V5 - MAIN WEB APPLICATION
+==============================================
+
+⚠️ CONFIGURAÇÃO CRÍTICA PARA O RENDER (GUNICORN):
+---------------------------------------------------
+Para garantir que a Thread do motor de trading e as rotas HTTP compartilhem
+a MESMA memória e evitar inconsistências causadas por múltiplos workers isolados,
+configure o "Start Command" no painel do Render com EXATAMENTE 1 worker:
+
+    gunicorn -w 1 -k gthread main_web:app
+
+Onde:
+  -w 1        : Força apenas 1 worker process (essencial para Singletons e cache compartilhado)
+  -k gthread  : Usa threads ao invés de processos para paralelização (compatível com threading.Thread)
+  main_web:app: Aponta para a instância Flask neste arquivo
+
+⚠️ NUNCA use -w 2 ou superior, pois isso criará processos isolados e quebrará
+   a sincronização entre o motor de trading e as APIs HTTP!
+
+🔄 ARQUITETURA:
+- O motor de trading roda em uma Thread daemon separada (sniper_worker_loop)
+- A Thread é iniciada automaticamente no escopo global via start_runtime_services()
+- Crash-proofing total: erros de rede/API são capturados e o motor continua rodando
+- Heartbeat logs com flush=True para monitoramento em tempo real no Render
+"""
 import os
 import time
 import threading
@@ -585,14 +611,44 @@ if _saved_risk_mode in ('conservative', 'aggressive'):
 
 
 def start_runtime_services():
-    """Inicia as threads do robô uma única vez, inclusive sob gunicorn/wsgi."""
+    """
+    🚀 INICIALIZAÇÃO DOS SERVIÇOS DE BACKGROUND
+
+    Inicia as threads do robô uma única vez, garantindo compatibilidade com
+    Gunicorn/WSGI e prevenindo inicializações duplicadas.
+
+    ✅ THREADS INICIADAS:
+    1. sniper_worker_loop (daemon=True) - Motor principal de trading
+       - Varre o mercado 24/7 em busca de oportunidades
+       - Executa ordens automaticamente quando detecta sinais
+       - Crash-proof: nunca morre, sempre recupera de erros
+
+    2. _monitor_sl_tp_automatico (daemon=True) - Monitor de Stop Loss/Take Profit
+       - Monitora posições abertas continuamente
+       - Fecha automaticamente trades que atingem -5% SL ou +100% TP
+
+    3. _fetch_active_client_balances (daemon=True, one-shot) - Cache de saldo
+       - Aquece o cache de saldo em background imediatamente
+       - Evita latência no primeiro acesso ao dashboard
+
+    ⚠️ IMPORTANTE: Esta função usa um Lock para garantir que as threads sejam
+       iniciadas apenas UMA vez, mesmo sob Gunicorn com reload ou múltiplas
+       requisições simultâneas durante o boot.
+
+    🔒 THREAD-SAFE: Usa RUNTIME_START_LOCK para prevenir race conditions.
+    """
     global RUNTIME_STARTED
 
     with RUNTIME_START_LOCK:
         if RUNTIME_STARTED:
             return False
 
+        # 🔄 Inicia a Thread principal do motor de trading em background (daemon=True)
+        # daemon=True garante que a thread seja encerrada quando o processo principal terminar
         threading.Thread(target=sniper_worker_loop, daemon=True).start()
+        print("✅ [BACKGROUND THREAD] Motor de trading iniciado (sniper_worker_loop)")
+
+        # 🛡️ Inicia o monitor automático de SL/TP
         threading.Thread(target=_monitor_sl_tp_automatico, daemon=True).start()
         print("   Monitor SL/TP: ATIVO (-5% SL / +100% TP)")
         _log_risk_management_mode()
@@ -2025,9 +2081,27 @@ def _executar_trade_teste():
     return False
 
 def sniper_worker_loop():
-    """Motor Sniper que varre o mercado e atualiza o Dashboard sem travar."""
+    """
+    🔄 MOTOR SNIPER PRINCIPAL - Thread de Background Dedicada
+
+    Este é o coração do sistema de trading automático, executando em uma Thread
+    daemon separada que varre o mercado continuamente e executa ordens.
+
+    ✅ RECURSOS IMPLEMENTADOS:
+    - Background Thread dedicada isolando o loop principal da estratégia
+    - Crash-proofing absoluto: captura TODOS os erros de rede/API/sistema
+    - Heartbeat logging com flush=True para monitoramento em tempo real
+    - Recovery automático: nunca morre, sempre retoma após erros
+    - Sincronização de memória garantida com único worker do Gunicorn
+
+    ⚠️ IMPORTANTE: Esta função roda em daemon=True, sendo iniciada automaticamente
+       pela função start_runtime_services() no escopo global do app.
+
+    🛡️ ANTI-CRASH: Se Bybit falhar, der timeout ou CCXT retornar erro, o sistema
+       loga o problema, aguarda 10s e continua o próximo ciclo automaticamente.
+    """
     global central_state, BybitClient, IndicatorEngine, GroqValidator
-    
+
     # ⏳ Carregamento Lazy (apenas quando worker inicia)
     print("⏳ Carregando dependências pesadas (primeira vez)...")
     try:
@@ -2076,10 +2150,11 @@ def sniper_worker_loop():
     same_symbol_streak = 0
 
     while True:
-        try:
-            # 🔄 HEARTBEAT - Log de batimento cardíaco para monitoramento ativo
-            print("🔄 [MOTOR CHAVE] Iniciando novo ciclo de varredura do mercado...", flush=True)
+        # 🔄 HEARTBEAT - Log de batimento cardíaco para monitoramento ativo no Render
+        # OBRIGATÓRIO usar flush=True para forçar saída imediata no terminal do Render
+        print("🔄 [MOTOR CORE] Iniciando nova varredura de mercado e caçando sinais...", flush=True)
 
+        try:
             _repair_open_trades()
             _close_stale_open_trades(max_age_minutes=180)
 
@@ -2291,27 +2366,35 @@ def sniper_worker_loop():
                         # Espaçamento fixo de 15s entre ciclos bem-sucedidos.
                         time.sleep(15)
                 except Exception as e:
+                    # Erro interno do scan - loga e continua
+                    print(f"⚠️ [SCAN ERROR] {type(e).__name__}: {str(e)}", flush=True)
                     if _handle_ai_rate_limit(e):
                         continue
                     time.sleep(15)
         except Exception as e:
-            # 🛡️ CRASH-PROOFING TOTAL - Captura TODOS os erros e mantém o motor rodando
+            # 🛡️ MECANISMO ANTI-CRASH ABSOLUTO (CRASH-PROOFING)
+            # Captura QUALQUER erro (conexão, timeout, CCXT, Bybit, etc.) e mantém o motor vivo
+            # A Thread NUNCA pode morrer sob nenhuma circunstância!
             error_type = type(e).__name__
             error_msg = str(e)
 
-            print(f"❌ [MOTOR CHAVE - ERRO CAPTURADO] Tipo: {error_type}", flush=True)
+            print(f"❌ [MOTOR CORE - ERRO CAPTURADO] Tipo: {error_type}", flush=True)
             print(f"   Detalhes: {error_msg}", flush=True)
-            print(f"   🔄 Recuperando em 10 segundos e continuando operação...", flush=True)
+            print(f"   Stack: Erro de rede/API/sistema detectado", flush=True)
+            print(f"   🔄 Aguardando 10 segundos antes de tentar próximo ciclo...", flush=True)
 
             # Verifica se é erro de rate limit das IAs para tratamento específico
             if _handle_ai_rate_limit(e):
                 continue
 
-            # Pausa de 10 segundos antes de continuar (conforme requisito)
+            # Pausa de 10 segundos antes de continuar (REQUISITO OBRIGATÓRIO)
+            # Isso evita loop infinito em caso de erro persistente e dá tempo para
+            # que problemas de rede/API se resolvam antes da próxima tentativa
             time.sleep(10)
 
-            # NUNCA deixa a Thread morrer - sempre continua o loop
-            print(f"✅ [MOTOR CHAVE - RECUPERADO] Thread retomando operação normal", flush=True)
+            # CRÍTICO: NUNCA deixa a Thread morrer - sempre continua o loop
+            # Mesmo após erro grave, o motor retoma operação automaticamente
+            print(f"✅ [MOTOR CORE - RECUPERADO] Thread retomando varredura de mercado", flush=True)
 
 def health_check():
     """Health check para monitorar worker thread."""
