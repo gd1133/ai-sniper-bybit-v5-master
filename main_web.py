@@ -1215,7 +1215,10 @@ def _extract_http_error_details(exc):
     response = getattr(exc, 'response', None)
     if response is not None:
         status_code = getattr(response, 'status_code', status_code)
-        response_headers = dict(getattr(response, 'headers', {}) or response_headers or {})
+        response_headers = getattr(response, 'headers', None)
+        if response_headers is None:
+            response_headers = getattr(exc, 'resp_headers', None)
+        response_headers = dict(response_headers or {})
         try:
             response_body = response.text
         except Exception:
@@ -1450,9 +1453,9 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
         try:
             from pybit.exceptions import FailedRequestError, InvalidRequestError
         except Exception:
-            class _MissingPybitError(Exception):
+            class _PybitExceptionFallback(Exception):
                 pass
-            FailedRequestError = InvalidRequestError = _MissingPybitError
+            FailedRequestError = InvalidRequestError = _PybitExceptionFallback
 
         error_details = {}
         try:
@@ -1465,12 +1468,7 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
             )
             try:
                 wallet_payload = session.get_wallet_balance(accountType='UNIFIED', coin='USDT')
-            except InvalidRequestError as e:
-                error_details = _extract_http_error_details(e)
-                error_details.update(_probe_bybit_wallet_balance_error(api_key, api_secret, base_url, recv_window))
-                _log_bybit_validation_failure(account_mode, error_details)
-                raise
-            except FailedRequestError as e:
+            except (InvalidRequestError, FailedRequestError) as e:
                 error_details = _extract_http_error_details(e)
                 error_details.update(_probe_bybit_wallet_balance_error(api_key, api_secret, base_url, recv_window))
                 _log_bybit_validation_failure(account_mode, error_details)
@@ -1487,7 +1485,7 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
         except Exception as e:
             if not error_details:
                 error_details = _extract_http_error_details(e)
-                if error_details.get('status_code') in [None, ''] or error_details.get('response_body') in [None, '']:
+                if error_details.get('status_code') is None or not error_details.get('response_body'):
                     error_details.update(_probe_bybit_wallet_balance_error(api_key, api_secret, base_url, recv_window))
                 _log_bybit_validation_failure(account_mode, error_details)
             validation_message = _friendly_bybit_error(
@@ -2557,7 +2555,6 @@ def api_update_cliente(client_id):
                 "valid": ok,
                 "api_error": None if ok else msg,
                 "api_error_status": validation.get('api_error_status'),
-                "api_error_response": validation.get('api_error_response'),
                 "recv_window": validation.get('recv_window'),
                 "bybit_base_url": validation.get('base_url'),
                 "client": record,
@@ -2570,7 +2567,6 @@ def api_update_cliente(client_id):
             "valid": ok,
             "api_error": None if ok else msg,
             "api_error_status": validation.get('api_error_status'),
-            "api_error_response": validation.get('api_error_response'),
             "synced_to_cloud": cloud_synced,
             "synced_to_local": local_synced,
         }), 500
@@ -2623,7 +2619,6 @@ def add_cliente():
                 "valid": ok,
                 "api_error": None if ok else msg,
                 "api_error_status": validation.get('api_error_status'),
-                "api_error_response": validation.get('api_error_response'),
                 "recv_window": validation.get('recv_window'),
                 "bybit_base_url": validation.get('base_url'),
                 "client": record,
@@ -2639,7 +2634,6 @@ def add_cliente():
             "valid": ok,
             "api_error": None if ok else msg,
             "api_error_status": validation.get('api_error_status'),
-            "api_error_response": validation.get('api_error_response'),
         }), 500
     except Exception as e:
         print(f"❌ [BACKEND] Exceção ao processar vincular_cliente: {e}")

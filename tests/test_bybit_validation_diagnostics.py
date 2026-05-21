@@ -40,7 +40,7 @@ def test_friendly_bybit_error_handles_permission_and_ip_diagnostics():
     assert 'IP do servidor não autorizado' in ip_message
 
 
-def test_validar_e_salvar_cliente_logs_exact_bybit_status_and_body(monkeypatch, capsys):
+def test_validate_and_save_client_logs_exact_bybit_status_and_body(monkeypatch, capsys):
     captured_payloads = []
 
     monkeypatch.setattr(main_web, 'BybitV5HTTP', _FailingBybitHTTP)
