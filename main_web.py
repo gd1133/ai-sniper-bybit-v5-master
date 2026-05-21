@@ -8,6 +8,9 @@ import re
 import sys
 import io
 import math
+import json
+import hmac
+import hashlib
 from datetime import datetime, timedelta
 
 # Força UTF-8 no stdout do Windows
@@ -1196,7 +1199,108 @@ def _extract_unified_usdt_balance(wallet_payload):
     return 0.0
 
 
-def _friendly_bybit_error(raw_error: str, account_mode: str) -> str:
+def _build_bybit_signed_query(params):
+    return '&'.join(
+        f'{key}={value}'
+        for key, value in sorted((params or {}).items())
+        if value is not None
+    )
+
+
+def _extract_http_error_details(exc):
+    status_code = getattr(exc, 'status_code', None)
+    response_body = None
+    response_headers = getattr(exc, 'resp_headers', None)
+
+    response = getattr(exc, 'response', None)
+    if response is not None:
+        status_code = getattr(response, 'status_code', status_code)
+        response_headers = getattr(response, 'headers', None)
+        if response_headers is None:
+            response_headers = getattr(exc, 'resp_headers', None)
+        response_headers = dict(response_headers or {})
+        try:
+            response_body = response.text
+        except Exception:
+            try:
+                response_body = response.content.decode('utf-8', errors='replace')
+            except Exception:
+                response_body = None
+
+    raw_message = getattr(exc, 'message', None) or str(exc)
+    if response_body in [None, ''] and isinstance(raw_message, str) and raw_message.strip():
+        response_body = raw_message
+
+    return {
+        'exception_type': type(exc).__name__,
+        'status_code': status_code,
+        'response_body': response_body,
+        'response_headers': response_headers,
+        'message': raw_message,
+        'request': getattr(exc, 'request', None),
+    }
+
+
+def _probe_bybit_wallet_balance_error(api_key, api_secret, base_url, recv_window):
+    if not api_key or not api_secret or not base_url:
+        return {}
+
+    endpoint = '/v5/account/wallet-balance'
+    params = {
+        'accountType': 'UNIFIED',
+        'coin': 'USDT',
+    }
+    query_string = _build_bybit_signed_query(params)
+    timestamp = str(int(time.time() * 1000))
+    signature_payload = f'{timestamp}{api_key}{recv_window}{query_string}'
+    signature = hmac.new(
+        str(api_secret).encode('utf-8'),
+        signature_payload.encode('utf-8'),
+        hashlib.sha256,
+    ).hexdigest()
+
+    headers = {
+        'X-BAPI-API-KEY': str(api_key),
+        'X-BAPI-TIMESTAMP': timestamp,
+        'X-BAPI-RECV-WINDOW': str(recv_window),
+        'X-BAPI-SIGN': signature,
+        'X-BAPI-SIGN-TYPE': '2',
+    }
+
+    try:
+        response = requests.get(
+            f'{base_url}{endpoint}',
+            params=params,
+            headers=headers,
+            timeout=15,
+        )
+        return {
+            'status_code': response.status_code,
+            'response_body': response.text,
+            'response_headers': dict(response.headers or {}),
+        }
+    except requests.exceptions.RequestException as exc:
+        return _extract_http_error_details(exc)
+
+
+def _log_bybit_validation_failure(account_mode, details):
+    if not details:
+        return
+
+    print(
+        f"❌ [BYBIT VALIDATION] mode={account_mode} "
+        f"exception={details.get('exception_type') or 'desconhecida'} "
+        f"status_code={details.get('status_code')}"
+    )
+    if details.get('request'):
+        print(f"❌ [BYBIT VALIDATION] request={details.get('request')}")
+    if details.get('message'):
+        print(f"❌ [BYBIT VALIDATION] message={details.get('message')}")
+    if details.get('response_body') not in [None, '']:
+        print(f"❌ [BYBIT VALIDATION] response_body={details.get('response_body')}")
+
+
+def _friendly_bybit_error(raw_error: str, account_mode: str, *, status_code=None, response_body=None) -> str:
     """Converte mensagens de erro cruas do pybit em mensagens amigáveis em português.
 
     Erros comuns:
@@ -1213,10 +1317,31 @@ def _friendly_bybit_error(raw_error: str, account_mode: str) -> str:
         else 'Use chaves criadas em bybit.com (⚙️ API Management → Create New Key).'
     )
 
-    lowered = msg.lower()
+    body_text = ''
+    if response_body not in [None, '']:
+        if isinstance(response_body, str):
+            body_text = response_body
+        else:
+            try:
+                body_text = json.dumps(response_body, ensure_ascii=False)
+            except Exception:
+                body_text = str(response_body)
+
+    normalized_parts = [msg]
+    if status_code not in [None, '']:
+        normalized_parts.append(f'HTTP {status_code}')
+    if body_text:
+        normalized_parts.append(body_text)
+
+    normalized_message = ' | '.join(part for part in normalized_parts if part)
+    lowered = normalized_message.lower()
 
     # IP not whitelisted — check BEFORE 401 because Bybit sometimes returns 401 for IP bans
-    if 'ip' in lowered and ('not allow' in lowered or 'whitelist' in lowered or 'forbidden' in lowered or '403' in msg):
+    if (
+        '10010' in normalized_message
+        or 'ip' in lowered and ('not allow' in lowered or 'whitelist' in lowered or 'forbidden' in lowered or '403' in normalized_message)
+        or 'unmatched ip' in lowered
+    ):
         return (
             'IP do servidor não autorizado pela chave API. '
             'O servidor Railway/cloud usa IPs dinâmicos. '
@@ -1225,7 +1350,7 @@ def _friendly_bybit_error(raw_error: str, account_mode: str) -> str:
         )
 
     # HTTP 401 or Bybit retCode 401
-    if '401' in msg or 'errcode: 401' in lowered or 'http 401' in lowered:
+    if '401' in normalized_message or 'errcode: 401' in lowered or 'http 401' in lowered:
         server_label = 'Testnet' if is_testnet else 'Real'
         return (
             f'Chave API inválida ou sem permissão (erro 401) no servidor {server_label} da Bybit. '
@@ -1238,28 +1363,38 @@ def _friendly_bybit_error(raw_error: str, account_mode: str) -> str:
         )
 
     # Invalid api_key (retCode 10003)
-    if '10003' in msg or 'invalid api_key' in lowered or 'invalid api key' in lowered:
+    if '10003' in normalized_message or 'invalid api_key' in lowered or 'invalid api key' in lowered:
         return (
             f'Chave API não reconhecida (código 10003). '
             f'Verifique se copiou corretamente a API Key. {source_hint}'
         )
 
     # Invalid signature / wrong secret (retCode 10004)
-    if '10004' in msg or 'invalid sign' in lowered:
+    if '10004' in normalized_message or 'invalid sign' in lowered:
         return (
             f'Assinatura inválida (código 10004). '
             f'Verifique se copiou corretamente o API Secret. {source_hint}'
         )
 
+    # Missing permissions (retCode 10005)
+    if '10005' in normalized_message or 'permission denied' in lowered:
+        return (
+            'A chave API foi reconhecida, mas não tem permissões suficientes na Bybit (código 10005). '
+            'Ative pelo menos leitura de conta/saldo; se o bot também for operar, habilite permissões de trading conforme necessário.'
+        )
+
     # Expired key (retCode 33004)
-    if '33004' in msg or 'expired' in lowered:
+    if '33004' in normalized_message or 'expired' in lowered:
         return (
             f'Chave API expirada (código 33004). '
             f'Crie uma nova chave em {"testnet.bybit.com" if is_testnet else "bybit.com"}.'
         )
 
+    if 'read timed out' in lowered or 'connection aborted' in lowered or 'connection error' in lowered:
+        return 'Falha de rede ao validar as chaves na Bybit. Verifique conectividade, firewall e disponibilidade da API.'
+
     # Generic fallback – keep original but add hint
-    return f'Erro ao validar chaves Bybit: {msg}'
+    return f'Erro ao validar chaves Bybit: {normalized_message}'
 
 
 def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=None, client_id=None, existing_client=None):
@@ -1316,6 +1451,14 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
         # --- Validação via Bybit V5 (comportamento original) ---
         base_url = _get_bybit_v5_base_url(resolved_testnet)
         try:
+            from pybit.exceptions import FailedRequestError, InvalidRequestError
+        except Exception:
+            class _PybitExceptionFallback(Exception):
+                pass
+            FailedRequestError = InvalidRequestError = _PybitExceptionFallback
+
+        error_details = {}
+        try:
             recv_window = _compute_safe_recv_window(base_url)
             session = _ensure_pybit_http_class()(
                 testnet=resolved_testnet,
@@ -1323,14 +1466,34 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
                 api_secret=api_secret,
                 recv_window=recv_window,
             )
-            wallet_payload = session.get_wallet_balance(accountType='UNIFIED', coin='USDT')
+            try:
+                wallet_payload = session.get_wallet_balance(accountType='UNIFIED', coin='USDT')
+            except (InvalidRequestError, FailedRequestError) as e:
+                error_details = _extract_http_error_details(e)
+                error_details.update(_probe_bybit_wallet_balance_error(api_key, api_secret, base_url, recv_window))
+                _log_bybit_validation_failure(account_mode, error_details)
+                raise
+            except requests.exceptions.RequestException as e:
+                error_details = _extract_http_error_details(e)
+                _log_bybit_validation_failure(account_mode, error_details)
+                raise
             balance = _extract_unified_usdt_balance(wallet_payload)
             payload['saldo_base'] = round(float(balance), 2)
             payload['status'] = 'ativo'
             valid = True
             validation_message = f'Conta {account_mode.upper()} validada via Bybit V5'
         except Exception as e:
-            validation_message = _friendly_bybit_error(str(e), account_mode)
+            if not error_details:
+                error_details = _extract_http_error_details(e)
+                if error_details.get('status_code') is None or not error_details.get('response_body'):
+                    error_details.update(_probe_bybit_wallet_balance_error(api_key, api_secret, base_url, recv_window))
+                _log_bybit_validation_failure(account_mode, error_details)
+            validation_message = _friendly_bybit_error(
+                str(e),
+                account_mode,
+                status_code=error_details.get('status_code'),
+                response_body=error_details.get('response_body'),
+            )
             payload['status'] = 'erro_api'
             if existing_client is not None:
                 try:
@@ -1365,6 +1528,8 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
         'balance': payload.get('saldo_base', 0.0),
         'account_mode': account_mode,
         'exchange': exchange,
+        'api_error_status': error_details.get('status_code') if exchange == 'bybit' else None,
+        'api_error_response': error_details.get('response_body') if exchange == 'bybit' and not valid else None,
     }
 
 
@@ -2389,6 +2554,7 @@ def api_update_cliente(client_id):
                 "msg": f"Cliente atualizado! Conta {validation.get('account_mode', account_mode).upper()} sincronizada com a {str(validation.get('exchange','bybit')).upper()}.",
                 "valid": ok,
                 "api_error": None if ok else msg,
+                "api_error_status": validation.get('api_error_status'),
                 "recv_window": validation.get('recv_window'),
                 "bybit_base_url": validation.get('base_url'),
                 "client": record,
@@ -2397,7 +2563,10 @@ def api_update_cliente(client_id):
             })
         return jsonify({
             "error": "Falha ao atualizar",
+            "msg": msg or "Falha ao atualizar investidor",
             "valid": ok,
+            "api_error": None if ok else msg,
+            "api_error_status": validation.get('api_error_status'),
             "synced_to_cloud": cloud_synced,
             "synced_to_local": local_synced,
         }), 500
@@ -2449,6 +2618,7 @@ def add_cliente():
                 "msg": f"Investidor conectado! Conta {validation.get('account_mode', account_mode).upper()} validada na {str(validation.get('exchange','bybit')).upper()}.",
                 "valid": ok,
                 "api_error": None if ok else msg,
+                "api_error_status": validation.get('api_error_status'),
                 "recv_window": validation.get('recv_window'),
                 "bybit_base_url": validation.get('base_url'),
                 "client": record,
@@ -2458,7 +2628,13 @@ def add_cliente():
             print(f"✅ [BACKEND] Enviando resposta de sucesso ao frontend")
             return jsonify(response_data)
         print(f"❌ [BACKEND] Falha ao salvar investidor - record é None")
-        return jsonify({"status": "erro", "msg": "Falha ao salvar investidor"}), 500
+        return jsonify({
+            "status": "erro",
+            "msg": msg or "Falha ao salvar investidor",
+            "valid": ok,
+            "api_error": None if ok else msg,
+            "api_error_status": validation.get('api_error_status'),
+        }), 500
     except Exception as e:
         print(f"❌ [BACKEND] Exceção ao processar vincular_cliente: {e}")
         import traceback
