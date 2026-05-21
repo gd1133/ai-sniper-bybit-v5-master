@@ -465,6 +465,51 @@ class BybitClient:
             print(f"[ERRO BROKER] Preço {symbol} falhou: {e}")
             return self.cache_ticker[symbol][0] if symbol in self.cache_ticker else 0.0
 
+    def _fetch_order_details(self, symbol, order_id):
+        """Busca detalhes completos da ordem após sua criação.
+
+        Args:
+            symbol: Símbolo da ordem (ex: 'DOGEUSDT')
+            order_id: ID da ordem retornado pela API
+
+        Returns:
+            dict: Detalhes completos da ordem ou None em caso de erro
+        """
+        if not self.pybit_session:
+            print("⚠️  [FETCH ORDER] pybit_session indisponível")
+            return None
+
+        try:
+            v5_symbol = self._normalize_v5_symbol(symbol)
+            print(f"🔍 [FETCH ORDER] Buscando detalhes da ordem {order_id} para {v5_symbol}")
+
+            # Usa get_open_orders para buscar ordem recém-criada
+            rsp = self.pybit_session.get_open_orders(
+                category='linear',
+                symbol=v5_symbol,
+                orderId=order_id
+            )
+
+            ok, error_message = self._handle_v5_ret_code(rsp, 'v5/order/realtime')
+            if not ok:
+                print(f"❌ [FETCH ORDER] Erro ao buscar detalhes: {error_message}")
+                return None
+
+            result = (rsp or {}).get('result') or {}
+            orders_list = result.get('list') or []
+
+            if not orders_list:
+                print(f"⚠️  [FETCH ORDER] Ordem {order_id} não encontrada na lista de ordens abertas")
+                return None
+
+            order_details = orders_list[0]
+            print(f"✅ [FETCH ORDER] Detalhes obtidos: side={order_details.get('side')}, qty={order_details.get('qty')}, price={order_details.get('price')}")
+            return order_details
+
+        except Exception as e:
+            print(f"❌ [FETCH ORDER] Exceção ao buscar detalhes da ordem: {e}")
+            return None
+
     def execute_market_order(self, symbol, side, qty, raise_on_error=False):
         """Executa ordem a mercado para entrada instantânea."""
         try:
@@ -506,13 +551,29 @@ class BybitClient:
                 result = (rsp or {}).get('result') or {}
                 order_id = result.get('orderId') or result.get('orderLinkId')
                 print(f"✅ [BYBIT] Ordem criada com sucesso - ID: {order_id}")
-                return {
-                    **result,
-                    'id': order_id,
-                    'route': 'v5/order/create',
-                    'category': 'linear',
-                    'symbol': v5_symbol,
-                }
+
+                # Busca detalhes completos da ordem recém-criada
+                order_details = self._fetch_order_details(symbol, order_id)
+
+                # Se conseguiu buscar os detalhes, mescla com o resultado inicial
+                if order_details:
+                    return {
+                        **order_details,
+                        'id': order_id,
+                        'route': 'v5/order/create',
+                        'category': 'linear',
+                        'symbol': v5_symbol,
+                    }
+                else:
+                    # Fallback: retorna apenas os dados básicos da criação
+                    print(f"⚠️  [BYBIT] Não foi possível buscar detalhes completos, retornando dados básicos")
+                    return {
+                        **result,
+                        'id': order_id,
+                        'route': 'v5/order/create',
+                        'category': 'linear',
+                        'symbol': v5_symbol,
+                    }
 
             # Fallback para CCXT se pybit não estiver disponível
             params = {'category': 'linear'}  # Obrigatório para futuros/perpétuos USDT conforme Bybit V5 API

@@ -81,6 +81,7 @@ class _FakeHTTP:
         self.endpoint = None
         self.place_order_calls = []
         self.insurance_calls = []
+        self.get_open_orders_calls = []
 
     def get_insurance(self, **kwargs):
         self.insurance_calls.append(kwargs)
@@ -96,6 +97,30 @@ class _FakeHTTP:
             'retCode': 0,
             'retMsg': 'OK',
             'result': {'orderId': 'oid-123'},
+        }
+
+    def get_open_orders(self, **kwargs):
+        self.get_open_orders_calls.append(kwargs)
+        return {
+            'retCode': 0,
+            'retMsg': 'OK',
+            'result': {
+                'list': [{
+                    'orderId': kwargs.get('orderId', 'oid-123'),
+                    'orderLinkId': '',
+                    'symbol': kwargs.get('symbol', 'BTCUSDT'),
+                    'side': 'Buy',
+                    'orderType': 'Market',
+                    'price': '50000.00',
+                    'qty': '2.66',
+                    'status': 'Filled',
+                    'timeInForce': 'GTC',
+                    'avgPrice': '50000.00',
+                    'cumExecQty': '2.66',
+                    'cumExecValue': '133000.00',
+                    'cumExecFee': '79.80',
+                }]
+            },
         }
 
 
