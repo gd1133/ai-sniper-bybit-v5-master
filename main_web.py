@@ -312,9 +312,9 @@ def _calculate_dynamic_order_quantity(broker, symbol, balance):
         if min_notional_raw and min_notional_raw > 0:
             target_notional = min_notional_raw * SAFETY_MARGIN
         elif 'binance' in exchange_name:
-            target_notional = 5.00 * SAFETY_MARGIN   # $5.00 mínimo → $5.50 alvo
+            target_notional = 5.00 * SAFETY_MARGIN   # Binance: $5.00 mínimo + margem de segurança
         else:
-            target_notional = 2.00 * SAFETY_MARGIN   # $2.00 mínimo → $2.20 alvo (Bybit)
+            target_notional = 2.00 * SAFETY_MARGIN   # Bybit: $2.00 mínimo + margem de segurança
 
         print(f"   📏 Piso nocional alvo ({exchange_name}): ${target_notional:.2f} USDT")
 
@@ -335,7 +335,6 @@ def _calculate_dynamic_order_quantity(broker, symbol, balance):
                 print(f"⚠️ [PRECISION] Falha no amount_to_precision: {precision_err} — usando fallback matemático")
                 # Fallback: usa amount.min como piso e ajusta decimais matematicamente
                 if min_amount and min_amount > 0:
-                    import math
                     decimals = max(0, -int(math.floor(math.log10(min_amount))))
                     final_qty = round(raw_qty, decimals)
                 else:
