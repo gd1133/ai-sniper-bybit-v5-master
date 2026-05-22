@@ -2964,7 +2964,7 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                                     f"✅ *ORDEM EXECUTADA*\n\n"
                                     f"👤 *Cliente:* {cliente_nome}\n"
                                     f"📦 *Símbolo:* `{symbol}`\n"
-                                    f"📈 *Lado:* {side.upper()}\n"
+                                    f"📈 *Lado:* {str(side).upper()}\n"
                                     f"📊 *Quantidade:* `{qty}`\n"
                                     f"🆔 *ID da Ordem:* `{order_id}`"
                                 )
@@ -2997,7 +2997,7 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                                 f"🚨 *URGENTE: FALHA NA EXECUÇÃO DA ORDEM*\n\n"
                                 f"👤 *Cliente:* {cliente_nome}\n"
                                 f"📦 *Símbolo Tentado:* `{symbol}`\n"
-                                f"📈 *Lado:* {side.upper()}\n"
+                                f"📈 *Lado:* {str(side).upper()}\n"
                                 f"📊 *Quantidade Falhou:* `{qty}`\n"
                                 f"• *Tipo da Exceção:* `{error_type}`\n"
                                 f"• *Erro Bruto:* `{error_msg}`"
