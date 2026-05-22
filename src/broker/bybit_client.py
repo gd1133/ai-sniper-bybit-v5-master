@@ -4,7 +4,7 @@ from datetime import datetime
 
 # 🔧 CORREÇÃO CIRCULAR IMPORT: Importações movidas para lazy loading
 # As importações de src.config e src.broker.order_calculator foram movidas
-# para dentro dos métodos que as utilizam para evitar dependência circular
+# para dentro dos métodos que as utilizam para evitar dependência circulaR
 
 AUTH_10003_ALERT = (
     "ERRO DE AUTENTICAÇÃO: Verifique se a chave de API é de produção e se o 2FA está ativo na Bybit"
@@ -275,12 +275,16 @@ class BybitClient:
                 self.exchange, symbol, current_price, balance, risk_multiplier=1.0
             )
 
-    def _normalize_order_qty(self, symbol, qty):
-        """
+    
         Normaliza quantidade para precisão aceita pela corretora, evitando Qty invalid.
         🔧 CORREÇÃO: Considera simultaneamente min amount e min notional.
+        def _normalize_order_qty(self, symbol, qty):
         """
-        from decimal import Decimal, ROUND_UP
+        Normaliza quantidade para precisão aceita pela corretora, evitando Qty invalid.
+        🔧 CORREÇÃO DEFINITIVA: Elimina o erro de conversão de float para Decimal,
+        utiliza o método nativo amount_to_precision do CCXT e valida limites estritos.
+        """
+        from decimal import Decimal
 
         try:
             qty_value = float(qty)
@@ -303,40 +307,21 @@ class BybitClient:
 
             # Min amount (quantidade mínima em contratos/moedas)
             min_amount = limits.get('amount', {}).get('min')
-            # 🔧 Valida se min_amount é None ou string 'none' antes de usar
-            if min_amount is None or str(min_amount).lower() == 'none':
-                min_amount = 0.001
-            elif min_amount <= 0:
+            if min_amount is None or str(min_amount).lower() == 'none' or min_amount <= 0:
                 min_amount = 0.001
 
-            # Min notional (valor mínimo em USDT) - Bybit exige >= 6 USDT
-            # 🔧 CORREÇÃO: Valida se min_cost é None ou string 'none' antes de usar
+            # Min notional (valor mínimo em USDT) - Bybit exige >= 5.0 ou 6.0 USDT
             min_cost = limits.get('cost', {}).get('min')
-            if min_cost is None or str(min_cost).lower() == 'none':
-                min_cost = 6.0
-            elif min_cost <= 0:
+            if min_cost is None or str(min_cost).lower() == 'none' or min_cost <= 0:
                 min_cost = 6.0
 
-            # Precisão da quantidade
-            amount_precision = market.get('precision', {}).get('amount')
-            # 🔧 Valida se amount_precision é None ou string 'none' antes de usar
-            if amount_precision is None or str(amount_precision).lower() == 'none':
-                amount_precision = 2
-            else:
-                # 🔧 PROTEÇÃO CRÍTICA: Converte para int para evitar TypeError em .scaleb()
-                # Quando amount_precision é float (ex: 2.0), .scaleb() pode retornar float
-                # causando "TypeError: conversion from float to Decimal is not supported"
-                amount_precision = int(amount_precision)
-
-            print(f"   📊 [BYBIT LIMITS] {symbol}: min_amount={min_amount}, min_notional={min_cost} USDT, precision={amount_precision}")
+            print(f"   📊 [BYBIT LIMITS] {symbol}: min_amount={min_amount}, min_notional={min_cost} USDT", flush=True)
         except Exception as market_err:
-            print(f"⚠️ [BYBIT MARKET] Erro ao carregar limites: {market_err}, usando defaults")
+            print(f"⚠️ [BYBIT MARKET] Erro ao carregar limites: {market_err}, usando defaults", flush=True)
             min_amount = 0.001
             min_cost = 6.0
-            amount_precision = 2
 
-        # 🔧 PASSO 3: Calcula quantidade mínima para satisfazer min notional
-        # PROTEÇÃO DE TIPO: Converte TODOS os valores para Decimal usando str() primeiro
+        # 🔧 PASSO 3: Calcula quantidade mínima para satisfazer min notional usando decimais seguros
         min_cost_decimal = Decimal(str(min_cost))
         current_price_decimal = Decimal(str(current_price))
         min_qty_for_notional = min_cost_decimal / current_price_decimal
@@ -344,39 +329,33 @@ class BybitClient:
         # 🔧 PASSO 4: Usa o maior entre min_amount e min_qty_for_notional
         required_min_qty = max(Decimal(str(min_amount)), min_qty_for_notional)
 
-        # Se quantidade fornecida for menor que o mínimo, usa o mínimo
+        # Se a quantidade fornecida pelo sinal for menor que o mínimo exigido, joga para o mínimo seguro
         if Decimal(str(qty_value)) < required_min_qty:
-            print(f"⚠️ [BYBIT QTY] Quantidade {qty_value} abaixo do mínimo. Ajustando para {required_min_qty}")
-            # 🔧 PROTEÇÃO DE TIPO: Converte required_min_qty para float antes de usar
+            print(f"⚠️ [BYBIT QTY] Quantidade {qty_value} abaixo do mínimo necessário. Ajustando para {required_min_qty}", flush=True)
             qty_value = float(required_min_qty)
 
-        # 🔧 PASSO 5: Arredonda para cima respeitando precisão da exchange
-        # 🔧 PROTEÇÃO CRÍTICA: amount_precision deve ser int para .scaleb() retornar Decimal correto
-        step = Decimal('1').scaleb(-int(amount_precision))
-        quantized = Decimal(str(qty_value)).quantize(step, rounding=ROUND_UP)
+        # 🔧 PASSO 5: Arredonda o lote usando o método nativo e blindado do CCXT
+        # Isso elimina completamente o uso manual de .scaleb() que causava o TypeError
+        final_qty = self.exchange.amount_to_precision(symbol, qty_value)
 
-        # Garante que após arredondamento ainda atende min notional
-        # 🔧 PROTEÇÃO DE TIPO: Usa Decimal para todos os cálculos
-        notional_value_decimal = quantized * current_price_decimal
-        if notional_value_decimal < min_cost_decimal:
-            # Arredonda para cima até atingir min notional
-            # 🔧 PROTEÇÃO DE TIPO: Todos os cálculos em Decimal
-            adjusted_qty = min_cost_decimal / current_price_decimal
-            quantized = adjusted_qty.quantize(step, rounding=ROUND_UP)
-            notional_value_decimal = quantized * current_price_decimal
-            print(f"   🔧 [BYBIT NOTIONAL] Ajustado para qty={quantized} (notional={float(notional_value_decimal):.2f} USDT >= {float(min_cost_decimal)} USDT)")
-
-        normalized = format(quantized, 'f')
-        final_qty = normalized.rstrip('0').rstrip('.') if '.' in normalized else normalized
-
-        # 🔧 PASSO 6: Exibe informações de validação
-        # 🔧 PROTEÇÃO DE TIPO: Usa Decimal para cálculo final, converte para float apenas para exibição
+        # 🔧 PASSO 6: Garante que após o arredondamento o valor nocional final cumpre o mínimo exigido
         final_qty_decimal = Decimal(str(final_qty))
-        final_notional_decimal = final_qty_decimal * current_price_decimal
-        print(f"   ✅ [BYBIT ORDER] qty={final_qty} (notional={float(final_notional_decimal):.2f} USDT, min_amount={min_amount}, min_notional={float(min_cost_decimal)} USDT)")
+        notional_value_decimal = final_qty_decimal * current_price_decimal
+        
+        if notional_value_decimal < min_cost_decimal:
+            # Caso o arredondamento do CCXT jogue o valor um pouco abaixo por decimais, força um ajuste para cima
+            adjusted_qty = min_cost_decimal / current_price_decimal
+            # Adiciona uma micro-margem de 5% em float para o CCXT cravar o lote acima do piso
+            final_qty = self.exchange.amount_to_precision(symbol, float(adjusted_qty) * 1.05)
+            final_qty_decimal = Decimal(str(final_qty))
+            notional_value_decimal = final_qty_decimal * current_price_decimal
+            print(f"   🔧 [BYBIT NOTIONAL RE-ADJUSTED] Qty recalculada para cima para bater o piso: qty={final_qty}", flush=True)
 
-        return final_qty
+        # Exibe informações detalhadas de validação e sucesso no log do Render
+        print(f"   ✅ [BYBIT ORDER VALIDA] qty={final_qty} (notional={float(notional_value_decimal):.2f} USDT >= {float(min_cost_decimal)} USDT)", flush=True)
 
+        return str(final_qty)
+        
     def _validate_insurance_fund(self):
         """Consulta o fundo de seguros V5 apenas para validar conectividade inicial."""
         if self.pybit_session is None:
