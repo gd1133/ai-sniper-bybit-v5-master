@@ -125,13 +125,17 @@ class BinanceClient:
 
     def _normalize_order_qty(self, symbol, qty):
         """
-        🔧 CORREÇÃO DEFINITIVA BINANCE:
-        Elimina misturas de Float/Decimal e usa o amount_to_precision nativo do CCXT.
+        🔧 CORREÇÃO DEFINITIVA BINANCE V2:
+        Conversão Decimal via String + amount_to_precision nativo do CCXT.
         """
         try:
-            qty_value = float(qty)
+            # Conversão segura de float para Decimal usando string
+            qty_decimal = Decimal(str(float(qty)))
         except (TypeError, ValueError):
             raise ValueError(f"Quantidade inválida: {qty}")
+
+        if qty_decimal <= 0:
+            raise ValueError(f"Quantidade deve ser positiva: {qty}")
 
         current_price = self.get_last_price(symbol)
         if current_price <= 0:
@@ -157,24 +161,24 @@ class BinanceClient:
             min_amount = 0.001
             min_cost = 5.5
 
-        # Conversão segura via string
+        # Conversões seguras usando Decimal(str())
         min_cost_decimal = Decimal(str(min_cost))
         current_price_decimal = Decimal(str(current_price))
         min_qty_for_notional = min_cost_decimal / current_price_decimal
 
         required_min_qty = max(Decimal(str(min_amount)), min_qty_for_notional)
 
-        if Decimal(str(qty_value)) < required_min_qty:
-            print(f"⚠️ [BINANCE QTY] Quantidade {qty_value} abaixo do piso. Ajustando para {required_min_qty}", flush=True)
-            qty_value = float(required_min_qty)
+        if qty_decimal < required_min_qty:
+            print(f"⚠️ [BINANCE QTY] Quantidade {qty_decimal} abaixo do piso. Ajustando para {required_min_qty}", flush=True)
+            qty_decimal = required_min_qty
 
-        # Arredondamento nativo CCXT (Sem loops de .quantize ou .scaleb)
-        final_qty = self.exchange.amount_to_precision(symbol, qty_value)
+        # Delega arredondamento final estritamente ao CCXT
+        final_qty = self.exchange.amount_to_precision(symbol, float(qty_decimal))
 
         # Proteção pós-arredondamento contra quebras de centavos nocionais
         final_qty_decimal = Decimal(str(final_qty))
         notional_value_decimal = final_qty_decimal * current_price_decimal
-        
+
         if notional_value_decimal < min_cost_decimal:
             adjusted_qty = min_cost_decimal / current_price_decimal
             final_qty = self.exchange.amount_to_precision(symbol, float(adjusted_qty) * 1.05)
@@ -215,19 +219,34 @@ class BinanceClient:
             return None
 
     def set_tp_sl_sniper(self, symbol, side, entry_price, position_qty):
-        """Configura travas automáticas de take profit (+100% margem) e stop loss (-3% institucional)."""
+        """
+        🎯 PROTOCOLO 100/50 - SETAGEM AUTOMÁTICA DE TP/SL NA BINANCE FUTURES
+        Take Profit: +10% de movimento (+100% de lucro sobre margem com alavancagem 10x)
+        Stop Loss: -50% de perda sobre o valor da entrada (Proteção Institucional)
+        """
         try:
             if not self.authenticated: return False
 
             # Lado reverso para fechar
             exit_side = 'sell' if side.lower() == 'buy' else 'buy'
-            tp_price = entry_price * 1.10 if side.lower() == 'buy' else entry_price * 0.90
-            sl_price = entry_price * 0.97 if side.lower() == 'buy' else entry_price * 1.03
+
+            # Cálculo estrito dos alvos de preço com base na direção
+            if side.lower() == 'buy':
+                tp_price = entry_price * 1.10  # +10% movimento
+                sl_price = entry_price * 0.50  # -50% do valor de entrada (Stop Loss de 50%)
+            else:
+                tp_price = entry_price * 0.90  # -10% movimento (lucra na queda)
+                sl_price = entry_price * 1.50  # +50% do valor de entrada (Stop Loss de 50%)
 
             price_to_precision = getattr(self.exchange, 'price_to_precision', None)
             if callable(price_to_precision):
                 tp_price = float(price_to_precision(symbol, tp_price))
                 sl_price = float(price_to_precision(symbol, sl_price))
+
+            print(f"🛡️ [BINANCE PROTEÇÃO] Ativo: {symbol}")
+            print(f"   📍 Entrada: ${entry_price:.4f}")
+            print(f"   ✅ Target TP (+100%): ${tp_price:.4f}")
+            print(f"   ❌ Target SL (-50%): ${sl_price:.4f}")
 
             # Envia o Stop Loss como ordem de gatilho acoplada
             self.exchange.create_order(
@@ -237,7 +256,7 @@ class BinanceClient:
                 amount=float(position_qty),
                 params={'stopPrice': sl_price, 'reduceOnly': True}
             )
-            print(f"🛡️ [BINANCE PROTEÇÃO] Trava de Stop Loss configurada em ${sl_price}")
+            print(f"✅ [BINANCE TP/SL] Trava de Stop Loss configurada com sucesso.")
             return True
         except Exception as e:
             print(f"⚠️ [BINANCE TP/SL] Falha ao configurar proteção de capital: {e}")

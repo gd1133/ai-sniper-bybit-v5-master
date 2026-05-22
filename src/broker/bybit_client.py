@@ -1,817 +1,654 @@
 # -*- coding: utf-8 -*-
-"""
-╔══════════════════════════════════════════════════════════════════╗
-║             AI SNIPER BYBIT V5 - MAIN WEB APPLICATION            ║
-║                  MAESTRO CORE FULL EDITION v60.9                 ║
-╚══════════════════════════════════════════════════════════════════╝
-
-⚠️ CONFIGURAÇÃO CRÍTICA PARA O RENDER (GUNICORN):
----------------------------------------------------
-gunicorn -w 1 -k gthread main_web:app
-"""
-import os
 import time
-import threading
-import sqlite3
-import requests
-import re
 import sys
 import io
-import math
-from datetime import datetime, timedelta
+from decimal import Decimal
 
-# Força UTF-8 no stdout do Windows para evitar quebras com emojis
+# Força UTF-8 no stdout para evitar erros de encode com emojis no Render/Terminal
 if sys.platform == 'win32':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
-from flask import Flask, jsonify, request, send_from_directory
-from flask_cors import CORS
-from dotenv import load_dotenv
-from src.config import get_bybit_base_url, get_environment_config, resolve_use_testnet
+AUTH_10003_ALERT = (
+    "ERRO DE AUTENTICAÇÃO: Verifique se a chave de API é de produção e se o 2FA está ativo na Bybit"
+)
 
-# --- IMPORTAÇÕES DAS PASTAS INTERNAS (SRC) ---
-try:
-    from src.database import manager as db
-except Exception as e:
-    print(f"❌ Erro Crítico ao importar Database Manager: {e}")
-    db = None
+# Globals para carregamento em Lazy Loading
+_ccxt_instance = None
+_pd_instance = None
+_pybit_http_class = None
 
-# Módulos carregados sob demanda (Lazy Loading) para evitar importação circular
-BybitClient = None
-BybitV5HTTP = None
-IndicatorEngine = None
-GroqValidator = None
-public_price_broker = None
+def _get_ccxt():
+    """Carrega CCXT lazy (apenas na primeira vez)."""
+    global _ccxt_instance
+    if _ccxt_instance is None:
+        print("⏳ Carregando CCXT (primeira vez)...", flush=True)
+        import ccxt as ccxt_lib
+        _ccxt_instance = ccxt_lib
+        print("✅ CCXT carregado com sucesso", flush=True)
+    return _ccxt_instance
 
-RUNTIME_START_LOCK = threading.Lock()
-RUNTIME_STARTED = False
-AI_RATE_LIMIT_STATUS_MESSAGE = '⚠️ Limite das IAs atingido. Aguardando cooldown de 60s...'
-AI_COOLDOWN_ACTIVE = False
-AI_COOLDOWN_LOCK = threading.Lock()
+def _get_pd():
+    """Carrega Pandas lazy."""
+    global _pd_instance
+    if _pd_instance is None:
+        print("⏳ Carregando Pandas...", flush=True)
+        import pandas as pd
+        _pd_instance = pd
+        print("✅ Pandas carregado com sucesso", flush=True)
+    return _pd_instance
 
-# ==============================================================================
-# 🔄 BROKER MANAGER SINGLETON - Previne rate limiting e vazamento de conexões
-# ==============================================================================
-class BrokerManager:
-    _instance = None
-    _lock = threading.Lock()
+def _get_pybit_http():
+    """Carrega pybit HTTP lazy (apenas na primeira vez)."""
+    global _pybit_http_class
+    if _pybit_http_class is None:
+        print("⏳ Carregando pybit HTTP...", flush=True)
+        from pybit.unified_trading import HTTP as pybit_http
+        _pybit_http_class = pybit_http
+        print("✅ pybit HTTP carregado com sucesso", flush=True)
+    return _pybit_http_class
 
-    def __new__(cls):
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = super(BrokerManager, cls).__new__(cls)
-                    cls._instance._initialized = False
-        return cls._instance
 
-    def __init__(self):
-        if self._initialized:
+class BybitClient:
+    """
+    IA 1: Responsável pela comunicação com a Bybit.
+    Versão 1.8.6: Correção estrita de tipos Decimal/Float + Tratamento nativo CCXT + Protocolo 100/50.
+    Blindagem contra bloqueios de API e vazamento de memória.
+    """
+    def __init__(self, api_key=None, api_secret=None, testnet=None):
+        # LAZY LOADING: Evita importação circular puxando apenas no escopo local
+        from src.config import get_bybit_base_url, get_bybit_credentials, resolve_use_testnet
+        from src.broker.order_calculator import OrderCalculator
+
+        ccxt = _get_ccxt()
+
+        env_api_key, env_api_secret = get_bybit_credentials()
+
+        # SANITIZAÇÃO: Remove espaços, quebras de linha e caracteres invisíveis
+        api_key = str(api_key or env_api_key or '').strip().replace('\n', '').replace('\r', '')
+        api_secret = str(api_secret or env_api_secret or '').strip().replace('\n', '').replace('\r', '')
+
+        self.testnet = resolve_use_testnet(testnet)
+        self.active_endpoint = get_bybit_base_url(self.testnet)
+        self.pybit_session = None
+
+        cfg = {
+            'enableRateLimit': True,
+            'rateLimit': 100,  # Delay mínimo tolerável entre requisições
+            'timeout': 15000,   # Timeout HTTP de 15s para evitar travamento da thread
+            'options': {
+                'defaultType': 'swap',  # Foco absoluto em contratos perpétuos
+                'defaultSubType': 'linear',
+                'adjustForTimeDifference': True,
+                'recvWindow': 20000,  # Janela ampla para tolerar latência do servidor em nuvem
+            }
+        }
+
+        # Inicializa a calculadora de ordens dinâmica
+        self.order_calculator = OrderCalculator(exchange_name='bybit')
+        if api_key and api_secret:
+            cfg['apiKey'] = api_key
+            cfg['secret'] = api_secret
+
+        self.exchange = ccxt.bybit(cfg)
+        self._configure_exchange_endpoint()
+
+        # SINCRONIZAÇÃO DE TEMPO: Executa na inicialização para mitigar drift de timestamp
+        if api_key and api_secret:
+            try:
+                self.exchange.load_time_difference()
+                print("✅ [BYBIT TIME SYNC] Diferença de tempo sincronizada com o servidor", flush=True)
+            except Exception as sync_err:
+                print(f"⚠️ [BYBIT TIME SYNC] Aviso: {sync_err}", flush=True)
+
+        self.pybit_api_version = 'v5'
+        self.pybit_sdk_module = ''
+
+        if api_key and api_secret:
+            self._init_pybit_session(api_key, api_secret)
+
+        print(f"🔍 [BYBIT ENDPOINT] testnet={self.testnet} endpoint={self.active_endpoint}", flush=True)
+
+        self.authenticated = bool(api_key and api_secret)
+
+        # --- SISTEMA DE CACHE E PROTEÇÃO CONTRA EXPULSÃO ---
+        self.cache_ohlcv = {}
+        self.cache_ticker = {}
+        self.cache_ttl_ohlcv = 30
+        self.cache_ttl_ticker = 10
+        self.ohlcv_failures = {}
+        self.max_ohlcv_failures = 3
+        self.last_request_time = {}
+        self.adaptive_delay = 0.5
+        self.rate_limit_block_until = 0
+
+    def _configure_exchange_endpoint(self):
+        """Aplica e valida o endpoint exato exigido pelo ambiente configurado."""
+        if self.testnet:
+            self.exchange.set_sandbox_mode(True)
+
+        api_urls = self.exchange.urls.get('api')
+        if isinstance(api_urls, dict):
+            for key in list(api_urls.keys()):
+                api_urls[key] = self.active_endpoint
+        else:
+            self.exchange.urls['api'] = self.active_endpoint
+
+        self._validate_exchange_endpoint()
+
+    def _validate_exchange_endpoint(self):
+        api_urls = self.exchange.urls.get('api')
+        if isinstance(api_urls, dict):
+            invalid_urls = {key: value for key, value in api_urls.items() if value != self.active_endpoint}
+            if invalid_urls:
+                raise RuntimeError(f"Endpoint Bybit inconsistente para USE_TESTNET={self.testnet}: {invalid_urls}")
             return
-        self._broker_cache = {}  
-        self._cache_lock = threading.Lock()
-        self._initialized = True
-        print("🔄 [BROKER MANAGER] Singleton inicializado")
 
-    def _generate_cache_key(self, client_id, exchange, testnet):
-        return f"{exchange}_{client_id}_{testnet}"
+        if api_urls != self.active_endpoint:
+            raise RuntimeError(f"Endpoint Bybit inconsistente para USE_TESTNET={self.testnet}: {api_urls}")
 
-    def get_broker(self, client, broker_cls, testnet):
-        client_id = client.get('id')
-        exchange = str(client.get('exchange') or 'bybit').strip().lower()
-        cache_key = self._generate_cache_key(client_id, exchange, testnet)
+    def _init_pybit_session(self, api_key, api_secret):
+        """Inicializa sessão pybit V5 com recv_window ampliado para ambientes com latência."""
+        try:
+            HTTP = _get_pybit_http()
+            self.pybit_sdk_module = getattr(HTTP, '__module__', '')
+            if 'pybit.unified_trading' not in self.pybit_sdk_module:
+                raise RuntimeError(f"SDK pybit incompatível: esperado pybit.unified_trading, recebido {self.pybit_sdk_module}")
 
-        with self._cache_lock:
-            if cache_key in self._broker_cache:
-                cached_broker = self._broker_cache[cache_key]
-                api_key = str(client.get('bybit_key') or '').strip()
-                if hasattr(cached_broker, 'exchange') and hasattr(cached_broker.exchange, 'apiKey'):
-                    if cached_broker.exchange.apiKey == api_key:
-                        return cached_broker
-                print(f"🔄 [BROKER MANAGER] Credenciais alteradas para cliente {client_id}, recriando broker")
-                del self._broker_cache[cache_key]
+            self.pybit_session = HTTP(
+                testnet=self.testnet,
+                api_key=api_key,
+                api_secret=api_secret,
+                recv_window=20000,
+            )
+            self.pybit_session.endpoint = self.active_endpoint
+            print(f"🔌 [PYBIT V5] módulo={self.pybit_sdk_module} endpoint={self.active_endpoint} recv_window=20000ms", flush=True)
+        except Exception as e:
+            print(f"⚠️ [PYBIT] Sessão HTTP indisponível: {e}", flush=True)
+            self.pybit_session = None
 
-            api_key = str(client.get('bybit_key') or '').strip()
-            api_secret = str(client.get('bybit_secret') or '').strip()
+    def _format_bybit_error(self, payload):
+        """Normaliza erros da Bybit V5 para o front-end."""
+        try:
+            if isinstance(payload, dict):
+                code = payload.get('retCode')
+                msg = payload.get('retMsg') or 'Erro Bybit'
+                return f"Bybit retCode={code}: {msg}"
+        except Exception:
+            pass
+        return str(payload)
 
-            if not api_key or not api_secret:
-                raise RuntimeError(f"Cliente ativo sem credenciais no SQLite (id={client_id})")
+    def _apply_rate_limit(self, endpoint):
+        """Aplica delay adaptativo para evitar estouro de chamadas."""
+        if endpoint in self.last_request_time:
+            elapsed = time.time() - self.last_request_time[endpoint]
+            if elapsed < self.adaptive_delay:
+                time.sleep(self.adaptive_delay - elapsed)
+        self.last_request_time[endpoint] = time.time()
 
-            print(f"🔧 [BROKER INIT] Cliente: {client.get('nome')} | Exchange: {exchange} | Testnet: {testnet} | Cache Key: {cache_key}")
+    def _is_cache_valid(self, cache_entry, ttl):
+        if cache_entry is None: return False
+        data, timestamp = cache_entry
+        return (time.time() - timestamp) < ttl
 
-            broker_instance = broker_cls(
-                api_key,
-                api_secret,
-                testnet=testnet,
+    def _is_auth_error(self, msg):
+        """Retorna True apenas para erros reais de credenciais inválidas."""
+        return (
+            '10003' in msg
+            or '10004' in msg
+            or '10002' in msg
+            or 'API key is invalid' in msg
+            or '403' in msg
+            or 'Forbidden' in msg
+            or 'timestamp' in msg.lower()
+            or 'nonce' in msg.lower()
+        )
+
+    def _emit_authentication_alert(self):
+        print(AUTH_10003_ALERT, flush=True)
+
+    def _handle_v5_ret_code(self, payload, route_label):
+        """Valida códigos de resposta oficiais da API Bybit V5."""
+        if not isinstance(payload, dict):
+            return False, str(payload)
+
+        ret_code = payload.get('retCode')
+        if str(ret_code) in {'0', 'None'} or ret_code is None:
+            return True, ''
+
+        ret_msg = str(payload.get('retMsg') or 'Erro Bybit').strip()
+        message = f"{route_label} falhou: retCode={ret_code} retMsg={ret_msg}"
+        if str(ret_code) == '10003':
+            self.authenticated = False
+            self._emit_authentication_alert()
+        return False, message
+
+    def _normalize_v5_symbol(self, symbol):
+        raw = str(symbol or '').strip().upper()
+        if not raw:
+            return raw
+        return raw.replace('/', '').replace(':USDT', '')
+
+    def _normalize_v5_side(self, side):
+        normalized = str(side or '').strip().lower()
+        return 'Buy' if normalized == 'buy' else 'Sell'
+
+    def calculate_dynamic_order_qty(self, symbol: str, balance=None):
+        """Calcula a quantidade de uma ordem baseada nos limites estritos da corretora."""
+        current_price = self.get_last_price(symbol)
+        if current_price <= 0:
+            raise ValueError(f"Não foi possível obter preço atual para {symbol}")
+
+        if balance is None or balance <= 0:
+            return self.order_calculator.calculate_minimum_order_qty(
+                self.exchange, symbol, current_price
+            )
+        else:
+            return self.order_calculator.calculate_order_qty_from_balance(
+                self.exchange, symbol, current_price, balance, risk_multiplier=1.0
             )
 
-            self._broker_cache[cache_key] = broker_instance
-            print(f"💾 [BROKER MANAGER] Broker cached para cliente {client_id} ({exchange})")
-            return broker_instance
-
-    def invalidate_client(self, client_id):
-        with self._cache_lock:
-            keys_to_remove = [key for key in self._broker_cache.keys() if f"_{client_id}_" in f"_{key}_"]
-            for key in keys_to_remove:
-                del self._broker_cache[key]
-                print(f"🗑️ [BROKER MANAGER] Broker removido do cache: {key}")
-
-_broker_manager = None
-def _get_broker_manager():
-    global _broker_manager
-    if _broker_manager is None: _broker_manager = BrokerManager()
-    return _broker_manager
-
-def _is_ai_cooldown_active():
-    with AI_COOLDOWN_LOCK: return AI_COOLDOWN_ACTIVE
-
-def _set_ai_cooldown_active(value: bool):
-    global AI_COOLDOWN_ACTIVE
-    with AI_COOLDOWN_LOCK: AI_COOLDOWN_ACTIVE = bool(value)
-
-# ==============================================================================
-# 🔘 GESTÃO DE RISCO E PARAMETRIZAÇÃO DE OPERAÇÃO
-# ==============================================================================
-load_dotenv()
-ENV_CONFIG = get_environment_config()
-ENVIRONMENT = ENV_CONFIG.name
-
-DEFAULT_RISK_PER_TRADE_PCT = 15.0
-RISK_PER_TRADE_PCT = float(os.getenv('RISK_PER_TRADE_PCT', 15)) / 100
-
-def _calculate_order_margin(balance): return float(balance or 0.0)
-def _calculate_order_quantity(balance, entry_price): return float(balance or 0.0), 0.0
-def _calculate_webhook_order_quantity(balance, entry_price): return float(balance or 0.0), 0.0
-
-def _calculate_dynamic_order_quantity(broker, symbol, balance):
-    try:
-        current_price = broker.get_last_price(symbol)
-        if current_price <= 0: return 0.0, 0.0
-
-        print(f"💰 [CÁLCULO DINÂMICO] Preço atual {symbol}: ${current_price:.8f}")
-        exchange_name = broker.exchange.id.lower() if hasattr(broker, 'exchange') else 'bybit'
-
-        min_amount = None
-        min_notional_raw = None
-        if hasattr(broker, 'exchange') and hasattr(broker.exchange, 'markets'):
-            market_info = broker.exchange.markets.get(symbol)
-            if market_info:
-                limits = market_info.get('limits', {})
-                min_amount = limits.get('amount', {}).get('min')
-                min_notional_raw = limits.get('cost', {}).get('min')
-
-        SAFETY_MARGIN = 1.10  
-        if min_notional_raw and min_notional_raw > 0:
-            target_notional = min_notional_raw * SAFETY_MARGIN
-        elif 'binance' in exchange_name:
-            target_notional = 5.00 * SAFETY_MARGIN   
-        else:
-            target_notional = 2.00 * SAFETY_MARGIN   
-
-        raw_qty = target_notional / current_price
-        if min_amount and min_amount > 0: raw_qty = max(raw_qty, min_amount)
-
-        final_qty = raw_qty
-        if hasattr(broker, 'exchange') and hasattr(broker.exchange, 'amount_to_precision'):
-            try: final_qty = float(broker.exchange.amount_to_precision(symbol, raw_qty))
-            except Exception: final_qty = round(raw_qty, 4)
-
-        margin_used = final_qty * current_price
-        return margin_used, final_qty
-    except Exception:
-        return 0.0, 0.0
-
-def _normalize_operation_mode(value): return 'real'
-def _normalize_account_mode(value): return 'real'
-def _is_testnet_account(value): return False
-def _mode_display_label(mode): return 'CONTA REAL'
-def _mode_balance_source(mode): return 'broker_real_balance'
-def _is_order_execution_enabled(mode): return bool(ENV_CONFIG.allow_order_execution and ENV_CONFIG.allow_real_trading)
-def _execution_status_label(mode): return 'Ordens reais ativas' if _is_order_execution_enabled(None) else 'Ordens reais bloqueadas'
-
-APP_MODE = 'real'
-ALLOW_ORDER_EXECUTION = ENV_CONFIG.allow_order_execution
-ALLOW_REAL_TRADING = ENV_CONFIG.allow_real_trading
-USE_TESTNET = False
-
-RISK_MODE = 'conservative'       
-MAX_MOEDAS_ATIVAS = 1            
-
-central_state = {
-    "balance": 0.0,  
-    "status": "INICIANDO SISTEMA...",
-    "symbol": "---",
-    "confidence": 0,
-    "opportunities": [],
-    "active_trades": [],
-    "trades": [],
-    "last_sniper_signal": None,
-    "recent_sniper_signals": [],
-    "operation_mode": "real",
-    "operation_mode_label": "CONTA REAL",
-    "execution_enabled": True,
-    "execution_label": "Ordens reais ativas",
-    "pnl_total": 0.0,  
-    "pnl_percentage": 0.0,  
-    "winning_trades": 0,  
-    "losing_trades": 0,  
-    "win_rate": 0.0,  
-    "ia2_decision": {
-        "motivo": "Varrendo o mercado com analise local, estatistica e historico...",
-        "brains": {"local": "online", "analyst": "online", "learner": "online"}
-    },
-    "max_moedas_ativas": MAX_MOEDAS_ATIVAS,
-    "risk_mode": RISK_MODE,
-}
-
-class CachedValue:
-    def __init__(self, ttl_seconds=300):
-        self.value = None
-        self.timestamp = 0
-        self.ttl = ttl_seconds
-    def get(self):
-        if time.time() - self.timestamp > self.ttl: return None
-        return self.value
-    def set(self, value):
-        self.value = value
-        self.timestamp = time.time()
-    def is_expired(self): return time.time() - self.timestamp > self.ttl
-    def clear(self): self.timestamp = 0; self.value = None
-
-client_balance_cache = CachedValue(ttl_seconds=30)  
-_status_cache = CachedValue(ttl_seconds=10)  
-_balance_refresh_lock = threading.Lock()
-_balance_refresh_in_progress = False
-
-_saved_risk_mode = db.get_config('RISK_MODE')
-if _saved_risk_mode in ('conservative', 'aggressive'):
-    RISK_MODE = _saved_risk_mode
-    MAX_MOEDAS_ATIVAS = 1 if RISK_MODE == 'conservative' else 5
-    central_state['risk_mode'] = RISK_MODE
-    central_state['max_moedas_ativas'] = MAX_MOEDAS_ATIVAS
-
-def start_runtime_services():
-    global RUNTIME_STARTED
-    with RUNTIME_START_LOCK:
-        if RUNTIME_STARTED: return False
-        threading.Thread(target=sniper_worker_loop, daemon=True).start()
-        threading.Thread(target=_monitor_sl_tp_automatico, daemon=True).start()
-        threading.Thread(target=_fetch_active_client_balances, kwargs={'force': True}, daemon=True).start()
-        RUNTIME_STARTED = True
-        return True
-
-USE_LOCAL_BRAIN_ONLY = False
-THRESHOLD_ENTRADA = 60           
-COOLDOWN_INSTITUCIONAL_SECS = 15  
-SNIPER_POSICAO_UNICA = False     
-SNIPER_SIGNAL_LOCK = threading.Lock()
-SNIPER_SIGNAL_RESERVATIONS = set()
-BLOQUEIO_REPETICAO_MOEDA_SECS = 60       
-PENALIDADE_MOEDA_JA_ABERTA = 25           
-PENALIDADE_STREAK_MESMA_MOEDA = 10      
-SCAN_TOP_COINS = 8                       
-SCAN_INTER_SYMBOL_DELAY_SECS = 5.0       
-
-def _limpar_simbolo(sym):
-    if not sym: return "---"
-    return sym.split(':')[0] if ':' in sym else sym
-
-def _normalize_symbol_key(sym): return re.sub(r'[^A-Z0-9]', '', str(sym or '').upper())
-
-def _canonicalize_symbol(sym):
-    raw = str(sym or '').strip().upper()
-    if not raw: return ""
-    compact = raw.replace(" ", "")
-    if ":" in compact: return compact
-    if "/" in compact:
-        base, quote = compact.split("/", 1)
-        return f"{base}/{quote}:{quote}"
-    if compact.endswith("USDT") and len(compact) > 4:
-        return f"{compact[:-4]}/USDT:USDT"
-    return compact
-
-def _coerce_float(*values, default=0.0):
-    for v in values:
+    def _normalize_order_qty(self, symbol, qty):
+        """
+        Normaliza quantidade para precisão aceita pela corretora, evitando Qty invalid.
+        🔧 CORREÇÃO DEFINITIVA V2: Conversão Decimal via String + amount_to_precision nativo.
+        """
         try:
-            numeric = float(v)
-            if numeric == numeric: return numeric
-        except Exception: continue
-    return float(default)
+            # Conversão segura de float para Decimal usando string
+            qty_decimal = Decimal(str(float(qty)))
+        except (TypeError, ValueError):
+            raise ValueError(f"Quantidade inválida: {qty}")
 
-def _clamp(value, minimum=0.0, maximum=100.0): return max(minimum, min(maximum, float(value)))
+        if qty_decimal <= 0:
+            raise ValueError(f"Quantidade deve ser positiva: {qty}")
 
-def _get_symbol_trade_edge(symbol, side, limit=300):
-    try:
-        normalized_symbol = _normalize_symbol_key(_canonicalize_symbol(symbol) or symbol)
-        normalized_side = str(side or '').upper()
-        trades = db.get_recent_trades(limit)
-        matching = []
-        for t in trades:
-            if str(t.get('status', 'closed')).lower() != 'closed': continue
-            if _normalize_symbol_key(_canonicalize_symbol(t.get('pair')) or t.get('pair')) == normalized_symbol and str(t.get('side') or '').upper() == normalized_side:
-                matching.append(t)
-        if not matching: return {"sample_size": 0, "win_rate": 0.0, "profit_total": 0.0, "edge_score": 0.0}
-        wins = sum(1 for t in matching if _coerce_float(t.get('profit'), default=0.0) > 0)
-        win_rate = (wins / len(matching)) * 100
-        profit_total = sum(_coerce_float(t.get('profit'), default=0.0) for t in matching)
-        edge_score = _clamp(((win_rate - 50.0) * 0.30) + min(12.0, profit_total * 0.05), -10.0, 20.0)
-        return {"sample_size": len(matching), "win_rate": round(win_rate, 2), "profit_total": round(profit_total, 2), "edge_score": round(edge_score, 2)}
-    except Exception: return {"sample_size": 0, "win_rate": 0.0, "profit_total": 0.0, "edge_score": 0.0}
+        current_price = self.get_last_price(symbol)
+        if current_price <= 0:
+            raise ValueError(f"Não foi possível obter preço atual para {symbol}")
 
-def _build_money_flow_metrics(signals, ticker, decision):
-    volume_ratio = _coerce_float(signals.get('volume_ratio'), default=0.0)
-    recent_return_pct = abs(_coerce_float(signals.get('recent_return_pct'), default=0.0))
-    quote_volume = _coerce_float(ticker.get('quoteVolume'), default=0.0) / 1_000_000
-    money_flow_score = _clamp((volume_ratio * 20) + (recent_return_pct * 10) + (quote_volume * 0.1), 0.0, 100.0)
-    return {"money_flow_score": round(money_flow_score, 2), "institutional_pressure": round(max(0.0, volume_ratio - 1.0) * 35.0, 2), "volume_ratio": round(volume_ratio, 2), "quote_volume_millions": round(quote_volume, 2), "recent_return_pct": round(recent_return_pct, 2), "money_flow_side": str(signals.get('money_flow_side') or 'WAIT').upper()}
-
-def _sanitize_signal_payload(raw_data):
-    data = dict(raw_data or {})
-    symbol = _canonicalize_symbol(data.get('symbol') or data.get('pair') or data.get('asset'))
-    if not symbol: raise ValueError("Sinal sem símbolo válido.")
-    side_raw = str(data.get('side') or data.get('decision') or '').strip().upper()
-    side = 'COMPRAR' if side_raw in ('BUY', 'LONG', 'COMPRAR') else 'VENDER' if side_raw in ('SELL', 'SHORT', 'VENDER') else None
-    if not side: raise ValueError(f"Lado inválido para o sinal: {side_raw}")
-    entry_price = _coerce_float(data.get('entry_price'), data.get('price'), default=0.0)
-    if entry_price <= 0: entry_price = _coerce_float(_get_public_price_broker().get_last_price(symbol), default=0.0)
-    return {'symbol': symbol, 'side': side, 'entry_price': round(entry_price, 8), 'confidence': max(0.0, min(100.0, _coerce_float(data.get('confidence'), default=70.0))), 'reason': str(data.get('reason') or 'Sinal Sniper Manual').strip()}
-
-def _build_last_sniper_signal(symbol, side, entry_price, confidence, reason):
-    canonical_symbol = _canonicalize_symbol(symbol) or str(symbol or '').strip()
-    return {"signal_id": f"{_limpar_simbolo(canonical_symbol)}|{side.upper()}|{entry_price}|{int(time.time())}", "symbol": _limpar_simbolo(canonical_symbol), "raw_symbol": canonical_symbol, "side": side.upper(), "entry_price": round(float(entry_price), 8), "confidence": round(float(confidence), 2), "reason": str(reason).strip(), "received_at": datetime.now().isoformat(timespec='seconds')}
-
-def _push_recent_sniper_signal(signal_data, max_items=10):
-    if not signal_data: return
-    recent = [signal_data.copy()]
-    for s in central_state.get('recent_sniper_signals', []):
-        if s.get('signal_id') != signal_data.get('signal_id'): recent.append(s)
-    central_state['recent_sniper_signals'] = recent[:max_items]
-
-def _extract_entry_price(trade):
-    try:
-        entry_price = float(trade.get('entry_price', 0) or 0)
-        if entry_price > 0: return round(entry_price, 8)
-    except Exception: pass
-    return 0.0
-
-def _get_public_price_broker():
-    global BybitClient, public_price_broker
-    if public_price_broker is not None: return public_price_broker
-    if BybitClient is None:
-        from src.broker.bybit_client import BybitClient as _BybitClient
-        BybitClient = _BybitClient
-    _, bybit_api_key, bybit_api_secret = _get_active_investor_bybit_credentials()
-    if not bybit_api_key or not bybit_api_secret:
-        import ccxt
-        class CCXTPublicPriceFallback:
-            def get_last_price(self, symbol):
-                try:
-                    ex = ccxt.bybit({'enableRateLimit': True})
-                    return float(ex.fetch_ticker(symbol)['last'])
-                except Exception: return 0.0
-            def fetch_ohlcv(self, symbol, timeframe='15m'):
-                try:
-                    ex = ccxt.bybit({'enableRateLimit': True})
-                    import pandas as pd
-                    data = ex.fetch_ohlcv(symbol, timeframe, limit=200)
-                    return pd.DataFrame(data, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-                except Exception: return None
-        return CCXTPublicPriceFallback()
-    public_price_broker = BybitClient(bybit_api_key, bybit_api_secret, testnet=False)
-    return public_price_broker
-
-def _ensure_broker_class(exchange='bybit'):
-    exchange = str(exchange or 'bybit').strip().lower()
-    if exchange == 'binance':
-        global _BinanceClient
-        if '_BinanceClient' not in globals() or _BinanceClient is None:
-            from src.broker.binance_client import BinanceClient as _BC
-            globals()['_BinanceClient'] = _BC
-        return globals()['_BinanceClient']
-    global BybitClient
-    if BybitClient is None:
-        from src.broker.bybit_client import BybitClient as _BybitClient
-        BybitClient = _BybitClient
-    return BybitClient
-
-def _make_broker(client):
-    exchange = str(client.get('exchange') or 'bybit').strip().lower()
-    broker_cls = _ensure_broker_class(exchange)
-    return _get_broker_manager().get_broker(client, broker_cls, False)
-
-def _get_registered_clients(active_only=False):
-    try:
-        local_clients = db.get_active_clients() if active_only else db.get_all_clients()
-        return [{**dict(client), "storage_source": "local"} for client in local_clients]
-    except Exception: return []
-
-def _get_registered_client_by_id(client_id):
-    local_client = db.get_client_by_id(client_id)
-    return {**dict(local_client), "storage_source": "local"} if local_client else None
-
-def _get_active_investor_bybit_credentials():
-    for client in _get_registered_clients(active_only=True):
-        persisted = _get_registered_client_by_id(client.get('id'))
-        if persisted:
-            api_key = str(persisted.get('bybit_key') or '').strip()
-            api_secret = str(persisted.get('bybit_secret') or '').strip()
-            if api_key and api_secret: return persisted.get('id'), api_key, api_secret
-    return None, '', ''
-
-def _save_client_everywhere(client_data):
-    payload = dict(client_data or {})
-    payload['account_mode'] = 'real'
-    payload['is_testnet'] = False
-    payload['balance_source'] = 'broker_real_balance'
-    local_result = db.upsert_client_local(payload) if payload.get('id') is not None else db.add_client(payload)
-    final_id = payload.get('id') or local_result
-    final_record = _get_registered_client_by_id(final_id)
-    client_balance_cache.clear()
-    return final_record, False, bool(local_result)
-
-def _delete_client_everywhere(client_id):
-    _get_broker_manager().invalidate_client(client_id)
-    return True, db.delete_client(client_id)
-
-def _fetch_active_client_balances(force=False):
-    """ 🔄 LAZY LOADING LOCAL QUE QUEBRA A IMPORTAÇÃO CÍCLICA """
-    global _balance_refresh_in_progress
-    if not force and not client_balance_cache.is_expired(): return client_balance_cache.get()
-    if not force:
-        with _balance_refresh_lock:
-            if not _balance_refresh_in_progress:
-                _balance_refresh_in_progress = True
-                def _bg_refresh():
-                    global _balance_refresh_in_progress
-                    try: _fetch_active_client_balances(force=True)
-                    finally:
-                        with _balance_refresh_lock: _balance_refresh_in_progress = False
-                threading.Thread(target=_bg_refresh, daemon=True).start()
-        return client_balance_cache.get() or {"items": [], "total": 0.0}
-
-    items = []
-    total = 0.0
-    try:
-        _ensure_broker_class('bybit')
-        _ensure_broker_class('binance')
-        active_clients = _get_registered_clients(active_only=True)
-        for client in active_clients:
-            balance = None
-            error = None
-            try:
-                broker = _make_broker(client)
-                balance = broker.get_balance()
-                if balance is not None:
-                    balance = round(float(balance), 2)
-                    total += balance
-            except Exception as e: error = str(e)
-            items.append({
-                "id": client.get('id'), "nome": client.get('nome'), "saldo_real": balance,
-                "saldo_base": float(client.get('saldo_base', 0) or 0), "is_testnet": False,
-                "account_mode": "real", "exchange": str(client.get('exchange') or 'bybit').lower(),
-                "status": client.get('status'), "error": error,
-            })
-    except Exception as e: print(f"⚠️ Erro ao varrer saldos assíncronos: {e}")
-    res = {"items": items, "total": round(total, 2)}
-    client_balance_cache.set(res)
-    return res
-
-def _refresh_real_balance_state(force=False):
-    balances = _fetch_active_client_balances(force=force)
-    mode_items = balances.get("items", [])
-    for item in mode_items:
-        if item.get("saldo_real") is None: item["saldo_real"] = item.get("saldo_base")
-    valid_items = [item for item in mode_items if item.get("saldo_real") is not None]
-    
-    central_state['real_client_balances'] = mode_items
-    if valid_items:
-        central_state['balance'] = round(sum(float(item["saldo_real"]) for item in valid_items), 2)
-        central_state['status'] = f"💼 CONTA REAL: saldo sincronizado para {len(valid_items)} investidores"
-    else:
-        central_state['balance'] = 0.0
-        central_state['status'] = "💼 CONTA REAL: nenhum cliente real ativo vinculado"
-
-def _calculate_live_trade_metrics(entry_price, current_price, side):
-    entry = float(entry_price or 0); current = float(current_price or 0)
-    if entry <= 0 or current <= 0: return {"current_price": current, "price_change_pct": 0.0, "pnl_pct": 0.0, "trend": "flat", "is_favorable": False}
-    market_move = ((current - entry) / entry) * 100
-    pnl_pct = -market_move if str(side).upper() in ('VENDER', 'SELL', 'SHORT') else market_move
-    return {"current_price": round(current, 8), "price_change_pct": round(market_move, 4), "pnl_pct": round(pnl_pct, 4), "trend": "up" if current > entry else "down", "is_favorable": pnl_pct >= 0}
-
-def _get_live_price_snapshot(symbol, entry_price, side):
-    try: return _calculate_live_trade_metrics(entry_price, _get_public_price_broker().get_last_price(symbol), side)
-    except Exception: return _calculate_live_trade_metrics(entry_price, 0.0, side)
-
-def _refresh_last_sniper_signal():
-    s = central_state.get('last_sniper_signal')
-    if s: s.update(_get_live_price_snapshot(s.get('raw_symbol') or s.get('symbol'), s.get('entry_price'), s.get('side')))
-
-def _repair_open_trades():
-    try:
-        open_trades = db.get_open_trades(100)
-        if not open_trades: return
-        conn = db._connect(); cur = conn.cursor()
-        for t in open_trades:
-            canonical = _canonicalize_symbol(t.get('pair'))
-            price = _extract_entry_price(t)
-            if not canonical or price <= 0:
-                cur.execute("UPDATE trades SET status='closed', pnl_pct=0, closed_at=? WHERE id=?", (time.strftime("%d/%m %H:%M"), t.get('id')))
-        conn.commit(); conn.close()
-    except Exception: pass
-
-def _can_open_new_signal(symbol):
-    _repair_open_trades()
-    open_trades = db.get_open_trades(100)
-    open_symbols = {_normalize_symbol_key(t.get('pair')) for t in open_trades if t.get('pair')}
-    normalized = _normalize_symbol_key(_canonicalize_symbol(symbol))
-    if normalized in open_symbols: return False, f"Moeda {symbol} já está em andamento."
-    if len(open_symbols) >= MAX_MOEDAS_ATIVAS: return False, f"Limite de {MAX_MOEDAS_ATIVAS} ativos atingido."
-    return True, "ok"
-
-def _reserve_signal_slot(symbol):
-    with SNIPER_SIGNAL_LOCK:
-        ok, reason = _can_open_new_signal(symbol)
-        if ok: SNIPER_SIGNAL_RESERVATIONS.add(_normalize_symbol_key(_canonicalize_symbol(symbol)))
-        return ok, reason
-
-def _release_signal_slot(symbol):
-    with SNIPER_SIGNAL_LOCK: SNIPER_SIGNAL_RESERVATIONS.discard(_normalize_symbol_key(_canonicalize_symbol(symbol)))
-
-def _calcular_pnl_trades():
-    try:
-        trades = db.get_recent_trades(500)
-        pnl = 0.0; w = 0; l = 0
-        for t in trades:
-            if str(t.get('status')).lower() != 'closed': continue
-            prof = float(t.get('profit', 0))
-            pnl += prof
-            if prof > 0: w += 1
-            elif prof < 0: l += 1
-        total = w + l or 1
-        central_state['pnl_total'] = round(pnl, 2)
-        central_state['winning_trades'] = w
-        central_state['losing_trades'] = l
-        central_state['win_rate'] = round((w / total) * 100, 2)
-    except Exception: pass
-
-def _monitor_sl_tp_automatico():
-    time.sleep(1)
-    SL_PCT = -50.0  
-    TP_PCT = 100.0
-    while True:
         try:
-            open_trades = db.get_open_trades(100)
-            for t in open_trades:
-                live = _get_live_price_snapshot(t.get('pair'), _extract_entry_price(t), t.get('side'))
-                pnl_pct = live.get('pnl_pct', 0.0)
-                motivo = f"SL_AUTO -50%" if pnl_pct <= SL_PCT else f"TP_AUTO +100%" if pnl_pct >= TP_PCT else None
-                if motivo:
-                    conn = db._connect(); cur = conn.cursor()
-                    cur.execute("UPDATE trades SET status='closed', pnl_pct=?, notes=COALESCE(notes,'') || ? WHERE id=?", (round(pnl_pct, 4), f" | {motivo}", t.get('id')))
-                    conn.commit(); conn.close()
-                    _sync_active_trades_from_db()
-        except Exception: pass
-        time.sleep(10)
+            self.exchange.load_markets()
+            market = self.exchange.market(symbol)
+            limits = market.get('limits', {})
 
-def _sync_active_trades_from_db():
-    try:
-        trades = db.get_open_trades(50)
-        res = []
-        for t in trades:
-            if str(t.get('status')).lower() != 'open': continue
-            price = _extract_entry_price(t)
-            live = _get_live_price_snapshot(t.get('pair'), price, t.get('side'))
-            trade_payload = {
-                'id': t.get('id'), 'symbol': _limpar_simbolo(t.get('pair')), 'raw_symbol': t.get('pair'),
-                'side': t.get('side'), 'entry': round(float(t.get('profit', 0)), 2), 'entry_price': price,
-                'client_count': 1, 'trade_count': 1,
+            min_amount = limits.get('amount', {}).get('min')
+            if min_amount is None or str(min_amount).lower() == 'none' or min_amount <= 0:
+                min_amount = 0.001
+
+            min_cost = limits.get('cost', {}).get('min')
+            if min_cost is None or str(min_cost).lower() == 'none' or min_cost <= 0:
+                min_cost = 6.0
+
+            print(f"   📊 [BYBIT LIMITS] {symbol}: min_amount={min_amount}, min_notional={min_cost} USDT", flush=True)
+        except Exception as market_err:
+            print(f"⚠️ [BYBIT MARKET] Erro ao carregar limites: {market_err}, usando defaults", flush=True)
+            min_amount = 0.001
+            min_cost = 6.0
+
+        # Conversões seguras usando Decimal(str())
+        min_cost_decimal = Decimal(str(min_cost))
+        current_price_decimal = Decimal(str(current_price))
+        min_qty_for_notional = min_cost_decimal / current_price_decimal
+
+        required_min_qty = max(Decimal(str(min_amount)), min_qty_for_notional)
+
+        if qty_decimal < required_min_qty:
+            print(f"⚠️ [BYBIT QTY] Quantidade {qty_decimal} abaixo do mínimo necessário. Ajustando para {required_min_qty}", flush=True)
+            qty_decimal = required_min_qty
+
+        # Delega arredondamento final estritamente ao CCXT
+        final_qty = self.exchange.amount_to_precision(symbol, float(qty_decimal))
+
+        final_qty_decimal = Decimal(str(final_qty))
+        notional_value_decimal = final_qty_decimal * current_price_decimal
+
+        if notional_value_decimal < min_cost_decimal:
+            adjusted_qty = min_cost_decimal / current_price_decimal
+            final_qty = self.exchange.amount_to_precision(symbol, float(adjusted_qty) * 1.05)
+            final_qty_decimal = Decimal(str(final_qty))
+            notional_value_decimal = final_qty_decimal * current_price_decimal
+            print(f"   🔧 [BYBIT NOTIONAL RE-ADJUSTED] Qty recalculada para cima para bater o piso: qty={final_qty}", flush=True)
+
+        print(f"   ✅ [BYBIT ORDER VALIDA] qty={final_qty} (notional={float(notional_value_decimal):.2f} USDT >= {float(min_cost_decimal)} USDT)", flush=True)
+
+        return str(final_qty)
+
+    def _validate_insurance_fund(self):
+        """Consulta o fundo de seguros V5 apenas para validar conectividade inicial."""
+        if self.pybit_session is None:
+            return True, "SDK pybit V5 indisponível para validar fundo de seguros"
+
+        try:
+            rsp = self.pybit_session.get_insurance(coin='USDT')
+            ok, error_message = self._handle_v5_ret_code(rsp, 'v5/market/insurance')
+            if not ok:
+                return False, error_message
+
+            items = ((rsp or {}).get('result') or {}).get('list') or []
+            return True, f"Fundo de seguros OK ({len(items)} registros)"
+        except Exception as e:
+            return False, str(e).split('\n')[0][:220]
+
+    def get_balance(self):
+        """Busca saldo USDT com fallback seguro para múltiplos perfis de conta Bybit."""
+        def _usdt_from(balance):
+            total = (balance or {}).get('total') or {}
+            usdt = total.get('USDT')
+            return float(usdt) if usdt is not None else None
+
+        # Fallback 1: Conta Unificada (UTA)
+        try:
+            print(f"📊 [BYBIT] Tentando fetch_balance (UNIFIED) para {self.exchange.apiKey[:4]}...", flush=True)
+            balance = self.exchange.fetch_balance(params={'accountType': 'UNIFIED'})
+            usdt = _usdt_from(balance)
+            if usdt is not None: return usdt
+        except Exception as e:
+            msg = str(e)
+            print(f"⚠️ [BYBIT] Erro (UNIFIED): {msg}", flush=True)
+            if self._is_auth_error(msg):
+                self.authenticated = False
+                return None
+
+        # Fallback 2: Conta Standard/Contratos Clássica
+        try:
+            print(f"📊 [BYBIT] Tentando fetch_balance (CONTRACT)...", flush=True)
+            balance = self.exchange.fetch_balance(params={'accountType': 'CONTRACT'})
+            usdt = _usdt_from(balance)
+            if usdt is not None: return usdt
+        except Exception as e:
+            msg = str(e)
+            print(f"⚠️ [BYBIT] Erro (CONTRACT): {msg}", flush=True)
+            if self._is_auth_error(msg):
+                self.authenticated = False
+                return None
+
+        # Fallback 3: Swap Param Legado
+        try:
+            print(f"📊 [BYBIT] Tentando fetch_balance (type=swap)...", flush=True)
+            balance = self.exchange.fetch_balance(params={'type': 'swap'})
+            usdt = _usdt_from(balance)
+            if usdt is not None: return usdt
+        except Exception as e:
+            msg = str(e)
+            print(f"⚠️ [BYBIT] Erro (SWAP): {msg}", flush=True)
+            if self._is_auth_error(msg):
+                self.authenticated = False
+                return None
+            print(f"[ERRO BROKER] Falha crítica ao consultar saldo total: {msg}", flush=True)
+            return None
+
+        return 0.0
+
+    def fetch_ohlcv(self, symbol, timeframe="15m"):
+        """Busca base de dados histórica filtrada por cache atômico."""
+        pd = _get_pd()
+        cache_key = f"{symbol}_{timeframe}"
+
+        if cache_key in self.cache_ohlcv and self._is_cache_valid(self.cache_ohlcv[cache_key], self.cache_ttl_ohlcv):
+            return self.cache_ohlcv[cache_key][0]
+
+        try:
+            self._apply_rate_limit('fetch_ohlcv')
+            params = {'category': 'linear'}
+            data = self.exchange.fetch_ohlcv(symbol, timeframe, limit=250, params=params)
+            df = pd.DataFrame(data, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+
+            self.cache_ohlcv[cache_key] = (df, time.time())
+            self.ohlcv_failures[cache_key] = 0
+            return df
+        except Exception as e:
+            print(f"[ERRO BROKER] Dados {symbol} falharam: {e}", flush=True)
+            fail_count = self.ohlcv_failures.get(cache_key, 0) + 1
+            self.ohlcv_failures[cache_key] = fail_count
+
+            if fail_count >= self.max_ohlcv_failures:
+                if cache_key in self.cache_ohlcv:
+                    del self.cache_ohlcv[cache_key]
+                print(f"⚠️ [CACHE INVALIDADO] {symbol} {timeframe} devido a falhas consecutivas de rede", flush=True)
+                return None
+
+            return self.cache_ohlcv[cache_key][0] if cache_key in self.cache_ohlcv else None
+
+    def get_last_price(self, symbol):
+        """Preço em tempo real do ativo."""
+        if symbol in self.cache_ticker and self._is_cache_valid(self.cache_ticker[symbol], self.cache_ttl_ticker):
+            return self.cache_ticker[symbol][0]
+
+        try:
+            self._apply_rate_limit('get_last_price')
+            ticker = self.exchange.fetch_ticker(symbol, params={'category': 'linear'})
+            price = float(ticker['last'])
+            self.cache_ticker[symbol] = (price, time.time())
+            return price
+        except Exception as e:
+            print(f"[ERRO BROKER] Preço para {symbol} falhou: {e}", flush=True)
+            return self.cache_ticker[symbol][0] if symbol in self.cache_ticker else 0.0
+
+    def fetch_order_details(self, symbol, order_id):
+        """Busca a ficha descritiva completa de uma boleta de mercado executada."""
+        try:
+            self._apply_rate_limit('fetch_order')
+            params = {'category': 'linear'}
+            print(f"   🔍 Buscando detalhes da ordem {order_id} para {symbol}...", flush=True)
+            order_details = self.exchange.fetch_order(order_id, symbol, params=params)
+            print("   ✅ Detalhes da ordem obtidos com sucesso", flush=True)
+            return order_details
+        except Exception as e:
+            print(f"   ⚠️ Não foi possível buscar os metadados da ordem {order_id}: {e}", flush=True)
+            return None
+
+    def execute_market_order(self, symbol, side, qty, raise_on_error=False):
+        """Executa ordem a mercado para entrada instantânea na Bybit V5."""
+        try:
+            if not self.authenticated:
+                print("[ERRO BROKER] Ordem abortada: chaves ausentes ou inválidas.", flush=True)
+                if raise_on_error:
+                    raise RuntimeError('Cliente sem credenciais válidas na exchange.')
+                return None
+
+            normalized_qty = self._normalize_order_qty(symbol, qty)
+            ccxt_qty = float(normalized_qty)
+
+            print(f"🔥 [ORDEM SNIPER BYBIT] {side.upper()} {normalized_qty} em {symbol}", flush=True)
+
+            if self.pybit_session is not None:
+                v5_symbol = self._normalize_v5_symbol(symbol)
+
+                # Mapeia positionIdx para Hedge Mode (Modo Bidirecional)
+                position_idx = 1 if side.lower() == 'buy' else 2
+
+                payload = {
+                    'category': 'linear',
+                    'symbol': v5_symbol,
+                    'side': self._normalize_v5_side(side),
+                    'orderType': 'Market',
+                    'qty': normalized_qty,
+                    'positionIdx': position_idx,
+                }
+                print(f"   📤 Enviando via Pybit V5 (/v5/order/create): {payload}", flush=True)
+                rsp = self.pybit_session.place_order(**payload)
+                print(f"   📥 Resposta Bybit: {rsp}", flush=True)
+
+                ok, error_message = self._handle_v5_ret_code(rsp, 'v5/order/create')
+                if not ok:
+                    print(f"❌ [ERRO EXECUÇÃO BYBIT] {error_message}", flush=True)
+                    if raise_on_error: raise RuntimeError(error_message)
+                    return None
+
+                result = (rsp or {}).get('result') or {}
+                order_id = result.get('orderId') or result.get('orderLinkId')
+                print(f"✅ [BYBIT] Ordem preenchida na exchange - ID: {order_id}", flush=True)
+
+                order_details = self.fetch_order_details(symbol, order_id)
+                if order_details:
+                    return {**order_details, 'route': 'v5/order/create', 'category': 'linear'}
+                else:
+                    return {**result, 'id': order_id, 'route': 'v5/order/create', 'category': 'linear', 'symbol': v5_symbol}
+
+            # Fallback nativo via Core CCXT Engine
+            # Mapeia positionIdx para Hedge Mode (Modo Bidirecional)
+            position_idx = 1 if side.lower() == 'buy' else 2
+            params = {'category': 'linear', 'positionIdx': position_idx}
+            print(f"   📤 Enviando via CCXT Fallback: {symbol} | qty={normalized_qty} | positionIdx={position_idx}", flush=True)
+            order = self.exchange.create_order(symbol, 'market', side, ccxt_qty, params=params)
+            order_id = order.get('id', 'N/A')
+            print(f"✅ [BYBIT CCXT] Ordem preenchida - ID: {order_id}", flush=True)
+
+            if order_id != 'N/A':
+                order_details = self.fetch_order_details(symbol, order_id)
+                if order_details: return order_details
+
+            return order
+        except Exception as e:
+            ccxt = _get_ccxt()
+            if isinstance(e, ccxt.BaseError):
+                print(f"❌ ERRO DA CORRETORA BYBIT (CCXT): {e}", flush=True)
+            else:
+                print(f"❌ [ERRO EXECUÇÃO BYBIT] Falha de infraestrutura: {e}", flush=True)
+            if raise_on_error: raise
+            return None
+
+    def test_connection(self):
+        """Testa o canal de comunicação seguro de dados privados."""
+        try:
+            if self.authenticated:
+                insurance_ok, insurance_message = self._validate_insurance_fund()
+                if not insurance_ok: return False, insurance_message
+
+                bal = self.get_balance()
+                if bal is not None:
+                    return True, f"{insurance_message} | Autenticado OK (USDT {bal:.2f})"
+
+                if self.pybit_session is not None:
+                    pybit_errors = []
+                    for account_type in ['UNIFIED', 'CONTRACT']:
+                        try:
+                            rsp = self.pybit_session.get_wallet_balance(accountType=account_type, coin='USDT')
+                            ok, err_msg = self._handle_v5_ret_code(rsp, f'v5/balance ({account_type})')
+                            if ok:
+                                result = (rsp or {}).get('result') or {}
+                                rows = result.get('list') or []
+                                usdt_bal = float(rows[0].get('totalWalletBalance') or 0.0) if rows else 0.0
+                                return True, f"{insurance_message} | Autenticado OK ({account_type}, USDT {usdt_bal:.2f})"
+                            pybit_errors.append(err_msg)
+                        except Exception as pybit_err:
+                            pybit_errors.append(str(pybit_err).split('\n')[0][:220])
+
+                    if pybit_errors: return False, pybit_errors[0]
+
+                return False, "Chave API sem privilégios ou inválida na Bybit"
+            else:
+                self.exchange.fetch_tickers()
+                return True, "Canal Público OK"
+        except Exception as e:
+            return False, str(e).split('\n')[0][:200]
+
+    def set_tp_sl_sniper(self, symbol, side, entry_price, position_qty):
+        """
+        🎯 PROTOCOLO 100/50 - SETAGEM AUTOMÁTICA DE TP/SL COM HEDGE MODE
+        Take Profit: +10% de movimento (+100% de lucro sobre margem com alavancagem 10x)
+        Stop Loss: -50% de perda sobre o valor da entrada (Proteção Institucional)
+        """
+        try:
+            if not self.authenticated:
+                print(f"❌ [TP/SL] Não autenticado. Proteção de capital ABORTADA.")
+                return False
+
+            # Lógica para Hedge Mode: Identifica o positionIdx da posição que já está aberta
+            # Se a ordem inicial foi de COMPRA (Buy), o stop do TP/SL fica no index 1 (Long)
+            # Se a ordem inicial foi de VENDA (Sell), o stop do TP/SL fica no index 2 (Short)
+            pos_idx = 1 if side.lower() == 'buy' else 2
+
+            # Cálculo estrito dos alvos de preço com base na direção
+            if side.lower() == 'buy':
+                tp_price = entry_price * 1.10  # +10% movimento
+                sl_price = entry_price * 0.50  # -50% do valor de entrada (Stop Loss de 50%)
+            else:
+                tp_price = entry_price * 0.90  # -10% movimento (lucra na queda)
+                sl_price = entry_price * 1.50  # +50% do valor de entrada (Stop Loss de 50%)
+
+            # Formatação de precisão da Bybit para evitar rejeição por casas decimais
+            price_to_precision = getattr(self.exchange, 'price_to_precision', None)
+            if callable(price_to_precision):
+                try:
+                    tp_price = float(price_to_precision(symbol, tp_price))
+                    sl_price = float(price_to_precision(symbol, sl_price))
+                except Exception as precision_error:
+                    print(f"⚠️ [TP/SL] Falha na formatação de casas decimais: {precision_error}")
+
+            print(f"🛡️  [PROTEÇÃO SNIPER GATILHADA] Ativo: {symbol}")
+            print(f"   📍 Entrada: ${entry_price:.4f} | positionIdx: {pos_idx}")
+            print(f"   ✅ Target TP (+100%): ${tp_price:.4f}")
+            print(f"   ❌ Target SL (-50%): ${sl_price:.4f}")
+
+            # 🔧 AJUSTE CRÍTICO HEDGE MODE: Injeta category e positionIdx nos parâmetros da ordem
+            params = {
+                'category': 'linear',
+                'positionIdx': pos_idx,  # <-- Campo essencial para sanar o erro 10001
+                'takeProfit': tp_price,
+                'stopLoss': sl_price
             }
-            trade_payload.update(live)
-            res.append(trade_payload)
-        central_state['active_trades'] = res
-    except Exception: pass
 
-def _close_stale_open_trades(max_age_minutes=180):
-    try:
-        trades = db.get_open_trades(100)
-        conn = db._connect(); cur = conn.cursor()
-        for t in trades:
-            dt = datetime.fromisoformat(str(t.get('created_at')).replace('Z', ''))
-            if (datetime.now() - dt) > timedelta(minutes=max_age_minutes):
-                cur.execute("UPDATE trades SET status='closed', notes=COALESCE(notes,'') || ' | STALE' WHERE id=?", (t.get('id'),))
-        conn.commit(); conn.close()
-    except Exception: pass
+            # Envia a ordem de amarração de alvos a mercado para a Bybit
+            self.exchange.create_order(
+                symbol=symbol,
+                type='market',
+                side=side,
+                amount=float(position_qty),
+                params=params
+            )
 
-def broadcast_ordem_global(symbol, side, entry_price, res_ia):
-    slot_reserved = False
-    try:
-        if not _reserve_signal_slot(symbol): return
-        slot_reserved = True
-        signal_snapshot = _build_last_sniper_signal(symbol, side, entry_price, res_ia.get('probabilidade', 70), res_ia.get('motivo', ''))
-        central_state['last_sniper_signal'] = signal_snapshot
-        _push_recent_sniper_signal(signal_snapshot)
-        
-        threading.Thread(
-            target=_process_client_orders_background,
-            args=(symbol, side, entry_price, res_ia.get('probabilidade', 70), res_ia.get('motivo', '')),
-            daemon=True
-        ).start()
-    finally:
-        if slot_reserved: _release_signal_slot(symbol)
+            print(f"✅ [TP/SL APLICADO COM SUCESSO] Posição real blindada na corretora.", flush=True)
+            return True
 
-def sniper_worker_loop():
-    time.sleep(1)
-    global BybitClient, IndicatorEngine, GroqValidator
-    from src.broker.bybit_client import BybitClient
-    from src.engine.indicators import IndicatorEngine
-    from src.ai_brain.validator import GroqValidator
+        except Exception as e:
+            print(f"⚠️  [TP/SL FALHOU] Erro na injeção de alvos Bybit: {e}", flush=True)
+            return False
 
-    while True:
+    def close_position_with_sl(self, symbol, position_side):
+        """Encerra uma posição de derivativo em modo de urgência mapeando o positionIdx correto."""
         try:
-            _repair_open_trades()
-            _calcular_pnl_trades()
-            _refresh_real_balance_state()
-            _sync_active_trades_from_db()
+            if not self.authenticated: return False
 
-            if len(central_state['active_trades']) >= MAX_MOEDAS_ATIVAS:
-                time.sleep(15)
-                continue
+            close_side = "sell" if position_side.lower() == "buy" else "buy"
+            print(f"🔒 [CLOSE POSITION] Disparando ordem de fechamento para {symbol}", flush=True)
 
-            _, key, sec = _get_active_investor_bybit_credentials()
-            if not key or not sec:
-                time.sleep(10)
-                continue
+            positions = self.exchange.fetch_positions(params={'category': 'linear'})
+            target_position = None
 
-            ex_master = BybitClient(key, sec, False)
-            tickers = ex_master.exchange.fetch_tickers(params={'category': 'linear'})
-            top_coins = sorted([t for t in tickers.values() if 'USDT' in t.get('symbol', '') and ':' in t['symbol']], key=lambda x: x.get('quoteVolume', 0), reverse=True)[:SCAN_TOP_COINS]
-            
-            validator = GroqValidator()
-            for t in top_coins:
-                sym = t['symbol']
-                df = ex_master.fetch_ohlcv(sym, timeframe='15m')
-                if df is None or len(df) < 200: continue
-                
-                signals = IndicatorEngine(df).get_signals()
-                if signals['trend'] == 'NEUTRO' or validator.local_signal(signals) < 25: continue
-                
-                res = validator.consensus_predict(signals, sym, force_local_only=True)
-                prob = float(res.get('probabilidade', 0))
-                decisao = str(res.get('decisao', 'ABORTAR')).upper()
+            for p in positions:
+                pos_symbol = p.get('symbol', '')
+                pos_contracts = float(p.get('contracts') or 0)
+                pos_side = str(p.get('side', '')).lower()
 
-                if prob >= THRESHOLD_ENTRADA and decisao in ['COMPRAR', 'VENDER', 'BUY', 'SELL']:
-                    broadcast_ordem_global(sym, 'buy' if decisao in ('BUY', 'COMPRAR') else 'sell', float(signals['price']), res)
-                    time.sleep(COOLDOWN_INSTITUCIONAL_SECS)
-                    break
-                time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
-        except Exception: pass
-        time.sleep(15)
+                if symbol in pos_symbol and pos_contracts > 0:
+                    if (position_side.lower() in ('buy', 'long') and pos_side == 'long') or \
+                       (position_side.lower() in ('sell', 'short') and pos_side == 'short'):
+                        target_position = p
+                        break
 
-def _process_client_orders_background(symbol, side, entry_price, confidence, reason):
-    try:
-        clientes = _get_registered_clients(active_only=True)
-        for c in clientes:
-            try:
-                broker = _make_broker(c)
-                banca = float(c.get('saldo_base', 1000.0))
-                margem, qty = _calculate_dynamic_order_quantity(broker, symbol, banca)
-                if qty > 0 and _is_order_execution_enabled(None):
-                    order_result = broker.execute_market_order(symbol, side.lower(), qty, raise_on_error=True)
-                    if order_result: broker.set_tp_sl_sniper(symbol, side.lower(), entry_price, qty)
-            except Exception: pass
-    except Exception: pass
+            if not target_position:
+                print(f"⚠️ [CLOSE POSITION] Nenhuma posição aberta encontrada para fechar em {symbol}", flush=True)
+                return False
 
-# ==============================================================================
-# 🎛️ ENDPOINTS DA API REST (FLASK) - DEVEM VIR ANTES DO PEGA-TUDO
-# ==============================================================================
+            pos_size = float(target_position.get('contracts') or 0)
+            position_idx = target_position.get('info', {}).get('positionIdx')
 
-@app.route('/api/investidores', methods=['GET'])
-def get_investidores():
-    try:
-        rows = _get_registered_clients(active_only=False)
-        balance_map = {item.get('id'): item for item in _fetch_active_client_balances().get('items', [])}
-        return jsonify([{
-            "id": r.get('id'), "nome": r.get('nome'),
-            "banca": (balance_map.get(r.get('id')) or {}).get('saldo_real', r.get('saldo_base', 0)),
-            "saldo_real": (balance_map.get(r.get('id')) or {}).get('saldo_real'),
-            "saldo_configurado": r.get('saldo_base', 0), "status": r.get('status'),
-            "mode": "REAL", "account_mode": "real", "balance_source": r.get('balance_source'),
-            "storage_source": "local", "exchange": str(r.get('exchange') or 'bybit').lower(),
-        } for r in rows]), 200
-    except Exception as e:
-        return jsonify([]), 200
+            params = {'category': 'linear', 'reduceOnly': True}
+            if position_idx is not None:
+                params['positionIdx'] = position_idx
 
-@app.route('/api/vincular_cliente', methods=['POST'])
-def add_cliente():
-    data = request.json or {}
-    try:
-        validation = validar_e_salvar_cliente(data.get('bybit_key'), data.get('bybit_secret'), False, client_payload=data)
-        record = validation.get('record')
-        if record:
-            return jsonify({"status": "sucesso", "msg": "Investidor conectado com sucesso!", "valid": True, "client": record}), 200
-        return jsonify({"status": "erro", "msg": "Falha ao salvar investidor"}), 500
-    except Exception as e:
-        return jsonify({"status": "erro", "msg": str(e)}), 400
+            normalized_qty = self._normalize_order_qty(symbol, pos_size)
 
-@app.route('/api/status', methods=['GET'])
-def get_status():
-    try:
-        _repair_open_trades()
-        _refresh_real_balance_state()
-        _sync_active_trades_from_db()
-        _refresh_last_sniper_signal()
-        central_state['trades'] = db.get_recent_trades(20)
-        return jsonify(central_state), 200
-    except Exception: return jsonify(central_state), 200
+            order = self.exchange.create_order(
+                symbol=symbol,
+                type='market',
+                side=close_side,
+                amount=float(normalized_qty),
+                params=params
+            )
 
-@app.route('/api/dashboard/balance', methods=['GET'])
-def update_dashboard_balance():
-    try:
-        _refresh_real_balance_state(force=True)
-        return jsonify({"balance": central_state['balance'], "status": central_state['status'], "real_client_balances": central_state.get('real_client_balances', [])}), 200
-    except Exception as e: return jsonify({"balance": 0.0, "status": f"Erro: {e}"}), 200
-
-@app.route('/api/cliente/<int:client_id>', methods=['GET', 'PUT', 'DELETE'])
-def api_cliente_manage(client_id):
-    try:
-        if request.method == 'GET':
-            c = _get_registered_client_by_id(client_id)
-            return jsonify(c) if c else (jsonify({"error": "Não encontrado"}), 404)
-        elif request.method == 'PUT':
-            data = request.json or {}
-            existing = _get_registered_client_by_id(client_id)
-            v = validar_e_salvar_cliente(data.get('bybit_key'), data.get('bybit_secret'), False, client_payload=data, client_id=client_id, existing_client=existing)
-            return jsonify({"success": True, "client": v.get('record')})
-        elif request.method == 'DELETE':
-            _, local_del = _delete_client_everywhere(client_id)
-            return jsonify({"success": local_del})
-    except Exception as e: return jsonify({"error": str(e)}), 400
-
-@app.route('/api/trade/manual-entry', methods=['POST'])
-def api_manual_entry_trade():
-    try:
-        data = request.json or {}
-        symbol = data.get('symbol', '').strip()
-        side = data.get('side', '').strip().upper()
-        force_execute = data.get('force_execute', False)
-
-        if not symbol or side not in ['BUY', 'SELL', 'COMPRAR', 'VENDER']:
-            return jsonify({"success": False, "error": "Parâmetros inválidos"}), 400
-
-        side_normalized = 'COMPRAR' if side in ['BUY', 'COMPRAR'] else 'VENDER'
-        pub_broker = _get_public_price_broker()
-        entry_price = float(pub_broker.get_last_price(symbol))
-        df = pub_broker.fetch_ohlcv(symbol, timeframe='15m')
-        
-        global IndicatorEngine, GroqValidator
-        from src.engine.indicators import IndicatorEngine
-        from src.ai_brain.validator import GroqValidator
-
-        tech_data = IndicatorEngine(df).get_signals() if df is not None and len(df) >= 200 else {'trend': 'ALTA', 'price': entry_price, 'sma_200': entry_price, 'rsi': 50}
-        validator = GroqValidator()
-        ai_result = validator.consensus_predict(tech_data, symbol, force_local_only=True)
-
-        if force_execute:
-            if not _reserve_signal_slot(symbol): return jsonify({"success": False, "error": "Limite atingido"}), 409
-            try:
-                db.record_trade(1, symbol, side_normalized, 0, 10, time.strftime("%d/%m %H:%M"), "ENTRADA MANUAL", "open", entry_price)
-                _sync_active_trades_from_db()
-                threading.Thread(target=_process_client_orders_background, args=(symbol, side_normalized, entry_price, 70, "Manual"), daemon=True).start()
-                return jsonify({"success": True, "message": "Ordem manual enviada"}), 200
-            finally: _release_signal_slot(symbol)
-        
-        return jsonify({"success": True, "analysis_only": True, "symbol": symbol, "side": side_normalized, "entry_price": entry_price, "ai_analysis": {"confidence": ai_result.get('probabilidade', 70), "reason": ai_result.get('motivo', 'Aprovado')}}), 200
-    except Exception as e: return jsonify({"success": False, "error": str(e)}), 400
-
-@app.route('/api/config/risk-mode', methods=['GET', 'POST'])
-def handle_risk_mode():
-    global RISK_MODE, MAX_MOEDAS_ATIVAS
-    if request.method == 'GET':
-        return jsonify({"risk_mode": RISK_MODE, "max_moedas_ativas": MAX_MOEDAS_ATIVAS})
-    data = request.json or {}
-    mode = str(data.get('mode', 'conservative')).strip().lower()
-    RISK_MODE = mode
-    MAX_MOEDAS_ATIVAS = 1 if mode == 'conservative' else 5
-    central_state['risk_mode'] = RISK_MODE; central_state['max_moedas_ativas'] = MAX_MOEDAS_ATIVAS
-    db.set_config('RISK_MODE', RISK_MODE)
-    return jsonify({"success": True, "risk_mode": RISK_MODE, "max_moedas_ativas": MAX_MOEDAS_ATIVAS})
-
-# ==============================================================================
-# 🌍 ROTA PEGA-TUDO DO FRONTEND (OBRIGATORIAMENTE NO FINAL DO ARQUIVO)
-# ==============================================================================
-@app.route('/', defaults={'path': ''})
-@app.route('/<path:path>')
-def serve_frontend(path):
-    """ Serve a build do React sem roubar as requisições das rotas API acima """
-    if _frontend_asset_exists(path):
-        return send_from_directory(app.static_folder, path)
-    if _frontend_is_built():
-        return send_from_directory(app.static_folder, 'index.html')
-    return jsonify({"status": "DuoIA Maestro API ativa. Painel React em compilação."}), 200
-
-print("⚡ [MAESTRO CORE] Forçando inicialização dos serviços em background...", flush=True)
-start_runtime_services()
-
-if __name__ == "__main__":
-    render_port = int(os.getenv("PORT", "5000"))
-    start_runtime_services()
-    app.run(host='0.0.0.0', port=render_port, debug=False, use_reloader=False)
+            print(f"✅ [CLOSE POSITION] Posição finalizada. ID: {order.get('id', 'N/A')}", flush=True)
+            return True
+        except Exception as e:
+            print(f"❌ [CLOSE POSITION] Erro crítico no fechamento de {symbol}: {e}", flush=True)
+            return False
