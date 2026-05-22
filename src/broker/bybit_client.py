@@ -544,35 +544,52 @@ class BybitClient:
             return False, str(e).split('\n')[0][:200]
 
     def set_tp_sl_sniper(self, symbol, side, entry_price, position_qty):
-        """Setagem cirúrgica pós-entrada de Take Profit (+100% margem) e Stop Loss (-50% institucional)."""
+        """
+        🎯 PROTOCOLO 100/50 - SETAGEM AUTOMÁTICA DE TP/SL COM HEDGE MODE
+        Take Profit: +10% de movimento (+100% de lucro sobre margem com alavancagem)
+        Stop Loss: -50% de perda sobre o valor da entrada (Trava Real)
+        """
         try:
-            if not self.authenticated: return False
+            if not self.authenticated:
+                print(f"❌ [TP/SL] Não autenticado. Proteção de capital ABORTADA.")
+                return False
 
-            # Cálculo de Take Profit: +10% de movimento de preço = +100% PnL se alavancado em 10x
-            tp_price = entry_price * 1.10
+            # Lógica para Hedge Mode: Identifica o positionIdx da posição que já está aberta
+            # Se a ordem inicial foi de COMPRA (Buy), o stop do TP/SL fica no index 1 (Long)
+            # Se a ordem inicial foi de VENDA (Sell), o stop do TP/SL fica no index 2 (Short)
+            pos_idx = 1 if side.lower() == 'buy' else 2
 
-            # Cálculo de Stop Loss: -50% do valor da entrada
+            # Cálculo estrito dos alvos de preço com base na direção
             if side.lower() == 'buy':
-                sl_price = entry_price * 0.50  # Para compra: 50% abaixo do preço de entrada
+                tp_price = entry_price * 1.10  # +10% movimento
+                sl_price = entry_price * 0.50  # -50% do valor de entrada
             else:
-                sl_price = entry_price * 1.50  # Para venda: 50% acima do preço de entrada
+                tp_price = entry_price * 0.90  # -10% movimento (lucra na queda)
+                sl_price = entry_price * 1.50  # +50% do valor de entrada (prejuízo se subir)
 
+            # Formatação de precisão da Bybit para evitar rejeição por casas decimais
             price_to_precision = getattr(self.exchange, 'price_to_precision', None)
             if callable(price_to_precision):
                 try:
                     tp_price = float(price_to_precision(symbol, tp_price))
                     sl_price = float(price_to_precision(symbol, sl_price))
                 except Exception as precision_error:
-                    print(f"⚠️ [TP/SL] Erro de arredondamento de preço: {precision_error}", flush=True)
+                    print(f"⚠️ [TP/SL] Falha na formatação de casas decimais: {precision_error}")
 
-            print(f"🛡️  [PROTEÇÃO SNIPER] {symbol} | Alvos calculados -> ✅ TP: ${tp_price:.2f} (+10%) | ❌ SL: ${sl_price:.2f} (-50% do valor da entrada)", flush=True)
+            print(f"🛡️  [PROTEÇÃO SNIPER GATILHADA] Ativo: {symbol}")
+            print(f"   📍 Entrada: ${entry_price:.4f} | idx: {pos_idx}")
+            print(f"   ✅ Target TP (+100%): ${tp_price:.4f}")
+            print(f"   ❌ Target SL (-50%): ${sl_price:.4f}")
 
+            # 🔧 AJUSTE CRÍTICO HEDGE MODE: Injeta category e positionIdx nos parâmetros da ordem
             params = {
                 'category': 'linear',
+                'positionIdx': pos_idx,  # <-- Trava essencial que faltava para sanar o erro 10001
                 'takeProfit': {'triggerPrice': str(tp_price)},
                 'stopLoss': {'triggerPrice': str(sl_price)}
             }
 
+            # Envia a ordem de amarração de alvos a mercado para a Bybit
             self.exchange.create_order(
                 symbol=symbol,
                 type='market',
@@ -580,12 +597,13 @@ class BybitClient:
                 amount=position_qty,
                 params=params
             )
-            print("✅ [TP/SL SETADO] Alvos injetados com sucesso na corretora", flush=True)
+
+            print(f"✅ [TP/SL APLICADO COM SUCESSO] Posição real blindada na corretora.", flush=True)
             return True
+
         except Exception as e:
             print(f"⚠️  [TP/SL FALHOU] Erro na injeção de alvos Bybit: {e}", flush=True)
             return False
-
     def close_position_with_sl(self, symbol, position_side):
         """Encerra uma posição de derivativo em modo de urgência mapeando o positionIdx correto."""
         try:
