@@ -263,14 +263,14 @@ def _calculate_webhook_order_quantity(balance, entry_price):
 
 def _calculate_dynamic_order_quantity(broker, symbol, balance):
     """
-    🆕 v3.0: Executor focado ESTRITAMENTE no piso nocional mínimo da corretora.
+    🆕 v4.0: Executor focado ESTRITAMENTE no piso nocional mínimo da corretora.
 
     IGNORA totalmente percentuais fixos (5%, 15%, etc.).
-    Consulta preço atual e calcula quantidade EXATA para atingir:
-      - Binance: $5.50 USDT (mínimo + margem)
-      - Bybit: $2.50 USDT (mínimo + margem)
+    Lê dinamicamente os limites reais da exchange via CCXT (limits.amount.min e
+    limits.cost.min) e aplica uma margem de segurança de 10% sobre o custo mínimo.
 
-    Passa pelo amount_to_precision do CCXT para arredondar decimais corretamente.
+    Usa obrigatoriamente broker.exchange.amount_to_precision() para arredondar
+    dentro das regras de decimais da corretora. Fallback matemático se falhar.
 
     Args:
         broker: Instância de BybitClient ou BinanceClient
@@ -283,19 +283,6 @@ def _calculate_dynamic_order_quantity(broker, symbol, balance):
             - quantity: Quantidade de contratos/moedas
     """
     try:
-        # Usa o método do broker que já tem a lógica completa e correta
-        # incluindo conversão de símbolos e precisão CCXT
-        if hasattr(broker, 'calculate_dynamic_order_qty'):
-            print(f"💰 [EXECUTOR MÍNIMO] Usando calculate_dynamic_order_qty do broker")
-            quantity, metadata = broker.calculate_dynamic_order_qty(symbol, balance=None)
-            margin_used = metadata.get('calculated_cost', quantity * broker.get_last_price(symbol))
-
-            print(f"   ✅ Quantidade calculada: {quantity:.8f}")
-            print(f"   📊 Nocional final: ${margin_used:.2f} USDT")
-
-            return margin_used, quantity
-
-        # Fallback para brokers antigos sem o método
         # 1. Consulta preço atual do ativo
         current_price = broker.get_last_price(symbol)
         if current_price <= 0:
@@ -304,33 +291,69 @@ def _calculate_dynamic_order_quantity(broker, symbol, balance):
 
         print(f"💰 [EXECUTOR MÍNIMO] Preço atual {symbol}: ${current_price:.8f}")
 
-        # 2. Define piso nocional mínimo por corretora
         exchange_name = broker.exchange.id.lower() if hasattr(broker, 'exchange') else 'bybit'
-        if 'binance' in exchange_name:
-            min_notional = 5.50  # $5.50 USDT para Binance
+
+        # 2. Lê limites dinâmicos do mapa de mercados do CCXT
+        min_amount = None
+        min_notional_raw = None
+        if hasattr(broker, 'exchange') and hasattr(broker.exchange, 'markets'):
+            market_info = broker.exchange.markets.get(symbol)
+            if market_info:
+                limits = market_info.get('limits', {})
+                min_amount = limits.get('amount', {}).get('min')
+                min_notional_raw = limits.get('cost', {}).get('min')
+                if min_amount:
+                    print(f"   📐 Limite dinâmico amount.min: {min_amount}")
+                if min_notional_raw:
+                    print(f"   📐 Limite dinâmico cost.min: ${min_notional_raw}")
+
+        # 3. Define piso nocional alvo: dinâmico (+10%) ou fallback por corretora
+        SAFETY_MARGIN = 1.10  # +10% sobre o piso mínimo
+        if min_notional_raw and min_notional_raw > 0:
+            target_notional = min_notional_raw * SAFETY_MARGIN
+        elif 'binance' in exchange_name:
+            target_notional = 5.00 * SAFETY_MARGIN   # $5.00 mínimo → $5.50 alvo
         else:
-            min_notional = 2.50  # $2.50 USDT para Bybit
+            target_notional = 2.00 * SAFETY_MARGIN   # $2.00 mínimo → $2.20 alvo (Bybit)
 
-        print(f"   📏 Piso nocional mínimo ({exchange_name}): ${min_notional:.2f} USDT")
+        print(f"   📏 Piso nocional alvo ({exchange_name}): ${target_notional:.2f} USDT")
 
-        # 3. Calcula quantidade exata para atingir o piso nocional
-        # qty = min_notional / current_price
-        raw_qty = min_notional / current_price
+        # 4. Calcula quantidade raw para atingir o piso nocional
+        raw_qty = target_notional / current_price
 
-        # 4. Normaliza usando o método do broker se disponível
+        # Garante que a quantidade já atende ao amount.min antes da normalização
+        if min_amount and min_amount > 0:
+            raw_qty = max(raw_qty, min_amount)
+
+        # 5. Normaliza usando amount_to_precision do CCXT (preferido)
         final_qty = raw_qty
-        if hasattr(broker, '_normalize_order_qty'):
+        if hasattr(broker, 'exchange') and hasattr(broker.exchange, 'amount_to_precision'):
+            try:
+                final_qty = float(broker.exchange.amount_to_precision(symbol, raw_qty))
+                print(f"   ✅ amount_to_precision aplicado: {final_qty:.8f}")
+            except Exception as precision_err:
+                print(f"⚠️ [PRECISION] Falha no amount_to_precision: {precision_err} — usando fallback matemático")
+                # Fallback: usa amount.min como piso e ajusta decimais matematicamente
+                if min_amount and min_amount > 0:
+                    import math
+                    decimals = max(0, -int(math.floor(math.log10(min_amount))))
+                    final_qty = round(raw_qty, decimals)
+                else:
+                    final_qty = round(raw_qty, 4)
+        elif hasattr(broker, '_normalize_order_qty'):
             try:
                 final_qty = float(broker._normalize_order_qty(symbol, raw_qty))
             except Exception as norm_err:
                 print(f"⚠️ [NORMALIZE QTY] Erro ao normalizar: {norm_err}")
-                # Fallback: arredonda para 4 casas decimais
                 final_qty = round(raw_qty, 4)
         else:
-            # Fallback: arredonda para 4 casas decimais
             final_qty = round(raw_qty, 4)
 
-        # 5. Calcula valor nocional final
+        # Garante piso mínimo após normalização (o arredondamento pode ter truncado abaixo)
+        if min_amount and min_amount > 0 and final_qty < min_amount:
+            final_qty = min_amount
+
+        # 6. Calcula valor nocional final
         margin_used = final_qty * current_price
 
         print(f"   ✅ Quantidade calculada: {final_qty:.8f}")
@@ -2152,7 +2175,7 @@ def sniper_worker_loop():
     while True:
         # 🔄 HEARTBEAT - Log de batimento cardíaco para monitoramento ativo no Render
         # OBRIGATÓRIO usar flush=True para forçar saída imediata no terminal do Render
-        print("🔄 [MOTOR CORE] Iniciando nova varredura de mercado e caçando sinais...", flush=True)
+        print("🔄 [MOTOR CHAVE] Iniciando novo ciclo de varredura do mercado...", flush=True)
 
         try:
             _repair_open_trades()
@@ -3286,6 +3309,9 @@ def broadcast_sniper_signal():
     finally:
         if slot_reserved:
             _release_signal_slot(symbol)
+
+print("⚡ [MAESTRO CORE] Forçando inicialização dos serviços em background...", flush=True)
+start_runtime_services()
 
 if __name__ == "__main__":
     render_port = int(os.getenv("PORT", "5000"))
