@@ -298,18 +298,24 @@ class BybitClient:
 
             # Min amount (quantidade mínima em contratos/moedas)
             min_amount = limits.get('amount', {}).get('min')
-            if min_amount is None or min_amount <= 0:
+            # 🔧 Valida se min_amount é None ou string 'none' antes de usar
+            if min_amount is None or str(min_amount).lower() == 'none':
+                min_amount = 0.001
+            elif min_amount <= 0:
                 min_amount = 0.001
 
             # Min notional (valor mínimo em USDT) - Bybit geralmente exige >= 5 USDT
-            # 🔧 CORREÇÃO: Valida se min_cost é None antes de usar
+            # 🔧 CORREÇÃO: Valida se min_cost é None ou string 'none' antes de usar
             min_cost = limits.get('cost', {}).get('min')
-            if min_cost is None or min_cost <= 0:
+            if min_cost is None or str(min_cost).lower() == 'none':
+                min_cost = 5.0
+            elif min_cost <= 0:
                 min_cost = 5.0
 
             # Precisão da quantidade
             amount_precision = market.get('precision', {}).get('amount')
-            if amount_precision is None:
+            # 🔧 Valida se amount_precision é None ou string 'none' antes de usar
+            if amount_precision is None or str(amount_precision).lower() == 'none':
                 amount_precision = 2
 
             print(f"   📊 [BYBIT LIMITS] {symbol}: min_amount={min_amount}, min_notional={min_cost} USDT, precision={amount_precision}")
