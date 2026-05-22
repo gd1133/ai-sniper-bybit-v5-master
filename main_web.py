@@ -2867,14 +2867,20 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
     Executa em thread separada para não bloquear o webhook do TradingView.
     """
     try:
-        # 1. Notificação Master (Para o seu Grupo VIP ou seu Bot de Controle)
+        # Telegram de auditoria: apenas eventos reais de execução de ordem
         master_tk, master_chat = _get_master_telegram_config()
-        if master_tk and master_chat:
-            m_msg = (f"🚀 *SINAL SNIPER BROADCAST*\n\n"
-                     f"📦 *Ativo:* {symbol}\n📈 *Lado:* {side}\n"
-                     f"🎯 *Entrada:* ${entry_price}\n🧠 *Confiança:* {confidence}%")
-            requests.post(f"https://api.telegram.org/bot{master_tk}/sendMessage",
-                          json={"chat_id": master_chat, "text": m_msg, "parse_mode": "Markdown"})
+
+        def _safe_send_order_audit(message):
+            if not (master_tk and master_chat):
+                return
+            try:
+                requests.post(
+                    f"https://api.telegram.org/bot{master_tk}/sendMessage",
+                    json={"chat_id": master_chat, "text": message, "parse_mode": "Markdown"},
+                    timeout=5
+                )
+            except Exception as tg_err:
+                print(f"⚠️ [TELEGRAM AUDIT FALHOU] {type(tg_err).__name__}: {tg_err}")
 
         # 2. Loop de Execução para Clientes Cadastrados
         clientes = _get_registered_clients(active_only=True)
@@ -2954,6 +2960,16 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                                 print(f"✅ [ORDEM REAL EXECUTADA NA EXCHANGE] ID: {order_id}")
                                 print(f"   📊 Detalhes: {order_result}")
 
+                                success_msg = (
+                                    f"✅ *ORDEM EXECUTADA*\n\n"
+                                    f"👤 *Cliente:* {cliente_nome}\n"
+                                    f"📦 *Símbolo:* `{symbol}`\n"
+                                    f"📈 *Lado:* {side.upper()}\n"
+                                    f"📊 *Quantidade:* `{qty}`\n"
+                                    f"🆔 *ID da Ordem:* `{order_id}`"
+                                )
+                                _safe_send_order_audit(success_msg)
+
                                 # ✅ Executa Proteção: TP +100% margem (10% preço) / SL -50% margem (5% preço com 10x leverage)
                                 tp_sl_ok = broker.set_tp_sl_sniper(symbol, side.lower(), entry_price, qty)
                                 if tp_sl_ok:
@@ -2975,6 +2991,18 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                             print(f"   🔍 ERRO BRUTO DA CORRETORA: {order_err}")
                             print(f"   📋 TIPO DO ERRO: {type(order_err).__name__}")
                             print(f"   💡 CAUSA PROVÁVEL: Autenticação, permissões ou saldo insuficiente")
+                            error_type = type(order_err).__name__
+                            error_msg = str(order_err)
+                            error_alert = (
+                                f"🚨 *URGENTE: FALHA NA EXECUÇÃO DA ORDEM*\n\n"
+                                f"👤 *Cliente:* {cliente_nome}\n"
+                                f"📦 *Símbolo Tentado:* `{symbol}`\n"
+                                f"📈 *Lado:* {side.upper()}\n"
+                                f"📊 *Quantidade Falhou:* `{qty}`\n"
+                                f"• *Tipo da Exceção:* `{error_type}`\n"
+                                f"• *Erro Bruto:* `{error_msg}`"
+                            )
+                            _safe_send_order_audit(error_alert)
                             raise  # Força propagação do erro sem silenciar
                     else:
                         # Diagnóstico detalhado do bloqueio
@@ -2993,21 +3021,6 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                         print(f"🔒 [{mode_label}] {c.get('nome')} - execução bloqueada: {reason_str}")
                         print(f"💡 DIAGNÓSTICO: API conectada ✅ | Saldo visível ✅ | Execução bloqueada por: {reason_str}")
 
-                    # --- NOTIFICAÇÃO PRIVADA EDUCATIVA (SNIPER PROTOCOL) ---
-                    c_msg = (f"🎯 *SNIPER GIVALDO v60.1 - DISPARO CONFIRMADO*\n\n"
-                             f"👤 *Trader:* {c.get('nome')}\n"
-                             f"📦 *Ativo:* {symbol}\n"
-                             f"📈 *Lado:* {side}\n"
-                             f"💰 *Margem Alocada:* ${margem:.2f} ({_format_risk_per_trade_pct()} da banca)\n"
-                             f"📊 *Quantidade:* {qty:.4f}\n"
-                             f"🎯 *Preço Entrada:* ${entry_price:.2f}\n"
-                             f"🧠 *Confiança IA:* {confidence}%")
-
-                    c_tk = c.get('tg_token') or c.get('tg_api_key')
-                    c_chat = c.get('chat_id')
-                    if c_tk and c_chat:
-                        requests.post(f"https://api.telegram.org/bot{c_tk}/sendMessage",
-                                      json={"chat_id": c_chat, "text": c_msg, "parse_mode": "Markdown"})
                 except Exception as task_err:
                     cliente_nome = c.get('nome', 'DESCONHECIDO')
                     # 🚫 FALLBACK DESATIVADO: Sempre joga erro bruto no log
