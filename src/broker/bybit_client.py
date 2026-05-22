@@ -453,12 +453,17 @@ class BybitClient:
 
             if self.pybit_session is not None:
                 v5_symbol = self._normalize_v5_symbol(symbol)
+
+                # Mapeia positionIdx para Hedge Mode (Modo Bidirecional)
+                position_idx = 1 if side.lower() == 'buy' else 2
+
                 payload = {
-                    'category': 'linear',  
+                    'category': 'linear',
                     'symbol': v5_symbol,
                     'side': self._normalize_v5_side(side),
                     'orderType': 'Market',
                     'qty': normalized_qty,
+                    'positionIdx': position_idx,
                 }
                 print(f"   📤 Enviando via Pybit V5 (/v5/order/create): {payload}", flush=True)
                 rsp = self.pybit_session.place_order(**payload)
@@ -481,8 +486,10 @@ class BybitClient:
                     return {**result, 'id': order_id, 'route': 'v5/order/create', 'category': 'linear', 'symbol': v5_symbol}
 
             # Fallback nativo via Core CCXT Engine
-            params = {'category': 'linear'}
-            print(f"   📤 Enviando via CCXT Fallback: {symbol} | qty={normalized_qty}", flush=True)
+            # Mapeia positionIdx para Hedge Mode (Modo Bidirecional)
+            position_idx = 1 if side.lower() == 'buy' else 2
+            params = {'category': 'linear', 'positionIdx': position_idx}
+            print(f"   📤 Enviando via CCXT Fallback: {symbol} | qty={normalized_qty} | positionIdx={position_idx}", flush=True)
             order = self.exchange.create_order(symbol, 'market', side, ccxt_qty, params=params)
             order_id = order.get('id', 'N/A')
             print(f"✅ [BYBIT CCXT] Ordem preenchida - ID: {order_id}", flush=True)
@@ -537,12 +544,18 @@ class BybitClient:
             return False, str(e).split('\n')[0][:200]
 
     def set_tp_sl_sniper(self, symbol, side, entry_price, position_qty):
-        """Setagem cirúrgica pós-entrada de Take Profit (+100% margem) e Stop Loss (-3% institucional)."""
+        """Setagem cirúrgica pós-entrada de Take Profit (+100% margem) e Stop Loss (-50% institucional)."""
         try:
             if not self.authenticated: return False
 
-            tp_price = entry_price * 1.10  # +10% de movimento de preço = +100% PnL se alavancado em 10x
-            sl_price = entry_price * 0.97  # Trava estrita de risco em -3%
+            # Cálculo de Take Profit: +10% de movimento de preço = +100% PnL se alavancado em 10x
+            tp_price = entry_price * 1.10
+
+            # Cálculo de Stop Loss: -50% do valor da entrada
+            if side.lower() == 'buy':
+                sl_price = entry_price * 0.50  # Para compra: 50% abaixo do preço de entrada
+            else:
+                sl_price = entry_price * 1.50  # Para venda: 50% acima do preço de entrada
 
             price_to_precision = getattr(self.exchange, 'price_to_precision', None)
             if callable(price_to_precision):
@@ -552,7 +565,7 @@ class BybitClient:
                 except Exception as precision_error:
                     print(f"⚠️ [TP/SL] Erro de arredondamento de preço: {precision_error}", flush=True)
 
-            print(f"🛡️  [PROTEÇÃO SNIPER] {symbol} | Alvos calculados -> TP: ${tp_price:.2f} | SL: ${sl_price:.2f}", flush=True)
+            print(f"🛡️  [PROTEÇÃO SNIPER] {symbol} | Alvos calculados -> ✅ TP: ${tp_price:.2f} (+10%) | ❌ SL: ${sl_price:.2f} (-50% do valor da entrada)", flush=True)
 
             params = {
                 'category': 'linear',
