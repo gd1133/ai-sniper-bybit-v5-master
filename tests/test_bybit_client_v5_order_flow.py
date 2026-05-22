@@ -63,6 +63,27 @@ class _FakeExchange:
             'params': params or {},
         }
 
+    def fetch_order(self, order_id, symbol, params=None):
+        """Mock fetch_order para retornar detalhes completos da ordem."""
+        return {
+            'id': order_id,
+            'symbol': symbol,
+            'type': 'market',
+            'side': 'buy',
+            'price': 50000.0,
+            'amount': 2.67,
+            'cost': 133500.0,
+            'filled': 2.67,
+            'remaining': 0.0,
+            'status': 'closed',
+            'timestamp': 1234567890000,
+            'datetime': '2009-02-13T23:31:30.000Z',
+            'info': {
+                'orderId': order_id,
+                'symbol': symbol.replace('/', '').replace(':USDT', ''),
+            }
+        }
+
 
 class _FakeCcxt:
     class BaseError(Exception):
@@ -150,6 +171,11 @@ if __name__ == '__main__':
         if not order or order.get('id') != 'oid-123' or order.get('route') != 'v5/order/create':
             print(f"❌ Ordem V5 inválida: {order}")
             raise SystemExit(2)
+
+        # Verificar que a ordem tem detalhes completos (não apenas orderId)
+        if order.get('price') is None or order.get('amount') is None or order.get('status') is None:
+            print(f"❌ Ordem V5 deveria ter detalhes completos após fetch_order: {order}")
+            raise SystemExit(11)
 
         order_call = client.pybit_session.place_order_calls[-1]
         if order_call.get('category') != 'linear' or order_call.get('symbol') != 'BTCUSDT' or order_call.get('side') != 'Buy':
