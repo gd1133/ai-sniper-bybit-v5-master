@@ -331,10 +331,10 @@ class BybitClient:
             amount_precision = 2
 
         # 🔧 PASSO 3: Calcula quantidade mínima para satisfazer min notional
-        # IMPORTANTE: Usa float puro para cálculos, depois converte para Decimal com str()
-        min_cost_float = float(min_cost)
-        current_price_float = float(current_price)
-        min_qty_for_notional = Decimal(str(min_cost_float / current_price_float))
+        # PROTEÇÃO DE TIPO: Converte TODOS os valores para Decimal usando str() primeiro
+        min_cost_decimal = Decimal(str(min_cost))
+        current_price_decimal = Decimal(str(current_price))
+        min_qty_for_notional = min_cost_decimal / current_price_decimal
 
         # 🔧 PASSO 4: Usa o maior entre min_amount e min_qty_for_notional
         required_min_qty = max(Decimal(str(min_amount)), min_qty_for_notional)
@@ -350,25 +350,24 @@ class BybitClient:
         quantized = Decimal(str(qty_value)).quantize(step, rounding=ROUND_UP)
 
         # Garante que após arredondamento ainda atende min notional
-        # 🔧 PROTEÇÃO DE TIPO: Usa float puro para cálculos, depois Decimal(str())
-        quantized_float = float(quantized)
-        notional_value = quantized_float * current_price_float
-        if notional_value < min_cost_float:
+        # 🔧 PROTEÇÃO DE TIPO: Usa Decimal para todos os cálculos
+        notional_value_decimal = quantized * current_price_decimal
+        if notional_value_decimal < min_cost_decimal:
             # Arredonda para cima até atingir min notional
-            # 🔧 PROTEÇÃO DE TIPO: Calcula em float, depois converte para Decimal(str())
-            adjusted_qty_float = min_cost_float / current_price_float
-            quantized = Decimal(str(adjusted_qty_float)).quantize(step, rounding=ROUND_UP)
-            notional_value = float(quantized) * current_price_float
-            print(f"   🔧 [BYBIT NOTIONAL] Ajustado para qty={quantized} (notional={notional_value:.2f} USDT >= {min_cost_float} USDT)")
+            # 🔧 PROTEÇÃO DE TIPO: Todos os cálculos em Decimal
+            adjusted_qty = min_cost_decimal / current_price_decimal
+            quantized = adjusted_qty.quantize(step, rounding=ROUND_UP)
+            notional_value_decimal = quantized * current_price_decimal
+            print(f"   🔧 [BYBIT NOTIONAL] Ajustado para qty={quantized} (notional={float(notional_value_decimal):.2f} USDT >= {float(min_cost_decimal)} USDT)")
 
         normalized = format(quantized, 'f')
         final_qty = normalized.rstrip('0').rstrip('.') if '.' in normalized else normalized
 
         # 🔧 PASSO 6: Exibe informações de validação
-        # 🔧 PROTEÇÃO DE TIPO: Usa float para cálculo final
-        final_qty_float = float(final_qty)
-        final_notional = final_qty_float * current_price_float
-        print(f"   ✅ [BYBIT ORDER] qty={final_qty} (notional={final_notional:.2f} USDT, min_amount={min_amount}, min_notional={min_cost_float} USDT)")
+        # 🔧 PROTEÇÃO DE TIPO: Usa Decimal para cálculo final, converte para float apenas para exibição
+        final_qty_decimal = Decimal(str(final_qty))
+        final_notional_decimal = final_qty_decimal * current_price_decimal
+        print(f"   ✅ [BYBIT ORDER] qty={final_qty} (notional={float(final_notional_decimal):.2f} USDT, min_amount={min_amount}, min_notional={float(min_cost_decimal)} USDT)")
 
         return final_qty
 
