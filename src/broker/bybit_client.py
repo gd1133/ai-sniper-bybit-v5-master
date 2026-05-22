@@ -309,13 +309,13 @@ class BybitClient:
             elif min_amount <= 0:
                 min_amount = 0.001
 
-            # Min notional (valor mínimo em USDT) - Bybit geralmente exige >= 5 USDT
+            # Min notional (valor mínimo em USDT) - Bybit exige >= 6 USDT
             # 🔧 CORREÇÃO: Valida se min_cost é None ou string 'none' antes de usar
             min_cost = limits.get('cost', {}).get('min')
             if min_cost is None or str(min_cost).lower() == 'none':
-                min_cost = 5.0
+                min_cost = 6.0
             elif min_cost <= 0:
-                min_cost = 5.0
+                min_cost = 6.0
 
             # Precisão da quantidade
             amount_precision = market.get('precision', {}).get('amount')
@@ -327,11 +327,14 @@ class BybitClient:
         except Exception as market_err:
             print(f"⚠️ [BYBIT MARKET] Erro ao carregar limites: {market_err}, usando defaults")
             min_amount = 0.001
-            min_cost = 5.0
+            min_cost = 6.0
             amount_precision = 2
 
         # 🔧 PASSO 3: Calcula quantidade mínima para satisfazer min notional
-        min_qty_for_notional = Decimal(str(min_cost)) / Decimal(str(current_price))
+        # IMPORTANTE: Usa float puro para cálculos, depois converte para Decimal com str()
+        min_cost_float = float(min_cost)
+        current_price_float = float(current_price)
+        min_qty_for_notional = Decimal(str(min_cost_float / current_price_float))
 
         # 🔧 PASSO 4: Usa o maior entre min_amount e min_qty_for_notional
         required_min_qty = max(Decimal(str(min_amount)), min_qty_for_notional)
@@ -339,6 +342,7 @@ class BybitClient:
         # Se quantidade fornecida for menor que o mínimo, usa o mínimo
         if Decimal(str(qty_value)) < required_min_qty:
             print(f"⚠️ [BYBIT QTY] Quantidade {qty_value} abaixo do mínimo. Ajustando para {required_min_qty}")
+            # 🔧 PROTEÇÃO DE TIPO: Converte required_min_qty para float antes de usar
             qty_value = float(required_min_qty)
 
         # 🔧 PASSO 5: Arredonda para cima respeitando precisão da exchange
@@ -346,19 +350,25 @@ class BybitClient:
         quantized = Decimal(str(qty_value)).quantize(step, rounding=ROUND_UP)
 
         # Garante que após arredondamento ainda atende min notional
-        notional_value = float(quantized) * current_price
-        if notional_value < min_cost:
+        # 🔧 PROTEÇÃO DE TIPO: Usa float puro para cálculos, depois Decimal(str())
+        quantized_float = float(quantized)
+        notional_value = quantized_float * current_price_float
+        if notional_value < min_cost_float:
             # Arredonda para cima até atingir min notional
-            quantized = (Decimal(str(min_cost)) / Decimal(str(current_price))).quantize(step, rounding=ROUND_UP)
-            notional_value = float(quantized) * current_price
-            print(f"   🔧 [BYBIT NOTIONAL] Ajustado para qty={quantized} (notional={notional_value:.2f} USDT >= {min_cost} USDT)")
+            # 🔧 PROTEÇÃO DE TIPO: Calcula em float, depois converte para Decimal(str())
+            adjusted_qty_float = min_cost_float / current_price_float
+            quantized = Decimal(str(adjusted_qty_float)).quantize(step, rounding=ROUND_UP)
+            notional_value = float(quantized) * current_price_float
+            print(f"   🔧 [BYBIT NOTIONAL] Ajustado para qty={quantized} (notional={notional_value:.2f} USDT >= {min_cost_float} USDT)")
 
         normalized = format(quantized, 'f')
         final_qty = normalized.rstrip('0').rstrip('.') if '.' in normalized else normalized
 
         # 🔧 PASSO 6: Exibe informações de validação
-        final_notional = float(final_qty) * current_price
-        print(f"   ✅ [BYBIT ORDER] qty={final_qty} (notional={final_notional:.2f} USDT, min_amount={min_amount}, min_notional={min_cost} USDT)")
+        # 🔧 PROTEÇÃO DE TIPO: Usa float para cálculo final
+        final_qty_float = float(final_qty)
+        final_notional = final_qty_float * current_price_float
+        print(f"   ✅ [BYBIT ORDER] qty={final_qty} (notional={final_notional:.2f} USDT, min_amount={min_amount}, min_notional={min_cost_float} USDT)")
 
         return final_qty
 
