@@ -2,8 +2,9 @@ import time
 from decimal import Decimal, ROUND_DOWN
 from datetime import datetime
 
-from src.config import get_bybit_base_url, get_bybit_credentials, resolve_use_testnet
-from src.broker.order_calculator import OrderCalculator, sanitize_numeric_string
+# 🔧 CORREÇÃO CIRCULAR IMPORT: Importações movidas para lazy loading
+# As importações de src.config e src.broker.order_calculator foram movidas
+# para dentro dos métodos que as utilizam para evitar dependência circular
 
 AUTH_10003_ALERT = (
     "ERRO DE AUTENTICAÇÃO: Verifique se a chave de API é de produção e se o 2FA está ativo na Bybit"
@@ -52,6 +53,10 @@ class BybitClient:
     Blindagem contra bloqueios de API.
     """
     def __init__(self, api_key=None, api_secret=None, testnet=None):
+        # 🔧 LAZY LOADING: Importa config apenas quando necessário
+        from src.config import get_bybit_base_url, get_bybit_credentials, resolve_use_testnet
+        from src.broker.order_calculator import OrderCalculator
+
         # Carrega CCXT apenas quando BybitClient é instanciado
         ccxt = _get_ccxt()
 
