@@ -2,7 +2,7 @@
 """
 ╔══════════════════════════════════════════════════════════════════╗
 ║             AI SNIPER BYBIT V5 - MAIN WEB APPLICATION            ║
-║                  MAESTRO CORE FULL EDITION v61.2                 ║
+║                  MAESTRO CORE FULL EDITION v61.5                 ║
 ╚══════════════════════════════════════════════════════════════════╝
 
 gunicorn -w 1 -k gthread main_web:app
@@ -100,6 +100,16 @@ def _get_broker_manager():
 
 load_dotenv()
 ENV_CONFIG = get_environment_config()
+
+# ==============================================================================
+# 🚀 INICIALIZAÇÃO DO APP FLASK & BANCO DE DADOS (CORE RECONSTRUIDO)
+# ==============================================================================
+app = Flask(__name__, static_folder='dist', static_url_path='')
+CORS(app)
+
+if db is not None:
+    db.init_db()
+
 APP_MODE = 'real'
 ALLOW_ORDER_EXECUTION = ENV_CONFIG.allow_order_execution
 ALLOW_REAL_TRADING = ENV_CONFIG.allow_real_trading
@@ -153,12 +163,13 @@ _status_cache = CachedValue(ttl_seconds=3)
 _balance_refresh_lock = threading.Lock()
 _balance_refresh_in_progress = False
 
-_saved_risk_mode = db.get_config('RISK_MODE')
-if _saved_risk_mode in ('conservative', 'aggressive'):
-    RISK_MODE = _saved_risk_mode
-    MAX_MOEDAS_ATIVAS = 1 if RISK_MODE == 'conservative' else 5
-    central_state['risk_mode'] = RISK_MODE
-    central_state['max_moedas_ativas'] = MAX_MOEDAS_ATIVAS
+if db is not None:
+    _saved_risk_mode = db.get_config('RISK_MODE')
+    if _saved_risk_mode in ('conservative', 'aggressive'):
+        RISK_MODE = _saved_risk_mode
+        MAX_MOEDAS_ATIVAS = 1 if RISK_MODE == 'conservative' else 5
+        central_state['risk_mode'] = RISK_MODE
+        central_state['max_moedas_ativas'] = MAX_MOEDAS_ATIVAS
 
 def start_runtime_services():
     global RUNTIME_STARTED
@@ -350,31 +361,21 @@ def _fetch_active_client_balances(force=False):
     
     res = {"items": items, "total": round(total, 2)}
     client_balance_cache.set(res)
-    return res
-
-def _refresh_real_balance_state(force=False):
-    """ ⚡ RECONSTRUTOR DE CARD DE SALDO GLOBAL EM GATILHO DIRETO """
-    balances = _fetch_active_client_balances(force=force) or {"items": [], "total": 0.0}
-    items = balances.get("items", [])
     
-    for item in items:
-        if item.get("saldo_real") is None: item["saldo_real"] = item.get("saldo_base")
-        
-    valid_items = [i for i in items if i.get("saldo_real") is not None]
+    # ⚡ CORE FIX: Força sincronização em tempo real do card para o React
+    valid_items = [item for item in items if item.get("saldo_real") is not None]
     central_state['real_client_balances'] = items
     if valid_items:
         central_state['balance'] = round(sum(float(i["saldo_real"]) for i in valid_items), 2)
         central_state['status'] = f"💼 CONTA REAL: saldo sincronizado para {len(valid_items)} investidores"
     else:
         central_state['balance'] = 0.0
-        central_state['status'] = "💼 CONTA REAL: aguardando pareamento de chave de escrita..."
+        central_state['status'] = "💼 CONTA REAL: aguardando pareamento de chaves..."
+        
+    return res
 
-def _calculate_live_trade_metrics(entry_price, current_price, side):
-    entry = float(entry_price or 0); current = float(current_price or 0)
-    if entry <= 0 or current <= 0: return {"current_price": current, "price_change_pct": 0.0, "pnl_pct": 0.0, "trend": "flat", "is_favorable": False}
-    market_move = ((current - entry) / entry) * 100
-    pnl_pct = -market_move if str(side).upper() in ('VENDER', 'SELL', 'SHORT') else market_move
-    return {"current_price": round(current, 8), "price_change_pct": round(market_move, 4), "pnl_pct": round(pnl_pct, 4), "trend": "up" if current > entry else "down", "is_favorable": pnl_pct >= 0}
+def _refresh_real_balance_state(force=False):
+    _fetch_active_client_balances(force=force)
 
 def _get_live_price_snapshot(symbol, entry_price, side):
     try: return _calculate_live_trade_metrics(entry_price, _get_public_price_broker().get_last_price(symbol), side)
@@ -446,7 +447,7 @@ def _monitor_sl_tp_automatico():
         time.sleep(10)
 
 def _sync_active_trades_from_db():
-    """ ⚡ RESTAURADOR DO MOTOR DE ESTRUTURA DOS CARDS DE TRADES ATIVOS """
+    """ ⚡ ESTRUTURADOR DOS CARDS EM TEMPO REAL PARA ACENDER O PAINEL REACT """
     try:
         _repair_open_trades()
         open_trades = db.get_open_trades(50)
@@ -506,17 +507,6 @@ def _close_stale_open_trades(max_age_minutes=180):
                 cur.execute("UPDATE trades SET status='closed', notes=COALESCE(notes,'') || ' | STALE' WHERE id=?", (t.get('id'),))
         conn.commit(); conn.close()
     except Exception: pass
-
-def _manual_close_open_trades(symbol, requested_by="dashboard"):
-    canonical = _canonicalize_symbol(symbol)
-    count = 0
-    for t in db.get_open_trades(200):
-        if _normalize_symbol_key(t.get('pair')) == _normalize_symbol_key(canonical):
-            live = _get_live_price_snapshot(canonical, _extract_entry_price(t), t.get('side'))
-            db.close_trade(t.get('id'), live.get('pnl_pct', 0), 0, time.strftime("%d/%m %H:%M"), f"MANUAL {requested_by}")
-            count += 1
-    _sync_active_trades_from_db()
-    return {"symbol": _limpar_simbolo(canonical), "closed_count": count}
 
 def broadcast_ordem_global(symbol, side, entry_price, res_ia):
     slot_reserved = False
@@ -583,7 +573,7 @@ def sniper_worker_loop():
         time.sleep(15)
 
 def _process_client_orders_background(symbol, side, entry_price, confidence, reason):
-    """ Loop assíncrono corrigido com salvamento local SQLite e disparo de Telegram sem falha de parsing """
+    """ Loop assíncrono com salvamento local e disparo protegido anti-400 do Telegram """
     try:
         tk, chat = f"{os.getenv('TELEGRAM_TOKEN') or ''}".strip(), f"{os.getenv('TELEGRAM_CHAT_ID') or ''}".strip()
         clientes = _get_registered_clients(active_only=True)
@@ -609,7 +599,6 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                         broker.set_tp_sl_sniper(symbol, side.lower(), entry_price, qty)
 
                         if tk and chat:
-                            # ⚡ FIX TELEGRAM: Removido os marcadores markdown internos das variáveis para blindar contra o erro 400 da API
                             msg_tg = (
                                 f"🔥 OPERACAO REAL EXECUTADA\n\n"
                                 f"👤 Investidor: {c.get('nome')}\n"
