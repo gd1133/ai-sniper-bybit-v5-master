@@ -110,12 +110,35 @@ CORS(app)
 if db is not None:
     db.init_db()
 
+# ==============================================================================
+# 🎨 FUNÇÕES DE VALIDAÇÃO DO BUILD DO FRONTEND VITE (REACT)
+# ==============================================================================
+def _frontend_index_path():
+    """Retorna o caminho completo do index.html do build do React"""
+    return os.path.join(app.static_folder or "", 'index.html')
+
+def _frontend_is_built():
+    """Verifica se o frontend foi compilado e está disponível"""
+    return bool(app.static_folder) and os.path.isfile(_frontend_index_path())
+
+def _frontend_asset_exists(path):
+    """Verifica se um asset específico do frontend existe"""
+    return bool(path) and bool(app.static_folder) and os.path.isfile(os.path.join(app.static_folder, path))
+
 APP_MODE = 'real'
 ALLOW_ORDER_EXECUTION = ENV_CONFIG.allow_order_execution
 ALLOW_REAL_TRADING = ENV_CONFIG.allow_real_trading
 USE_TESTNET = False
-RISK_MODE = 'conservative'       
-MAX_MOEDAS_ATIVAS = 1            
+RISK_MODE = 'conservative'
+MAX_MOEDAS_ATIVAS = 1
+
+# Constantes do Sniper Worker
+SCAN_TOP_COINS = 50
+THRESHOLD_ENTRADA = 70.0
+COOLDOWN_INSTITUCIONAL_SECS = 5
+SCAN_INTER_SYMBOL_DELAY_SECS = 0.5
+SNIPER_SIGNAL_LOCK = threading.Lock()
+SNIPER_SIGNAL_RESERVATIONS = set()            
 
 central_state = {
     "balance": 0.0,  
@@ -205,6 +228,40 @@ def _coerce_float(*values, default=0.0):
             if numeric == numeric: return numeric
         except Exception: continue
     return float(default)
+
+# ==============================================================================
+# 📊 FUNÇÃO DE CÁLCULO DE MÉTRICAS DE PREÇO LIVE (PNL OSCILANTE)
+# ==============================================================================
+def _calculate_live_trade_metrics(entry_price, current_price, side):
+    """
+    Calcula métricas de PnL em tempo real para ordens ativas.
+    Alimenta os cards visuais da Dashboard com dados oscilantes.
+    """
+    entry = float(entry_price or 0)
+    current = float(current_price or 0)
+
+    if entry <= 0 or current <= 0:
+        return {
+            "current_price": current,
+            "price_change_pct": 0.0,
+            "pnl_pct": 0.0,
+            "trend": "flat",
+            "is_favorable": False
+        }
+
+    # Calcula a movimentação do mercado em %
+    market_move = ((current - entry) / entry) * 100
+
+    # Inverte o PnL se for posição SHORT/VENDER
+    pnl_pct = -market_move if str(side).upper() in ('VENDER', 'SELL', 'SHORT') else market_move
+
+    return {
+        "current_price": round(current, 8),
+        "price_change_pct": round(market_move, 4),
+        "pnl_pct": round(pnl_pct, 4),
+        "trend": "up" if current > entry else "down",
+        "is_favorable": pnl_pct >= 0
+    }
 
 def _get_symbol_trade_edge(symbol, side, limit=300):
     try:
@@ -507,6 +564,43 @@ def _close_stale_open_trades(max_age_minutes=180):
                 cur.execute("UPDATE trades SET status='closed', notes=COALESCE(notes,'') || ' | STALE' WHERE id=?", (t.get('id'),))
         conn.commit(); conn.close()
     except Exception: pass
+
+def _calculate_dynamic_order_quantity(broker, symbol, banca):
+    """
+    Calcula a quantidade dinâmica da ordem baseada no risco por trade.
+    Retorna (margem_separada, quantidade_normalizada)
+    """
+    try:
+        RISK_PER_TRADE_PCT = 5.0  # 5% da banca por operação
+        margem = (banca * RISK_PER_TRADE_PCT) / 100.0
+
+        # Busca o preço atual do símbolo
+        last_price = float(broker.get_last_price(symbol) or 0)
+        if last_price <= 0:
+            return 0.0, 0.0
+
+        # Calcula quantidade baseada na margem
+        qty = margem / last_price
+
+        # Normaliza com as precisões da exchange
+        try:
+            markets = broker.exchange.load_markets()
+            market = markets.get(symbol, {})
+            amount_precision = market.get('precision', {}).get('amount', 3)
+            qty = broker.exchange.amount_to_precision(symbol, qty)
+            qty = float(qty)
+        except Exception:
+            qty = round(qty, 3)
+
+        return round(margem, 2), qty
+    except Exception:
+        return 0.0, 0.0
+
+def _is_order_execution_enabled(client_context):
+    """
+    Verifica se a execução de ordens está habilitada no sistema.
+    """
+    return ALLOW_ORDER_EXECUTION and ALLOW_REAL_TRADING
 
 def broadcast_ordem_global(symbol, side, entry_price, res_ia):
     slot_reserved = False
