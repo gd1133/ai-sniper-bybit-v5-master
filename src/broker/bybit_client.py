@@ -472,6 +472,32 @@ class BybitClient:
             print(f"[ERRO BROKER] Preço {symbol} falhou: {e}")
             return self.cache_ticker[symbol][0] if symbol in self.cache_ticker else 0.0
 
+    def fetch_order_details(self, symbol, order_id):
+        """Busca detalhes completos de uma ordem já criada.
+
+        Bybit V5 API retorna apenas orderId no place_order. Para obter detalhes
+        completos (preço, quantidade executada, status, etc.), é necessário
+        consultar via fetch_order.
+
+        Args:
+            symbol: Símbolo no formato CCXT (ex: 'BTC/USDT:USDT')
+            order_id: ID da ordem retornado pelo place_order
+
+        Returns:
+            dict: Detalhes completos da ordem ou None se falhar
+        """
+        try:
+            self._apply_rate_limit('fetch_order')
+            params = {'category': 'linear'}
+            print(f"   🔍 Buscando detalhes da ordem {order_id} para {symbol}...")
+            order_details = self.exchange.fetch_order(order_id, symbol, params=params)
+            print(f"   ✅ Detalhes da ordem obtidos com sucesso")
+            return order_details
+        except Exception as e:
+            print(f"   ⚠️ Não foi possível buscar detalhes da ordem {order_id}: {e}")
+            # Retorna None para permitir que o código continue com os dados básicos
+            return None
+
     def execute_market_order(self, symbol, side, qty, raise_on_error=False):
         """Executa ordem a mercado para entrada instantânea."""
         try:
@@ -513,20 +539,41 @@ class BybitClient:
                 result = (rsp or {}).get('result') or {}
                 order_id = result.get('orderId') or result.get('orderLinkId')
                 print(f"✅ [BYBIT] Ordem criada com sucesso - ID: {order_id}")
-                return {
-                    **result,
-                    'id': order_id,
-                    'route': 'v5/order/create',
-                    'category': 'linear',
-                    'symbol': v5_symbol,
-                }
+
+                # Bybit V5 API retorna apenas orderId. Buscar detalhes completos da ordem.
+                order_details = self.fetch_order_details(symbol, order_id)
+                if order_details:
+                    # Mesclar dados básicos com detalhes completos
+                    return {
+                        **order_details,
+                        'route': 'v5/order/create',
+                        'category': 'linear',
+                    }
+                else:
+                    # Fallback: retornar dados básicos se fetch_order falhar
+                    return {
+                        **result,
+                        'id': order_id,
+                        'route': 'v5/order/create',
+                        'category': 'linear',
+                        'symbol': v5_symbol,
+                    }
 
             # Fallback para CCXT se pybit não estiver disponível
             params = {'category': 'linear'}  # Obrigatório para futuros/perpétuos USDT conforme Bybit V5 API
             print(f"   📤 Enviando ordem via CCXT: symbol={symbol}, type=market, side={side}, qty={normalized_qty}, params={params}")
             order = self.exchange.create_order(symbol, 'market', side, ccxt_qty, params=params)
             print(f"   📥 Resposta CCXT: {order}")
-            print(f"✅ [BYBIT CCXT] Ordem criada - ID: {order.get('id', 'N/A')}")
+            order_id = order.get('id', 'N/A')
+            print(f"✅ [BYBIT CCXT] Ordem criada - ID: {order_id}")
+
+            # CCXT também pode retornar dados incompletos. Tentar fetch_order para detalhes completos.
+            if order_id != 'N/A':
+                order_details = self.fetch_order_details(symbol, order_id)
+                if order_details:
+                    return order_details
+
+            # Fallback: retornar resposta original do CCXT se fetch_order falhar
             return order
         except Exception as e:
             # Importa ccxt para capturar erros específicos da corretora

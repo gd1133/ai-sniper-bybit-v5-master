@@ -66,6 +66,27 @@ class _FakeExchange:
             'params': params or {},
         }
 
+    def fetch_order(self, order_id, symbol, params=None):
+        """Mock fetch_order to return complete order details."""
+        return {
+            'id': order_id,
+            'symbol': symbol,
+            'type': 'market',
+            'side': 'buy',
+            'price': 87.05,
+            'amount': 0.1,
+            'cost': 8.705,
+            'filled': 0.1,
+            'remaining': 0.0,
+            'status': 'closed',
+            'timestamp': 1234567890000,
+            'datetime': '2009-02-13T23:31:30.000Z',
+            'info': {
+                'orderId': order_id,
+                'symbol': symbol.replace('/', '').replace(':USDT', ''),
+            }
+        }
+
 
 class _FakeCcxt:
     class BaseError(Exception):
