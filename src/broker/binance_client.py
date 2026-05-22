@@ -320,6 +320,8 @@ class BinanceClient:
 
             # Precisão da quantidade
             amount_precision = market.get('precision', {}).get('amount', 3)
+            # 🔧 PROTEÇÃO CRÍTICA: Converte para int para evitar TypeError em .scaleb()
+            amount_precision = int(amount_precision) if amount_precision is not None else 3
 
             print(f"   📊 [BINANCE LIMITS] {symbol}: min_amount={min_amount}, min_notional={min_cost} USDT, precision={amount_precision}")
         except Exception as market_err:
@@ -340,7 +342,8 @@ class BinanceClient:
             qty_value = float(required_min_qty)
 
         # 🔧 PASSO 5: Arredonda para cima respeitando precisão da exchange
-        step = Decimal('1').scaleb(-amount_precision)
+        # 🔧 PROTEÇÃO CRÍTICA: amount_precision deve ser int para .scaleb() retornar Decimal correto
+        step = Decimal('1').scaleb(-int(amount_precision))
         quantized = Decimal(str(qty_value)).quantize(step, rounding=ROUND_UP)
 
         # Garante que após arredondamento ainda atende min notional

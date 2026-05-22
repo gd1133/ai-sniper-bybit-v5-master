@@ -89,6 +89,8 @@ class OrderCalculator:
             # Precisão da quantidade
             precision = market.get('precision', {})
             amount_precision = precision.get('amount', 4)
+            # 🔧 PROTEÇÃO CRÍTICA: Converte para int para evitar TypeError em .scaleb()
+            amount_precision = int(amount_precision) if amount_precision is not None else 4
 
             print(f"   📊 [{self.exchange_name.upper()} LIMITS] {symbol}:")
             print(f"      • min_amount: {min_amount} contratos")
@@ -114,7 +116,8 @@ class OrderCalculator:
             required_qty = max(Decimal(str(min_amount)), min_qty_for_notional)
 
             # PASSO 4: Arredonda para cima respeitando precisão da exchange
-            step = Decimal('1').scaleb(-amount_precision)
+            # 🔧 PROTEÇÃO CRÍTICA: amount_precision deve ser int para .scaleb() retornar Decimal correto
+            step = Decimal('1').scaleb(-int(amount_precision))
             quantized = required_qty.quantize(step, rounding=ROUND_UP)
 
             # PASSO 5: Valida que o nocional ainda atende o mínimo após arredondamento
