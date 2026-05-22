@@ -322,6 +322,11 @@ class BybitClient:
             # 🔧 Valida se amount_precision é None ou string 'none' antes de usar
             if amount_precision is None or str(amount_precision).lower() == 'none':
                 amount_precision = 2
+            else:
+                # 🔧 PROTEÇÃO CRÍTICA: Converte para int para evitar TypeError em .scaleb()
+                # Quando amount_precision é float (ex: 2.0), .scaleb() pode retornar float
+                # causando "TypeError: conversion from float to Decimal is not supported"
+                amount_precision = int(amount_precision)
 
             print(f"   📊 [BYBIT LIMITS] {symbol}: min_amount={min_amount}, min_notional={min_cost} USDT, precision={amount_precision}")
         except Exception as market_err:
@@ -346,7 +351,8 @@ class BybitClient:
             qty_value = float(required_min_qty)
 
         # 🔧 PASSO 5: Arredonda para cima respeitando precisão da exchange
-        step = Decimal('1').scaleb(-amount_precision)
+        # 🔧 PROTEÇÃO CRÍTICA: amount_precision deve ser int para .scaleb() retornar Decimal correto
+        step = Decimal('1').scaleb(-int(amount_precision))
         quantized = Decimal(str(qty_value)).quantize(step, rounding=ROUND_UP)
 
         # Garante que após arredondamento ainda atende min notional
