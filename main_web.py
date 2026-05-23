@@ -9,6 +9,7 @@ gunicorn -w 1 -k gthread main_web:app
 """
 import os
 import socket
+import errno
 import time
 import threading
 import sqlite3
@@ -41,6 +42,7 @@ public_price_broker = None
 
 RUNTIME_START_LOCK = threading.Lock()
 RUNTIME_STARTED = False
+RUNTIME_LOCK_ERROR = False
 MAESTRO_LOCK_PORT = int(os.getenv("MAESTRO_LOCK_PORT", "4999"))
 _MAESTRO_PROCESS_LOCK_SOCKET = None
 AI_RATE_LIMIT_STATUS_MESSAGE = '⚠️ Limite das IAs atingido. Aguardando cooldown de 60s...'
@@ -198,9 +200,13 @@ if db is not None:
         central_state['max_moedas_ativas'] = MAX_MOEDAS_ATIVAS
 
 def start_runtime_services():
-    global RUNTIME_STARTED, _MAESTRO_PROCESS_LOCK_SOCKET
+    global RUNTIME_STARTED, RUNTIME_LOCK_ERROR, _MAESTRO_PROCESS_LOCK_SOCKET
     with RUNTIME_START_LOCK:
-        if RUNTIME_STARTED: return False
+        if RUNTIME_STARTED or RUNTIME_LOCK_ERROR: return False
+        if not (1024 <= MAESTRO_LOCK_PORT <= 65535):
+            print(f"⚠️ [MAESTRO CORE] Porta de lock inválida ({MAESTRO_LOCK_PORT}). Mantendo apenas o worker HTTP ativo.", flush=True)
+            RUNTIME_LOCK_ERROR = True
+            return False
         if _MAESTRO_PROCESS_LOCK_SOCKET is None:
             lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             try:
@@ -208,9 +214,14 @@ def start_runtime_services():
                 lock_socket.listen(1)
                 _MAESTRO_PROCESS_LOCK_SOCKET = lock_socket
                 print("⚡ [MAESTRO CORE] Instância única obtida. Iniciando loop de trading real...", flush=True)
-            except OSError:
+            except OSError as exc:
                 lock_socket.close()
-                print("ℹ️ [MAESTRO CORE] Instância em background já ativa por outro worker. Ignorando inicialização duplicada.", flush=True)
+                err_no = getattr(exc, "errno", None)
+                if err_no == errno.EADDRINUSE:
+                    print("ℹ️ [MAESTRO CORE] Instância em background já ativa por outro worker. Ignorando inicialização duplicada.", flush=True)
+                else:
+                    print(f"⚠️ [MAESTRO CORE] Falha ao obter process lock ({exc}). Mantendo apenas o worker HTTP ativo.", flush=True)
+                    RUNTIME_LOCK_ERROR = True
                 return False
         threading.Thread(target=sniper_worker_loop, daemon=True).start()
         threading.Thread(target=_monitor_sl_tp_automatico, daemon=True).start()
