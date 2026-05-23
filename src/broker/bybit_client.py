@@ -2,6 +2,7 @@
 import time
 import sys
 import io
+import threading
 from decimal import Decimal
 
 # Força UTF-8 no stdout para evitar erros de encode com emojis no Render/Terminal
@@ -12,39 +13,51 @@ AUTH_10003_ALERT = (
     "ERRO DE AUTENTICAÇÃO: Verifique se a chave de API é de produção e se o 2FA está ativo na Bybit"
 )
 
-# Globals para carregamento em Lazy Loading
+# Globals para carregamento em Lazy Loading com Thread Safety
 _ccxt_instance = None
 _pd_instance = None
 _pybit_http_class = None
+_ccxt_lock = threading.Lock()
+_pd_lock = threading.Lock()
+_pybit_lock = threading.Lock()
 
 def _get_ccxt():
-    """Carrega CCXT lazy (apenas na primeira vez)."""
+    """Carrega CCXT lazy (apenas na primeira vez) com thread lock."""
     global _ccxt_instance
-    if _ccxt_instance is None:
-        print("⏳ Carregando CCXT (primeira vez)...", flush=True)
-        import ccxt as ccxt_lib
-        _ccxt_instance = ccxt_lib
-        print("✅ CCXT carregado com sucesso", flush=True)
+    if _ccxt_instance is not None:
+        return _ccxt_instance
+    with _ccxt_lock:
+        if _ccxt_instance is None:
+            print("⏳ Carregando CCXT (primeira vez)...", flush=True)
+            import ccxt as ccxt_lib
+            _ccxt_instance = ccxt_lib
+            print("✅ CCXT carregado com sucesso", flush=True)
     return _ccxt_instance
 
 def _get_pd():
-    """Carrega Pandas lazy."""
+    """Carrega Pandas lazy com thread lock."""
     global _pd_instance
-    if _pd_instance is None:
-        print("⏳ Carregando Pandas...", flush=True)
-        import pandas as pd
-        _pd_instance = pd
-        print("✅ Pandas carregado com sucesso", flush=True)
+    if _pd_instance is not None:
+        return _pd_instance
+    with _pd_lock:
+        if _pd_instance is None:
+            print("⏳ Carregando Pandas...", flush=True)
+            import pandas as pd
+            _pd_instance = pd
+            print("✅ Pandas carregado com sucesso", flush=True)
     return _pd_instance
 
 def _get_pybit_http():
-    """Carrega pybit HTTP lazy (apenas na primeira vez)."""
+    """Carrega pybit HTTP lazy (apenas na primeira vez) com thread lock."""
     global _pybit_http_class
-    if _pybit_http_class is None:
-        print("⏳ Carregando pybit HTTP...", flush=True)
-        from pybit.unified_trading import HTTP as pybit_http
-        _pybit_http_class = pybit_http
-        print("✅ pybit HTTP carregado com sucesso", flush=True)
+    if _pybit_http_class is not None:
+        return _pybit_http_class
+    with _pybit_lock:
+        if _pybit_http_class is None:
+            print("⏳ Carregando pybit HTTP...", flush=True)
+            from pybit.unified_trading import HTTP as pybit_http
+            _pybit_http_class = pybit_http
+            print("✅ pybit HTTP carregado com sucesso", flush=True)
     return _pybit_http_class
 
 

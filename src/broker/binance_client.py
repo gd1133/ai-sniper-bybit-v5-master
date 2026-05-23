@@ -2,30 +2,39 @@
 import time
 import sys
 import io
+import threading
 from decimal import Decimal
 
 # Força UTF-8 no stdout do Windows
 if sys.platform == 'win32':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
-# Globals para Lazy Loading
+# Globals para Lazy Loading com Thread Safety
 _ccxt_instance = None
 _pd_instance = None
+_ccxt_lock = threading.Lock()
+_pd_lock = threading.Lock()
 
 def _get_ccxt():
     global _ccxt_instance
-    if _ccxt_instance is None:
-        print("⏳ Carregando CCXT para Binance...", flush=True)
-        import ccxt as ccxt_lib
-        _ccxt_instance = ccxt_lib
-        print("✅ CCXT Binance carregado com sucesso", flush=True)
+    if _ccxt_instance is not None:
+        return _ccxt_instance
+    with _ccxt_lock:
+        if _ccxt_instance is None:
+            print("⏳ Carregando CCXT para Binance...", flush=True)
+            import ccxt as ccxt_lib
+            _ccxt_instance = ccxt_lib
+            print("✅ CCXT Binance carregado com sucesso", flush=True)
     return _ccxt_instance
 
 def _get_pd():
     global _pd_instance
-    if _pd_instance is None:
-        import pandas as pd
-        _pd_instance = pd
+    if _pd_instance is not None:
+        return _pd_instance
+    with _pd_lock:
+        if _pd_instance is None:
+            import pandas as pd
+            _pd_instance = pd
     return _pd_instance
 
 
