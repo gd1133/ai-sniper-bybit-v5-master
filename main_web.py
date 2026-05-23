@@ -93,9 +93,12 @@ class BrokerManager:
             for key in keys_to_remove: del self._broker_cache[key]
 
 _broker_manager = None
+_broker_manager_lock = threading.Lock()
 def _get_broker_manager():
     global _broker_manager
-    if _broker_manager is None: _broker_manager = BrokerManager()
+    if _broker_manager is not None: return _broker_manager
+    with _broker_manager_lock:
+        if _broker_manager is None: _broker_manager = BrokerManager()
     return _broker_manager
 
 load_dotenv()
@@ -310,26 +313,33 @@ def _extract_entry_price(trade):
     except Exception: pass
     return 0.0
 
+_public_price_broker_lock = threading.Lock()
+
 def _get_public_price_broker():
     global BybitClient, public_price_broker
     if public_price_broker is not None: return public_price_broker
-    if BybitClient is None:
-        from src.broker.bybit_client import BybitClient as _BybitClient
-        BybitClient = _BybitClient
-    _, bybit_api_key, bybit_api_secret = _get_active_investor_bybit_credentials()
-    if not bybit_api_key or not bybit_api_secret:
-        import ccxt
-        class CCXTPublicPriceFallback:
-            def get_last_price(self, symbol):
-                try: return float(ccxt.bybit().fetch_ticker(symbol)['last'])
-                except Exception: return 0.0
-            def fetch_ohlcv(self, symbol, timeframe='15m'):
-                try:
-                    import pandas as pd
-                    return pd.DataFrame(ccxt.bybit().fetch_ohlcv(symbol, timeframe, limit=200), columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-                except Exception: return None
-        return CCXTPublicPriceFallback()
-    public_price_broker = BybitClient(bybit_api_key, bybit_api_secret, testnet=False)
+    with _public_price_broker_lock:
+        if public_price_broker is not None: return public_price_broker
+        if BybitClient is None:
+            from src.broker.bybit_client import BybitClient as _BybitClient
+            BybitClient = _BybitClient
+        _, bybit_api_key, bybit_api_secret = _get_active_investor_bybit_credentials()
+        if not bybit_api_key or not bybit_api_secret:
+            from src.broker.bybit_client import _get_ccxt as _get_ccxt_cached
+            class CCXTPublicPriceFallback:
+                def __init__(self):
+                    self._ccxt_exchange = _get_ccxt_cached().bybit()
+                def get_last_price(self, symbol):
+                    try: return float(self._ccxt_exchange.fetch_ticker(symbol)['last'])
+                    except Exception: return 0.0
+                def fetch_ohlcv(self, symbol, timeframe='15m'):
+                    try:
+                        from src.broker.bybit_client import _get_pd as _get_pd_cached
+                        pd = _get_pd_cached()
+                        return pd.DataFrame(self._ccxt_exchange.fetch_ohlcv(symbol, timeframe, limit=200), columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+                    except Exception: return None
+            return CCXTPublicPriceFallback()
+        public_price_broker = BybitClient(bybit_api_key, bybit_api_secret, testnet=False)
     return public_price_broker
 
 def _ensure_broker_class(exchange='bybit'):
@@ -641,7 +651,12 @@ def sniper_worker_loop():
                 time.sleep(10)
                 continue
 
-            ex_master = BybitClient(key, sec, False)
+            # Reutiliza broker via BrokerManager (singleton cacheado) em vez de instanciar novo BybitClient
+            active_clients = _get_registered_clients(active_only=True)
+            if not active_clients:
+                time.sleep(10)
+                continue
+            ex_master = _make_broker(active_clients[0])
             tickers = ex_master.exchange.fetch_tickers(params={'category': 'linear'})
             top_coins = sorted([t for t in tickers.values() if 'USDT' in t.get('symbol', '') and ':' in t['symbol']], key=lambda x: x.get('quoteVolume', 0), reverse=True)[:SCAN_TOP_COINS]
             
