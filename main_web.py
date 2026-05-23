@@ -8,6 +8,7 @@
 gunicorn -w 1 -k gthread main_web:app
 """
 import os
+import socket
 import time
 import threading
 import sqlite3
@@ -40,6 +41,8 @@ public_price_broker = None
 
 RUNTIME_START_LOCK = threading.Lock()
 RUNTIME_STARTED = False
+MAESTRO_LOCK_PORT = int(os.getenv("MAESTRO_LOCK_PORT", "4999"))
+_MAESTRO_PROCESS_LOCK_SOCKET = None
 AI_RATE_LIMIT_STATUS_MESSAGE = '⚠️ Limite das IAs atingido. Aguardando cooldown de 60s...'
 AI_COOLDOWN_ACTIVE = False
 AI_COOLDOWN_LOCK = threading.Lock()
@@ -195,9 +198,20 @@ if db is not None:
         central_state['max_moedas_ativas'] = MAX_MOEDAS_ATIVAS
 
 def start_runtime_services():
-    global RUNTIME_STARTED
+    global RUNTIME_STARTED, _MAESTRO_PROCESS_LOCK_SOCKET
     with RUNTIME_START_LOCK:
         if RUNTIME_STARTED: return False
+        if _MAESTRO_PROCESS_LOCK_SOCKET is None:
+            lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                lock_socket.bind(("127.0.0.1", MAESTRO_LOCK_PORT))
+                lock_socket.listen(1)
+                _MAESTRO_PROCESS_LOCK_SOCKET = lock_socket
+                print("⚡ [MAESTRO CORE] Instância única obtida. Iniciando loop de trading real...", flush=True)
+            except OSError:
+                lock_socket.close()
+                print("ℹ️ [MAESTRO CORE] Instância em background já ativa por outro worker. Ignorando inicialização duplicada.", flush=True)
+                return False
         threading.Thread(target=sniper_worker_loop, daemon=True).start()
         threading.Thread(target=_monitor_sl_tp_automatico, daemon=True).start()
         threading.Thread(target=_fetch_active_client_balances, kwargs={'force': True}, daemon=True).start()
