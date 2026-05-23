@@ -684,11 +684,19 @@ def sniper_worker_loop():
 def _process_client_orders_background(symbol, side, entry_price, confidence, reason):
     """ Loop assíncrono com salvamento local e disparo protegido anti-400 do Telegram """
     try:
-        tk, chat = f"{os.getenv('TELEGRAM_TOKEN') or ''}".strip(), f"{os.getenv('TELEGRAM_CHAT_ID') or ''}".strip()
+        # 1. DUALIDADE DE CONFIGURAÇÃO (FALLBACK DO BANCO)
+        # Primeiro tenta ler do .env, depois fallback para variáveis do banco
+        tk = f"{os.getenv('TELEGRAM_TOKEN') or ''}".strip()
+        chat = f"{os.getenv('TELEGRAM_CHAT_ID') or ''}".strip()
+
         clientes = _get_registered_clients(active_only=True)
 
         for c in clientes:
             try:
+                # Fallback dinâmico: se .env estiver vazio, busca do dicionário do cliente
+                client_tk = tk or f"{c.get('telegram_token') or c.get('token_telegram') or ''}".strip()
+                client_chat = chat or f"{c.get('telegram_chat_id') or c.get('chat_id') or ''}".strip()
+
                 broker = _make_broker(c)
                 banca = float(c.get('saldo_base', 1000.0))
                 margem, qty = _calculate_dynamic_order_quantity(broker, symbol, banca)
@@ -698,16 +706,17 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                     if order_result:
                         order_id = order_result.get('id', order_result.get('orderId', 'N/A'))
                         side_label = 'COMPRAR' if side.lower() in ('buy', 'comprar') else 'VENDER'
-                        
+
                         db.record_trade(
                             client_id=c.get('id', 1), pair=symbol, side=side_label, pnl_pct=0,
                             profit=round(margem, 2), closed_at=time.strftime("%d/%m %H:%M"),
                             notes=f"AUTO SNIPER | ID: {order_id}", status="open", entry_price=entry_price
                         )
-                        
+
                         broker.set_tp_sl_sniper(symbol, side.lower(), entry_price, qty)
 
-                        if tk and chat:
+                        # 2. DEPURAÇÃO ATIVA + 3. HIGIENIZAÇÃO DE ENVIO
+                        if client_tk and client_chat:
                             msg_tg = (
                                 f"🔥 OPERACAO REAL EXECUTADA\n\n"
                                 f"👤 Investidor: {c.get('nome')}\n"
@@ -717,10 +726,24 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                                 f"💰 Margem Separada: ${margem:.2f} USDT\n"
                                 f"🆔 Hash ID: {order_id}"
                             )
-                            try: requests.post(f"https://api.telegram.org/bot{tk}/sendMessage", json={"chat_id": chat, "text": msg_tg}, timeout=5)
-                            except Exception: pass
-            except Exception: pass
-    except Exception: pass
+                            try:
+                                # Higienização: limpa espaços e converte chat_id numérico para int
+                                clean_chat = str(client_chat).strip()
+                                if clean_chat.isdigit():
+                                    clean_chat = int(clean_chat)
+
+                                requests.post(
+                                    f"https://api.telegram.org/bot{client_tk}/sendMessage",
+                                    json={"chat_id": clean_chat, "text": msg_tg},
+                                    timeout=5
+                                )
+                                print(f"✅ [TELEGRAM] Notificação enviada com sucesso para {c.get('nome')} (chat_id: {clean_chat})", flush=True)
+                            except Exception as tg_err:
+                                print(f"❌ [TELEGRAM ERROR] Falha ao enviar notificação para {c.get('nome')}: {tg_err}", flush=True)
+            except Exception as client_err:
+                print(f"⚠️ [CLIENT ERROR] Falha ao processar ordem para cliente {c.get('nome', 'Unknown')}: {client_err}", flush=True)
+    except Exception as general_err:
+        print(f"❌ [PROCESS ERROR] Erro geral no processamento de ordens: {general_err}", flush=True)
 
 # ==============================================================================
 # 🎛️ ENDPOINTS DA API REST (FLASK)
