@@ -694,8 +694,9 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
         for c in clientes:
             try:
                 # Fallback dinâmico: se .env estiver vazio, busca do dicionário do cliente
-                client_tk = tk or f"{c.get('telegram_token') or c.get('token_telegram') or ''}".strip()
-                client_chat = chat or f"{c.get('telegram_chat_id') or c.get('chat_id') or ''}".strip()
+                # CORREÇÃO: campos corretos do banco são 'tg_token', 'tg_api_key' e 'chat_id'
+                client_tk = tk or f"{c.get('tg_token') or c.get('tg_api_key') or c.get('telegram_token') or c.get('token_telegram') or ''}".strip()
+                client_chat = chat or f"{c.get('chat_id') or c.get('telegram_chat_id') or ''}".strip()
 
                 broker = _make_broker(c)
                 banca = float(c.get('saldo_base', 1000.0))
@@ -833,6 +834,94 @@ def api_manual_entry_trade():
         ai_result = GroqValidator().consensus_predict(tech_data, symbol, force_local_only=True)
         return jsonify({"success": True, "analysis_only": True, "symbol": symbol, "side": side_normalized, "entry_price": entry_price, "ai_analysis": {"confidence": ai_result.get('probabilidade', 70), "reason": ai_result.get('motivo', 'Aprovado')}}), 200
     except Exception as e: return jsonify({"success": False, "error": str(e)}), 400
+
+@app.route('/api/trade/manual-close', methods=['POST'])
+def api_manual_close_trade():
+    """Endpoint para fechar posições manualmente via interface web"""
+    try:
+        data = request.json or {}
+        symbol = data.get('symbol', '').strip()
+        side = data.get('side', '').strip().upper()
+        client_id = data.get('client_id')
+
+        if not symbol:
+            return jsonify({"success": False, "error": "Símbolo é obrigatório"}), 400
+
+        if not side or side not in ['BUY', 'SELL', 'COMPRAR', 'VENDER', 'LONG', 'SHORT']:
+            return jsonify({"success": False, "error": "Lado inválido. Use: BUY, SELL, LONG ou SHORT"}), 400
+
+        # Normaliza o lado da posição
+        position_side = 'buy' if side in ['BUY', 'COMPRAR', 'LONG'] else 'sell'
+
+        # Se client_id foi especificado, fecha apenas para esse cliente
+        if client_id:
+            client = _get_registered_client_by_id(client_id)
+            if not client:
+                return jsonify({"success": False, "error": f"Cliente ID {client_id} não encontrado"}), 404
+            clients_to_close = [client]
+        else:
+            # Senão, fecha para todos os clientes ativos
+            clients_to_close = _get_registered_clients(active_only=True)
+
+        if not clients_to_close:
+            return jsonify({"success": False, "error": "Nenhum cliente ativo encontrado"}), 404
+
+        results = []
+        for c in clients_to_close:
+            try:
+                broker = _make_broker(c)
+                success = broker.close_position_with_sl(symbol, position_side)
+
+                if success:
+                    # Busca o trade aberto correspondente no banco e fecha
+                    open_trades = db.get_open_trades(limit=100)
+                    for trade in open_trades:
+                        if (trade.get('client_id') == c.get('id') and
+                            symbol in trade.get('pair', '') and
+                            trade.get('status') == 'open'):
+                            # Fecha o trade com PnL zerado (fechamento manual)
+                            db.close_trade(
+                                trade_id=trade.get('id'),
+                                pnl_pct=0.0,
+                                profit=0.0,
+                                closed_at=time.strftime("%d/%m %H:%M"),
+                                notes="FECHAMENTO MANUAL"
+                            )
+                    _sync_active_trades_from_db()
+
+                    results.append({
+                        "client_id": c.get('id'),
+                        "client_name": c.get('nome'),
+                        "success": True,
+                        "message": f"Posição fechada com sucesso"
+                    })
+                    print(f"✅ [MANUAL CLOSE] Posição {symbol} fechada para {c.get('nome')}", flush=True)
+                else:
+                    results.append({
+                        "client_id": c.get('id'),
+                        "client_name": c.get('nome'),
+                        "success": False,
+                        "message": f"Falha ao fechar posição - verifique se existe posição aberta"
+                    })
+            except Exception as client_err:
+                results.append({
+                    "client_id": c.get('id'),
+                    "client_name": c.get('nome'),
+                    "success": False,
+                    "error": str(client_err)
+                })
+                print(f"❌ [MANUAL CLOSE ERROR] Erro ao fechar para {c.get('nome')}: {client_err}", flush=True)
+
+        success_count = sum(1 for r in results if r.get('success'))
+        return jsonify({
+            "success": success_count > 0,
+            "message": f"{success_count}/{len(results)} posições fechadas com sucesso",
+            "results": results
+        }), 200
+
+    except Exception as e:
+        print(f"❌ [MANUAL CLOSE] Erro geral: {e}", flush=True)
+        return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/api/config/risk-mode', methods=['GET', 'POST'])
 def handle_risk_mode():
