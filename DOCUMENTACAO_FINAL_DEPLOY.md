@@ -27,6 +27,9 @@ O sistema opera com scanner de mercado, validação técnica/IA local, execuçã
 - SL automático: -50%
 - Fechamento manual: endpoint `/api/trade/manual-close`
 
+Observação de risco:
+- O SL de 50% é uma configuração agressiva da estratégia atual e deve ser revisado conforme o perfil de risco antes de operar em conta real.
+
 ## 5) Multi-cliente
 Quando um sinal é aprovado:
 - Todos os clientes ativos podem executar em paralelo;
