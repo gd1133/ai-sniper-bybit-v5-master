@@ -20,6 +20,8 @@ O sistema opera com scanner de mercado, validação técnica/IA local, execuçã
 - Força de movimento: volume ratio
 
 ## 4) Regras operacionais atuais (código)
+⚠️ **Atenção:** o SL de 50% é uma configuração agressiva e deve ser obrigatoriamente revisada antes de operar em conta real.
+
 - Threshold de entrada: 70
 - Máx posições simultâneas: 1 (conservador) / 5 (agressivo)
 - Risco por operação: 5% da banca por cliente
@@ -29,7 +31,7 @@ O sistema opera com scanner de mercado, validação técnica/IA local, execuçã
 
 Observação de risco:
 - O SL de 50% é uma configuração agressiva da estratégia atual e deve ser revisado conforme o perfil de risco antes de operar em conta real.
-- Como a ordem é limitada a 5% da banca por cliente, a perda máxima teórica por operação fica limitada a ~2,5% da banca total.
+- Como a ordem é limitada a 5% da banca por cliente, a perda máxima teórica por operação fica limitada a 2,5% da banca total.
 
 ## 5) Multi-cliente
 Quando um sinal é aprovado:
