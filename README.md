@@ -1,6 +1,6 @@
-# Motor Sniper v60.9
+# Motor Sniper v61.5
 
-Bot de trading com dashboard web em tempo real, operacao multiativo e integracao com Bybit e IA para validacao de sinais.
+Bot de trading com dashboard web em tempo real, operação multiativo e integração com Bybit e IA para validação de sinais.
 
 ## ⚠️ IMPORTANTE: Configuração Modo Real vs Testnet
 
@@ -46,12 +46,14 @@ python diagnostico_execucao_ordens.py # Diagnostica por que ordens não executam
 📖 **Documentação completa:**
 - `docs/API_TESTER_GUIA.md` - Guia completo do API Tester
 - `CORRECAO_MODO_REAL_TESTNET.md` - Configuração testnet vs produção
+- `DOCUMENTACAO_FINAL_DEPLOY.md` - Documentação final consolidada para versão atual e deploy em conta de cliente
 
-## Documentacao completa
+## Documentação completa
 
-Para a documentacao tecnica, operacional e comercial completa, consulte:
+Para a documentação técnica, operacional e comercial completa, consulte:
 
 - `docs/DOCUMENTACAO_COMPLETA.md`
+- `DOCUMENTACAO_FINAL_DEPLOY.md` (documento final recomendado para deploy da versão atual)
 
 ## Stack
 
