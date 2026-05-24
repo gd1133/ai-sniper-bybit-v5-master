@@ -296,9 +296,9 @@ Mesmo com score alto, o sistema ainda pode abortar a entrada quando:
 
 Configuracao observada no codigo:
 
-- **Threshold minimo:** 60%
+- **Threshold de entrada:** 70%
 - **Threshold minimo no fallback soberano do 3o cerebro:** 80%
-- **Maximo de moedas simultaneas:** 5
+- **Maximo de moedas simultaneas:** 1 (conservador) / 5 (agressivo)
 - **Sem repeticao de moeda ja aberta:** ativo
 - **Posicao unica:** desativada
 - **Valor da ordem:** 5% da banca total do cliente
