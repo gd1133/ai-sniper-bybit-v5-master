@@ -29,6 +29,7 @@ O sistema opera com scanner de mercado, validação técnica/IA local, execuçã
 
 Observação de risco:
 - O SL de 50% é uma configuração agressiva da estratégia atual e deve ser revisado conforme o perfil de risco antes de operar em conta real.
+- Como a ordem é limitada a 5% da banca por cliente, a perda máxima teórica por operação fica limitada a ~2,5% da banca total.
 
 ## 5) Multi-cliente
 Quando um sinal é aprovado:
