@@ -399,6 +399,7 @@ const App = () => {
 
   const handleManualCloseTrade = async (trade) => {
     const symbol = trade?.raw_symbol || trade?.symbol;
+    const side = String(trade?.side || '').trim().toUpperCase();
     if (!symbol || trade?.isSignalCard) return;
     if (!confirm(`Fechar manualmente a operação de ${trade.symbol}?`)) return;
 
@@ -407,7 +408,7 @@ const App = () => {
       const res = await fetch(`${API_BASE}/api/trade/manual-close`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbol }),
+        body: JSON.stringify({ symbol, ...(side ? { side } : {}) }),
       });
       const json = await res.json();
       if (!res.ok || !json.success) {
