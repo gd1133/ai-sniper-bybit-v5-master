@@ -859,11 +859,11 @@ def api_manual_close_trade():
         if not symbol:
             return jsonify({"success": False, "error": "Símbolo é obrigatório"}), 400
 
-        if not side or side not in ['BUY', 'SELL', 'COMPRAR', 'VENDER', 'LONG', 'SHORT']:
+        if side and side not in ['BUY', 'SELL', 'COMPRAR', 'VENDER', 'LONG', 'SHORT']:
             return jsonify({"success": False, "error": "Lado inválido. Use: BUY, SELL, LONG ou SHORT"}), 400
 
-        # Normaliza o lado da posição
-        position_side = 'buy' if side in ['BUY', 'COMPRAR', 'LONG'] else 'sell'
+        # Normaliza o lado da posição (quando ausente, tenta ambos os lados)
+        position_sides = ['buy', 'sell'] if not side else (['buy'] if side in ['BUY', 'COMPRAR', 'LONG'] else ['sell'])
 
         # Se client_id foi especificado, fecha apenas para esse cliente
         if client_id:
@@ -882,7 +882,11 @@ def api_manual_close_trade():
         for c in clients_to_close:
             try:
                 broker = _make_broker(c)
-                success = broker.close_position_with_sl(symbol, position_side)
+                success = False
+                for position_side in position_sides:
+                    success = broker.close_position_with_sl(symbol, position_side)
+                    if success:
+                        break
 
                 if success:
                     # Busca o trade aberto correspondente no banco e fecha
