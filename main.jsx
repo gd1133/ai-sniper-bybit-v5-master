@@ -408,7 +408,7 @@ const App = () => {
       const res = await fetch(`${API_BASE}/api/trade/manual-close`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbol, side: side || undefined }),
+        body: JSON.stringify({ symbol, ...(side ? { side } : {}) }),
       });
       const json = await res.json();
       if (!res.ok || !json.success) {

@@ -863,7 +863,12 @@ def api_manual_close_trade():
             return jsonify({"success": False, "error": "Lado inválido. Use: BUY, SELL, LONG ou SHORT"}), 400
 
         # Normaliza o lado da posição (quando ausente, tenta ambos os lados)
-        position_sides = ['buy', 'sell'] if not side else (['buy'] if side in ['BUY', 'COMPRAR', 'LONG'] else ['sell'])
+        if not side:
+            position_sides = ['buy', 'sell']
+        elif side in ['BUY', 'COMPRAR', 'LONG']:
+            position_sides = ['buy']
+        else:
+            position_sides = ['sell']
 
         # Se client_id foi especificado, fecha apenas para esse cliente
         if client_id:
@@ -886,6 +891,7 @@ def api_manual_close_trade():
                 for position_side in position_sides:
                     success = broker.close_position_with_sl(symbol, position_side)
                     if success:
+                        print(f"✅ [MANUAL CLOSE] Fechamento confirmado no lado {position_side.upper()} para {symbol}", flush=True)
                         break
 
                 if success:
