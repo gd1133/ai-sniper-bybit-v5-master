@@ -134,6 +134,7 @@ ALLOW_REAL_TRADING = ENV_CONFIG.allow_real_trading
 USE_TESTNET = False
 RISK_MODE = 'conservative'
 MAX_MOEDAS_ATIVAS = 1
+LEVERAGE = 10  # Alavancagem padrão (deve coincidir com main.py)
 
 # Constantes do Sniper Worker
 SCAN_TOP_COINS = 50
@@ -196,6 +197,14 @@ if db is not None:
         MAX_MOEDAS_ATIVAS = 1 if RISK_MODE == 'conservative' else 5
         central_state['risk_mode'] = RISK_MODE
         central_state['max_moedas_ativas'] = MAX_MOEDAS_ATIVAS
+    _saved_leverage = db.get_config('LEVERAGE')
+    if _saved_leverage:
+        try:
+            _lev = int(_saved_leverage)
+            if _lev > 0:
+                LEVERAGE = _lev
+        except (ValueError, TypeError):
+            pass
 
 def start_runtime_services():
     global RUNTIME_STARTED
@@ -256,7 +265,10 @@ def _calculate_live_trade_metrics(entry_price, current_price, side):
     market_move = ((current - entry) / entry) * 100
 
     # Inverte o PnL se for posição SHORT/VENDER
-    pnl_pct = -market_move if str(side).upper() in ('VENDER', 'SELL', 'SHORT') else market_move
+    price_pct = -market_move if str(side).upper() in ('VENDER', 'SELL', 'SHORT') else market_move
+
+    # Aplica alavancagem para obter PnL % sobre a margem (igual ao exibido na Bybit)
+    pnl_pct = price_pct * LEVERAGE
 
     return {
         "current_price": round(current, 8),
