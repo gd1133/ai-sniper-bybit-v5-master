@@ -650,7 +650,10 @@ class BybitClient:
             if position_idx is not None:
                 params['positionIdx'] = position_idx
 
-            normalized_qty = self._normalize_order_qty(symbol, pos_size)
+            # Use amount_to_precision for rounding only — _normalize_order_qty enforces
+            # minimum notional and can inflate qty above the real position size, which
+            # Bybit rejects when reduceOnly=True.
+            normalized_qty = self.exchange.amount_to_precision(symbol, pos_size)
 
             order = self.exchange.create_order(
                 symbol=symbol,
