@@ -133,6 +133,18 @@ const getTradeProgressText = (trade) => {
   return `Faltam ${Math.max(0, 50 - Math.abs(pnlPct)).toFixed(2)}% para SL`;
 };
 
+const canonicalizeTradeSymbol = (value) => {
+  const raw = String(value || '').trim().toUpperCase().replace(/\s+/g, '');
+  if (!raw) return '';
+  if (raw.includes(':')) return raw;
+  if (raw.includes('/')) {
+    const [base, quote] = raw.split('/', 2);
+    return base && quote ? `${base}/${quote}:${quote}` : raw;
+  }
+  if (raw.endsWith('USDT') && raw.length > 4) return `${raw.slice(0, -4)}/USDT:USDT`;
+  return raw;
+};
+
 /**
  * MOTOR SNIPER v60.7 - SaaS EDITION
  * Visual Proof Framework • Emerald Design
@@ -398,7 +410,7 @@ const App = () => {
 
 
   const handleManualCloseTrade = async (trade) => {
-    const symbol = trade?.raw_symbol || trade?.symbol;
+    const symbol = canonicalizeTradeSymbol(trade?.raw_symbol || trade?.symbol);
     const side = String(trade?.side || '').trim().toUpperCase();
     if (!symbol || trade?.isSignalCard) return;
     if (!confirm(`Fechar manualmente a operação de ${trade.symbol}?`)) return;
@@ -412,7 +424,7 @@ const App = () => {
       });
       const json = await res.json();
       if (!res.ok || !json.success) {
-        alert(json.error || 'Erro ao fechar operação manualmente');
+        alert(json.error || json.message || 'Erro ao fechar operação manualmente');
         return;
       }
       await refreshStatusSnapshot();
