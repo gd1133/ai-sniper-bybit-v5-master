@@ -622,38 +622,88 @@ class BybitClient:
         try:
             if not self.authenticated: return False
 
-            close_side = "sell" if position_side.lower() == "buy" else "buy"
             print(f"🔒 [CLOSE POSITION] Disparando ordem de fechamento para {symbol}", flush=True)
 
+            requested_side = str(position_side or '').strip().lower()
+            if requested_side in ('buy', 'long', 'comprar'):
+                requested_bucket = 'long'
+            elif requested_side in ('sell', 'short', 'vender'):
+                requested_bucket = 'short'
+            else:
+                requested_bucket = None
+
+            def _symbol_keys(value):
+                raw = str(value or '').strip().upper()
+                if not raw:
+                    return set()
+                cleaned = ''.join(ch for ch in raw if ch.isalnum())
+                keys = {cleaned}
+                if ':' in raw:
+                    keys.add(''.join(ch for ch in raw.split(':', 1)[0] if ch.isalnum()))
+                if '/' in raw:
+                    base, quote = raw.split('/', 1)
+                    quote = quote.split(':', 1)[0]
+                    if base and quote:
+                        keys.add(f"{base}{quote}")
+                if raw.endswith('USDT') and len(raw) > 4:
+                    keys.add(raw[:-4] + 'USDT')
+                return {k for k in keys if k}
+
+            requested_symbol_keys = _symbol_keys(symbol)
             positions = self.exchange.fetch_positions(params={'category': 'linear'})
             target_position = None
+            target_bucket = requested_bucket
 
             for p in positions:
-                pos_symbol = p.get('symbol', '')
+                pos_symbol = p.get('symbol') or p.get('info', {}).get('symbol') or ''
                 pos_contracts = float(p.get('contracts') or 0)
                 pos_side = str(p.get('side', '')).lower()
+                pos_info = p.get('info', {}) or {}
+                pos_symbol_keys = _symbol_keys(pos_symbol)
+                pos_idx = str(pos_info.get('positionIdx') or '').strip()
 
-                if symbol in pos_symbol and pos_contracts > 0:
-                    if (position_side.lower() in ('buy', 'long') and pos_side == 'long') or \
-                       (position_side.lower() in ('sell', 'short') and pos_side == 'short'):
-                        target_position = p
-                        break
+                if requested_symbol_keys and not requested_symbol_keys.intersection(pos_symbol_keys):
+                    continue
+
+                if pos_contracts <= 0:
+                    continue
+
+                if pos_side in ('long', 'buy'):
+                    current_bucket = 'long'
+                elif pos_side in ('short', 'sell'):
+                    current_bucket = 'short'
+                elif pos_idx == '1':
+                    current_bucket = 'long'
+                elif pos_idx == '2':
+                    current_bucket = 'short'
+                else:
+                    current_bucket = None
+
+                if requested_bucket and current_bucket and requested_bucket != current_bucket:
+                    continue
+
+                target_position = p
+                if current_bucket:
+                    target_bucket = current_bucket
+                break
 
             if not target_position:
                 print(f"⚠️ [CLOSE POSITION] Nenhuma posição aberta encontrada para fechar em {symbol}", flush=True)
                 return False
 
-            pos_size = float(target_position.get('contracts') or 0)
+            close_side = 'sell' if target_bucket == 'long' else 'buy'
+            order_symbol = target_position.get('symbol') or symbol
+            pos_size = float(target_position.get('contracts') or target_position.get('info', {}).get('size') or 0)
             position_idx = target_position.get('info', {}).get('positionIdx')
 
             params = {'category': 'linear', 'reduceOnly': True}
             if position_idx is not None:
                 params['positionIdx'] = position_idx
 
-            normalized_qty = self._normalize_order_qty(symbol, pos_size)
+            normalized_qty = self._normalize_order_qty(order_symbol, pos_size)
 
             order = self.exchange.create_order(
-                symbol=symbol,
+                symbol=order_symbol,
                 type='market',
                 side=close_side,
                 amount=float(normalized_qty),

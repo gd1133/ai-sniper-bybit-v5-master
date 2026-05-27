@@ -852,7 +852,7 @@ def api_manual_close_trade():
     """Endpoint para fechar posições manualmente via interface web"""
     try:
         data = request.json or {}
-        symbol = data.get('symbol', '').strip()
+        symbol = _canonicalize_symbol(data.get('symbol', '').strip())
         side = data.get('side', '').strip().upper()
         client_id = data.get('client_id')
 
@@ -884,22 +884,34 @@ def api_manual_close_trade():
             return jsonify({"success": False, "error": "Nenhum cliente ativo encontrado"}), 404
 
         results = []
+        normalized_symbol = _normalize_symbol_key(symbol)
         for c in clients_to_close:
             try:
                 broker = _make_broker(c)
                 success = False
+                used_symbol = symbol
                 for position_side in position_sides:
-                    success = broker.close_position_with_sl(symbol, position_side)
+                    for symbol_candidate in [symbol, _limpar_simbolo(symbol)]:
+                        if not symbol_candidate:
+                            continue
+                        success = broker.close_position_with_sl(symbol_candidate, position_side)
+                        if success:
+                            used_symbol = symbol_candidate
+                            print(f"✅ [MANUAL CLOSE] Fechamento confirmado no lado {position_side.upper()} para {symbol_candidate}", flush=True)
+                            break
                     if success:
-                        print(f"✅ [MANUAL CLOSE] Fechamento confirmado no lado {position_side.upper()} para {symbol}", flush=True)
                         break
 
                 if success:
                     # Busca o trade aberto correspondente no banco e fecha
                     open_trades = db.get_open_trades(limit=100)
                     for trade in open_trades:
+                        trade_canonical = _canonicalize_symbol(trade.get('pair'))
+                        if not trade_canonical:
+                            continue
+                        trade_symbol = _normalize_symbol_key(trade_canonical)
                         if (trade.get('client_id') == c.get('id') and
-                            symbol in trade.get('pair', '') and
+                            trade_symbol == normalized_symbol and
                             trade.get('status') == 'open'):
                             # Fecha o trade com PnL zerado (fechamento manual)
                             db.close_trade(
@@ -915,15 +927,15 @@ def api_manual_close_trade():
                         "client_id": c.get('id'),
                         "client_name": c.get('nome'),
                         "success": True,
-                        "message": f"Posição fechada com sucesso"
+                        "message": f"Posição fechada com sucesso ({used_symbol})"
                     })
-                    print(f"✅ [MANUAL CLOSE] Posição {symbol} fechada para {c.get('nome')}", flush=True)
+                    print(f"✅ [MANUAL CLOSE] Posição {used_symbol} fechada para {c.get('nome')}", flush=True)
                 else:
                     results.append({
                         "client_id": c.get('id'),
                         "client_name": c.get('nome'),
                         "success": False,
-                        "message": f"Falha ao fechar posição - verifique se existe posição aberta"
+                        "message": f"Falha ao fechar posição {symbol} - verifique se existe posição aberta"
                     })
             except Exception as client_err:
                 results.append({
