@@ -139,7 +139,8 @@ const canonicalizeTradeSymbol = (value) => {
   if (raw.includes(':')) return raw;
   if (raw.includes('/')) {
     const [base, quote] = raw.split('/', 2);
-    return base && quote ? `${base}/${quote}:${quote}` : raw;
+    if (base && quote && quote === 'USDT') return `${base}/${quote}:${quote}`;
+    return raw;
   }
   if (raw.endsWith('USDT') && raw.length > 4) return `${raw.slice(0, -4)}/USDT:USDT`;
   return raw;
@@ -424,7 +425,7 @@ const App = () => {
       });
       const json = await res.json();
       if (!res.ok || !json.success) {
-        alert(json.error || json.message || 'Erro ao fechar operação manualmente');
+        alert(json.message || json.error || 'Erro ao fechar operação manualmente');
         return;
       }
       await refreshStatusSnapshot();

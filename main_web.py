@@ -906,7 +906,10 @@ def api_manual_close_trade():
                     # Busca o trade aberto correspondente no banco e fecha
                     open_trades = db.get_open_trades(limit=100)
                     for trade in open_trades:
-                        trade_symbol = _normalize_symbol_key(_canonicalize_symbol(trade.get('pair')) or trade.get('pair'))
+                        trade_canonical = _canonicalize_symbol(trade.get('pair'))
+                        if not trade_canonical:
+                            continue
+                        trade_symbol = _normalize_symbol_key(trade_canonical)
                         if (trade.get('client_id') == c.get('id') and
                             trade_symbol == normalized_symbol and
                             trade.get('status') == 'open'):

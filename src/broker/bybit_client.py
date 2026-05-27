@@ -632,10 +632,24 @@ class BybitClient:
             else:
                 requested_bucket = None
 
-            def _symbol_key(value):
-                return ''.join(ch for ch in str(value or '').upper() if ch.isalnum())
+            def _symbol_keys(value):
+                raw = str(value or '').strip().upper()
+                if not raw:
+                    return set()
+                cleaned = ''.join(ch for ch in raw if ch.isalnum())
+                keys = {cleaned}
+                if ':' in raw:
+                    keys.add(''.join(ch for ch in raw.split(':', 1)[0] if ch.isalnum()))
+                if '/' in raw:
+                    base, quote = raw.split('/', 1)
+                    quote = quote.split(':', 1)[0]
+                    if base and quote:
+                        keys.add(f"{base}{quote}")
+                if raw.endswith('USDT') and len(raw) > 4:
+                    keys.add(raw[:-4] + 'USDT')
+                return {k for k in keys if k}
 
-            requested_symbol_key = _symbol_key(symbol)
+            requested_symbol_keys = _symbol_keys(symbol)
             positions = self.exchange.fetch_positions(params={'category': 'linear'})
             target_position = None
             target_bucket = requested_bucket
@@ -645,10 +659,10 @@ class BybitClient:
                 pos_contracts = float(p.get('contracts') or 0)
                 pos_side = str(p.get('side', '')).lower()
                 pos_info = p.get('info', {}) or {}
-                pos_symbol_key = _symbol_key(pos_symbol)
+                pos_symbol_keys = _symbol_keys(pos_symbol)
                 pos_idx = str(pos_info.get('positionIdx') or '').strip()
 
-                if requested_symbol_key and requested_symbol_key not in pos_symbol_key and pos_symbol_key not in requested_symbol_key:
+                if requested_symbol_keys and not requested_symbol_keys.intersection(pos_symbol_keys):
                     continue
 
                 if pos_contracts <= 0:
