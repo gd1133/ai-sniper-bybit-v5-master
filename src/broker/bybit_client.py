@@ -249,7 +249,10 @@ class BybitClient:
         if leverage in (None, ''):
             return None
 
-        leverage_value = int(str(leverage).strip())
+        try:
+            leverage_value = int(str(leverage).strip())
+        except (TypeError, ValueError):
+            raise ValueError(f"Alavancagem deve ser um número positivo: {leverage}")
         if leverage_value <= 0:
             raise ValueError(f"Alavancagem deve ser positiva: {leverage}")
         return leverage_value

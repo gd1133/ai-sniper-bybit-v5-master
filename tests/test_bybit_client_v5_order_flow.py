@@ -209,13 +209,13 @@ if __name__ == '__main__':
             raise SystemExit(12)
         if leverage_call.get('buyLeverage') != '20':
             print(f"❌ buyLeverage incorreto: {leverage_call}")
-            raise SystemExit(12)
+            raise SystemExit(13)
         if leverage_call.get('sellLeverage') != '20':
             print(f"❌ sellLeverage incorreto: {leverage_call}")
-            raise SystemExit(12)
+            raise SystemExit(14)
         if leverage_call.get('symbol') != 'BTCUSDT':
             print(f"❌ Payload de alavancagem incorreto: {leverage_call}")
-            raise SystemExit(12)
+            raise SystemExit(15)
 
         insurance_call = client.pybit_session.insurance_calls[-1]
         if insurance_call.get('coin') != 'USDT':
@@ -227,7 +227,7 @@ if __name__ == '__main__':
         repeated_leverage_order = already_configured_client.execute_market_order('BTC/USDT:USDT', 'buy', 0.25, leverage=40)
         if repeated_leverage_order is None:
             print("❌ Ordem deveria continuar quando a Bybit responder que a alavancagem já está configurada")
-            raise SystemExit(13)
+            raise SystemExit(16)
 
         bybit_client._pybit_http_class = _AuthFailingHTTP
         auth_client = bybit_client.BybitClient('key', 'secret', testnet=False)
