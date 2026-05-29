@@ -557,7 +557,7 @@ def _monitor_financial_stop_loss():
 
                     # Busca posições abertas do cliente
                     try:
-                        positions_response = broker.pybit_session.get_positions(category='linear')
+                        positions_response = broker.pybit_session.get_positions(category='linear', settleCoin='USDT')
                         ok, err = broker._handle_v5_ret_code(positions_response, 'get_positions')
 
                         if not ok:
