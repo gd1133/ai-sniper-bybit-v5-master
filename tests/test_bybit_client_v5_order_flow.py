@@ -198,10 +198,9 @@ if __name__ == '__main__':
         if order_call.get('category') != 'linear' or order_call.get('symbol') != 'BTCUSDT' or order_call.get('side') != 'Buy':
             print(f"❌ Payload V5 incorreto: {order_call}")
             raise SystemExit(3)
-        # Note: Quantity is normalized using internal logic in _normalize_order_qty,
-        # which applies ROUND_UP to ensure minimum notional value is met
-        if order_call.get('qty') != '2.67':
-            print(f"❌ Quantidade normalizada incorreta: esperado 2.67, recebido {order_call.get('qty')}")
+        expected_qty = client.exchange.amount_to_precision('BTC/USDT:USDT', TEST_QTY_WITH_HIGH_PRECISION)
+        if order_call.get('qty') != expected_qty:
+            print(f"❌ Quantidade normalizada incorreta: esperado {expected_qty}, recebido {order_call.get('qty')}")
             raise SystemExit(10)
 
         leverage_call = client.pybit_session.set_leverage_calls[-1]
