@@ -204,7 +204,16 @@ if __name__ == '__main__':
             raise SystemExit(10)
 
         leverage_call = client.pybit_session.set_leverage_calls[-1]
-        if leverage_call.get('category') != 'linear' or leverage_call.get('buyLeverage') != '20' or leverage_call.get('sellLeverage') != '20':
+        if leverage_call.get('category') != 'linear':
+            print(f"❌ Categoria de alavancagem incorreta: {leverage_call}")
+            raise SystemExit(12)
+        if leverage_call.get('buyLeverage') != '20':
+            print(f"❌ buyLeverage incorreto: {leverage_call}")
+            raise SystemExit(12)
+        if leverage_call.get('sellLeverage') != '20':
+            print(f"❌ sellLeverage incorreto: {leverage_call}")
+            raise SystemExit(12)
+        if leverage_call.get('symbol') != 'BTCUSDT':
             print(f"❌ Payload de alavancagem incorreto: {leverage_call}")
             raise SystemExit(12)
 

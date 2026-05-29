@@ -286,7 +286,7 @@ class BybitClient:
                     raise RuntimeError(error_message)
                 return False
             except Exception as leverage_error:
-                if self._is_leverage_already_configured(leverage_error):
+                if self._is_leverage_already_configured(str(leverage_error)):
                     print(f"   ℹ️ Alavancagem já configurada em {v5_symbol}: {leverage_str}x", flush=True)
                     return True
                 print(f"⚠️ [LEVERAGE] Falha ao configurar {v5_symbol} em {leverage_str}x: {leverage_error}", flush=True)
@@ -310,7 +310,7 @@ class BybitClient:
                 print(f"   ⚙️ Alavancagem configurada em {symbol}: {leverage_str}x", flush=True)
                 return True
             except Exception as leverage_error:
-                if self._is_leverage_already_configured(leverage_error):
+                if self._is_leverage_already_configured(str(leverage_error)):
                     print(f"   ℹ️ Alavancagem já configurada em {symbol}: {leverage_str}x", flush=True)
                     return True
                 print(f"⚠️ [LEVERAGE] Falha ao configurar {symbol} em {leverage_str}x: {leverage_error}", flush=True)

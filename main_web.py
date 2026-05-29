@@ -715,7 +715,11 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                 margem, qty = _calculate_dynamic_order_quantity(broker, symbol, banca)
 
                 if qty > 0 and _is_order_execution_enabled(None):
-                    configured_leverage = c.get('leverage') or c.get('alavancagem') or LEVERAGE
+                    configured_leverage = c.get('leverage')
+                    if configured_leverage in (None, ''):
+                        configured_leverage = c.get('alavancagem')
+                    if configured_leverage in (None, ''):
+                        configured_leverage = LEVERAGE
                     order_result = broker.execute_market_order(
                         symbol,
                         side.lower(),
