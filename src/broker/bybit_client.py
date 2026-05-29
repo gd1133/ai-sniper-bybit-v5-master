@@ -3,7 +3,7 @@ import time
 import sys
 import io
 import threading
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 # Força UTF-8 no stdout para evitar erros de encode com emojis no Render/Terminal
 if sys.platform == 'win32':
@@ -250,16 +250,24 @@ class BybitClient:
             return None
 
         try:
-            leverage_value = int(str(leverage).strip())
-        except (TypeError, ValueError):
+            leverage_decimal = Decimal(str(leverage).strip())
+        except (TypeError, ValueError, InvalidOperation):
             raise ValueError(f"Alavancagem deve ser um número positivo: {leverage}")
+        if leverage_decimal != leverage_decimal.to_integral_value():
+            raise ValueError(f"Alavancagem deve ser um número inteiro positivo: {leverage}")
+        leverage_value = int(leverage_decimal)
         if leverage_value <= 0:
             raise ValueError(f"Alavancagem deve ser positiva: {leverage}")
         return leverage_value
 
     def _is_leverage_already_configured(self, error_message):
         normalized = str(error_message or '').lower()
-        return 'leverage not modified' in normalized or ('not modified' in normalized and 'leverage' in normalized)
+        known_messages = (
+            'leverage not modified',
+            'leverage is not modified',
+            'same leverage',
+        )
+        return any(message in normalized for message in known_messages)
 
     def _configure_symbol_leverage(self, symbol, leverage, raise_on_error=False):
         leverage_value = self._normalize_leverage(leverage)
