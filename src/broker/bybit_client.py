@@ -245,6 +245,81 @@ class BybitClient:
         normalized = str(side or '').strip().lower()
         return 'Buy' if normalized == 'buy' else 'Sell'
 
+    def _normalize_leverage(self, leverage):
+        if leverage in (None, ''):
+            return None
+
+        leverage_value = int(str(leverage).strip())
+        if leverage_value <= 0:
+            raise ValueError(f"Alavancagem deve ser positiva: {leverage}")
+        return leverage_value
+
+    def _is_leverage_already_configured(self, error_message):
+        normalized = str(error_message or '').lower()
+        return 'leverage not modified' in normalized or ('not modified' in normalized and 'leverage' in normalized)
+
+    def _configure_symbol_leverage(self, symbol, leverage, raise_on_error=False):
+        leverage_value = self._normalize_leverage(leverage)
+        if leverage_value is None:
+            return True
+
+        leverage_str = str(leverage_value)
+
+        if self.pybit_session is not None:
+            v5_symbol = self._normalize_v5_symbol(symbol)
+            try:
+                rsp = self.pybit_session.set_leverage(
+                    category='linear',
+                    symbol=v5_symbol,
+                    buyLeverage=leverage_str,
+                    sellLeverage=leverage_str,
+                )
+                ok, error_message = self._handle_v5_ret_code(rsp, 'set_leverage')
+                if ok:
+                    print(f"   ⚙️ Alavancagem configurada em {v5_symbol}: {leverage_str}x", flush=True)
+                    return True
+                if self._is_leverage_already_configured(error_message):
+                    print(f"   ℹ️ Alavancagem já configurada em {v5_symbol}: {leverage_str}x", flush=True)
+                    return True
+                print(f"⚠️ [LEVERAGE] {error_message}", flush=True)
+                if raise_on_error:
+                    raise RuntimeError(error_message)
+                return False
+            except Exception as leverage_error:
+                if self._is_leverage_already_configured(leverage_error):
+                    print(f"   ℹ️ Alavancagem já configurada em {v5_symbol}: {leverage_str}x", flush=True)
+                    return True
+                print(f"⚠️ [LEVERAGE] Falha ao configurar {v5_symbol} em {leverage_str}x: {leverage_error}", flush=True)
+                if raise_on_error:
+                    raise
+                return False
+
+        set_leverage = getattr(self.exchange, 'set_leverage', None)
+        if callable(set_leverage):
+            try:
+                self._apply_rate_limit('set_leverage')
+                set_leverage(
+                    leverage_value,
+                    symbol,
+                    params={
+                        'category': 'linear',
+                        'buyLeverage': leverage_str,
+                        'sellLeverage': leverage_str,
+                    },
+                )
+                print(f"   ⚙️ Alavancagem configurada em {symbol}: {leverage_str}x", flush=True)
+                return True
+            except Exception as leverage_error:
+                if self._is_leverage_already_configured(leverage_error):
+                    print(f"   ℹ️ Alavancagem já configurada em {symbol}: {leverage_str}x", flush=True)
+                    return True
+                print(f"⚠️ [LEVERAGE] Falha ao configurar {symbol} em {leverage_str}x: {leverage_error}", flush=True)
+                if raise_on_error:
+                    raise
+                return False
+
+        return True
+
     def calculate_dynamic_order_qty(self, symbol: str, balance=None):
         """Calcula a quantidade de uma ordem baseada nos limites estritos da corretora."""
         current_price = self.get_last_price(symbol)
@@ -449,7 +524,7 @@ class BybitClient:
             print(f"   ⚠️ Não foi possível buscar os metadados da ordem {order_id}: {e}", flush=True)
             return None
 
-    def execute_market_order(self, symbol, side, qty, raise_on_error=False):
+    def execute_market_order(self, symbol, side, qty, raise_on_error=False, leverage=None):
         """Executa ordem a mercado para entrada instantânea na Bybit V5."""
         try:
             if not self.authenticated:
@@ -465,6 +540,8 @@ class BybitClient:
 
             if self.pybit_session is not None:
                 v5_symbol = self._normalize_v5_symbol(symbol)
+                if not self._configure_symbol_leverage(symbol, leverage, raise_on_error=raise_on_error):
+                    return None
 
                 # Mapeia positionIdx para Hedge Mode (Modo Bidirecional)
                 position_idx = 1 if side.lower() == 'buy' else 2
@@ -498,6 +575,8 @@ class BybitClient:
                     return {**result, 'id': order_id, 'route': 'v5/order/create', 'category': 'linear', 'symbol': v5_symbol}
 
             # Fallback nativo via Core CCXT Engine
+            if not self._configure_symbol_leverage(symbol, leverage, raise_on_error=raise_on_error):
+                return None
             # Mapeia positionIdx para Hedge Mode (Modo Bidirecional)
             position_idx = 1 if side.lower() == 'buy' else 2
             params = {'category': 'linear', 'positionIdx': position_idx}

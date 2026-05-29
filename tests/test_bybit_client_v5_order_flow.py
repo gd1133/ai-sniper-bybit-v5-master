@@ -122,6 +122,7 @@ class _FakeHTTP:
         self.kwargs = kwargs
         self.endpoint = None
         self.place_order_calls = []
+        self.set_leverage_calls = []
         self.insurance_calls = []
 
     def get_insurance(self, **kwargs):
@@ -140,6 +141,14 @@ class _FakeHTTP:
             'result': {'orderId': 'oid-123'},
         }
 
+    def set_leverage(self, **kwargs):
+        self.set_leverage_calls.append(kwargs)
+        return {
+            'retCode': 0,
+            'retMsg': 'OK',
+            'result': {},
+        }
+
 
 class _AuthFailingHTTP(_FakeHTTP):
     __module__ = 'pybit.unified_trading'
@@ -151,6 +160,14 @@ class _AuthFailingHTTP(_FakeHTTP):
             'retMsg': 'API key is invalid',
             'result': {},
         }
+
+
+class _AlreadyConfiguredLeverageHTTP(_FakeHTTP):
+    __module__ = 'pybit.unified_trading'
+
+    def set_leverage(self, **kwargs):
+        self.set_leverage_calls.append(kwargs)
+        raise Exception('leverage not modified')
 
 
 if __name__ == '__main__':
@@ -167,7 +184,7 @@ if __name__ == '__main__':
             print(f"❌ test_connection deveria validar fundo de seguros: ok={ok} message={message}")
             raise SystemExit(1)
 
-        order = client.execute_market_order('BTC/USDT:USDT', 'buy', TEST_QTY_WITH_HIGH_PRECISION)
+        order = client.execute_market_order('BTC/USDT:USDT', 'buy', TEST_QTY_WITH_HIGH_PRECISION, leverage=20)
         if not order or order.get('id') != 'oid-123' or order.get('route') != 'v5/order/create':
             print(f"❌ Ordem V5 inválida: {order}")
             raise SystemExit(2)
@@ -187,10 +204,22 @@ if __name__ == '__main__':
             print(f"❌ Quantidade normalizada incorreta: esperado 2.67, recebido {order_call.get('qty')}")
             raise SystemExit(10)
 
+        leverage_call = client.pybit_session.set_leverage_calls[-1]
+        if leverage_call.get('category') != 'linear' or leverage_call.get('buyLeverage') != '20' or leverage_call.get('sellLeverage') != '20':
+            print(f"❌ Payload de alavancagem incorreto: {leverage_call}")
+            raise SystemExit(12)
+
         insurance_call = client.pybit_session.insurance_calls[-1]
         if insurance_call.get('coin') != 'USDT':
             print(f"❌ Consulta insurance incorreta: {insurance_call}")
             raise SystemExit(4)
+
+        bybit_client._pybit_http_class = _AlreadyConfiguredLeverageHTTP
+        already_configured_client = bybit_client.BybitClient('key', 'secret', testnet=False)
+        repeated_leverage_order = already_configured_client.execute_market_order('BTC/USDT:USDT', 'buy', 0.25, leverage=40)
+        if repeated_leverage_order is None:
+            print("❌ Ordem deveria continuar quando a Bybit responder que a alavancagem já está configurada")
+            raise SystemExit(13)
 
         bybit_client._pybit_http_class = _AuthFailingHTTP
         auth_client = bybit_client.BybitClient('key', 'secret', testnet=False)
