@@ -212,6 +212,7 @@ def start_runtime_services():
         if RUNTIME_STARTED: return False
         threading.Thread(target=sniper_worker_loop, daemon=True).start()
         threading.Thread(target=_monitor_sl_tp_automatico, daemon=True).start()
+        threading.Thread(target=_monitor_financial_stop_loss, daemon=True).start()
         threading.Thread(target=_fetch_active_client_balances, kwargs={'force': True}, daemon=True).start()
         RUNTIME_STARTED = True
         return True
@@ -525,6 +526,133 @@ def _monitor_sl_tp_automatico():
         except Exception: pass
         time.sleep(10)
 
+def _monitor_financial_stop_loss():
+    """
+    🛡️ MONITOR DE STOP LOSS FINANCEIRO V60.7
+
+    Monitora o unrealisedPnl em tempo real de todas as posições abertas.
+    Se o prejuízo atingir -50% da margem utilizada, fecha a posição imediatamente
+    via ordem a mercado (reduceOnly=True).
+
+    Exemplo:
+    - Margem usada: $2.40 USDT
+    - Limite de perda: -$1.20 USDT (50% da margem)
+    - Quando unrealisedPnl <= -$1.20, dispara fechamento forçado
+    """
+    time.sleep(5)  # Aguarda inicialização do sistema
+    print("🛡️ [MONITOR FINANCEIRO] Iniciado - Stop Loss financeiro ativo (-50% da margem)", flush=True)
+
+    while True:
+        try:
+            # Busca todos os clientes ativos
+            clientes = _get_registered_clients(active_only=True)
+
+            for cliente in clientes:
+                try:
+                    broker = _make_broker(cliente)
+
+                    # Verifica se tem sessão pybit ativa
+                    if not broker.pybit_session or not broker.authenticated:
+                        continue
+
+                    # Busca posições abertas do cliente
+                    try:
+                        positions_response = broker.pybit_session.get_positions(category='linear')
+                        ok, err = broker._handle_v5_ret_code(positions_response, 'get_positions')
+
+                        if not ok:
+                            continue
+
+                        positions_list = (positions_response.get('result') or {}).get('list', [])
+
+                        for pos in positions_list:
+                            try:
+                                # Extrai dados da posição
+                                symbol = pos.get('symbol', '')
+                                size = float(pos.get('size') or 0)
+                                side = str(pos.get('side', '')).lower()
+                                unrealised_pnl = float(pos.get('unrealisedPnl') or 0)
+                                position_value = float(pos.get('positionValue') or 0)
+                                leverage = float(pos.get('leverage') or 20)
+
+                                # Pula se não houver posição aberta
+                                if size <= 0:
+                                    continue
+
+                                # 🔧 CÁLCULO DA MARGEM UTILIZADA
+                                # Margem = Valor da Posição / Alavancagem
+                                margem_utilizada = position_value / leverage if leverage > 0 else position_value
+
+                                # 🚨 LIMITE DE PERDA: -50% da margem
+                                limite_perda = -0.50 * margem_utilizada
+
+                                print(f"   📊 [MONITOR] {symbol} | Size: {size} | unrealisedPnl: ${unrealised_pnl:.2f} | Margem: ${margem_utilizada:.2f} | Limite: ${limite_perda:.2f}", flush=True)
+
+                                # 🔥 CONDIÇÃO DE FECHAMENTO FORÇADO
+                                if unrealised_pnl <= limite_perda:
+                                    print(f"🚨 [STOP FINANCEIRO] {symbol} atingiu limite de perda!", flush=True)
+                                    print(f"   💔 unrealisedPnl: ${unrealised_pnl:.2f} <= Limite: ${limite_perda:.2f}", flush=True)
+                                    print(f"   🔒 Disparando fechamento forçado...", flush=True)
+
+                                    # Determina o lado da ordem de fechamento
+                                    close_side = 'sell' if side in ('long', 'buy') else 'buy'
+
+                                    # Fecha a posição via ordem a mercado
+                                    try:
+                                        success = broker.close_position_with_sl(symbol, side)
+
+                                        if success:
+                                            print(f"   ✅ [STOP FINANCEIRO] Posição {symbol} fechada com sucesso!", flush=True)
+
+                                            # Atualiza registro no banco de dados
+                                            try:
+                                                conn = db._connect()
+                                                cur = conn.cursor()
+
+                                                # Calcula PnL percentual
+                                                pnl_pct = (unrealised_pnl / margem_utilizada * 100) if margem_utilizada > 0 else 0
+
+                                                cur.execute(
+                                                    "UPDATE trades SET status='closed', pnl_pct=?, notes=COALESCE(notes,'') || ? WHERE pair=? AND client_id=? AND status='open'",
+                                                    (
+                                                        round(pnl_pct, 2),
+                                                        f" | STOP_FINANCEIRO_AUTO unrealisedPnl=${unrealised_pnl:.2f}",
+                                                        symbol,
+                                                        cliente.get('id')
+                                                    )
+                                                )
+                                                conn.commit()
+                                                conn.close()
+                                                print(f"   💾 [BANCO] Trade atualizado no banco de dados", flush=True)
+                                            except Exception as db_err:
+                                                print(f"   ⚠️ [BANCO] Erro ao atualizar trade: {db_err}", flush=True)
+
+                                            # Sincroniza estado central
+                                            _sync_active_trades_from_db()
+                                        else:
+                                            print(f"   ❌ [STOP FINANCEIRO] Falha ao fechar posição {symbol}", flush=True)
+
+                                    except Exception as close_err:
+                                        print(f"   ❌ [STOP FINANCEIRO] Erro ao fechar posição: {close_err}", flush=True)
+
+                            except Exception as pos_err:
+                                print(f"   ⚠️ [MONITOR] Erro ao processar posição: {pos_err}", flush=True)
+                                continue
+
+                    except Exception as fetch_err:
+                        print(f"   ⚠️ [MONITOR] Erro ao buscar posições do cliente {cliente.get('nome')}: {fetch_err}", flush=True)
+                        continue
+
+                except Exception as client_err:
+                    print(f"   ⚠️ [MONITOR] Erro ao processar cliente {cliente.get('nome', 'Unknown')}: {client_err}", flush=True)
+                    continue
+
+        except Exception as general_err:
+            print(f"❌ [MONITOR FINANCEIRO] Erro geral: {general_err}", flush=True)
+
+        # Aguarda 5 segundos antes da próxima verificação
+        time.sleep(5)
+
 def _sync_active_trades_from_db():
     """ ⚡ ESTRUTURADOR DOS CARDS EM TEMPO REAL PARA ACENDER O PAINEL REACT """
     try:
@@ -589,20 +717,33 @@ def _close_stale_open_trades(max_age_minutes=180):
 
 def _calculate_dynamic_order_quantity(broker, symbol, banca):
     """
-    Calcula a quantidade dinâmica da ordem baseada no risco por trade.
+    🎯 GESTÃO ESTRITAMENTE FINANCEIRA V60.7
+    Calcula quantidade baseada em:
+    - Margem de entrada: 5% da banca atual (ex: $48 → $2.40 USDT)
+    - Alavancagem: 20x fixo
+    - Fórmula: Qty = (Margem × 20) / Preço Atual
+
     Retorna (margem_separada, quantidade_normalizada)
     """
     try:
         RISK_PER_TRADE_PCT = 5.0  # 5% da banca por operação
+        LEVERAGE = 20  # Alavancagem fixa em 20x
+
         margem = (banca * RISK_PER_TRADE_PCT) / 100.0
 
         # Busca o preço atual do símbolo
         last_price = float(broker.get_last_price(symbol) or 0)
         if last_price <= 0:
+            print(f"❌ [CALC QTY] Preço inválido para {symbol}", flush=True)
             return 0.0, 0.0
 
-        # Calcula quantidade baseada na margem
-        qty = margem / last_price
+        # 🔧 FÓRMULA CORRETA COM ALAVANCAGEM 20X
+        # Qty = (Margem Calculada × 20) / Preço Atual da Moeda
+        qty = (margem * LEVERAGE) / last_price
+
+        print(f"   💰 [CALC QTY] Banca: ${banca:.2f} → Margem (5%): ${margem:.2f} USDT", flush=True)
+        print(f"   📊 [CALC QTY] Preço: ${last_price:.4f} | Alavancagem: {LEVERAGE}x", flush=True)
+        print(f"   🔢 [CALC QTY] Qty calculada: {qty:.6f}", flush=True)
 
         # Normaliza com as precisões da exchange
         try:
@@ -611,11 +752,14 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca):
             amount_precision = market.get('precision', {}).get('amount', 3)
             qty = broker.exchange.amount_to_precision(symbol, qty)
             qty = float(qty)
-        except Exception:
+            print(f"   ✅ [CALC QTY] Qty normalizada: {qty}", flush=True)
+        except Exception as precision_err:
+            print(f"   ⚠️ [CALC QTY] Erro na precisão, usando arredondamento simples: {precision_err}", flush=True)
             qty = round(qty, 3)
 
         return round(margem, 2), qty
-    except Exception:
+    except Exception as calc_err:
+        print(f"❌ [CALC QTY] Erro no cálculo: {calc_err}", flush=True)
         return 0.0, 0.0
 
 def _is_order_execution_enabled(client_context):
@@ -715,6 +859,26 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                 margem, qty = _calculate_dynamic_order_quantity(broker, symbol, banca)
 
                 if qty > 0 and _is_order_execution_enabled(None):
+                    # 🔧 CONFIGURAÇÃO AUTOMÁTICA DE ALAVANCAGEM 20X
+                    # Define alavancagem para 20x antes de enviar ordem
+                    if broker.pybit_session:
+                        try:
+                            v5_symbol = broker._normalize_v5_symbol(symbol)
+                            rsp_leverage = broker.pybit_session.set_leverage(
+                                category='linear',
+                                symbol=v5_symbol,
+                                buyLeverage='20',
+                                sellLeverage='20'
+                            )
+                            ok, err = broker._handle_v5_ret_code(rsp_leverage, 'set_leverage')
+                            if ok or 'leverage not modified' in err.lower():
+                                print(f"   ✅ [LEVERAGE] {v5_symbol} configurado para 20x", flush=True)
+                            else:
+                                print(f"   ⚠️ [LEVERAGE] Aviso ao definir alavancagem: {err}", flush=True)
+                        except Exception as lev_err:
+                            # Ignora erros se moeda já estiver em 20x
+                            print(f"   ⚠️ [LEVERAGE] Erro ao configurar (pode já estar em 20x): {lev_err}", flush=True)
+
                     order_result = broker.execute_market_order(symbol, side.lower(), qty, raise_on_error=True)
                     if order_result:
                         order_id = order_result.get('id', order_result.get('orderId', 'N/A'))
