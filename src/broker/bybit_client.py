@@ -253,7 +253,7 @@ class BybitClient:
             leverage_decimal = Decimal(str(leverage).strip())
         except (TypeError, ValueError, InvalidOperation):
             raise ValueError(f"Alavancagem deve ser um número positivo: {leverage}")
-        if leverage_decimal != leverage_decimal.to_integral_value():
+        if leverage_decimal % 1 != 0:
             raise ValueError(f"Alavancagem deve ser um número inteiro positivo: {leverage}")
         leverage_value = int(leverage_decimal)
         if leverage_value <= 0:

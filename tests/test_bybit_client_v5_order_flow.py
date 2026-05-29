@@ -228,6 +228,10 @@ if __name__ == '__main__':
         if repeated_leverage_order is None:
             print("❌ Ordem deveria continuar quando a Bybit responder que a alavancagem já está configurada")
             raise SystemExit(16)
+        repeated_leverage_call = already_configured_client.pybit_session.set_leverage_calls[-1]
+        if repeated_leverage_call.get('buyLeverage') != '40' or repeated_leverage_call.get('sellLeverage') != '40':
+            print(f"❌ Payload de alavancagem repetida incorreto: {repeated_leverage_call}")
+            raise SystemExit(17)
 
         bybit_client._pybit_http_class = _AuthFailingHTTP
         auth_client = bybit_client.BybitClient('key', 'secret', testnet=False)
