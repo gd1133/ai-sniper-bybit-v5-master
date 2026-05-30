@@ -137,7 +137,7 @@ def _frontend_asset_exists(path):
 APP_MODE = 'real'
 ALLOW_ORDER_EXECUTION = ENV_CONFIG.allow_order_execution
 ALLOW_REAL_TRADING = ENV_CONFIG.allow_real_trading
-USE_TESTNET = False
+USE_TESTNET = ENV_CONFIG.use_testnet
 RISK_MODE = 'conservative'
 MAX_MOEDAS_ATIVAS = 1
 LEVERAGE = 10  # Alavancagem padrão (deve coincidir com main.py)
@@ -358,7 +358,7 @@ def _get_public_price_broker():
                         return pd.DataFrame(self._ccxt_exchange.fetch_ohlcv(symbol, timeframe, limit=200), columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
                     except Exception: return None
             return CCXTPublicPriceFallback()
-        public_price_broker = BybitClient(bybit_api_key, bybit_api_secret, testnet=False)
+        public_price_broker = BybitClient(bybit_api_key, bybit_api_secret, testnet=ENV_CONFIG.use_testnet)
     return public_price_broker
 
 def _ensure_broker_class(exchange='bybit'):
@@ -378,7 +378,7 @@ def _ensure_broker_class(exchange='bybit'):
 def _make_broker(client):
     exchange = str(client.get('exchange') or 'bybit').strip().lower()
     broker_cls = _ensure_broker_class(exchange)
-    return _get_broker_manager().get_broker(client, broker_cls, False)
+    return _get_broker_manager().get_broker(client, broker_cls, USE_TESTNET)
 
 def _get_registered_clients(active_only=False):
     try: return [{**dict(c), "storage_source": "local"} for c in (db.get_active_clients() if active_only else db.get_all_clients())]
@@ -399,7 +399,7 @@ def _get_active_investor_bybit_credentials():
 
 def _save_client_everywhere(client_data):
     payload = dict(client_data or {})
-    payload['account_mode'], payload['is_testnet'], payload['balance_source'] = 'real', False, 'broker_real_balance'
+    payload['account_mode'], payload['is_testnet'], payload['balance_source'] = 'real', USE_TESTNET, 'broker_real_balance'
     res = db.upsert_client_local(payload) if payload.get('id') is not None else db.add_client(payload)
     client_balance_cache.clear()
     return _get_registered_client_by_id(payload.get('id') or res), False, bool(res)
@@ -439,7 +439,7 @@ def _fetch_active_client_balances(force=False):
             except Exception as e: error = str(e)
             items.append({
                 "id": client.get('id'), "nome": client.get('nome'), "saldo_real": balance,
-                "saldo_base": float(client.get('saldo_base', 0) or 0), "is_testnet": False,
+                "saldo_base": float(client.get('saldo_base', 0) or 0), "is_testnet": USE_TESTNET,
                 "account_mode": "real", "exchange": str(client.get('exchange') or 'bybit').lower(),
                 "status": client.get('status'), "error": error,
             })
@@ -1196,7 +1196,9 @@ def handle_risk_mode():
 
 def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=None, client_id=None, existing_client=None):
     payload = dict(client_payload or {})
-    payload['account_mode'], payload['is_testnet'], payload['balance_source'] = 'real', False, 'broker_real_balance'
+    # Use explicit is_testnet if True, otherwise fall back to global USE_TESTNET setting
+    final_is_testnet = is_testnet if is_testnet else USE_TESTNET
+    payload['account_mode'], payload['is_testnet'], payload['balance_source'] = 'real', final_is_testnet, 'broker_real_balance'
     payload['exchange'] = str(payload.get('exchange') or 'bybit').strip().lower()
     if client_id is not None: payload['id'] = client_id
     if api_key: payload['bybit_key'] = api_key
