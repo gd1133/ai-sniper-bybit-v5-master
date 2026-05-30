@@ -348,7 +348,33 @@ class BybitClient:
             usdt = total.get('USDT')
             return float(usdt) if usdt is not None else None
 
-        # Fallback 1: Conta Unificada (UTA)
+        # Fallback 0: Tenta usar pybit diretamente (mais confiável para saldo)
+        if self.pybit_session and self.authenticated:
+            try:
+                print(f"📊 [BYBIT] Tentando get_wallet_balance (pybit UNIFIED) para {self.exchange.apiKey[:4]}...", flush=True)
+                wallet_response = self.pybit_session.get_wallet_balance(accountType='UNIFIED')
+                ok, err = self._handle_v5_ret_code(wallet_response, 'get_wallet_balance')
+
+                if ok:
+                    result = wallet_response.get('result', {})
+                    wallet_list = result.get('list', [])
+
+                    if wallet_list:
+                        wallet_data = wallet_list[0]
+                        coin_list = wallet_data.get('coin', [])
+
+                        for coin in coin_list:
+                            if coin.get('coin') == 'USDT':
+                                wallet_balance = float(coin.get('walletBalance') or coin.get('equity') or 0)
+                                if wallet_balance > 0:
+                                    print(f"✅ [BYBIT] Saldo via pybit: ${wallet_balance:.2f} USDT", flush=True)
+                                    return wallet_balance
+                else:
+                    print(f"⚠️ [BYBIT] Erro pybit get_wallet_balance: {err}", flush=True)
+            except Exception as e:
+                print(f"⚠️ [BYBIT] Exceção em pybit get_wallet_balance: {e}", flush=True)
+
+        # Fallback 1: Conta Unificada (UTA) via CCXT
         try:
             print(f"📊 [BYBIT] Tentando fetch_balance (UNIFIED) para {self.exchange.apiKey[:4]}...", flush=True)
             balance = self.exchange.fetch_balance(params={'accountType': 'UNIFIED'})
