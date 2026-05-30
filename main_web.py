@@ -220,6 +220,7 @@ def start_runtime_services():
         threading.Thread(target=_monitor_sl_tp_automatico, daemon=True).start()
         threading.Thread(target=_monitor_financial_stop_loss, daemon=True).start()
         threading.Thread(target=_fetch_active_client_balances, kwargs={'force': True}, daemon=True).start()
+        threading.Thread(target=_monitor_dashboard_positions, daemon=True).start()
         RUNTIME_STARTED = True
         return True
 
@@ -713,6 +714,210 @@ def _sync_active_trades_from_db():
             trade['open_pnl_value'] = round((entry_margin * pnl_pct) / 100, 2) if entry_margin else 0.0
     except Exception:
         central_state['active_trades'] = []
+
+def _monitor_dashboard_positions():
+    """
+    🔄 MONITOR DE SINCRONIZAÇÃO DO DASHBOARD EM TEMPO REAL
+
+    Busca posições abertas e saldo diretamente da API da Bybit para alimentar
+    o frontend do painel, garantindo que os dados exibidos reflitam a realidade da conta.
+
+    Esta função corrige o problema de dashboard travado em "Iniciando sistema..."
+    e exibindo $0 quando há posições abertas na Bybit.
+
+    Parâmetros obrigatórios da API Bybit V5:
+    - category='linear' (para contratos perpétuos USDT)
+    - settleCoin='USDT' (para evitar erro 10001)
+    """
+    time.sleep(8)  # Aguarda inicialização completa do sistema
+    print(f"🔄 [DASHBOARD MONITOR] Iniciado - Sincronização de posições Bybit → Frontend", flush=True)
+
+    while True:
+        try:
+            # Busca todos os clientes ativos
+            clientes = _get_registered_clients(active_only=True)
+
+            if not clientes:
+                central_state['status'] = "💼 Aguardando registro de investidores..."
+                central_state['balance'] = 0.0
+                central_state['active_trades'] = []
+                time.sleep(10)
+                continue
+
+            total_wallet_balance = 0.0
+            all_positions = []
+
+            for cliente in clientes:
+                try:
+                    broker = _make_broker(cliente)
+
+                    # Verifica se tem sessão pybit ativa
+                    if not broker.pybit_session or not broker.authenticated:
+                        print(f"   ⚠️ [DASHBOARD] Cliente {cliente.get('nome')} sem autenticação ativa", flush=True)
+                        continue
+
+                    # 1️⃣ BUSCA SALDO DA CONTA COM PARÂMETROS CORRETOS
+                    try:
+                        # Tenta buscar saldo usando a API V5 com accountType='UNIFIED'
+                        wallet_response = broker.pybit_session.get_wallet_balance(
+                            accountType='UNIFIED'
+                        )
+                        ok, err = broker._handle_v5_ret_code(wallet_response, 'get_wallet_balance')
+
+                        if ok:
+                            result = wallet_response.get('result', {})
+                            wallet_list = result.get('list', [])
+
+                            if wallet_list:
+                                wallet_data = wallet_list[0]
+                                # Busca o saldo USDT no campo coin
+                                coin_list = wallet_data.get('coin', [])
+
+                                for coin in coin_list:
+                                    if coin.get('coin') == 'USDT':
+                                        # Usa walletBalance ou equity como saldo principal
+                                        wallet_balance = float(coin.get('walletBalance') or coin.get('equity') or 0)
+                                        total_wallet_balance += wallet_balance
+                                        print(f"   💰 [DASHBOARD] {cliente.get('nome')}: ${wallet_balance:.2f} USDT", flush=True)
+                                        break
+                        else:
+                            print(f"   ⚠️ [DASHBOARD] Erro ao buscar saldo de {cliente.get('nome')}: {err}", flush=True)
+                    except Exception as wallet_err:
+                        print(f"   ⚠️ [DASHBOARD] Exceção ao buscar saldo: {wallet_err}", flush=True)
+
+                    # 2️⃣ BUSCA POSIÇÕES ABERTAS COM PARÂMETROS CORRETOS
+                    try:
+                        # CORREÇÃO CRÍTICA: Usa category='linear' e settleCoin='USDT'
+                        positions_response = broker.pybit_session.get_positions(
+                            category='linear',
+                            settleCoin='USDT'
+                        )
+                        ok, err = broker._handle_v5_ret_code(positions_response, 'get_positions')
+
+                        if not ok:
+                            print(f"   ⚠️ [DASHBOARD] Erro ao buscar posições de {cliente.get('nome')}: {err}", flush=True)
+                            continue
+
+                        positions_list = (positions_response.get('result') or {}).get('list', [])
+
+                        for pos in positions_list:
+                            try:
+                                # Extrai dados da posição
+                                symbol = pos.get('symbol', '')
+                                size = float(pos.get('size') or 0)
+                                side = str(pos.get('side', '')).lower()
+                                entry_price = float(pos.get('avgPrice') or 0)
+                                unrealised_pnl = float(pos.get('unrealisedPnl') or 0)
+                                leverage = float(pos.get('leverage') or ALAVANCAGEM)
+
+                                # Pula se não houver posição aberta
+                                if size <= 0:
+                                    continue
+
+                                # Normaliza o lado da posição para o formato do sistema
+                                side_normalized = 'COMPRAR' if side in ('buy', 'long') else 'VENDER'
+
+                                # Adiciona à lista de posições
+                                all_positions.append({
+                                    'client_id': cliente.get('id'),
+                                    'client_nome': cliente.get('nome'),
+                                    'symbol': symbol,
+                                    'side': side_normalized,
+                                    'size': size,
+                                    'entry_price': entry_price,
+                                    'unrealised_pnl': unrealised_pnl,
+                                    'leverage': leverage
+                                })
+
+                                print(f"   📊 [DASHBOARD] {symbol}: {side_normalized} | Size: {size} | Entry: ${entry_price:.4f} | PnL: ${unrealised_pnl:.2f}", flush=True)
+
+                            except Exception as pos_parse_err:
+                                print(f"   ⚠️ [DASHBOARD] Erro ao processar posição: {pos_parse_err}", flush=True)
+                                continue
+
+                    except Exception as fetch_pos_err:
+                        print(f"   ⚠️ [DASHBOARD] Erro ao buscar posições: {fetch_pos_err}", flush=True)
+                        continue
+
+                except Exception as client_err:
+                    print(f"   ⚠️ [DASHBOARD] Erro ao processar cliente {cliente.get('nome', 'Unknown')}: {client_err}", flush=True)
+                    continue
+
+            # 3️⃣ ATUALIZA O ESTADO CENTRAL DO DASHBOARD
+            central_state['balance'] = round(total_wallet_balance, 2)
+
+            if all_positions:
+                central_state['status'] = f"✅ ONLINE | {len(all_positions)} posição(ões) ativa(s)"
+
+                # Agrupa posições por símbolo para o painel
+                grouped_positions = {}
+                for pos in all_positions:
+                    symbol = pos['symbol']
+                    key = _normalize_symbol_key(symbol)
+
+                    if key not in grouped_positions:
+                        grouped_positions[key] = {
+                            'symbol': _limpar_simbolo(symbol),
+                            'raw_symbol': symbol,
+                            'side': pos['side'],
+                            'entry_price': pos['entry_price'],
+                            'unrealised_pnl': 0.0,
+                            'size': 0.0,
+                            'client_count': 0
+                        }
+
+                    grouped_positions[key]['unrealised_pnl'] += pos['unrealised_pnl']
+                    grouped_positions[key]['size'] += pos['size']
+                    grouped_positions[key]['client_count'] += 1
+
+                # Atualiza os trades ativos com preços em tempo real
+                active_trades_list = []
+                for key, pos_data in grouped_positions.items():
+                    try:
+                        # Busca preço atual para calcular PnL%
+                        pub_broker = _get_public_price_broker()
+                        current_price = pub_broker.get_last_price(pos_data['raw_symbol'])
+
+                        # Calcula métricas em tempo real
+                        live_metrics = _calculate_live_trade_metrics(
+                            pos_data['entry_price'],
+                            current_price,
+                            pos_data['side']
+                        )
+
+                        active_trades_list.append({
+                            'symbol': pos_data['symbol'],
+                            'raw_symbol': pos_data['raw_symbol'],
+                            'side': pos_data['side'],
+                            'entry_price': pos_data['entry_price'],
+                            'current_price': live_metrics['current_price'],
+                            'price_change_pct': live_metrics['price_change_pct'],
+                            'pnl_pct': live_metrics['pnl_pct'],
+                            'trend': live_metrics['trend'],
+                            'is_favorable': live_metrics['is_favorable'],
+                            'open_pnl_value': round(pos_data['unrealised_pnl'], 2),
+                            'size': pos_data['size'],
+                            'client_count': pos_data['client_count']
+                        })
+                    except Exception as calc_err:
+                        print(f"   ⚠️ [DASHBOARD] Erro ao calcular métricas para {pos_data['symbol']}: {calc_err}", flush=True)
+                        continue
+
+                central_state['active_trades'] = active_trades_list
+
+            else:
+                central_state['status'] = f"✅ ONLINE | Saldo: ${total_wallet_balance:.2f} USDT | Sem posições abertas"
+                central_state['active_trades'] = []
+
+            print(f"🔄 [DASHBOARD] Estado atualizado: Saldo=${total_wallet_balance:.2f} | Posições={len(all_positions)}", flush=True)
+
+        except Exception as general_err:
+            print(f"❌ [DASHBOARD MONITOR] Erro geral: {general_err}", flush=True)
+            import traceback
+            traceback.print_exc()
+
+        # Aguarda 10 segundos antes da próxima sincronização
+        time.sleep(10)
 
 def _close_stale_open_trades(max_age_minutes=180):
     try:
