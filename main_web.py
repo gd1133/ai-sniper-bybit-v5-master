@@ -863,6 +863,7 @@ def _monitor_dashboard_positions():
                             'entry_price': pos['entry_price'],
                             'unrealised_pnl': 0.0,
                             'size': 0.0,
+                            'leverage': pos['leverage'],
                             'client_count': 0
                         }
 
@@ -885,6 +886,11 @@ def _monitor_dashboard_positions():
                             pos_data['side']
                         )
 
+                        # Calcula margem total usada (notional value / leverage)
+                        leverage = grouped_positions[key].get('leverage', ALAVANCAGEM)
+                        notional_value = pos_data['size'] * pos_data['entry_price']
+                        margin_used = notional_value / leverage if leverage > 0 else notional_value
+
                         active_trades_list.append({
                             'symbol': pos_data['symbol'],
                             'raw_symbol': pos_data['raw_symbol'],
@@ -896,6 +902,7 @@ def _monitor_dashboard_positions():
                             'trend': live_metrics['trend'],
                             'is_favorable': live_metrics['is_favorable'],
                             'open_pnl_value': round(pos_data['unrealised_pnl'], 2),
+                            'entry': round(margin_used, 2),
                             'size': pos_data['size'],
                             'client_count': pos_data['client_count']
                         })
@@ -1086,7 +1093,30 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
 
                 broker = _make_broker(c)
                 banca = float(c.get('saldo_base', 1000.0))
-                
+
+                # 🔒 CORREÇÃO MODO CONSERVADOR: Bloqueia nova entrada se já houver posição aberta
+                if RISK_MODE == 'conservative':
+                    try:
+                        # Verifica quantas posições reais o cliente tem abertas na Bybit
+                        if broker.pybit_session and broker.authenticated:
+                            positions_response = broker.pybit_session.get_positions(
+                                category='linear',
+                                settleCoin='USDT'
+                            )
+                            ok, err = broker._handle_v5_ret_code(positions_response, 'get_positions')
+
+                            if ok:
+                                positions_list = (positions_response.get('result') or {}).get('list', [])
+                                open_positions_count = sum(1 for pos in positions_list if float(pos.get('size') or 0) > 0)
+
+                                if open_positions_count >= 1:
+                                    print(f"   🔒 [CONSERVADOR] Cliente {c.get('nome')} já tem {open_positions_count} posição(ões) aberta(s). Bloqueando nova entrada.", flush=True)
+                                    continue  # Pula para o próximo cliente
+                            else:
+                                print(f"   ⚠️ [CONSERVADOR] Erro ao verificar posições para {c.get('nome')}: {err}", flush=True)
+                    except Exception as pos_check_err:
+                        print(f"   ⚠️ [CONSERVADOR] Exceção ao verificar posições: {pos_check_err}", flush=True)
+
                 # 🔥 CORREÇÃO 1: Busca saldo atual da Bybit e calcula margem dinamicamente
                 margem, qty, saldo_atualizado = _calculate_dynamic_order_quantity(broker, symbol, banca)
 
