@@ -44,6 +44,12 @@ AI_RATE_LIMIT_STATUS_MESSAGE = '⚠️ Limite das IAs atingido. Aguardando coold
 AI_COOLDOWN_ACTIVE = False
 AI_COOLDOWN_LOCK = threading.Lock()
 
+# 🔧 CONFIGURAÇÃO DE GERENCIAMENTO DE RISCO MOTOR SNIPER V60.7
+# Altere estes valores conforme necessário para diferentes estratégias de trading
+ALAVANCAGEM = 20  # Alavancagem fixa (pode ser alterado para 30 ou 50 no futuro)
+MARGEM_INPUT = 5.0  # Margem de entrada fixa em USDT (anteriormente era 5% da banca)
+LIMITE_PERDA_STOP = -2.50  # Stop loss financeiro: -50% da margem de entrada ($5.0)
+
 class BrokerManager:
     _instance = None
     _lock = threading.Lock()
@@ -528,19 +534,21 @@ def _monitor_sl_tp_automatico():
 
 def _monitor_financial_stop_loss():
     """
-    🛡️ MONITOR DE STOP LOSS FINANCEIRO V60.7
+    🛡️ MONITOR DE STOP LOSS FINANCEIRO V60.7 (COM MARGEM FIXA)
 
     Monitora o unrealisedPnl em tempo real de todas as posições abertas.
-    Se o prejuízo atingir -50% da margem utilizada, fecha a posição imediatamente
+    Com margem de entrada fixa de $5.0 USDT, o limite de perda é fixo em -$2.50 USDT (50% da margem).
+    
+    Se o unrealizedPnl atingir ou passar de -$2.50 USDT, fecha a posição imediatamente
     via ordem a mercado (reduceOnly=True).
 
     Exemplo:
-    - Margem usada: $2.40 USDT
-    - Limite de perda: -$1.20 USDT (50% da margem)
-    - Quando unrealisedPnl <= -$1.20, dispara fechamento forçado
+    - Margem usada: $5.0 USDT (MARGEM_INPUT fixo)
+    - Limite de perda: -$2.50 USDT (50% da margem)
+    - Quando unrealisedPnl <= -$2.50, dispara fechamento forçado
     """
     time.sleep(5)  # Aguarda inicialização do sistema
-    print("🛡️ [MONITOR FINANCEIRO] Iniciado - Stop Loss financeiro ativo (-50% da margem)", flush=True)
+    print(f"🛡️ [MONITOR FINANCEIRO] Iniciado - Stop Loss financeiro ativo ({LIMITE_PERDA_STOP} USDT = 50% de {MARGEM_INPUT} USDT)", flush=True)
 
     while True:
         try:
@@ -555,7 +563,7 @@ def _monitor_financial_stop_loss():
                     if not broker.pybit_session or not broker.authenticated:
                         continue
 
-                    # Busca posições abertas do cliente
+                    # Busca posições abertas do cliente usando os parâmetros corretos
                     try:
                         positions_response = broker.pybit_session.get_positions(category='linear', settleCoin='USDT')
                         ok, err = broker._handle_v5_ret_code(positions_response, 'get_positions')
@@ -573,20 +581,16 @@ def _monitor_financial_stop_loss():
                                 side = str(pos.get('side', '')).lower()
                                 unrealised_pnl = float(pos.get('unrealisedPnl') or 0)
                                 position_value = float(pos.get('positionValue') or 0)
-                                leverage = float(pos.get('leverage') or 20)
+                                leverage = float(pos.get('leverage') or ALAVANCAGEM)
 
                                 # Pula se não houver posição aberta
                                 if size <= 0:
                                     continue
 
-                                # 🔧 CÁLCULO DA MARGEM UTILIZADA
-                                # Margem = Valor da Posição / Alavancagem
-                                margem_utilizada = position_value / leverage if leverage > 0 else position_value
+                                # 🔧 LIMITE FIXO DE PERDA: -$2.50 USDT (50% de $5.0)
+                                limite_perda = LIMITE_PERDA_STOP
 
-                                # 🚨 LIMITE DE PERDA: -50% da margem
-                                limite_perda = -0.50 * margem_utilizada
-
-                                print(f"   📊 [MONITOR] {symbol} | Size: {size} | unrealisedPnl: ${unrealised_pnl:.2f} | Margem: ${margem_utilizada:.2f} | Limite: ${limite_perda:.2f}", flush=True)
+                                print(f"   📊 [MONITOR] {symbol} | Size: {size} | unrealisedPnl: ${unrealised_pnl:.2f} | Limite: ${limite_perda:.2f}", flush=True)
 
                                 # 🔥 CONDIÇÃO DE FECHAMENTO FORÇADO
                                 if unrealised_pnl <= limite_perda:
@@ -609,11 +613,11 @@ def _monitor_financial_stop_loss():
                                                 conn = db._connect()
                                                 cur = conn.cursor()
 
-                                                # Calcula PnL percentual baseado em margem
-                                                pnl_pct = (unrealised_pnl / margem_utilizada * 100) if margem_utilizada > 0 else 0
+                                                # Calcula PnL percentual baseado no unrealizedPnl
+                                                pnl_pct = (unrealised_pnl / MARGEM_INPUT * 100) if MARGEM_INPUT > 0 else 0
                                                 
-                                                # 🔥 CORREÇÃO 2: Atualiza com profit correto
-                                                # O unrealisedPnl já é o P&L correto da posição
+                                                # 🔥 CORREÇÃO: Usa unrealisedPnl como profit
+                                                # Para short: será negativo se tiver prejuízo, positivo se tiver lucro
                                                 profit = unrealised_pnl
 
                                                 cur.execute(
@@ -722,23 +726,24 @@ def _close_stale_open_trades(max_age_minutes=180):
 
 def _calculate_dynamic_order_quantity(broker, symbol, banca=None):
     """
-    🎯 GESTÃO ESTRITAMENTE FINANCEIRA V60.7 - COM ATUALIZAÇÃO DINÂMICA DE BANCA
+    🎯 GESTÃO ESTRITAMENTE FINANCEIRA V60.7 - COM MARGEM FIXA
     
-    Busca o saldo atual em USDT via API Bybit V5 (get_wallet_balance com accountType='UNIFIED').
-    Se a banca não for encontrada na API, usa o valor padrão informado.
+    Utiliza margem de entrada fixa: MARGEM_INPUT = 5.0 USDT
+    Alavancagem fixa: ALAVANCAGEM = 20x
     
     Calcula quantidade baseada em:
-    - Margem de entrada: 5% do saldo atual em USDT
-    - Alavancagem: 20x fixo
-    - Fórmula: Qty = (Margem × 20) / Preço Atual
-
+    - Margem de entrada: 5.0 USDT (MARGEM_INPUT, fixo)
+    - Alavancagem: 20x fixo (ALAVANCAGEM)
+    - Fórmula: Qty = (5.0 × 20) / Preço Atual
+    
     Retorna (margem_separada, quantidade_normalizada, saldo_atualizado)
     """
     try:
-        RISK_PER_TRADE_PCT = 5.0  # 5% do saldo por operação
-        LEVERAGE = 20  # Alavancagem fixa em 20x
+        # 🔥 CONFIGURAÇÃO FIXA: Usa as variáveis de módulo definidas
+        RISK_MARGIN = MARGEM_INPUT  # 5.0 USDT
+        LEVERAGE = ALAVANCAGEM  # 20x
 
-        # 🔥 CORREÇÃO 1: BUSCAR SALDO ATUAL DA BYBIT V5
+        # Busca saldo atual para referência (não mais usado para cálculo de margem)
         saldo_atual = broker.get_balance()
         if saldo_atual is None or saldo_atual <= 0:
             print(f"⚠️ [CALC QTY] Falha ao buscar saldo da Bybit, usando padrão: ${banca:.2f}", flush=True)
@@ -746,8 +751,8 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None):
         
         saldo_atual = float(saldo_atual)
         
-        # Calcula margem como 5% do saldo
-        margem = (saldo_atual * RISK_PER_TRADE_PCT) / 100.0
+        # 🔧 MARGEM FIXA: Sempre 5.0 USDT independente do saldo
+        margem = RISK_MARGIN
 
         # Busca o preço atual do símbolo
         last_price = float(broker.get_last_price(symbol) or 0)
@@ -755,14 +760,15 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None):
             print(f"❌ [CALC QTY] Preço inválido para {symbol}", flush=True)
             return 0.0, 0.0, saldo_atual
 
-        # 🔧 FÓRMULA CORRETA COM ALAVANCAGEM 20X
-        # Qty = (Margem Calculada × 20) / Preço Atual da Moeda
+        # 🔧 FÓRMULA FIXA COM MARGEM E ALAVANCAGEM
+        # Qty = (Margem Fixa × Alavancagem) / Preço Atual
+        # Qty = (5.0 × 20) / Preço Atual = 100 / Preço Atual
         qty = (margem * LEVERAGE) / last_price
 
         print(f"   💰 [CALC QTY] Saldo Atual (BYBIT V5): ${saldo_atual:.2f} USDT", flush=True)
-        print(f"   💰 [CALC QTY] Banca: ${saldo_atual:.2f} → Margem (5%): ${margem:.2f} USDT", flush=True)
+        print(f"   💰 [CALC QTY] Margem Fixa: ${margem:.2f} USDT (conforme MARGEM_INPUT)", flush=True)
         print(f"   📊 [CALC QTY] Preço: ${last_price:.4f} | Alavancagem: {LEVERAGE}x", flush=True)
-        print(f"   🔢 [CALC QTY] Qty calculada: {qty:.6f}", flush=True)
+        print(f"   🔢 [CALC QTY] Qty calculada: {qty:.6f} (Fórmula: {margem:.2f} × {LEVERAGE} / {last_price:.4f})", flush=True)
 
         # Normaliza com as precisões da exchange
         try:
@@ -880,25 +886,26 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                 margem, qty, saldo_atualizado = _calculate_dynamic_order_quantity(broker, symbol, banca)
 
                 if qty > 0 and _is_order_execution_enabled(None):
-                    # 🔧 CONFIGURAÇÃO AUTOMÁTICA DE ALAVANCAGEM 20X
-                    # Define alavancagem para 20x antes de enviar ordem
+                    # 🔧 CONFIGURAÇÃO AUTOMÁTICA DE ALAVANCAGEM (VARIÁVEL)
+                    # Define alavancagem conforme ALAVANCAGEM global antes de enviar ordem
                     if broker.pybit_session:
                         try:
                             v5_symbol = broker._normalize_v5_symbol(symbol)
+                            leverage_str = str(ALAVANCAGEM)
                             rsp_leverage = broker.pybit_session.set_leverage(
                                 category='linear',
                                 symbol=v5_symbol,
-                                buyLeverage='20',
-                                sellLeverage='20'
+                                buyLeverage=leverage_str,
+                                sellLeverage=leverage_str
                             )
                             ok, err = broker._handle_v5_ret_code(rsp_leverage, 'set_leverage')
                             if ok or 'leverage not modified' in err.lower():
-                                print(f"   ✅ [LEVERAGE] {v5_symbol} configurado para 20x", flush=True)
+                                print(f"   ✅ [LEVERAGE] {v5_symbol} configurado para {ALAVANCAGEM}x", flush=True)
                             else:
                                 print(f"   ⚠️ [LEVERAGE] Aviso ao definir alavancagem: {err}", flush=True)
                         except Exception as lev_err:
-                            # Ignora erros se moeda já estiver em 20x
-                            print(f"   ⚠️ [LEVERAGE] Erro ao configurar (pode já estar em 20x): {lev_err}", flush=True)
+                            # Ignora erros se moeda já estiver na alavancagem desejada
+                            print(f"   ⚠️ [LEVERAGE] Erro ao configurar para {ALAVANCAGEM}x (pode já estar neste valor): {lev_err}", flush=True)
 
                     order_result = broker.execute_market_order(symbol, side.lower(), qty, raise_on_error=True)
                     if order_result:
