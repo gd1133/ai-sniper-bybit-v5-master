@@ -248,7 +248,7 @@ Esta correção também recomenda:
 
 Reportar problemas com a correção:
 - [ ] Incluir logs completos do erro
-- [ ] Mostrar screenshotdo Render environment variables
+- [ ] Mostrar screenshot do Render environment variables
 - [ ] Confirmar que fez restart após alterar USE_TESTNET
 - [ ] Testar primeiro em TESTNET antes de usar REAL
 

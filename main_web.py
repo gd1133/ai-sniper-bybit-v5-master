@@ -1196,7 +1196,9 @@ def handle_risk_mode():
 
 def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=None, client_id=None, existing_client=None):
     payload = dict(client_payload or {})
-    payload['account_mode'], payload['is_testnet'], payload['balance_source'] = 'real', is_testnet or USE_TESTNET, 'broker_real_balance'
+    # Use explicit is_testnet if True, otherwise fall back to global USE_TESTNET setting
+    final_is_testnet = is_testnet if is_testnet else USE_TESTNET
+    payload['account_mode'], payload['is_testnet'], payload['balance_source'] = 'real', final_is_testnet, 'broker_real_balance'
     payload['exchange'] = str(payload.get('exchange') or 'bybit').strip().lower()
     if client_id is not None: payload['id'] = client_id
     if api_key: payload['bybit_key'] = api_key
