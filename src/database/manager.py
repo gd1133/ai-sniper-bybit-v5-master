@@ -134,6 +134,9 @@ def init_db():
         pnl_pct REAL,
         profit REAL,
         entry_price REAL DEFAULT 0,
+        exit_price REAL DEFAULT 0,
+        quantity REAL DEFAULT 0,
+        margin REAL DEFAULT 0,
         closed_at TEXT,
         notes TEXT,
         status TEXT DEFAULT 'closed',
@@ -141,6 +144,9 @@ def init_db():
     )
     ''')
     _ensure_column(cur, 'trades', 'entry_price', 'REAL DEFAULT 0')
+    _ensure_column(cur, 'trades', 'exit_price', 'REAL DEFAULT 0')
+    _ensure_column(cur, 'trades', 'quantity', 'REAL DEFAULT 0')
+    _ensure_column(cur, 'trades', 'margin', 'REAL DEFAULT 0')
 
     # Tabela de configuração global (TEST_MODE, TEST_BALANCE, etc)
     cur.execute('''
@@ -260,6 +266,9 @@ def record_trade(
     notes: str = '',
     status: str = 'closed',
     entry_price: float = 0.0,
+    exit_price: float = 0.0,
+    quantity: float = 0.0,
+    margin: float = 0.0,
 ):
     # Normaliza notas para facilitar filtros na UI (ex: SNIPER, BROADCAST, AUTO)
     notes_clean = (notes or '').strip()
@@ -271,8 +280,8 @@ def record_trade(
     conn = _connect()
     cur = conn.cursor()
     cur.execute(
-        'INSERT INTO trades (client_id, pair, side, pnl_pct, profit, entry_price, closed_at, notes, status) VALUES (?,?,?,?,?,?,?,?,?)',
-        (client_id, pair, side, pnl_pct, profit, entry_price, closed_at, notes_clean, status.lower())
+        'INSERT INTO trades (client_id, pair, side, pnl_pct, profit, entry_price, exit_price, quantity, margin, closed_at, notes, status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+        (client_id, pair, side, pnl_pct, profit, entry_price, exit_price, quantity, margin, closed_at, notes_clean, status.lower())
     )
     conn.commit()
     conn.close()
@@ -281,16 +290,39 @@ def record_trade(
 def close_trade(
     trade_id: int,
     pnl_pct: float,
-    profit: float,
-    closed_at: str,
+    profit: float = None,
+    exit_price: float = 0.0,
+    closed_at: str = '',
     notes: str = '',
+    entry_price: float = 0.0,
+    quantity: float = 0.0,
+    side: str = '',
 ) -> bool:
-    """Fecha um trade em aberto preservando histórico e notas."""
+    """
+    Fecha um trade em aberto preservando histórico e notas.
+    Se profit não for fornecido, calcula automaticamente baseado em side, entry_price, exit_price e quantity.
+    
+    P&L Calculation:
+    - LONG: profit = (exit_price - entry_price) * quantity
+    - SHORT: profit = (entry_price - exit_price) * quantity
+    """
     notes_clean = (notes or '').strip()
     try:
         notes_clean = notes_clean.upper()
     except Exception:
         notes_clean = str(notes_clean)
+
+    # Se profit não foi fornecido, calcula automaticamente
+    if profit is None and exit_price > 0 and entry_price > 0 and quantity > 0:
+        side_normalized = str(side or '').upper()
+        if side_normalized in ('VENDER', 'SELL', 'SHORT'):
+            # SHORT: Lucro = (Preço de Entrada - Preço de Saída) * Quantidade
+            profit = (entry_price - exit_price) * quantity
+        else:
+            # LONG: Lucro = (Preço de Saída - Preço de Entrada) * Quantidade
+            profit = (exit_price - entry_price) * quantity
+    elif profit is None:
+        profit = 0.0
 
     try:
         conn = _connect()
@@ -300,12 +332,13 @@ def close_trade(
             UPDATE trades
             SET pnl_pct = ?,
                 profit = ?,
+                exit_price = ?,
                 closed_at = ?,
                 notes = ?,
                 status = 'closed'
             WHERE id = ?
             ''',
-            (pnl_pct, profit, closed_at, notes_clean, trade_id),
+            (pnl_pct, profit, exit_price, closed_at, notes_clean, trade_id),
         )
         conn.commit()
         conn.close()

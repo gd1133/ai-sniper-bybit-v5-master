@@ -609,13 +609,18 @@ def _monitor_financial_stop_loss():
                                                 conn = db._connect()
                                                 cur = conn.cursor()
 
-                                                # Calcula PnL percentual
+                                                # Calcula PnL percentual baseado em margem
                                                 pnl_pct = (unrealised_pnl / margem_utilizada * 100) if margem_utilizada > 0 else 0
+                                                
+                                                # 🔥 CORREÇÃO 2: Atualiza com profit correto
+                                                # O unrealisedPnl já é o P&L correto da posição
+                                                profit = unrealised_pnl
 
                                                 cur.execute(
-                                                    "UPDATE trades SET status='closed', pnl_pct=?, notes=COALESCE(notes,'') || ? WHERE pair=? AND client_id=? AND status='open'",
+                                                    "UPDATE trades SET status='closed', pnl_pct=?, profit=?, notes=COALESCE(notes,'') || ? WHERE pair=? AND client_id=? AND status='open'",
                                                     (
                                                         round(pnl_pct, 2),
+                                                        round(profit, 2),
                                                         f" | STOP_FINANCEIRO_AUTO unrealisedPnl=${unrealised_pnl:.2f}",
                                                         symbol,
                                                         cliente.get('id')
@@ -623,7 +628,7 @@ def _monitor_financial_stop_loss():
                                                 )
                                                 conn.commit()
                                                 conn.close()
-                                                print(f"   💾 [BANCO] Trade atualizado no banco de dados", flush=True)
+                                                print(f"   💾 [BANCO] Trade atualizado no banco de dados com P&L: ${profit:.2f}", flush=True)
                                             except Exception as db_err:
                                                 print(f"   ⚠️ [BANCO] Erro ao atualizar trade: {db_err}", flush=True)
 
@@ -715,33 +720,47 @@ def _close_stale_open_trades(max_age_minutes=180):
         conn.commit(); conn.close()
     except Exception: pass
 
-def _calculate_dynamic_order_quantity(broker, symbol, banca):
+def _calculate_dynamic_order_quantity(broker, symbol, banca=None):
     """
-    🎯 GESTÃO ESTRITAMENTE FINANCEIRA V60.7
+    🎯 GESTÃO ESTRITAMENTE FINANCEIRA V60.7 - COM ATUALIZAÇÃO DINÂMICA DE BANCA
+    
+    Busca o saldo atual em USDT via API Bybit V5 (get_wallet_balance com accountType='UNIFIED').
+    Se a banca não for encontrada na API, usa o valor padrão informado.
+    
     Calcula quantidade baseada em:
-    - Margem de entrada: 5% da banca atual (ex: $48 → $2.40 USDT)
+    - Margem de entrada: 5% do saldo atual em USDT
     - Alavancagem: 20x fixo
     - Fórmula: Qty = (Margem × 20) / Preço Atual
 
-    Retorna (margem_separada, quantidade_normalizada)
+    Retorna (margem_separada, quantidade_normalizada, saldo_atualizado)
     """
     try:
-        RISK_PER_TRADE_PCT = 5.0  # 5% da banca por operação
+        RISK_PER_TRADE_PCT = 5.0  # 5% do saldo por operação
         LEVERAGE = 20  # Alavancagem fixa em 20x
 
-        margem = (banca * RISK_PER_TRADE_PCT) / 100.0
+        # 🔥 CORREÇÃO 1: BUSCAR SALDO ATUAL DA BYBIT V5
+        saldo_atual = broker.get_balance()
+        if saldo_atual is None or saldo_atual <= 0:
+            print(f"⚠️ [CALC QTY] Falha ao buscar saldo da Bybit, usando padrão: ${banca:.2f}", flush=True)
+            saldo_atual = banca if banca and banca > 0 else 1000.0
+        
+        saldo_atual = float(saldo_atual)
+        
+        # Calcula margem como 5% do saldo
+        margem = (saldo_atual * RISK_PER_TRADE_PCT) / 100.0
 
         # Busca o preço atual do símbolo
         last_price = float(broker.get_last_price(symbol) or 0)
         if last_price <= 0:
             print(f"❌ [CALC QTY] Preço inválido para {symbol}", flush=True)
-            return 0.0, 0.0
+            return 0.0, 0.0, saldo_atual
 
         # 🔧 FÓRMULA CORRETA COM ALAVANCAGEM 20X
         # Qty = (Margem Calculada × 20) / Preço Atual da Moeda
         qty = (margem * LEVERAGE) / last_price
 
-        print(f"   💰 [CALC QTY] Banca: ${banca:.2f} → Margem (5%): ${margem:.2f} USDT", flush=True)
+        print(f"   💰 [CALC QTY] Saldo Atual (BYBIT V5): ${saldo_atual:.2f} USDT", flush=True)
+        print(f"   💰 [CALC QTY] Banca: ${saldo_atual:.2f} → Margem (5%): ${margem:.2f} USDT", flush=True)
         print(f"   📊 [CALC QTY] Preço: ${last_price:.4f} | Alavancagem: {LEVERAGE}x", flush=True)
         print(f"   🔢 [CALC QTY] Qty calculada: {qty:.6f}", flush=True)
 
@@ -757,10 +776,10 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca):
             print(f"   ⚠️ [CALC QTY] Erro na precisão, usando arredondamento simples: {precision_err}", flush=True)
             qty = round(qty, 3)
 
-        return round(margem, 2), qty
+        return round(margem, 2), qty, saldo_atual
     except Exception as calc_err:
         print(f"❌ [CALC QTY] Erro no cálculo: {calc_err}", flush=True)
-        return 0.0, 0.0
+        return 0.0, 0.0, banca if banca and banca > 0 else 1000.0
 
 def _is_order_execution_enabled(client_context):
     """
@@ -856,7 +875,9 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
 
                 broker = _make_broker(c)
                 banca = float(c.get('saldo_base', 1000.0))
-                margem, qty = _calculate_dynamic_order_quantity(broker, symbol, banca)
+                
+                # 🔥 CORREÇÃO 1: Busca saldo atual da Bybit e calcula margem dinamicamente
+                margem, qty, saldo_atualizado = _calculate_dynamic_order_quantity(broker, symbol, banca)
 
                 if qty > 0 and _is_order_execution_enabled(None):
                     # 🔧 CONFIGURAÇÃO AUTOMÁTICA DE ALAVANCAGEM 20X
@@ -884,10 +905,20 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                         order_id = order_result.get('id', order_result.get('orderId', 'N/A'))
                         side_label = 'COMPRAR' if side.lower() in ('buy', 'comprar') else 'VENDER'
 
+                        # 🔥 CORREÇÃO 2: Armazena margem, quantidade e saldo para cálculo posterior de P&L
                         db.record_trade(
-                            client_id=c.get('id', 1), pair=symbol, side=side_label, pnl_pct=0,
-                            profit=round(margem, 2), closed_at=time.strftime("%d/%m %H:%M"),
-                            notes=f"AUTO SNIPER | ID: {order_id}", status="open", entry_price=entry_price
+                            client_id=c.get('id', 1), 
+                            pair=symbol, 
+                            side=side_label, 
+                            pnl_pct=0,
+                            profit=0.0,  # Será calculado ao fechar
+                            closed_at=time.strftime("%d/%m %H:%M"),
+                            notes=f"AUTO SNIPER | ID: {order_id}", 
+                            status="open", 
+                            entry_price=entry_price,
+                            exit_price=0.0,
+                            quantity=qty,
+                            margin=margem
                         )
 
                         broker.set_tp_sl_sniper(symbol, side.lower(), entry_price, qty)
@@ -901,6 +932,7 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                                 f"📈 Direcao: {side_label}\n"
                                 f"📊 Lote: {qty}\n"
                                 f"💰 Margem Separada: ${margem:.2f} USDT\n"
+                                f"💼 Saldo Atualizado: ${saldo_atualizado:.2f} USDT\n"
                                 f"🆔 Hash ID: {order_id}"
                             )
                             try:
@@ -1077,13 +1109,35 @@ def api_manual_close_trade():
                         if (trade.get('client_id') == c.get('id') and
                             trade_symbol == normalized_symbol and
                             trade.get('status') == 'open'):
-                            # Fecha o trade com PnL zerado (fechamento manual)
+                            
+                            # 🔥 CORREÇÃO 2: Busca o preço de fechamento e calcula P&L correto
+                            current_price = broker.get_last_price(used_symbol) or 0
+                            entry_price = float(trade.get('entry_price', 0))
+                            qty = float(trade.get('quantity', 0))
+                            side = str(trade.get('side', '')).upper()
+                            
+                            # Calcula P&L baseado no tipo de posição
+                            if qty > 0 and entry_price > 0 and current_price > 0:
+                                if side in ('VENDER', 'SELL', 'SHORT'):
+                                    # SHORT: Lucro = (Preço de Entrada - Preço de Saída) * Quantidade
+                                    profit = (entry_price - current_price) * qty
+                                else:
+                                    # LONG: Lucro = (Preço de Saída - Preço de Entrada) * Quantidade
+                                    profit = (current_price - entry_price) * qty
+                            else:
+                                profit = 0.0
+                            
+                            # Fecha o trade com P&L calculado
                             db.close_trade(
                                 trade_id=trade.get('id'),
                                 pnl_pct=0.0,
-                                profit=0.0,
+                                profit=profit,
+                                exit_price=current_price,
                                 closed_at=time.strftime("%d/%m %H:%M"),
-                                notes="FECHAMENTO MANUAL"
+                                notes="FECHAMENTO MANUAL",
+                                entry_price=entry_price,
+                                quantity=qty,
+                                side=side
                             )
                     _sync_active_trades_from_db()
 
