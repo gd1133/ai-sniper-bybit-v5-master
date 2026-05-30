@@ -614,7 +614,7 @@ def _monitor_financial_stop_loss():
                                                 cur = conn.cursor()
 
                                                 # Calcula PnL percentual baseado no unrealizedPnl
-                                                pnl_pct = (unrealised_pnl / MARGEM_INPUT * 100) if MARGEM_INPUT > 0 else 0
+                                                pnl_pct = ((unrealised_pnl / MARGEM_INPUT) * 100) if MARGEM_INPUT > 0 else 0
                                                 
                                                 # 🔥 CORREÇÃO: Usa unrealisedPnl como profit
                                                 # Para short: será negativo se tiver prejuízo, positivo se tiver lucro
@@ -740,8 +740,8 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None):
     """
     try:
         # 🔥 CONFIGURAÇÃO FIXA: Usa as variáveis de módulo definidas
-        RISK_MARGIN = MARGEM_INPUT  # 5.0 USDT
-        LEVERAGE = ALAVANCAGEM  # 20x
+        risk_margin = MARGEM_INPUT  # 5.0 USDT
+        leverage_value = ALAVANCAGEM  # 20x
 
         # Busca saldo atual para referência (não mais usado para cálculo de margem)
         saldo_atual = broker.get_balance()
@@ -752,7 +752,7 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None):
         saldo_atual = float(saldo_atual)
         
         # 🔧 MARGEM FIXA: Sempre 5.0 USDT independente do saldo
-        margem = RISK_MARGIN
+        margem = risk_margin
 
         # Busca o preço atual do símbolo
         last_price = float(broker.get_last_price(symbol) or 0)
@@ -763,12 +763,12 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None):
         # 🔧 FÓRMULA FIXA COM MARGEM E ALAVANCAGEM
         # Qty = (Margem Fixa × Alavancagem) / Preço Atual
         # Qty = (5.0 × 20) / Preço Atual = 100 / Preço Atual
-        qty = (margem * LEVERAGE) / last_price
+        qty = (margem * leverage_value) / last_price
 
         print(f"   💰 [CALC QTY] Saldo Atual (BYBIT V5): ${saldo_atual:.2f} USDT", flush=True)
         print(f"   💰 [CALC QTY] Margem Fixa: ${margem:.2f} USDT (conforme MARGEM_INPUT)", flush=True)
-        print(f"   📊 [CALC QTY] Preço: ${last_price:.4f} | Alavancagem: {LEVERAGE}x", flush=True)
-        print(f"   🔢 [CALC QTY] Qty calculada: {qty:.6f} (Fórmula: {margem:.2f} × {LEVERAGE} / {last_price:.4f})", flush=True)
+        print(f"   📊 [CALC QTY] Preço: ${last_price:.4f} | Alavancagem: {leverage_value}x", flush=True)
+        print(f"   🔢 [CALC QTY] Qty calculada: {qty:.6f} (Fórmula: {margem:.2f} × {leverage_value} / {last_price:.4f})", flush=True)
 
         # Normaliza com as precisões da exchange
         try:
