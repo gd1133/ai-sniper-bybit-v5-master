@@ -678,7 +678,7 @@ def _sync_active_trades_from_db():
             key = _normalize_symbol_key(raw_symbol)
             margin = float(t.get('profit', 0) or 0)
             entry_price = _extract_entry_price(t)
-            if margin <= 0 or entry_price <= 0: continue
+            if entry_price <= 0: continue
 
             if key not in grouped:
                 grouped[key] = {
