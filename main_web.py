@@ -592,7 +592,6 @@ def _monitor_financial_stop_loss():
                                     or pos.get('positionBalance')
                                     or pos.get('positionMargin')
                                     or MARGEM_INPUT
-                                    or 0
                                 )
                                 if initial_margin <= 0:
                                     initial_margin = MARGEM_INPUT
@@ -604,10 +603,10 @@ def _monitor_financial_stop_loss():
 
                                 position_key = f"{cliente.get('id')}:{symbol}:{position_idx or side}"
                                 positions_seen.add(position_key)
-                                state = trailing_state.get(position_key) or {
+                                state = trailing_state.get(position_key, {
                                     'trailing_ativo': False,
                                     'max_roi_atingido': None
-                                }
+                                })
 
                                 if roi_pct >= TRAILING_TRIGGER_ROI and not state['trailing_ativo']:
                                     state['trailing_ativo'] = True
@@ -626,15 +625,16 @@ def _monitor_financial_stop_loss():
                                 # 🔧 LIMITE FIXO DE PERDA: -$2.50 USDT (50% de $5.0)
                                 limite_perda = LIMITE_PERDA_STOP
 
-                                max_roi_atingido = state.get('max_roi_atingido') if state else None
+                                max_roi_atingido = state.get('max_roi_atingido')
                                 print(
                                     f"   📊 [MONITOR] {symbol} | Size: {size} | ROI: {roi_pct:.2f}% | "
-                                    f"Topo ROI: {max_roi_atingido if max_roi_atingido is not None else 0:.2f}% | "
+                                    f"Topo ROI: {(max_roi_atingido or 0):.2f}% | "
                                     f"unrealisedPnl: ${unrealised_pnl:.2f} | Limite: ${limite_perda:.2f}",
                                     flush=True
                                 )
 
                                 trailing_reversao = False
+                                queda_roi = 0.0
                                 if state['trailing_ativo'] and state['max_roi_atingido'] is not None:
                                     queda_roi = state['max_roi_atingido'] - roi_pct
                                     trailing_reversao = queda_roi >= TRAILING_REVERSAO_ROI
@@ -651,7 +651,6 @@ def _monitor_financial_stop_loss():
                                         print(f"🚨 [STOP FINANCEIRO] {symbol} atingiu limite de perda!", flush=True)
                                         print(f"   💔 unrealisedPnl: ${unrealised_pnl:.2f} <= Limite: ${limite_perda:.2f}", flush=True)
                                     else:
-                                        queda_roi = state['max_roi_atingido'] - roi_pct
                                         print(f"🏁 [TRAILING STOP] {symbol} detectou reversão de tendência!", flush=True)
                                         print(
                                             f"   📉 ROI atual: {roi_pct:.2f}% | Topo: {state['max_roi_atingido']:.2f}% | "
