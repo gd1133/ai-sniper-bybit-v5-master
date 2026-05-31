@@ -49,6 +49,8 @@ AI_COOLDOWN_LOCK = threading.Lock()
 ALAVANCAGEM = 20  # Alavancagem fixa (pode ser alterado para 30 ou 50 no futuro)
 MARGEM_INPUT = 5.0  # Margem de entrada fixa em USDT (anteriormente era 5% da banca)
 LIMITE_PERDA_STOP = -2.50  # Stop loss financeiro: -50% da margem de entrada ($5.0)
+TRAILING_TRIGGER_ROI = 20.0  # Ativa rastreamento ao atingir +20% de ROI
+TRAILING_REVERSAO_ROI = 15.0  # Fecha posição se recuar 15% a partir do topo de ROI
 
 class BrokerManager:
     _instance = None
@@ -551,7 +553,10 @@ def _monitor_financial_stop_loss():
     time.sleep(5)  # Aguarda inicialização do sistema
     print(f"🛡️ [MONITOR FINANCEIRO] Iniciado - Stop Loss financeiro ativo ({LIMITE_PERDA_STOP} USDT = 50% de {MARGEM_INPUT} USDT)", flush=True)
 
+    trailing_state = {}
+
     while True:
+        positions_seen = set()
         try:
             # Busca todos os clientes ativos
             clientes = _get_registered_clients(active_only=True)
@@ -580,27 +585,79 @@ def _monitor_financial_stop_loss():
                                 symbol = pos.get('symbol', '')
                                 size = float(pos.get('size') or 0)
                                 side = str(pos.get('side', '')).lower()
+                                position_idx = str(pos.get('positionIdx') or '').strip()
                                 unrealised_pnl = float(pos.get('unrealisedPnl') or 0)
-                                position_value = float(pos.get('positionValue') or 0)
-                                leverage = float(pos.get('leverage') or ALAVANCAGEM)
+                                initial_margin = float(
+                                    pos.get('positionIM')
+                                    or pos.get('positionBalance')
+                                    or pos.get('positionMargin')
+                                    or MARGEM_INPUT
+                                )
+                                if initial_margin <= 0:
+                                    initial_margin = MARGEM_INPUT
+                                roi_pct = (unrealised_pnl / initial_margin) * 100 if initial_margin > 0 else 0.0
 
                                 # Pula se não houver posição aberta
                                 if size <= 0:
                                     continue
 
+                                position_key = f"{cliente.get('id')}:{symbol}:{position_idx or side}"
+                                positions_seen.add(position_key)
+                                state = trailing_state.get(position_key, {
+                                    'trailing_ativo': False,
+                                    'max_roi_atingido': None
+                                })
+
+                                if roi_pct >= TRAILING_TRIGGER_ROI and not state['trailing_ativo']:
+                                    state['trailing_ativo'] = True
+                                    state['max_roi_atingido'] = roi_pct
+                                    print(
+                                        f"🎯 [TRAILING] Ativado em {symbol} | ROI: {roi_pct:.2f}% | Cliente: {cliente.get('nome')}",
+                                        flush=True
+                                    )
+
+                                if state['trailing_ativo']:
+                                    max_roi = state['max_roi_atingido']
+                                    if max_roi is None or roi_pct > max_roi:
+                                        state['max_roi_atingido'] = roi_pct
+                                    trailing_state[position_key] = state
+
                                 # 🔧 LIMITE FIXO DE PERDA: -$2.50 USDT (50% de $5.0)
                                 limite_perda = LIMITE_PERDA_STOP
 
-                                print(f"   📊 [MONITOR] {symbol} | Size: {size} | unrealisedPnl: ${unrealised_pnl:.2f} | Limite: ${limite_perda:.2f}", flush=True)
+                                max_roi_atingido = state.get('max_roi_atingido')
+                                print(
+                                    f"   📊 [MONITOR] {symbol} | Size: {size} | ROI: {roi_pct:.2f}% | "
+                                    f"Topo ROI: {(max_roi_atingido or 0):.2f}% | "
+                                    f"unrealisedPnl: ${unrealised_pnl:.2f} | Limite: ${limite_perda:.2f}",
+                                    flush=True
+                                )
+
+                                trailing_reversao = False
+                                queda_roi = 0.0
+                                if state['trailing_ativo'] and state['max_roi_atingido'] is not None:
+                                    queda_roi = state['max_roi_atingido'] - roi_pct
+                                    trailing_reversao = queda_roi >= TRAILING_REVERSAO_ROI
+
+                                motivo_fechamento = None
+                                if unrealised_pnl <= limite_perda:
+                                    motivo_fechamento = "STOP_FINANCEIRO"
+                                elif trailing_reversao:
+                                    motivo_fechamento = "TRAILING_REVERSAO"
 
                                 # 🔥 CONDIÇÃO DE FECHAMENTO FORÇADO
-                                if unrealised_pnl <= limite_perda:
-                                    print(f"🚨 [STOP FINANCEIRO] {symbol} atingiu limite de perda!", flush=True)
-                                    print(f"   💔 unrealisedPnl: ${unrealised_pnl:.2f} <= Limite: ${limite_perda:.2f}", flush=True)
+                                if motivo_fechamento:
+                                    if motivo_fechamento == "STOP_FINANCEIRO":
+                                        print(f"🚨 [STOP FINANCEIRO] {symbol} atingiu limite de perda!", flush=True)
+                                        print(f"   💔 unrealisedPnl: ${unrealised_pnl:.2f} <= Limite: ${limite_perda:.2f}", flush=True)
+                                    else:
+                                        print(f"🏁 [TRAILING STOP] {symbol} detectou reversão de tendência!", flush=True)
+                                        print(
+                                            f"   📉 ROI atual: {roi_pct:.2f}% | Topo: {state['max_roi_atingido']:.2f}% | "
+                                            f"Recuo: {queda_roi:.2f}% >= {TRAILING_REVERSAO_ROI:.2f}%",
+                                            flush=True
+                                        )
                                     print(f"   🔒 Disparando fechamento forçado...", flush=True)
-
-                                    # Determina o lado da ordem de fechamento
-                                    close_side = 'sell' if side in ('long', 'buy') else 'buy'
 
                                     # Fecha a posição via ordem a mercado
                                     try:
@@ -620,13 +677,20 @@ def _monitor_financial_stop_loss():
                                                 # 🔥 CORREÇÃO: Usa unrealisedPnl como profit
                                                 # Para short: será negativo se tiver prejuízo, positivo se tiver lucro
                                                 profit = unrealised_pnl
+                                                note_tag = (
+                                                    f" | STOP_FINANCEIRO_AUTO unrealisedPnl=${unrealised_pnl:.2f}"
+                                                    if motivo_fechamento == "STOP_FINANCEIRO"
+                                                    else (
+                                                        f" | TRAILING_STOP_INTELIGENTE roi={roi_pct:.2f}% topo={state['max_roi_atingido']:.2f}%"
+                                                    )
+                                                )
 
                                                 cur.execute(
                                                     "UPDATE trades SET status='closed', pnl_pct=?, profit=?, notes=COALESCE(notes,'') || ? WHERE pair=? AND client_id=? AND status='open'",
                                                     (
                                                         round(pnl_pct, 2),
                                                         round(profit, 2),
-                                                        f" | STOP_FINANCEIRO_AUTO unrealisedPnl=${unrealised_pnl:.2f}",
+                                                        note_tag,
                                                         symbol,
                                                         cliente.get('id')
                                                     )
@@ -639,6 +703,7 @@ def _monitor_financial_stop_loss():
 
                                             # Sincroniza estado central
                                             _sync_active_trades_from_db()
+                                            trailing_state.pop(position_key, None)
                                         else:
                                             print(f"   ❌ [STOP FINANCEIRO] Falha ao fechar posição {symbol}", flush=True)
 
@@ -659,6 +724,10 @@ def _monitor_financial_stop_loss():
 
         except Exception as general_err:
             print(f"❌ [MONITOR FINANCEIRO] Erro geral: {general_err}", flush=True)
+
+        stale_keys = [key for key in trailing_state.keys() if key not in positions_seen]
+        for key in stale_keys:
+            trailing_state.pop(key, None)
 
         # Aguarda 5 segundos antes da próxima verificação
         time.sleep(5)
