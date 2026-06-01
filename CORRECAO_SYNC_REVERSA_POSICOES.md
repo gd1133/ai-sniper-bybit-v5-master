@@ -63,18 +63,20 @@ for trade in open_trades:
         )
 ```
 
-### Normalização de Pares
+### Normalização de Pares / Símbolos
 
 Para garantir a comparação correta entre diferentes formatos de símbolos:
 
-- **Bybit API**: `BILLУСDT` (símbolo puro)
-- **Banco de dados**: `BILL-USDT` ou `BILL USDT` (possíveis variações)
+- **Bybit API**: `TONUSDT` (símbolo puro)
+- **Banco de dados**: `TON/USDT:USDT`, `BILL-USDT`, `BILL USDT` (possíveis variações)
 
-A função `normalize_pair()` padroniza para `BILLУСDT`:
+A função `normalize_pair()` padroniza para o mesmo texto limpo antes da comparação:
 
 ```python
 def normalize_pair(pair_str):
-    return str(pair_str or '').upper().replace('-', '').replace(' ', '')
+    text = str(pair_str or '').strip().upper()
+    text = text.split(':', 1)[0]  # remove sufixos como ':USDT'
+    return text.replace('/', '').replace('-', '').replace(' ', '')
 ```
 
 ## 📊 Fluxo de Execução
