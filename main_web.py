@@ -49,8 +49,25 @@ AI_COOLDOWN_LOCK = threading.Lock()
 ALAVANCAGEM = 20  # Alavancagem fixa (pode ser alterado para 30 ou 50 no futuro)
 MARGEM_INPUT = 5.0  # Margem de entrada fixa em USDT (anteriormente era 5% da banca)
 LIMITE_PERDA_STOP = -2.50  # Stop loss financeiro: -50% da margem de entrada ($5.0)
-TRAILING_TRIGGER_ROI = 20.0  # Ativa rastreamento ao atingir +20% de ROI
-TRAILING_REVERSAO_ROI = 15.0  # Fecha posição se recuar 15% a partir do topo de ROI
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    raw = str(raw).strip()
+    if not raw:
+        return default
+    try:
+        return float(raw.replace(',', '.'))
+    except Exception:
+        return default
+
+# 🟢 Rastreamento de Tendência Longa (Lucro Positivo Garantido)
+# - Só "arma" a reversão quando ROI atual ultrapassa o gatilho positivo (ex: +15%)
+# - Após armado, segue o topo e fecha a mercado apenas após recuo (ex: 20 p.p.) respeitando um piso > 0
+TRAILING_TRIGGER_ROI = max(0.0, _env_float("TRAILING_TRIGGER_ROI", 15.0))  # ROI mínimo para armar a trava
+TRAILING_REVERSAO_ROI = max(0.0, _env_float("TRAILING_REVERSAO_ROI", 20.0))  # Folga (pontos) desde o topo
+TRAILING_PROFIT_FLOOR_ROI = max(0.0, _env_float("TRAILING_PROFIT_FLOOR_ROI", 1.0))  # Piso mínimo de lucro (ROI)
 
 class BrokerManager:
     _instance = None
@@ -608,36 +625,45 @@ def _monitor_financial_stop_loss():
                                     'max_roi_atingido': None
                                 })
 
+                                # 1) Ativação da trava de lucro (só após ROI positivo)
                                 if roi_pct >= TRAILING_TRIGGER_ROI and not state['trailing_ativo']:
                                     state['trailing_ativo'] = True
                                     state['max_roi_atingido'] = roi_pct
                                     print(
-                                        f"🎯 [TRAILING] Ativado em {symbol} | ROI: {roi_pct:.2f}% | Cliente: {cliente.get('nome')}",
+                                        f"🎯 [TRAVA LUCRO] Ativada em {symbol} | ROI: {roi_pct:.2f}% (gatilho {TRAILING_TRIGGER_ROI:.2f}%) | Cliente: {cliente.get('nome')}",
                                         flush=True
                                     )
 
+                                # 2) Segurar tendência: registra topo e calcula stop dinâmico (com piso de lucro)
+                                stop_roi = None
                                 if state['trailing_ativo']:
                                     max_roi = state['max_roi_atingido']
                                     if max_roi is None or roi_pct > max_roi:
                                         state['max_roi_atingido'] = roi_pct
                                     trailing_state[position_key] = state
+                                    if state['max_roi_atingido'] is not None:
+                                        stop_roi = max(
+                                            state['max_roi_atingido'] - TRAILING_REVERSAO_ROI,
+                                            TRAILING_PROFIT_FLOOR_ROI
+                                        )
 
                                 # 🔧 LIMITE FIXO DE PERDA: -$2.50 USDT (50% de $5.0)
                                 limite_perda = LIMITE_PERDA_STOP
 
                                 max_roi_atingido = state.get('max_roi_atingido')
+                                stop_roi_tag = f" | Stop ROI: {stop_roi:.2f}%" if stop_roi is not None else ""
                                 print(
                                     f"   📊 [MONITOR] {symbol} | Size: {size} | ROI: {roi_pct:.2f}% | "
                                     f"Topo ROI: {(max_roi_atingido or 0):.2f}% | "
-                                    f"unrealisedPnl: ${unrealised_pnl:.2f} | Limite: ${limite_perda:.2f}",
+                                    f"unrealisedPnl: ${unrealised_pnl:.2f} | Limite: ${limite_perda:.2f}{stop_roi_tag}",
                                     flush=True
                                 )
 
                                 trailing_reversao = False
                                 queda_roi = 0.0
-                                if state['trailing_ativo'] and state['max_roi_atingido'] is not None:
+                                if stop_roi is not None and state['max_roi_atingido'] is not None:
                                     queda_roi = state['max_roi_atingido'] - roi_pct
-                                    trailing_reversao = queda_roi >= TRAILING_REVERSAO_ROI
+                                    trailing_reversao = roi_pct <= stop_roi
 
                                 motivo_fechamento = None
                                 if unrealised_pnl <= limite_perda:
@@ -654,7 +680,7 @@ def _monitor_financial_stop_loss():
                                         print(f"🏁 [TRAILING STOP] {symbol} detectou reversão de tendência!", flush=True)
                                         print(
                                             f"   📉 ROI atual: {roi_pct:.2f}% | Topo: {state['max_roi_atingido']:.2f}% | "
-                                            f"Recuo: {queda_roi:.2f}% >= {TRAILING_REVERSAO_ROI:.2f}%",
+                                            f"Stop: {(stop_roi or 0):.2f}% | Recuo: {queda_roi:.2f}% (folga {TRAILING_REVERSAO_ROI:.2f}%)",
                                             flush=True
                                         )
                                     print(f"   🔒 Disparando fechamento forçado...", flush=True)
@@ -673,7 +699,7 @@ def _monitor_financial_stop_loss():
 
                                                 # Calcula PnL percentual baseado no unrealizedPnl
                                                 pnl_pct = ((unrealised_pnl / MARGEM_INPUT) * 100) if MARGEM_INPUT > 0 else 0
-                                                
+
                                                 # 🔥 CORREÇÃO: Usa unrealisedPnl como profit
                                                 # Para short: será negativo se tiver prejuízo, positivo se tiver lucro
                                                 profit = unrealised_pnl
@@ -681,7 +707,7 @@ def _monitor_financial_stop_loss():
                                                     f" | STOP_FINANCEIRO_AUTO unrealisedPnl=${unrealised_pnl:.2f}"
                                                     if motivo_fechamento == "STOP_FINANCEIRO"
                                                     else (
-                                                        f" | TRAILING_STOP_INTELIGENTE roi={roi_pct:.2f}% topo={state['max_roi_atingido']:.2f}%"
+                                                        f" | TRAILING_TENDENCIA_POSITIVA roi={roi_pct:.2f}% topo={state['max_roi_atingido']:.2f}% stop={(stop_roi or 0):.2f}%"
                                                     )
                                                 )
 
