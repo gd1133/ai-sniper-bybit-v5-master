@@ -915,40 +915,49 @@ def _monitor_dashboard_positions():
             # 🔄 SINCRONIZAÇÃO REVERSA: DETECTAR E LIMPAR POSIÇÕES ENCERRADAS NA BYBIT
             # Verifica se posições marcadas como 'open' no banco foram fechadas na corretora
             try:
-                # Constrói mapa de posições ativas da Bybit: (symbol, client_id) → True
+                # Normaliza símbolos antes de comparar (ex: 'TON/USDT:USDT' -> 'TONUSDT')
+                def normalize_pair(pair_str):
+                    """
+                    Normaliza formato de par/símbolo para comparação entre banco e Bybit API.
+                    Ex.: 'TON/USDT:USDT' -> 'TONUSDT' | 'BILL-USDT' -> 'BILLUSDT'
+                    """
+                    text = str(pair_str or '').strip().upper()
+                    text = text.split(':', 1)[0]  # remove sufixos como ':USDT'
+                    return (
+                        text
+                        .replace('/', '')
+                        .replace('-', '')
+                        .replace(' ', '')
+                    )
+
+                # Constrói mapa de posições ativas normalizadas da Bybit: (normalized_symbol, client_id) → True
                 bybit_active_positions = set()
                 for pos in all_positions:
-                    symbol = pos['symbol']
-                    client_id = pos['client_id']
-                    bybit_active_positions.add((symbol, client_id))
-                
+                    symbol = normalize_pair(pos.get('symbol'))
+                    client_id = pos.get('client_id')
+                    if symbol and client_id is not None:
+                        bybit_active_positions.add((symbol, client_id))
+
                 # Obtém todas as posições marcadas como 'open' no banco de dados
                 open_trades = db.get_open_trades(limit=100)
-                
-                # Normaliza pares de entrada/símbolos para comparação
-                def normalize_pair(pair_str):
-                    """Normaliza formato de par (ex: 'BILL-USDT' → 'BILLУСDT')"""
-                    return str(pair_str or '').upper().replace('-', '').replace(' ', '')
-                
+
                 # Itera sobre posições abertas no banco
                 stale_trades_count = 0
                 for trade in open_trades:
                     trade_symbol = trade.get('pair', '')
                     client_id = trade.get('client_id')
-                    
-                    if not trade_symbol or not client_id:
+
+                    if not trade_symbol or client_id is None:
                         continue
-                    
+
                     # Normaliza para comparação com Bybit
                     normalized_trade_pair = normalize_pair(trade_symbol)
-                    
-                    # Verifica se esta posição existe nos ativos da Bybit
-                    position_exists = False
-                    for bybit_symbol, bybit_client_id in bybit_active_positions:
-                        if bybit_client_id == client_id and normalize_pair(bybit_symbol) == normalized_trade_pair:
-                            position_exists = True
-                            break
-                    
+                    if not normalized_trade_pair:
+                        continue
+
+                    # Verifica se esta posição existe nos ativos normalizados da Bybit
+                    position_exists = (normalized_trade_pair, client_id) in bybit_active_positions
+
                     # Se posição está 'open' no banco mas NÃO existe na Bybit → foi fechada externamente
                     if not position_exists:
                         # Marca como 'closed' no banco de dados
@@ -968,10 +977,10 @@ def _monitor_dashboard_positions():
                             print(f"   ⚠️ [SYNC REVERSA] Erro ao atualizar trade ID {trade.get('id')}: {update_err}", flush=True)
                         finally:
                             conn.close()
-                
+
                 if stale_trades_count > 0:
                     print(f"   ✅ [SYNC REVERSA] {stale_trades_count} posição(ões) sincronizada(s) como encerrada(s)", flush=True)
-            
+
             except Exception as sync_err:
                 print(f"   ⚠️ [SYNC REVERSA] Erro durante sincronização reversa: {sync_err}", flush=True)
                 import traceback
