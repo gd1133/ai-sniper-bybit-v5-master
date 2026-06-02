@@ -252,7 +252,6 @@ async def record_closed_trade_async(
         )
         net_pnl = gross_pnl
 
-    timestamp = datetime.utcnow().strftime('%Y-%m-%d %Human:%M:%S UTC')
     timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
     context_json = json.dumps(market_context or {}, ensure_ascii=False)
 
