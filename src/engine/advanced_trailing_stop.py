@@ -74,9 +74,7 @@ class AdvancedTrailingStopMonitor:
             raise ValueError("current_price must be greater than zero")
 
         if not self.trailing_armed:
-            if self.side == "buy" and price >= self.activation_price:
-                self.trailing_armed = True
-            elif self.side == "sell" and price <= self.activation_price:
+            if self._reached_activation(price):
                 self.trailing_armed = True
 
             if self.trailing_armed:
@@ -141,6 +139,12 @@ class AdvancedTrailingStopMonitor:
         if self.side == "buy":
             return self.last_price > trigger and price <= trigger
         return self.last_price < trigger and price >= trigger
+
+    def _reached_activation(self, price: float) -> bool:
+        eps = max(1e-9, abs(self.activation_price) * 1e-9)
+        if self.side == "buy":
+            return price + eps >= self.activation_price
+        return price - eps <= self.activation_price
 
 
 def simulate_trailing_stop_example() -> List[Tuple[str, TrailingStopSnapshot]]:
