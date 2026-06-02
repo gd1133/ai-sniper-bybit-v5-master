@@ -53,6 +53,8 @@ const normalizeInvestorRecord = (client) => {
     banca: client?.saldo_real ?? client?.saldo_base ?? client?.banca ?? 0,
     saldo_real: client?.saldo_real,
     saldo_configurado: client?.saldo_base ?? client?.saldo_configurado ?? 0,
+    balance_source: client?.balance_source ?? 'broker_real_balance',
+    is_fake_balance: Boolean(client?.is_fake_balance) || String(client?.balance_source || '') === 'training_fake_balance',
     mode: 'REAL',
     account_mode: 'real',
     storage_source: String(client?.storage_source || client?.source || 'local').toUpperCase(),
@@ -164,7 +166,7 @@ const App = () => {
   const [manualEntryAnalysis, setManualEntryAnalysis] = useState(null);
   const [manualEntryLoading, setManualEntryLoading] = useState(false);
   const [addFormFields, setAddFormFields] = useState({
-    id: null, nome: '', saldo_base: 0, bybit_key: '', bybit_secret: '', tg_token: '', chat_id: '', account_mode: 'real', exchange: 'bybit'
+    id: null, nome: '', saldo_base: 0, bybit_key: '', bybit_secret: '', tg_token: '', chat_id: '', account_mode: 'real', exchange: 'bybit', balance_source: 'broker_real_balance'
   });
   const [data, setData] = useState({
     balance: 0,  // Será atualizado do backend
@@ -289,7 +291,7 @@ const App = () => {
   }, []);
 
   const openNewInvestorModal = () => {
-    setAddFormFields({ id: null, nome: '', saldo_base: 0, bybit_key: '', bybit_secret: '', tg_token: '', chat_id: '', account_mode: 'real', exchange: 'bybit' });
+    setAddFormFields({ id: null, nome: '', saldo_base: 0, bybit_key: '', bybit_secret: '', tg_token: '', chat_id: '', account_mode: 'real', exchange: 'bybit', balance_source: 'broker_real_balance' });
     setAddFormMsg(null);
     setShowAddForm(true);
   };
@@ -314,7 +316,8 @@ const App = () => {
         tg_token: c.tg_token || '',
         chat_id: c.chat_id || '',
         account_mode: normalizeAccountMode(c.account_mode ?? c.is_testnet),
-        exchange: String(c.exchange || 'bybit').toLowerCase()
+        exchange: String(c.exchange || 'bybit').toLowerCase(),
+        balance_source: c.balance_source || 'broker_real_balance',
       });
       setAddFormMsg(null);
       setShowAddForm(true);
@@ -336,6 +339,28 @@ const App = () => {
         alert(json.error || 'Erro ao remover');
       }
     } catch (e) { console.error(e); alert('Erro ao remover'); }
+  };
+
+  const toggleInvestorBalanceSource = async (inv) => {
+    if (!inv?.id) return;
+    const current = String(inv.balance_source || 'broker_real_balance');
+    const next = current === 'training_fake_balance' ? 'broker_real_balance' : 'training_fake_balance';
+    try {
+      const res = await fetch(`${API_BASE}/api/cliente/${inv.id}/balance-source`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ balance_source: next }),
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        alert(json.error || 'Erro ao alternar fonte de saldo');
+        return;
+      }
+      if (json.client) upsertInvestor(json.client);
+    } catch (e) {
+      console.error(e);
+      alert('Erro ao conectar com o servidor');
+    }
   };
 
   const refreshStatusSnapshot = async () => {
@@ -544,8 +569,14 @@ const App = () => {
   const formAccountMode = normalizeAccountMode(addFormFields.account_mode);
   const formExchange = String(addFormFields.exchange || 'bybit').toLowerCase();
   const formExchangeLabel = formExchange === 'binance' ? 'Binance' : 'Bybit';
-  const formBalanceLabel = `Saldo sincronizado da Conta Real (${formExchangeLabel})`;
-  const formBalancePlaceholder = `Será lido da ${formExchangeLabel} Real`;
+  const formBalanceSource = String(addFormFields.balance_source || 'broker_real_balance');
+  const isTrainingBalance = formBalanceSource === 'training_fake_balance';
+  const formBalanceLabel = isTrainingBalance
+    ? 'Saldo fictício (Modo Teste)'
+    : `Saldo sincronizado da Conta Real (${formExchangeLabel})`;
+  const formBalancePlaceholder = isTrainingBalance
+    ? 'Será usado saldo fictício (ex.: 500 USDT)'
+    : `Será lido da ${formExchangeLabel} Real`;
 
   // Métricas live derivadas dos trades abertos (atualiza cards do topo em tempo real)
   const activeTrades = data.active_trades || [];
@@ -1048,9 +1079,19 @@ const App = () => {
                       <td className="p-8">
                         <div className="font-black italic text-xl uppercase">{inv.nome}</div>
                         <div className="flex items-center gap-2 mt-3 flex-wrap">
-                          <span className="px-3 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest bg-green-500/10 border-green-500/30 text-green-400">
-                            Conta Real
-                          </span>
+                          <button
+                            type="button"
+                            onClick={() => toggleInvestorBalanceSource(inv)}
+                            className={`px-3 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest transition-all ${String(inv.balance_source || 'broker_real_balance') === 'training_fake_balance' ? 'bg-purple-500/15 border-purple-500/40 text-purple-200 hover:bg-purple-500/20' : 'bg-green-500/10 border-green-500/30 text-green-400 hover:bg-green-500/15'}`}
+                            title="Alternar fonte de saldo (Real/Teste)"
+                          >
+                            {String(inv.balance_source || 'broker_real_balance') === 'training_fake_balance' ? '🧪 Saldo Teste' : '💰 Saldo Real'}
+                          </button>
+                          {inv.auth_disabled ? (
+                            <span className="px-3 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest bg-red-500/10 border-red-500/30 text-red-300">
+                              API inválida
+                            </span>
+                          ) : null}
                           <span className={`px-3 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest ${String(inv.exchange || 'bybit').toLowerCase() === 'binance' ? 'bg-orange-500/10 border-orange-500/30 text-orange-300' : 'bg-yellow-500/10 border-yellow-500/30 text-yellow-300'}`}>
                             {String(inv.exchange || 'BYBIT').toUpperCase()}
                           </span>
@@ -1102,7 +1143,7 @@ const App = () => {
                  <button onClick={() => {
                    setShowAddForm(false);
                    setAddFormMsg(null);
-                   setAddFormFields({ id: null, nome: '', saldo_base: 0, bybit_key: '', bybit_secret: '', tg_token: '', chat_id: '', account_mode: 'real', exchange: 'bybit' });
+                   setAddFormFields({ id: null, nome: '', saldo_base: 0, bybit_key: '', bybit_secret: '', tg_token: '', chat_id: '', account_mode: 'real', exchange: 'bybit', balance_source: 'broker_real_balance' });
                  }} className="p-4 hover:bg-zinc-800 rounded-full transition-all text-zinc-500 hover:text-white"><X size={28}/></button>
                </div>
             </div>
@@ -1110,17 +1151,18 @@ const App = () => {
                 e.preventDefault();
                 setAddFormSaving(true);
                 setAddFormMsg(null);
-                const payload = {
-                  nome: addFormFields.nome,
-                  saldo_base: parseFloat(addFormFields.saldo_base) || 0,
-                  bybit_key: addFormFields.bybit_key,
-                  bybit_secret: addFormFields.bybit_secret,
-                  tg_token: addFormFields.tg_token,
-                  chat_id: addFormFields.chat_id,
-                  account_mode: 'real',
-                  is_testnet: false,
-                  exchange: formExchange,
-                };
+                  const payload = {
+                    nome: addFormFields.nome,
+                    saldo_base: parseFloat(addFormFields.saldo_base) || 0,
+                    bybit_key: addFormFields.bybit_key,
+                    bybit_secret: addFormFields.bybit_secret,
+                    tg_token: addFormFields.tg_token,
+                    chat_id: addFormFields.chat_id,
+                    account_mode: 'real',
+                    is_testnet: false,
+                    exchange: formExchange,
+                    balance_source: addFormFields.balance_source,
+                  };
                 console.log('🔵 [FRONTEND] Iniciando salvamento do cliente:', { nome: payload.nome, exchange: payload.exchange, api_base: API_BASE });
                 try {
                   // Se id definido, atualiza; caso contrário cria novo
@@ -1208,7 +1250,29 @@ const App = () => {
                         💼 Conta Real (Fixo)
                       </div>
                       <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest ml-1">
-                        Sistema opera apenas com contas REAIS da {formExchangeLabel}. Sincroniza saldo automaticamente.
+                        Conta real é fixa. Você pode alternar apenas a fonte de saldo do painel para testes (saldo fictício) sem executar ordens.
+                      </p>
+                   </div>
+                  <div className="space-y-2 md:col-span-2">
+                     <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">Fonte do Saldo (Painel)</label>
+                      <div className="grid grid-cols-2 gap-3">
+                         <button
+                           type="button"
+                           onClick={() => handleFieldChange('balance_source', 'broker_real_balance')}
+                           className={`px-4 py-3 rounded-2xl border text-sm font-black uppercase italic transition-all ${!isTrainingBalance ? 'bg-green-500/15 border-green-500/40 text-green-300' : 'bg-black border-white/10 text-zinc-500 hover:text-white'}`}
+                         >
+                           💰 Real
+                         </button>
+                         <button
+                           type="button"
+                           onClick={() => handleFieldChange('balance_source', 'training_fake_balance')}
+                           className={`px-4 py-3 rounded-2xl border text-sm font-black uppercase italic transition-all ${isTrainingBalance ? 'bg-purple-500/15 border-purple-500/40 text-purple-200' : 'bg-black border-white/10 text-zinc-500 hover:text-white'}`}
+                         >
+                           🧪 Teste
+                         </button>
+                      </div>
+                      <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest ml-1">
+                        {isTrainingBalance ? 'Modo teste usa saldo fictício e ignora execução de ordens para este investidor.' : 'Saldo real sincroniza via API (requer chaves válidas).'}
                       </p>
                    </div>
                   <div className="space-y-2">
@@ -1218,25 +1282,25 @@ const App = () => {
                   <div className="space-y-2">
                      <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">{formBalanceLabel}</label>
                       <input
-                        value={addFormFields.saldo_base ? `Sincronizado: ${addFormFields.saldo_base}` : ''}
+                        value={isTrainingBalance ? `${Number(addFormFields.saldo_base || 500).toFixed(2)} USDT` : (addFormFields.saldo_base ? `Sincronizado: ${addFormFields.saldo_base}` : '')}
                         onChange={() => {}}
                         type="text"
                         disabled
                         className="w-full p-3 rounded-2xl outline-none font-mono border bg-zinc-950 border-white/5 text-zinc-500 cursor-not-allowed"
                         placeholder={formBalancePlaceholder}
                       />
-                      <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest ml-1">Saldo aparece após validar a chave.</p>
+                      <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest ml-1">{isTrainingBalance ? 'Saldo fictício aplicado no painel.' : 'Saldo aparece após validar a chave.'}</p>
                    </div>
                 </div>
                
-               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div className="space-y-2">
                      <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">API Key {formExchangeLabel}</label>
-                    <input value={addFormFields.bybit_key} onChange={(e)=>handleFieldChange('bybit_key', e.target.value)} type="password" autoComplete="new-password" placeholder="••••••••••••" className="w-full bg-black border border-white/10 p-3 rounded-2xl focus:border-green-500 outline-none transition-all font-mono" required />
+                    <input value={addFormFields.bybit_key} onChange={(e)=>handleFieldChange('bybit_key', e.target.value)} type="password" autoComplete="new-password" placeholder="••••••••••••" disabled={isTrainingBalance} className="w-full bg-black border border-white/10 p-3 rounded-2xl focus:border-green-500 outline-none transition-all font-mono disabled:opacity-50" required={!isTrainingBalance} />
                   </div>
                   <div className="space-y-2">
                      <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">API Secret {formExchangeLabel}</label>
-                    <input value={addFormFields.bybit_secret} onChange={(e)=>handleFieldChange('bybit_secret', e.target.value)} type="password" autoComplete="new-password" placeholder="••••••••••••" className="w-full bg-black border border-white/10 p-3 rounded-2xl focus:border-green-500 outline-none transition-all font-mono" required />
+                    <input value={addFormFields.bybit_secret} onChange={(e)=>handleFieldChange('bybit_secret', e.target.value)} type="password" autoComplete="new-password" placeholder="••••••••••••" disabled={isTrainingBalance} className="w-full bg-black border border-white/10 p-3 rounded-2xl focus:border-green-500 outline-none transition-all font-mono disabled:opacity-50" required={!isTrainingBalance} />
                   </div>
                </div>
 
@@ -1258,7 +1322,7 @@ const App = () => {
                     <button type="button" onClick={() => {
                       setShowAddForm(false);
                       setAddFormMsg(null);
-                      setAddFormFields({ id: null, nome: '', saldo_base: 0, bybit_key: '', bybit_secret: '', tg_token: '', chat_id: '', account_mode: 'real', exchange: 'bybit' });
+                      setAddFormFields({ id: null, nome: '', saldo_base: 0, bybit_key: '', bybit_secret: '', tg_token: '', chat_id: '', account_mode: 'real', exchange: 'bybit', balance_source: 'broker_real_balance' });
                     }} className="px-5 py-4 bg-zinc-900/30 border border-white/5 rounded-2xl text-zinc-300 uppercase font-black text-sm">Fechar</button>
                </div>
             </form>
