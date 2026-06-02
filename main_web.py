@@ -702,8 +702,7 @@ def _monitor_financial_stop_loss():
                                                 # Calcula PnL percentual baseado no unrealizedPnl
                                                 pnl_pct = ((unrealised_pnl / MARGEM_INPUT) * 100) if MARGEM_INPUT > 0 else 0
 
-                                                # 🔥 CORREÇÃO: Usa unrealisedPnl como profit
-                                                # Para short: será negativo se tiver prejuízo, positivo se tiver lucro
+                                                # Usa unrealisedPnl como profit bruto (será refinado abaixo)
                                                 profit = unrealised_pnl
                                                 note_tag = (
                                                     f" | STOP_FINANCEIRO_AUTO unrealisedPnl=${unrealised_pnl:.2f}"
@@ -730,6 +729,38 @@ def _monitor_financial_stop_loss():
                                                 print(f"   💾 [BANCO] Trade atualizado no banco de dados com P&L: ${profit:.2f}", flush=True)
                                             except Exception as db_err:
                                                 print(f"   ⚠️ [BANCO] Erro ao atualizar trade: {db_err}", flush=True)
+
+                                            # 🧠 Registra na trade_history com PnL líquido real da API V5
+                                            try:
+                                                from src.trade_history import record_closed_trade_sync
+                                                _auto_exit_reason = (
+                                                    'STOP_LOSS' if motivo_fechamento == 'STOP_FINANCEIRO'
+                                                    else 'TAKE_PROFIT'
+                                                )
+                                                _auto_direction = 'BUY' if side in ('long', 'buy') else 'SELL'
+                                                record_closed_trade_sync(
+                                                    pybit_session=broker.pybit_session,
+                                                    asset=symbol,
+                                                    direction=_auto_direction,
+                                                    entry_price=entry_price,
+                                                    stop_loss=0.0,
+                                                    take_profit=0.0,
+                                                    exit_price=mark_price,
+                                                    exit_reason=_auto_exit_reason,
+                                                    gross_pnl=round(unrealised_pnl, 4),
+                                                    market_context={
+                                                        'unrealised_pnl': unrealised_pnl,
+                                                        'roi_pct': round(roi_pct, 2),
+                                                        'leverage': leverage,
+                                                        'mark_price': mark_price,
+                                                        'floor_price': snapshot.floor_price,
+                                                        'trigger_price': snapshot.effective_trigger_price,
+                                                        'close_reason': motivo_fechamento,
+                                                    },
+                                                    client_id=int(cliente.get('id') or 0),
+                                                )
+                                            except Exception as th_err:
+                                                print(f"   ⚠️ [TRADE HISTORY] Erro ao salvar histórico: {th_err}", flush=True)
 
                                             # Sincroniza estado central
                                             _sync_active_trades_from_db()
@@ -1007,6 +1038,45 @@ def _monitor_dashboard_positions():
                             print(f"   ⚠️ [SYNC REVERSA] Erro ao atualizar trade ID {trade.get('id')}: {update_err}", flush=True)
                         finally:
                             conn.close()
+
+                        # 🧠 Registra na trade_history com PnL líquido real da API V5
+                        try:
+                            from src.trade_history import record_closed_trade_sync
+                            # Recupera o broker do cliente para buscar PnL real
+                            _sync_client = next(
+                                (c for c in clientes if c.get('id') == client_id), None
+                            )
+                            _sync_pybit = None
+                            if _sync_client:
+                                try:
+                                    _sync_pybit = _make_broker(_sync_client).pybit_session
+                                except Exception:
+                                    pass
+                            _sync_side = str(trade.get('side') or '').upper()
+                            _sync_direction = 'SELL' if _sync_side in ('VENDER', 'SELL', 'SHORT') else 'BUY'
+                            _sync_entry = float(trade.get('entry_price') or 0)
+                            _sync_qty = float(trade.get('quantity') or 0)
+                            _sync_exit = float(trade.get('exit_price') or 0)
+                            _sync_gross = float(trade.get('profit') or 0)
+                            record_closed_trade_sync(
+                                pybit_session=_sync_pybit,
+                                asset=trade_symbol,
+                                direction=_sync_direction,
+                                entry_price=_sync_entry,
+                                stop_loss=0.0,
+                                take_profit=0.0,
+                                exit_price=_sync_exit,
+                                exit_reason='MANUAL',
+                                gross_pnl=_sync_gross,
+                                market_context={
+                                    'quantity': _sync_qty,
+                                    'close_source': 'bybit_reverse_sync',
+                                },
+                                client_id=int(client_id or 0),
+                                trade_db_id=int(trade.get('id') or 0),
+                            )
+                        except Exception as th_err:
+                            print(f"   ⚠️ [TRADE HISTORY] Erro ao salvar histórico (sync reversa): {th_err}", flush=True)
 
                 if stale_trades_count > 0:
                     print(f"   ✅ [SYNC REVERSA] {stale_trades_count} posição(ões) sincronizada(s) como encerrada(s)", flush=True)
@@ -1554,6 +1624,30 @@ def api_manual_close_trade():
                                 quantity=qty,
                                 side=side
                             )
+
+                            # 🧠 Registra na trade_history com PnL líquido real da API V5
+                            try:
+                                from src.trade_history import record_closed_trade_sync
+                                _manual_direction = 'SELL' if side in ('VENDER', 'SELL', 'SHORT') else 'BUY'
+                                record_closed_trade_sync(
+                                    pybit_session=broker.pybit_session,
+                                    asset=used_symbol,
+                                    direction=_manual_direction,
+                                    entry_price=entry_price,
+                                    stop_loss=0.0,
+                                    take_profit=0.0,
+                                    exit_price=current_price,
+                                    exit_reason='MANUAL',
+                                    gross_pnl=round(profit, 4),
+                                    market_context={
+                                        'quantity': qty,
+                                        'close_source': 'manual_endpoint',
+                                    },
+                                    client_id=int(c.get('id') or 0),
+                                    trade_db_id=int(trade.get('id') or 0),
+                                )
+                            except Exception as th_err:
+                                print(f"   ⚠️ [TRADE HISTORY] Erro ao salvar histórico manual: {th_err}", flush=True)
                     _sync_active_trades_from_db()
 
                     results.append({
@@ -1601,6 +1695,28 @@ def handle_risk_mode():
     central_state['risk_mode'] = RISK_MODE; central_state['max_moedas_ativas'] = MAX_MOEDAS_ATIVAS
     db.set_config('RISK_MODE', RISK_MODE)
     return jsonify({"success": True, "risk_mode": RISK_MODE, "max_moedas_ativas": MAX_MOEDAS_ATIVAS})
+
+
+@app.route('/api/market-intelligence', methods=['GET'])
+def api_market_intelligence():
+    """
+    Endpoint do pipeline de exportação para o Cérebro (IA analista).
+
+    Retorna um payload JSON estruturado com o histórico de operações encerradas,
+    métricas agregadas e contexto de mercado para análise preditiva.
+
+    Query params:
+        limit (int): Quantidade máxima de trades a retornar (padrão: 100)
+    """
+    try:
+        from src.trade_history import get_market_intelligence_data
+        limit = int(request.args.get('limit', 100))
+        limit = max(1, min(limit, 500))  # Clamp entre 1 e 500
+        payload = get_market_intelligence_data(limit=limit)
+        return jsonify({"success": True, "data": payload}), 200
+    except Exception as e:
+        print(f"❌ [MARKET INTELLIGENCE] Erro ao gerar payload: {e}", flush=True)
+        return jsonify({"success": False, "error": str(e)}), 500
 
 def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=None, client_id=None, existing_client=None):
     payload = dict(client_payload or {})
