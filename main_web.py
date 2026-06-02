@@ -297,8 +297,6 @@ SNIPER_SIGNAL_RESERVATIONS = set()
 FORCAR_SINAL_TESTE = False
 _FORCED_SIGNAL_FIRED = False
 
-AI_RATE_LIMIT_STATUS_MESSAGE = "⏳ IA em cooldown (rate limit) — aguardando 60s..."
-
 central_state = {
     "balance": 0.0,  
     "status": "INICIANDO SISTEMA...",
@@ -1546,10 +1544,12 @@ def sniper_worker_loop():
             force_testnet_bypass = bool(USE_TESTNET and positions_empty)
             if top_coins:
                 central_state['symbol'] = _limpar_simbolo((top_coins[0] or {}).get('symbol'))
-                central_state['confidence'] = 0
+                if not central_state.get('last_sniper_signal'):
+                    central_state['confidence'] = 0
             else:
                 central_state['symbol'] = '---'
-                central_state['confidence'] = 0
+                if not central_state.get('last_sniper_signal'):
+                    central_state['confidence'] = 0
 
             # BYPASS (MECANISMO DE DEBUG):
             # Em Testnet, sem posições abertas, não espera "sinal institucional perfeito".
