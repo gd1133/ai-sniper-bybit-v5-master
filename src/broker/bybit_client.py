@@ -387,6 +387,11 @@ class BybitClient:
 
     def get_balance(self):
         """Busca saldo USDT com fallback seguro para múltiplos perfis de conta Bybit."""
+        # Se já sabemos que o cliente não está autenticado (ex.: retCode=10003),
+        # não insistimos em novos fetch_balance — evita spam e throttling.
+        if not getattr(self, 'authenticated', False):
+            return None
+
         def _usdt_from(balance):
             total = (balance or {}).get('total') or {}
             usdt = total.get('USDT')
