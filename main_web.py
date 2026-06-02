@@ -37,6 +37,7 @@ BybitV5HTTP = None
 IndicatorEngine = None
 GroqValidator = None
 public_price_broker = None
+public_radar_broker = None
 
 RUNTIME_START_LOCK = threading.Lock()
 RUNTIME_STARTED = False
@@ -286,6 +287,15 @@ SCAN_INTER_SYMBOL_DELAY_SECS = 0.5
 SNIPER_SIGNAL_LOCK = threading.Lock()
 SNIPER_SIGNAL_RESERVATIONS = set()            
 
+# ==============================================================================
+# 🧪 MODO DE TESTE RÁPIDO (TEMPORÁRIO)
+# ==============================================================================
+# Quando True:
+#  - O RADAR lê SEMPRE a Mainnet (dados reais) para preencher o card "RADAR LIVE"
+#  - O worker ignora filtros rígidos e força 1 sinal fictício (BUY/SELL) em <=60s
+FORCAR_SINAL_TESTE = True
+_FORCED_SIGNAL_FIRED = False
+
 central_state = {
     "balance": 0.0,  
     "status": "INICIANDO SISTEMA...",
@@ -470,6 +480,7 @@ def _extract_entry_price(trade):
     return 0.0
 
 _public_price_broker_lock = threading.Lock()
+_public_radar_broker_lock = threading.Lock()
 
 def _get_public_price_broker():
     global BybitClient, public_price_broker
@@ -497,6 +508,24 @@ def _get_public_price_broker():
             return CCXTPublicPriceFallback()
         public_price_broker = BybitClient(bybit_api_key, bybit_api_secret, testnet=ENV_CONFIG.use_testnet)
     return public_price_broker
+
+def _get_public_radar_broker_mainnet():
+    """
+    Broker dedicado para leitura pública de dados de mercado do RADAR.
+    Requisito: deve usar SEMPRE Mainnet (testnet=False), independentemente de USE_TESTNET.
+    """
+    global BybitClient, public_radar_broker
+    if public_radar_broker is not None:
+        return public_radar_broker
+    with _public_radar_broker_lock:
+        if public_radar_broker is not None:
+            return public_radar_broker
+        if BybitClient is None:
+            from src.broker.bybit_client import BybitClient as _BybitClient
+            BybitClient = _BybitClient
+        # Passa placeholders "truthy" para impedir fallback para chaves do .env.
+        public_radar_broker = BybitClient(" ", " ", testnet=False)
+    return public_radar_broker
 
 def _ensure_broker_class(exchange='bybit'):
     exchange = str(exchange or 'bybit').strip().lower()
@@ -1392,6 +1421,8 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
         slot_reserved = True
         signal_snapshot = _build_last_sniper_signal(symbol, side, entry_price, res_ia.get('probabilidade', 70), res_ia.get('motivo', ''))
         central_state['last_sniper_signal'] = signal_snapshot
+        central_state['symbol'] = signal_snapshot.get('symbol', central_state.get('symbol', '---'))
+        central_state['confidence'] = signal_snapshot.get('confidence', central_state.get('confidence', 0))
         _push_recent_sniper_signal(signal_snapshot)
         
         threading.Thread(
@@ -1407,6 +1438,7 @@ def sniper_worker_loop():
     from src.broker.bybit_client import BybitClient
     from src.engine.indicators import IndicatorEngine
     from src.ai_brain.validator import GroqValidator
+    global _FORCED_SIGNAL_FIRED
 
     while True:
         try:
@@ -1439,14 +1471,57 @@ def sniper_worker_loop():
             if not master_client:
                 time.sleep(10)
                 continue
-            ex_master = _make_broker(master_client)
-            tickers = ex_master.exchange.fetch_tickers(params={'category': 'linear'})
+
+            # RADAR: sempre usa Mainnet para leitura de dados (tickers/OHLCV),
+            # mesmo quando USE_TESTNET=True para execução das ordens.
+            radar_broker = _get_public_radar_broker_mainnet()
+            tickers = radar_broker.exchange.fetch_tickers(params={'category': 'linear'})
             top_coins = sorted([t for t in tickers.values() if 'USDT' in t.get('symbol', '') and ':' in t['symbol']], key=lambda x: x.get('quoteVolume', 0), reverse=True)[:SCAN_TOP_COINS]
             
             validator = GroqValidator()
+
+            # Alimenta o card RADAR LIVE imediatamente com a primeira moeda do radar.
+            if top_coins:
+                central_state['symbol'] = _limpar_simbolo(top_coins[0].get('symbol'))
+                if not FORCAR_SINAL_TESTE:
+                    central_state['confidence'] = 0
+            else:
+                central_state['symbol'] = '---'
+                central_state['confidence'] = 0
+
+            # Modo involuntário/forçado: gera 1 sinal fictício em <=60s para validar fluxo de execução na Testnet.
+            if FORCAR_SINAL_TESTE and top_coins and (not _FORCED_SIGNAL_FIRED):
+                t = top_coins[0]
+                sym = t.get('symbol')
+                if sym:
+                    side = 'buy' if int(time.time()) % 2 == 0 else 'sell'
+                    decisao = 'COMPRAR' if side == 'buy' else 'VENDER'
+                    entry_price = 0.0
+                    try:
+                        df = radar_broker.fetch_ohlcv(sym, timeframe='15m')
+                        if df is not None and len(df) > 0:
+                            signals = IndicatorEngine(df).get_signals()
+                            entry_price = float(signals.get('price') or 0.0)
+                    except Exception:
+                        entry_price = 0.0
+                    if entry_price <= 0:
+                        try:
+                            entry_price = float((radar_broker.exchange.fetch_ticker(sym) or {}).get('last') or 0.0)
+                        except Exception:
+                            entry_price = 0.0
+
+                    if entry_price > 0:
+                        central_state['symbol'] = _limpar_simbolo(sym)
+                        central_state['confidence'] = 95
+                        res = {"probabilidade": 95, "decisao": decisao, "motivo": "FORÇADO: teste rápido (ignora filtros SMC/Volume)"}
+                        broadcast_ordem_global(sym, side, entry_price, res)
+                        _FORCED_SIGNAL_FIRED = True
+                        time.sleep(COOLDOWN_INSTITUCIONAL_SECS)
+                        continue
+
             for t in top_coins:
                 sym = t['symbol']
-                df = ex_master.fetch_ohlcv(sym, timeframe='15m')
+                df = radar_broker.fetch_ohlcv(sym, timeframe='15m')
                 if df is None or len(df) < 200: continue
                 
                 signals = IndicatorEngine(df).get_signals()
@@ -1455,6 +1530,8 @@ def sniper_worker_loop():
                 res = validator.consensus_predict(signals, sym, force_local_only=True)
                 prob = float(res.get('probabilidade', 0))
                 decisao = str(res.get('decisao', 'ABORTAR')).upper()
+                central_state['symbol'] = _limpar_simbolo(sym)
+                central_state['confidence'] = round(prob, 2)
 
                 if prob >= THRESHOLD_ENTRADA and decisao in ['COMPRAR', 'VENDER', 'BUY', 'SELL']:
                     broadcast_ordem_global(sym, 'buy' if decisao in ('BUY', 'COMPRAR') else 'sell', float(signals['price']), res)
