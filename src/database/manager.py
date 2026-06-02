@@ -166,6 +166,13 @@ def init_db():
     conn.commit()
     conn.close()
 
+    # Inicializa tabela de histórico avançado para a IA analista
+    try:
+        from src.trade_history import init_trade_history_table
+        init_trade_history_table()
+    except Exception as th_err:
+        print(f"⚠️ [DATABASE] Aviso ao inicializar trade_history: {th_err}")
+
 
 def get_active_clients() -> List[Dict[str, Any]]:
     """Retorna apenas clientes cadastrados com status ativo"""
