@@ -44,6 +44,85 @@ AI_RATE_LIMIT_STATUS_MESSAGE = '⚠️ Limite das IAs atingido. Aguardando coold
 AI_COOLDOWN_ACTIVE = False
 AI_COOLDOWN_LOCK = threading.Lock()
 
+# Runtime-only: bloqueio temporário de clientes com erro de autenticação (ex.: chaves MAINNET em modo TESTNET)
+_CLIENT_AUTH_RUNTIME = {}  # client_id -> {authenticated: bool, disabled_until: float, reason: str}
+_CLIENT_AUTH_LOCK = threading.Lock()
+_CLIENT_AUTH_COOLDOWN_SECONDS = 10 * 60  # 10 min
+
+def _extract_bybit_ret_code_from_error(error):
+    """Extrai retCode (ex.: 10003) de exceções CCXT/Pybit ou mensagens logadas."""
+    try:
+        for attr in ('error_code', 'code', 'retCode'):
+            code = getattr(error, attr, None)
+            if code is not None:
+                return str(code)
+    except Exception:
+        pass
+    text = str(error or '')
+    match = re.search(r'retCode\\s*["\\\']?\\s*[:=]\\s*(\\d+)', text)
+    if match:
+        return match.group(1)
+    match = re.search(r'retCode=(\\d+)', text)
+    if match:
+        return match.group(1)
+    return None
+
+def _is_client_temporarily_disabled(client_id):
+    if not client_id:
+        return False
+    now = time.time()
+    with _CLIENT_AUTH_LOCK:
+        entry = _CLIENT_AUTH_RUNTIME.get(int(client_id))
+        if not entry:
+            return False
+        disabled_until = float(entry.get('disabled_until') or 0.0)
+        if disabled_until and now >= disabled_until:
+            _CLIENT_AUTH_RUNTIME.pop(int(client_id), None)
+            return False
+        return entry.get('authenticated') is False
+
+def _get_client_disable_reason(client_id):
+    with _CLIENT_AUTH_LOCK:
+        entry = _CLIENT_AUTH_RUNTIME.get(int(client_id or 0)) or {}
+        return str(entry.get('reason') or '').strip() or None
+
+def _disable_client_temporarily(client, reason, cooldown_seconds=_CLIENT_AUTH_COOLDOWN_SECONDS):
+    client_id = int((client or {}).get('id') or 0)
+    if not client_id:
+        return False
+    now = time.time()
+    with _CLIENT_AUTH_LOCK:
+        entry = _CLIENT_AUTH_RUNTIME.get(client_id)
+        if entry:
+            disabled_until = float(entry.get('disabled_until') or 0.0)
+            if disabled_until and now < disabled_until:
+                return False
+        _CLIENT_AUTH_RUNTIME[client_id] = {
+            'authenticated': False,
+            'disabled_until': now + float(cooldown_seconds or 0),
+            'reason': str(reason or '').strip(),
+        }
+        return True
+
+def _handle_invalid_api_key_10003_for_client(client, source_label='bybit'):
+    nome = (client or {}).get('nome') or 'Unknown'
+    client_id = int((client or {}).get('id') or 0)
+    if _is_client_temporarily_disabled(client_id):
+        return
+
+    # Mensagem explícita e amigável para o Render (modo TESTNET)
+    if USE_TESTNET:
+        print(
+            f"❌ [CONFIGURAÇÃO] O cliente {nome} está usando chaves reais da MAINNET, mas o robô está em modo TESTNET (Simulação). "
+            f"Altere as chaves no banco de dados para chaves geradas em testnet.bybit.com.",
+            flush=True,
+        )
+
+    _disable_client_temporarily(
+        client,
+        reason=f"bybit retCode=10003 (API key is invalid) detectado em {source_label}",
+    )
+
 # 🔧 CONFIGURAÇÃO DE GERENCIAMENTO DE RISCO MOTOR SNIPER V60.7
 # Altere estes valores conforme necessário para diferentes estratégias de trading
 ALAVANCAGEM = 20  # Alavancagem fixa (pode ser alterado para 30 ou 50 no futuro)
@@ -446,7 +525,15 @@ def _fetch_active_client_balances(force=False):
             balance = None
             error = None
             try:
-                balance = _make_broker(client).get_balance()
+                client_id = int(client.get('id') or 0)
+                if _is_client_temporarily_disabled(client_id):
+                    error = _get_client_disable_reason(client_id) or 'Cliente temporariamente desativado por erro de autenticação'
+                else:
+                    broker = _make_broker(client)
+                    balance = broker.get_balance()
+                    code = str(getattr(broker, 'last_auth_error_code', '') or '')
+                    if code == '10003' and balance is None:
+                        _handle_invalid_api_key_10003_for_client(client, source_label='fetch_balance')
                 if balance is not None:
                     balance = round(float(balance), 2)
                     total += balance
@@ -574,6 +661,10 @@ def _monitor_financial_stop_loss():
 
             for cliente in clientes:
                 try:
+                    client_id = int(cliente.get('id') or 0)
+                    if _is_client_temporarily_disabled(client_id):
+                        continue
+
                     broker = _make_broker(cliente)
 
                     if not broker.pybit_session or not broker.authenticated:
@@ -584,6 +675,8 @@ def _monitor_financial_stop_loss():
                         ok, err = broker._handle_v5_ret_code(positions_response, 'get_positions')
 
                         if not ok:
+                            if str(_extract_bybit_ret_code_from_error(err)) == '10003' or 'retCode=10003' in str(err):
+                                _handle_invalid_api_key_10003_for_client(cliente, source_label='MONITOR FINANCEIRO:get_positions')
                             continue
 
                         positions_list = (positions_response.get('result') or {}).get('list', [])
@@ -696,6 +789,10 @@ def _monitor_financial_stop_loss():
                                 continue
 
                     except Exception as fetch_err:
+                        code = _extract_bybit_ret_code_from_error(fetch_err)
+                        if str(code) == '10003' or 'API key is invalid' in str(fetch_err):
+                            _handle_invalid_api_key_10003_for_client(cliente, source_label='MONITOR FINANCEIRO:exception')
+                            continue
                         print(f"   ⚠️ [MONITOR] Erro ao buscar posições do cliente {cliente.get('nome')}: {fetch_err}", flush=True)
                         continue
 

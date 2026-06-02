@@ -3,6 +3,8 @@ import time
 import sys
 import io
 import threading
+import json
+import re
 from decimal import Decimal
 
 # Força UTF-8 no stdout para evitar erros de encode com emojis no Render/Terminal
@@ -216,6 +218,47 @@ class BybitClient:
             or 'nonce' in msg.lower()
         )
 
+    def _extract_bybit_ret_code(self, error):
+        """Extrai retCode de erros (ccxt/pybit) sem depender do formato exato."""
+        try:
+            if isinstance(error, dict) and 'retCode' in error:
+                code = error.get('retCode')
+                return str(code) if code is not None else None
+        except Exception:
+            pass
+
+        for attr in ('error_code', 'code', 'retCode'):
+            try:
+                code = getattr(error, attr, None)
+                if code is not None:
+                    return str(code)
+            except Exception:
+                pass
+
+        text = str(error or '')
+        match = re.search(r'retCode\\s*["\']?\\s*[:=]\\s*(\\d+)', text)
+        if match:
+            return match.group(1)
+
+        # Formato comum: bybit {"retCode":10003,"retMsg":"..."}
+        match = re.search(r'(\{.*?\})', text)
+        if match:
+            try:
+                payload = json.loads(match.group(1))
+                code = payload.get('retCode')
+                return str(code) if code is not None else None
+            except Exception:
+                return None
+        return None
+
+    def _record_last_auth_error(self, error):
+        try:
+            self.last_auth_error_code = self._extract_bybit_ret_code(error)
+            self.last_auth_error_message = str(error).split('\n')[0][:240]
+        except Exception:
+            self.last_auth_error_code = None
+            self.last_auth_error_message = None
+
     def _emit_authentication_alert(self):
         print(AUTH_10003_ALERT, flush=True)
 
@@ -232,6 +275,7 @@ class BybitClient:
         message = f"{route_label} falhou: retCode={ret_code} retMsg={ret_msg}"
         if str(ret_code) == '10003':
             self.authenticated = False
+            self._record_last_auth_error(payload)
             self._emit_authentication_alert()
         return False, message
 
@@ -348,6 +392,19 @@ class BybitClient:
             usdt = total.get('USDT')
             return float(usdt) if usdt is not None else None
 
+        ccxt = _get_ccxt()
+
+        def _handle_ccxt_balance_error(scope_label, err):
+            self._record_last_auth_error(err)
+            msg = str(err)
+            print(f"⚠️ [BYBIT] Erro ({scope_label}): {msg}", flush=True)
+            if isinstance(err, ccxt.AuthenticationError) or self._is_auth_error(msg):
+                self.authenticated = False
+                if str(self.last_auth_error_code) == '10003':
+                    self._emit_authentication_alert()
+                return True
+            return False
+
         # Fallback 0: Tenta usar pybit diretamente (mais confiável para saldo)
         if self.pybit_session and self.authenticated:
             try:
@@ -371,7 +428,9 @@ class BybitClient:
                                     return wallet_balance
                 else:
                     print(f"⚠️ [BYBIT] Erro pybit get_wallet_balance: {err}", flush=True)
+                    self._record_last_auth_error(wallet_response)
             except Exception as e:
+                self._record_last_auth_error(e)
                 print(f"⚠️ [BYBIT] Exceção em pybit get_wallet_balance: {e}", flush=True)
 
         # Fallback 1: Conta Unificada (UTA) via CCXT
@@ -381,10 +440,7 @@ class BybitClient:
             usdt = _usdt_from(balance)
             if usdt is not None: return usdt
         except Exception as e:
-            msg = str(e)
-            print(f"⚠️ [BYBIT] Erro (UNIFIED): {msg}", flush=True)
-            if self._is_auth_error(msg):
-                self.authenticated = False
+            if _handle_ccxt_balance_error('UNIFIED', e):
                 return None
 
         # Fallback 2: Conta Standard/Contratos Clássica
@@ -394,10 +450,7 @@ class BybitClient:
             usdt = _usdt_from(balance)
             if usdt is not None: return usdt
         except Exception as e:
-            msg = str(e)
-            print(f"⚠️ [BYBIT] Erro (CONTRACT): {msg}", flush=True)
-            if self._is_auth_error(msg):
-                self.authenticated = False
+            if _handle_ccxt_balance_error('CONTRACT', e):
                 return None
 
         # Fallback 3: Swap Param Legado
@@ -407,11 +460,9 @@ class BybitClient:
             usdt = _usdt_from(balance)
             if usdt is not None: return usdt
         except Exception as e:
-            msg = str(e)
-            print(f"⚠️ [BYBIT] Erro (SWAP): {msg}", flush=True)
-            if self._is_auth_error(msg):
-                self.authenticated = False
+            if _handle_ccxt_balance_error('SWAP', e):
                 return None
+            msg = str(e)
             print(f"[ERRO BROKER] Falha crítica ao consultar saldo total: {msg}", flush=True)
             return None
 
