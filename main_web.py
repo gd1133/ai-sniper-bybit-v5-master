@@ -141,6 +141,33 @@ def _env_float(name: str, default: float) -> float:
     except Exception:
         return default
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    raw = str(raw).strip().lower()
+    if not raw:
+        return default
+    if raw in ('1', 'true', 'yes', 'y', 'on'):
+        return True
+    if raw in ('0', 'false', 'no', 'n', 'off'):
+        return False
+    return default
+
+def _is_training_fake_balance_enabled() -> bool:
+    # Default: enabled on TESTNET to allow UI/training without valid API keys.
+    try:
+        default_enabled = bool(USE_TESTNET)
+    except Exception:
+        default_enabled = False
+    return _env_bool('ENABLE_TRAINING_FAKE_BALANCE', default_enabled)
+
+def _get_training_fake_balance_usd() -> float | None:
+    if not _is_training_fake_balance_enabled():
+        return None
+    value = float(_env_float('TRAINING_FAKE_BALANCE_USD', 500.0))
+    return value if value > 0 else None
+
 
 class BrokerManager:
     _instance = None
@@ -524,16 +551,25 @@ def _fetch_active_client_balances(force=False):
         for client in _get_registered_clients(active_only=True):
             balance = None
             error = None
+            is_fake_balance = False
             try:
                 client_id = int(client.get('id') or 0)
                 if _is_client_temporarily_disabled(client_id):
                     error = _get_client_disable_reason(client_id) or 'Cliente temporariamente desativado por erro de autenticação'
+                    fake = _get_training_fake_balance_usd()
+                    if fake is not None:
+                        balance = fake
+                        is_fake_balance = True
                 else:
                     broker = _make_broker(client)
                     balance = broker.get_balance()
                     code = str(getattr(broker, 'last_auth_error_code', '') or '')
                     if code == '10003' and balance is None:
                         _handle_invalid_api_key_10003_for_client(client, source_label='fetch_balance')
+                        fake = _get_training_fake_balance_usd()
+                        if fake is not None:
+                            balance = fake
+                            is_fake_balance = True
                 if balance is not None:
                     balance = round(float(balance), 2)
                     total += balance
@@ -542,7 +578,7 @@ def _fetch_active_client_balances(force=False):
                 "id": client.get('id'), "nome": client.get('nome'), "saldo_real": balance,
                 "saldo_base": float(client.get('saldo_base', 0) or 0), "is_testnet": USE_TESTNET,
                 "account_mode": "real", "exchange": str(client.get('exchange') or 'bybit').lower(),
-                "status": client.get('status'), "error": error,
+                "status": client.get('status'), "error": error, "is_fake_balance": is_fake_balance,
             })
     except Exception: pass
     
@@ -551,10 +587,18 @@ def _fetch_active_client_balances(force=False):
     
     # ⚡ CORE FIX: Força sincronização em tempo real do card para o React
     valid_items = [item for item in items if item.get("saldo_real") is not None]
+    fake_items = [item for item in valid_items if item.get("is_fake_balance")]
+    real_items = [item for item in valid_items if not item.get("is_fake_balance")]
     central_state['real_client_balances'] = items
-    if valid_items:
-        central_state['balance'] = round(sum(float(i["saldo_real"]) for i in valid_items), 2)
-        central_state['status'] = f"💼 CONTA REAL: saldo sincronizado para {len(valid_items)} investidores"
+    if real_items:
+        central_state['balance'] = round(sum(float(i["saldo_real"]) for i in real_items), 2)
+        msg = f"💼 CONTA REAL: saldo sincronizado para {len(real_items)} investidores"
+        if fake_items:
+            msg += f" ( +{len(fake_items)} com saldo fictício TESTNET )"
+        central_state['status'] = msg
+    elif fake_items:
+        central_state['balance'] = round(sum(float(i["saldo_real"]) for i in fake_items), 2)
+        central_state['status'] = f"🧪 TESTNET: saldo fictício ativo para {len(fake_items)} investidores"
     else:
         central_state['balance'] = 0.0
         central_state['status'] = "💼 CONTA REAL: aguardando pareamento de chaves..."
@@ -895,11 +939,20 @@ def _monitor_dashboard_positions():
 
                     # Verifica se tem sessão pybit ativa
                     if not broker.pybit_session or not broker.authenticated:
-                        print(f"   ⚠️ [DASHBOARD] Cliente {cliente.get('nome')} sem autenticação ativa", flush=True)
+                        fake = _get_training_fake_balance_usd()
+                        if fake is not None:
+                            total_wallet_balance += float(fake)
+                            print(
+                                f"   🧪 [DASHBOARD] Cliente {cliente.get('nome')} sem autenticação ativa — usando saldo fictício: ${float(fake):.2f} USDT",
+                                flush=True,
+                            )
+                        else:
+                            print(f"   ⚠️ [DASHBOARD] Cliente {cliente.get('nome')} sem autenticação ativa", flush=True)
                         continue
 
                     # 1️⃣ BUSCA SALDO DA CONTA COM PARÂMETROS CORRETOS
                     try:
+                        client_balance_added = False
                         # Tenta buscar saldo usando a API V5 com accountType='UNIFIED'
                         wallet_response = broker.pybit_session.get_wallet_balance(
                             accountType='UNIFIED'
@@ -920,12 +973,33 @@ def _monitor_dashboard_positions():
                                         # Usa walletBalance ou equity como saldo principal
                                         wallet_balance = float(coin.get('walletBalance') or coin.get('equity') or 0)
                                         total_wallet_balance += wallet_balance
+                                        client_balance_added = True
                                         print(f"   💰 [DASHBOARD] {cliente.get('nome')}: ${wallet_balance:.2f} USDT", flush=True)
                                         break
                         else:
                             print(f"   ⚠️ [DASHBOARD] Erro ao buscar saldo de {cliente.get('nome')}: {err}", flush=True)
+                            code = _extract_bybit_ret_code_from_error(err)
+                            if not client_balance_added and str(code or '') == '10003':
+                                _handle_invalid_api_key_10003_for_client(cliente, source_label='DASHBOARD:get_wallet_balance')
+                                fake = _get_training_fake_balance_usd()
+                                if fake is not None:
+                                    total_wallet_balance += float(fake)
+                                    print(
+                                        f"   🧪 [DASHBOARD] {cliente.get('nome')}: saldo fictício aplicado após erro 10003 (${float(fake):.2f} USDT)",
+                                        flush=True,
+                                    )
                     except Exception as wallet_err:
                         print(f"   ⚠️ [DASHBOARD] Exceção ao buscar saldo: {wallet_err}", flush=True)
+                        code = _extract_bybit_ret_code_from_error(wallet_err)
+                        if str(code or '') == '10003':
+                            _handle_invalid_api_key_10003_for_client(cliente, source_label='DASHBOARD:get_wallet_balance:exception')
+                            fake = _get_training_fake_balance_usd()
+                            if fake is not None:
+                                total_wallet_balance += float(fake)
+                                print(
+                                    f"   🧪 [DASHBOARD] {cliente.get('nome')}: saldo fictício aplicado após exceção 10003 (${float(fake):.2f} USDT)",
+                                    flush=True,
+                                )
 
                     # 2️⃣ BUSCA POSIÇÕES ABERTAS COM PARÂMETROS CORRETOS
                     try:
