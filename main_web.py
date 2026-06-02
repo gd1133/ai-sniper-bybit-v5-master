@@ -643,20 +643,45 @@ def _fetch_active_client_balances(force=False):
     fake_items = [item for item in valid_items if item.get("is_fake_balance")]
     real_items = [item for item in valid_items if not item.get("is_fake_balance")]
     central_state['real_client_balances'] = items
+    if valid_items:
+        # Unificação obrigatória: o saldo total do dashboard sempre soma TODOS os investidores ativos
+        # (incluindo clientes com saldo fictício / training_fake_balance).
+        central_state['balance'] = round(sum(float(i["saldo_real"]) for i in valid_items), 2)
+    else:
+        central_state['balance'] = 0.0
+
     if real_items:
-        central_state['balance'] = round(sum(float(i["saldo_real"]) for i in real_items), 2)
         msg = f"💼 CONTA REAL: saldo sincronizado para {len(real_items)} investidores"
         if fake_items:
             msg += f" ( +{len(fake_items)} com saldo fictício TESTNET )"
         central_state['status'] = msg
     elif fake_items:
-        central_state['balance'] = round(sum(float(i["saldo_real"]) for i in fake_items), 2)
         central_state['status'] = f"🧪 TESTNET: saldo fictício ativo para {len(fake_items)} investidores"
     else:
-        central_state['balance'] = 0.0
         central_state['status'] = "💼 CONTA REAL: aguardando pareamento de chaves..."
         
     return res
+
+def _build_api_status_payload():
+    """
+    Garante estrutura estável de chaves no retorno do `/api/status`,
+    independente de modo REAL/TESTE, para não quebrar o frontend.
+    """
+    payload = dict(central_state or {})
+    balance = round(_coerce_float(payload.get('balance'), default=0.0), 2)
+
+    active_trades = payload.get('active_trades')
+    if not isinstance(active_trades, list):
+        active_trades = []
+    payload['active_trades'] = active_trades
+
+    payload['saldo_real'] = balance
+    payload['saldo'] = balance
+    payload['saldo_atual'] = balance
+    payload['posicoes'] = active_trades
+    payload['radar'] = payload.get('symbol') or '---'
+    payload['confianca_ia'] = _coerce_float(payload.get('confidence'), default=0.0)
+    return payload
 
 def _refresh_real_balance_state(force=False):
     _fetch_active_client_balances(force=force)
@@ -1722,8 +1747,9 @@ def get_status():
         _sync_active_trades_from_db()
         _refresh_last_sniper_signal()
         central_state['trades'] = db.get_recent_trades(20)
-        return jsonify(central_state), 200
-    except Exception: return jsonify(central_state), 200
+        return jsonify(_build_api_status_payload()), 200
+    except Exception:
+        return jsonify(_build_api_status_payload()), 200
 
 @app.route('/api/dashboard/balance', methods=['GET'])
 def update_dashboard_balance():
