@@ -25,7 +25,6 @@ from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
 from src.config import get_bybit_base_url, get_environment_config, resolve_use_testnet
-from src.engine.advanced_trailing_stop import AdvancedTrailingStopMonitor
 
 try:
     from src.database import manager as db
@@ -63,8 +62,6 @@ def _env_float(name: str, default: float) -> float:
     except Exception:
         return default
 
-# 🟢 Trailing avançado com piso garantido (ativação em 100% ROI)
-TRAILING_CALLBACK_PCT = max(0.1, _env_float("TRAILING_CALLBACK_PCT", 2.0))
 
 class BrokerManager:
     _instance = None
@@ -551,39 +548,37 @@ def _monitor_sl_tp_automatico():
 
 def _monitor_financial_stop_loss():
     """
-    🛡️ MONITOR DE STOP LOSS FINANCEIRO V60.7 (COM MARGEM FIXA)
+    🎯 MONITOR FINANCEIRO V60.7 — REGRA BINÁRIA (ALVO FIXO NA PAREDE)
 
     Monitora o unrealisedPnl em tempo real de todas as posições abertas.
-    Com margem de entrada fixa de $5.0 USDT, o limite de perda é fixo em -$2.50 USDT (50% da margem).
-    
-    Se o unrealizedPnl atingir ou passar de -$2.50 USDT, fecha a posição imediatamente
-    via ordem a mercado (reduceOnly=True).
+    Margem de entrada fixa: $5.00 USDT.
 
-    Exemplo:
-    - Margem usada: $5.0 USDT (MARGEM_INPUT fixo)
-    - Limite de perda: -$2.50 USDT (50% da margem)
-    - Quando unrealisedPnl <= -$2.50, dispara fechamento forçado
+    Regra estritamente binária:
+    - Take Profit (+100%): fecha quando unrealisedPnl >= +$5.00 USDT
+    - Stop Loss  ( -50%): fecha quando unrealisedPnl <= -$2.50 USDT
+    - Zona neutra (-$2.49 a +$4.99): NÃO FAZ NADA — deixa a operação rodar.
+
+    Não há trailing stop, breakeven, nem saída antecipada por tendência.
     """
     time.sleep(5)  # Aguarda inicialização do sistema
-    print(f"🛡️ [MONITOR FINANCEIRO] Iniciado - Stop Loss financeiro ativo ({LIMITE_PERDA_STOP} USDT = 50% de {MARGEM_INPUT} USDT)", flush=True)
-
-    trailing_monitors = {}
+    ALVO_LUCRO = MARGEM_INPUT          # +$5.00 USDT  (100% da margem)
+    ALVO_PERDA = LIMITE_PERDA_STOP     # -$2.50 USDT  ( 50% da margem)
+    print(
+        f"🎯 [MONITOR FINANCEIRO] Iniciado — TP: +${ALVO_LUCRO:.2f} | SL: ${ALVO_PERDA:.2f} | Margem: ${MARGEM_INPUT:.2f}",
+        flush=True
+    )
 
     while True:
-        positions_seen = set()
         try:
-            # Busca todos os clientes ativos
             clientes = _get_registered_clients(active_only=True)
 
             for cliente in clientes:
                 try:
                     broker = _make_broker(cliente)
 
-                    # Verifica se tem sessão pybit ativa
                     if not broker.pybit_session or not broker.authenticated:
                         continue
 
-                    # Busca posições abertas do cliente usando os parâmetros corretos
                     try:
                         positions_response = broker.pybit_session.get_positions(category='linear', settleCoin='USDT')
                         ok, err = broker._handle_v5_ret_code(positions_response, 'get_positions')
@@ -595,181 +590,106 @@ def _monitor_financial_stop_loss():
 
                         for pos in positions_list:
                             try:
-                                # Extrai dados da posição
                                 symbol = pos.get('symbol', '')
                                 size = float(pos.get('size') or 0)
                                 side = str(pos.get('side', '')).lower()
-                                position_idx = str(pos.get('positionIdx') or '').strip()
                                 unrealised_pnl = float(pos.get('unrealisedPnl') or 0)
                                 entry_price = float(pos.get('avgPrice') or pos.get('entryPrice') or 0)
                                 mark_price = float(pos.get('markPrice') or pos.get('lastPrice') or entry_price or 0)
                                 leverage = float(pos.get('leverage') or ALAVANCAGEM or 1.0)
-                                initial_margin = float(
-                                    pos.get('positionIM')
-                                    or pos.get('positionBalance')
-                                    or pos.get('positionMargin')
-                                    or MARGEM_INPUT
-                                )
-                                if initial_margin <= 0:
-                                    initial_margin = MARGEM_INPUT
-                                roi_pct = (unrealised_pnl / initial_margin) * 100 if initial_margin > 0 else 0.0
 
-                                # Pula se não houver posição aberta
                                 if size <= 0:
                                     continue
 
-                                position_key = f"{cliente.get('id')}:{symbol}:{position_idx or side}"
-                                positions_seen.add(position_key)
-                                monitor = trailing_monitors.get(position_key)
-                                if monitor is None:
-                                    monitor = AdvancedTrailingStopMonitor(
-                                        entry_price=entry_price if entry_price > 0 else mark_price,
-                                        leverage=leverage if leverage > 0 else 1.0,
-                                        side=side,
-                                        callback_pct=TRAILING_CALLBACK_PCT,
-                                    )
-                                    trailing_monitors[position_key] = monitor
-
-                                was_armed = monitor.trailing_armed
-                                snapshot = monitor.update_price(mark_price)
-
-                                if snapshot.trailing_armed and not was_armed and snapshot.floor_price is not None:
-                                    print(
-                                        f"🎯 [TRAVA LUCRO 100% ROI] {symbol} ativada em {snapshot.activation_price:.6f} | Cliente: {cliente.get('nome')}",
-                                        flush=True
-                                    )
-
-                                # 🔧 LIMITE FIXO DE PERDA: -$2.50 USDT (50% de $5.0)
-                                limite_perda = LIMITE_PERDA_STOP
-
-                                trigger_tag = (
-                                    f" | Gatilho: {snapshot.effective_trigger_price:.6f}"
-                                    if snapshot.effective_trigger_price is not None
-                                    else ""
-                                )
-                                piso_tag = (
-                                    f" | Piso: {snapshot.floor_price:.6f}"
-                                    if snapshot.floor_price is not None
-                                    else ""
-                                )
-                                extremo_tag = (
-                                    f" | Extremo: {snapshot.extreme_price:.6f}"
-                                    if snapshot.extreme_price is not None
-                                    else ""
-                                )
+                                pnl_pct = (unrealised_pnl / MARGEM_INPUT) * 100 if MARGEM_INPUT > 0 else 0.0
                                 print(
-                                    f"   📊 [MONITOR] {symbol} | Size: {size} | ROI: {roi_pct:.2f}% | "
-                                    f"Preço: {mark_price:.6f} | Armado: {snapshot.trailing_armed} | "
-                                    f"unrealisedPnl: ${unrealised_pnl:.2f} | Limite: ${limite_perda:.2f}"
-                                    f"{piso_tag}{extremo_tag}{trigger_tag}",
+                                    f"   📊 [MONITOR] {symbol} | Size: {size} | "
+                                    f"unrealisedPnl: ${unrealised_pnl:.2f} | ROI: {pnl_pct:.1f}% | "
+                                    f"TP: +${ALVO_LUCRO:.2f} | SL: ${ALVO_PERDA:.2f}",
                                     flush=True
                                 )
 
-                                trailing_reversao = snapshot.should_close
+                                # ── REGRA BINÁRIA ──────────────────────────────────────
+                                if unrealised_pnl >= ALVO_LUCRO:
+                                    motivo_fechamento = "TAKE_PROFIT"
+                                elif unrealised_pnl <= ALVO_PERDA:
+                                    motivo_fechamento = "STOP_LOSS"
+                                else:
+                                    # Zona neutra — não faz nada
+                                    continue
+                                # ───────────────────────────────────────────────────────
 
-                                motivo_fechamento = None
-                                if unrealised_pnl <= limite_perda:
-                                    motivo_fechamento = "STOP_FINANCEIRO"
-                                elif trailing_reversao:
-                                    motivo_fechamento = snapshot.close_reason or "TRAILING_REVERSAO"
+                                if motivo_fechamento == "TAKE_PROFIT":
+                                    print(f"🏆 [TAKE PROFIT] {symbol} atingiu alvo de lucro!", flush=True)
+                                    print(f"   💰 unrealisedPnl: ${unrealised_pnl:.2f} >= Alvo: +${ALVO_LUCRO:.2f}", flush=True)
+                                else:
+                                    print(f"🚨 [STOP LOSS] {symbol} atingiu limite de perda!", flush=True)
+                                    print(f"   💔 unrealisedPnl: ${unrealised_pnl:.2f} <= Limite: ${ALVO_PERDA:.2f}", flush=True)
 
-                                # 🔥 CONDIÇÃO DE FECHAMENTO FORÇADO
-                                if motivo_fechamento:
-                                    if motivo_fechamento == "STOP_FINANCEIRO":
-                                        print(f"🚨 [STOP FINANCEIRO] {symbol} atingiu limite de perda!", flush=True)
-                                        print(f"   💔 unrealisedPnl: ${unrealised_pnl:.2f} <= Limite: ${limite_perda:.2f}", flush=True)
+                                print(f"   🔒 Disparando fechamento forçado...", flush=True)
+
+                                try:
+                                    success = broker.close_position_with_sl(symbol, side)
+
+                                    if success:
+                                        print(f"   ✅ [{motivo_fechamento}] Posição {symbol} fechada com sucesso!", flush=True)
+
+                                        try:
+                                            conn = db._connect()
+                                            cur = conn.cursor()
+                                            profit = unrealised_pnl
+                                            note_tag = (
+                                                f" | TAKE_PROFIT_AUTO unrealisedPnl=${unrealised_pnl:.2f}"
+                                                if motivo_fechamento == "TAKE_PROFIT"
+                                                else f" | STOP_LOSS_AUTO unrealisedPnl=${unrealised_pnl:.2f}"
+                                            )
+                                            cur.execute(
+                                                "UPDATE trades SET status='closed', pnl_pct=?, profit=?, notes=COALESCE(notes,'') || ? WHERE pair=? AND client_id=? AND status='open'",
+                                                (
+                                                    round(pnl_pct, 2),
+                                                    round(profit, 2),
+                                                    note_tag,
+                                                    symbol,
+                                                    cliente.get('id')
+                                                )
+                                            )
+                                            conn.commit()
+                                            conn.close()
+                                            print(f"   💾 [BANCO] Trade atualizado — P&L: ${profit:.2f}", flush=True)
+                                        except Exception as db_err:
+                                            print(f"   ⚠️ [BANCO] Erro ao atualizar trade: {db_err}", flush=True)
+
+                                        try:
+                                            from src.trade_history import record_closed_trade_sync
+                                            _auto_direction = 'BUY' if side in ('long', 'buy') else 'SELL'
+                                            record_closed_trade_sync(
+                                                pybit_session=broker.pybit_session,
+                                                asset=symbol,
+                                                direction=_auto_direction,
+                                                entry_price=entry_price,
+                                                stop_loss=0.0,
+                                                take_profit=0.0,
+                                                exit_price=mark_price,
+                                                exit_reason=motivo_fechamento,
+                                                gross_pnl=round(unrealised_pnl, 4),
+                                                market_context={
+                                                    'unrealised_pnl': unrealised_pnl,
+                                                    'roi_pct': round(pnl_pct, 2),
+                                                    'leverage': leverage,
+                                                    'mark_price': mark_price,
+                                                    'close_reason': motivo_fechamento,
+                                                },
+                                                client_id=int(cliente.get('id') or 0),
+                                            )
+                                        except Exception as th_err:
+                                            print(f"   ⚠️ [TRADE HISTORY] Erro ao salvar histórico: {th_err}", flush=True)
+
+                                        _sync_active_trades_from_db()
                                     else:
-                                        print(f"🏁 [TRAILING STOP] {symbol} cruzou gatilho real de saída!", flush=True)
-                                        print(
-                                            f"   📉 Preço atual: {mark_price:.6f} | Piso: {(snapshot.floor_price or 0):.6f} | "
-                                            f"Extremo: {(snapshot.extreme_price or 0):.6f} | Gatilho real: {(snapshot.effective_trigger_price or 0):.6f}",
-                                            flush=True
-                                        )
-                                    print(f"   🔒 Disparando fechamento forçado...", flush=True)
+                                        print(f"   ❌ [{motivo_fechamento}] Falha ao fechar posição {symbol}", flush=True)
 
-                                    # Fecha a posição via ordem a mercado
-                                    try:
-                                        success = broker.close_position_with_sl(symbol, side)
-
-                                        if success:
-                                            print(f"   ✅ [STOP FINANCEIRO] Posição {symbol} fechada com sucesso!", flush=True)
-
-                                            # Atualiza registro no banco de dados
-                                            try:
-                                                conn = db._connect()
-                                                cur = conn.cursor()
-
-                                                # Calcula PnL percentual baseado no unrealizedPnl
-                                                pnl_pct = ((unrealised_pnl / MARGEM_INPUT) * 100) if MARGEM_INPUT > 0 else 0
-
-                                                # Usa unrealisedPnl como profit bruto (será refinado abaixo)
-                                                profit = unrealised_pnl
-                                                note_tag = (
-                                                    f" | STOP_FINANCEIRO_AUTO unrealisedPnl=${unrealised_pnl:.2f}"
-                                                    if motivo_fechamento == "STOP_FINANCEIRO"
-                                                    else (
-                                                        f" | TRAILING_ACTIVATION_FLOOR price={mark_price:.6f}"
-                                                        f" floor={(snapshot.floor_price or 0):.6f}"
-                                                        f" trigger={(snapshot.effective_trigger_price or 0):.6f}"
-                                                    )
-                                                )
-
-                                                cur.execute(
-                                                    "UPDATE trades SET status='closed', pnl_pct=?, profit=?, notes=COALESCE(notes,'') || ? WHERE pair=? AND client_id=? AND status='open'",
-                                                    (
-                                                        round(pnl_pct, 2),
-                                                        round(profit, 2),
-                                                        note_tag,
-                                                        symbol,
-                                                        cliente.get('id')
-                                                    )
-                                                )
-                                                conn.commit()
-                                                conn.close()
-                                                print(f"   💾 [BANCO] Trade atualizado no banco de dados com P&L: ${profit:.2f}", flush=True)
-                                            except Exception as db_err:
-                                                print(f"   ⚠️ [BANCO] Erro ao atualizar trade: {db_err}", flush=True)
-
-                                            # 🧠 Registra na trade_history com PnL líquido real da API V5
-                                            try:
-                                                from src.trade_history import record_closed_trade_sync
-                                                _auto_exit_reason = (
-                                                    'STOP_LOSS' if motivo_fechamento == 'STOP_FINANCEIRO'
-                                                    else 'TAKE_PROFIT'
-                                                )
-                                                _auto_direction = 'BUY' if side in ('long', 'buy') else 'SELL'
-                                                record_closed_trade_sync(
-                                                    pybit_session=broker.pybit_session,
-                                                    asset=symbol,
-                                                    direction=_auto_direction,
-                                                    entry_price=entry_price,
-                                                    stop_loss=0.0,
-                                                    take_profit=0.0,
-                                                    exit_price=mark_price,
-                                                    exit_reason=_auto_exit_reason,
-                                                    gross_pnl=round(unrealised_pnl, 4),
-                                                    market_context={
-                                                        'unrealised_pnl': unrealised_pnl,
-                                                        'roi_pct': round(roi_pct, 2),
-                                                        'leverage': leverage,
-                                                        'mark_price': mark_price,
-                                                        'floor_price': snapshot.floor_price,
-                                                        'trigger_price': snapshot.effective_trigger_price,
-                                                        'close_reason': motivo_fechamento,
-                                                    },
-                                                    client_id=int(cliente.get('id') or 0),
-                                                )
-                                            except Exception as th_err:
-                                                print(f"   ⚠️ [TRADE HISTORY] Erro ao salvar histórico: {th_err}", flush=True)
-
-                                            # Sincroniza estado central
-                                            _sync_active_trades_from_db()
-                                            trailing_monitors.pop(position_key, None)
-                                        else:
-                                            print(f"   ❌ [STOP FINANCEIRO] Falha ao fechar posição {symbol}", flush=True)
-
-                                    except Exception as close_err:
-                                        print(f"   ❌ [STOP FINANCEIRO] Erro ao fechar posição: {close_err}", flush=True)
+                                except Exception as close_err:
+                                    print(f"   ❌ [{motivo_fechamento}] Erro ao fechar posição: {close_err}", flush=True)
 
                             except Exception as pos_err:
                                 print(f"   ⚠️ [MONITOR] Erro ao processar posição: {pos_err}", flush=True)
@@ -786,11 +706,6 @@ def _monitor_financial_stop_loss():
         except Exception as general_err:
             print(f"❌ [MONITOR FINANCEIRO] Erro geral: {general_err}", flush=True)
 
-        stale_keys = [key for key in trailing_monitors.keys() if key not in positions_seen]
-        for key in stale_keys:
-            trailing_monitors.pop(key, None)
-
-        # Aguarda 5 segundos antes da próxima verificação
         time.sleep(5)
 
 def _sync_active_trades_from_db():
