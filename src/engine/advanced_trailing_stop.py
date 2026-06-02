@@ -21,13 +21,13 @@ class TrailingStopSnapshot:
 
 class AdvancedTrailingStopMonitor:
     """
-    Trailing stop avançado com piso de lucro garantido.
+    Advanced trailing stop with guaranteed profit floor.
 
-    Regras:
-    1) Ativa apenas quando preço atinge ROI de 100% sobre a margem (100/leverage).
-    2) Ao ativar, grava preço de ativação como piso de lucro.
-    3) Após ativar, segue topo/fundo e calcula gatilho móvel por callback.
-    4) Gatilho real respeita o piso (Long=max, Short=min).
+    Rules:
+    1) Arms only when price reaches 100% ROI over margin (100/leverage).
+    2) On activation, stores activation price as immutable profit floor.
+    3) After activation, tracks favorable extreme and computes callback trigger.
+    4) Effective trigger always respects floor (Long=max, Short=min).
     """
 
     def __init__(self, entry_price: float, leverage: float, side: str, callback_pct: float = 2.0) -> None:
@@ -149,8 +149,8 @@ class AdvancedTrailingStopMonitor:
 
 def simulate_trailing_stop_example() -> List[Tuple[str, TrailingStopSnapshot]]:
     """
-    Exemplo prático de atualização de ticker no tempo (Long e Short).
-    Retorna snapshots para uso em logs, testes ou debug.
+    Practical ticker-path simulation over time (Long and Short).
+    Returns snapshots for logs, tests, or debugging.
     """
     events: List[Tuple[str, TrailingStopSnapshot]] = []
 
