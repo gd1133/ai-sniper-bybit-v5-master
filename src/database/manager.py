@@ -45,6 +45,7 @@ print(f"✅ [DATABASE] Caminho absoluto do banco: {DB_PATH}")
 # Sistema opera apenas em modo REAL
 VALID_ACCOUNT_MODES = {'real'}
 VALID_OPERATION_MODES = {'real'}
+VALID_BALANCE_SOURCES = {'broker_real_balance', 'training_fake_balance'}
 
 
 def is_truthy(value: Any) -> bool:
@@ -59,6 +60,16 @@ def normalize_account_mode(value: Any) -> str:
 def normalize_operation_mode(value: Any) -> str:
     """Sempre retorna 'real' - sistema opera apenas em modo real"""
     return 'real'
+
+def normalize_balance_source(value: Any) -> str:
+    raw = str(value or '').strip().lower()
+    if not raw or raw in {'broker_testnet_balance', 'real', 'broker'}:
+        return 'broker_real_balance'
+    if raw in {'training_fake_balance', 'fake', 'training', 'teste', 'test'}:
+        return 'training_fake_balance'
+    if raw in VALID_BALANCE_SOURCES:
+        return raw
+    return 'broker_real_balance'
 
 
 def _connect():
@@ -212,7 +223,7 @@ def add_client(data: Dict[str, Any]):
         cur = conn.cursor()
         # Sistema sempre opera em modo real
         account_mode = 'real'
-        balance_source = 'broker_real_balance'
+        balance_source = normalize_balance_source(data.get('balance_source'))
         exchange = str(data.get('exchange') or 'bybit').strip().lower()
         if exchange not in ('bybit', 'binance'):
             exchange = 'bybit'
@@ -370,7 +381,7 @@ def update_client(client_id: int, data: Dict[str, Any]) -> bool:
         conn = _connect()
         cur = conn.cursor()
         account_mode = normalize_account_mode(data.get('account_mode', data.get('is_testnet')))
-        balance_source = str(
+        balance_source = normalize_balance_source(
             data.get(
                 'balance_source',
                 'broker_testnet_balance' if account_mode == 'testnet' else 'broker_real_balance',

@@ -168,6 +168,23 @@ def _get_training_fake_balance_usd() -> float | None:
     value = float(_env_float('TRAINING_FAKE_BALANCE_USD', 500.0))
     return value if value > 0 else None
 
+_VALID_BALANCE_SOURCES = {'broker_real_balance', 'training_fake_balance'}
+
+def _normalize_balance_source(value) -> str:
+    raw = str(value or '').strip().lower()
+    if not raw or raw in {'broker_testnet_balance', 'real', 'broker'}:
+        return 'broker_real_balance'
+    if raw in {'training_fake_balance', 'fake', 'training', 'teste', 'test'}:
+        return 'training_fake_balance'
+    return raw if raw in _VALID_BALANCE_SOURCES else 'broker_real_balance'
+
+def _is_training_fake_balance_client(client) -> bool:
+    return _normalize_balance_source((client or {}).get('balance_source')) == 'training_fake_balance'
+
+def _get_forced_training_fake_balance_usd() -> float:
+    value = float(_env_float('TRAINING_FAKE_BALANCE_USD', 500.0))
+    return value if value > 0 else 500.0
+
 
 class BrokerManager:
     _instance = None
@@ -510,6 +527,9 @@ def _get_registered_client_by_id(client_id):
 
 def _get_active_investor_bybit_credentials():
     for client in _get_registered_clients(active_only=True):
+        client_id = int(client.get('id') or 0)
+        if _is_training_fake_balance_client(client) or _is_client_temporarily_disabled(client_id):
+            continue
         persisted = _get_registered_client_by_id(client.get('id'))
         if persisted:
             k = str(persisted.get('bybit_key') or '').strip()
@@ -519,7 +539,8 @@ def _get_active_investor_bybit_credentials():
 
 def _save_client_everywhere(client_data):
     payload = dict(client_data or {})
-    payload['account_mode'], payload['is_testnet'], payload['balance_source'] = 'real', USE_TESTNET, 'broker_real_balance'
+    payload['account_mode'], payload['is_testnet'] = 'real', USE_TESTNET
+    payload['balance_source'] = _normalize_balance_source(payload.get('balance_source'))
     res = db.upsert_client_local(payload) if payload.get('id') is not None else db.add_client(payload)
     client_balance_cache.clear()
     return _get_registered_client_by_id(payload.get('id') or res), False, bool(res)
@@ -554,7 +575,10 @@ def _fetch_active_client_balances(force=False):
             is_fake_balance = False
             try:
                 client_id = int(client.get('id') or 0)
-                if _is_client_temporarily_disabled(client_id):
+                if _is_training_fake_balance_client(client):
+                    balance = _get_forced_training_fake_balance_usd()
+                    is_fake_balance = True
+                elif _is_client_temporarily_disabled(client_id):
                     error = _get_client_disable_reason(client_id) or 'Cliente temporariamente desativado por erro de autenticação'
                     fake = _get_training_fake_balance_usd()
                     if fake is not None:
@@ -706,6 +730,8 @@ def _monitor_financial_stop_loss():
             for cliente in clientes:
                 try:
                     client_id = int(cliente.get('id') or 0)
+                    if _is_training_fake_balance_client(cliente):
+                        continue
                     if _is_client_temporarily_disabled(client_id):
                         continue
 
@@ -935,6 +961,31 @@ def _monitor_dashboard_positions():
 
             for cliente in clientes:
                 try:
+                    client_id = int(cliente.get('id') or 0)
+                    if _is_training_fake_balance_client(cliente):
+                        fake = _get_forced_training_fake_balance_usd()
+                        total_wallet_balance += float(fake)
+                        print(
+                            f"   🧪 [DASHBOARD] Cliente {cliente.get('nome')} em modo TESTE — usando saldo fictício: ${float(fake):.2f} USDT",
+                            flush=True,
+                        )
+                        continue
+
+                    if _is_client_temporarily_disabled(client_id):
+                        fake = _get_training_fake_balance_usd()
+                        if fake is not None:
+                            total_wallet_balance += float(fake)
+                            print(
+                                f"   🧪 [DASHBOARD] Cliente {cliente.get('nome')} desativado por autenticação — usando saldo fictício: ${float(fake):.2f} USDT",
+                                flush=True,
+                            )
+                        else:
+                            print(
+                                f"   ⚠️ [DASHBOARD] Cliente {cliente.get('nome')} desativado por autenticação: {_get_client_disable_reason(client_id) or 'motivo indisponível'}",
+                                flush=True,
+                            )
+                        continue
+
                     broker = _make_broker(cliente)
 
                     # Verifica se tem sessão pybit ativa
@@ -1378,7 +1429,17 @@ def sniper_worker_loop():
             if not active_clients:
                 time.sleep(10)
                 continue
-            ex_master = _make_broker(active_clients[0])
+            master_client = None
+            for c in active_clients:
+                cid = int(c.get('id') or 0)
+                if _is_training_fake_balance_client(c) or _is_client_temporarily_disabled(cid):
+                    continue
+                master_client = c
+                break
+            if not master_client:
+                time.sleep(10)
+                continue
+            ex_master = _make_broker(master_client)
             tickers = ex_master.exchange.fetch_tickers(params={'category': 'linear'})
             top_coins = sorted([t for t in tickers.values() if 'USDT' in t.get('symbol', '') and ':' in t['symbol']], key=lambda x: x.get('quoteVolume', 0), reverse=True)[:SCAN_TOP_COINS]
             
@@ -1415,6 +1476,14 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
 
         for c in clientes:
             try:
+                client_id = int(c.get('id') or 0)
+                if _is_training_fake_balance_client(c):
+                    print(f"   🧪 [EXEC] Cliente {c.get('nome')} em modo TESTE — ignorando execução de ordens", flush=True)
+                    continue
+                if _is_client_temporarily_disabled(client_id):
+                    print(f"   ⚠️ [EXEC] Cliente {c.get('nome')} desativado por autenticação — ignorando execução de ordens", flush=True)
+                    continue
+
                 # Fallback dinâmico: se .env estiver vazio, busca do dicionário do cliente
                 # CORREÇÃO: campos corretos do banco são 'tg_token', 'tg_api_key' e 'chat_id'
                 client_tk = tk or f"{c.get('tg_token') or c.get('tg_api_key') or c.get('telegram_token') or c.get('token_telegram') or ''}".strip()
@@ -1534,14 +1603,29 @@ def get_investidores():
     try:
         rows = _get_registered_clients(active_only=False)
         balance_map = {item.get('id'): item for item in _fetch_active_client_balances().get('items', [])}
-        return jsonify([{
-            "id": r.get('id'), "nome": r.get('nome'),
-            "banca": (balance_map.get(r.get('id')) or {}).get('saldo_real', r.get('saldo_base', 0)),
-            "saldo_real": (balance_map.get(r.get('id')) or {}).get('saldo_real'),
-            "saldo_configurado": r.get('saldo_base', 0), "status": r.get('status'),
-            "mode": "REAL", "account_mode": "real", "balance_source": r.get('balance_source'),
-            "storage_source": "local", "exchange": str(r.get('exchange') or 'bybit').lower(),
-        } for r in rows]), 200
+        payload = []
+        for r in rows:
+            client_id = int(r.get('id') or 0)
+            bm = balance_map.get(r.get('id')) or {}
+            balance_source = _normalize_balance_source(r.get('balance_source'))
+            payload.append({
+                "id": r.get('id'),
+                "nome": r.get('nome'),
+                "banca": bm.get('saldo_real', r.get('saldo_base', 0)),
+                "saldo_real": bm.get('saldo_real'),
+                "saldo_configurado": r.get('saldo_base', 0),
+                "status": r.get('status'),
+                "mode": "REAL",
+                "account_mode": "real",
+                "balance_source": balance_source,
+                "is_fake_balance": bool(bm.get('is_fake_balance')) or balance_source == 'training_fake_balance',
+                "error": bm.get('error'),
+                "auth_disabled": _is_client_temporarily_disabled(client_id),
+                "auth_disabled_reason": _get_client_disable_reason(client_id),
+                "storage_source": "local",
+                "exchange": str(r.get('exchange') or 'bybit').lower(),
+            })
+        return jsonify(payload), 200
     except Exception: return jsonify([]), 200
 
 @app.route('/api/vincular_cliente', methods=['POST'])
@@ -1584,6 +1668,26 @@ def api_cliente_manage(client_id):
         elif request.method == 'DELETE':
             return jsonify({"success": _delete_client_everywhere(client_id)[1]})
     except Exception as e: return jsonify({"error": str(e)}), 400
+
+@app.route('/api/cliente/<int:client_id>/balance-source', methods=['POST'])
+def api_cliente_balance_source(client_id):
+    try:
+        data = request.json or {}
+        balance_source = _normalize_balance_source(data.get('balance_source'))
+        existing = _get_registered_client_by_id(client_id)
+        if not existing:
+            return jsonify({"success": False, "error": "Não encontrado"}), 404
+
+        existing['balance_source'] = balance_source
+        ok = db.update_client(int(client_id), existing)
+        client_balance_cache.clear()
+        if ok:
+            with _CLIENT_AUTH_LOCK:
+                _CLIENT_AUTH_RUNTIME.pop(int(client_id), None)
+            return jsonify({"success": True, "client": _get_registered_client_by_id(client_id)}), 200
+        return jsonify({"success": False, "error": "Falha ao atualizar"}), 500
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 400
 
 @app.route('/api/trade/manual-entry', methods=['POST'])
 def api_manual_entry_trade():
@@ -1808,7 +1912,8 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
     payload = dict(client_payload or {})
     # Use explicit is_testnet if True, otherwise fall back to global USE_TESTNET setting
     final_is_testnet = is_testnet if is_testnet else USE_TESTNET
-    payload['account_mode'], payload['is_testnet'], payload['balance_source'] = 'real', final_is_testnet, 'broker_real_balance'
+    payload['account_mode'], payload['is_testnet'] = 'real', final_is_testnet
+    payload['balance_source'] = _normalize_balance_source(payload.get('balance_source'))
     payload['exchange'] = str(payload.get('exchange') or 'bybit').strip().lower()
     if client_id is not None: payload['id'] = client_id
     if api_key: payload['bybit_key'] = api_key
@@ -1816,17 +1921,59 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
     if existing_client is not None and 'nome' not in payload: payload['nome'] = existing_client.get('nome')
 
     try:
+        if payload.get('balance_source') == 'training_fake_balance':
+            fake = float(payload.get('saldo_base') or 0) or _get_forced_training_fake_balance_usd()
+            payload['saldo_base'] = round(float(fake), 2)
+            payload['status'] = 'ativo'
+            record, _, local_synced = _save_client_everywhere(payload)
+            return {
+                'valid': True,
+                'msg': 'Modo teste ativo (saldo fictício)',
+                'record': record,
+                'synced_to_local': local_synced,
+                'balance': payload['saldo_base'],
+                'account_mode': 'real',
+                'exchange': payload['exchange'],
+                'balance_source': payload.get('balance_source'),
+            }
+
         broker = _make_broker(payload)
         balance = broker.get_balance()
-        payload['saldo_base'] = round(float(balance or 0.0), 2)
+        if balance is None or not getattr(broker, 'authenticated', False):
+            raw_msg = str(getattr(broker, 'last_auth_error_message', '') or '').strip()
+            raw_code = str(getattr(broker, 'last_auth_error_code', '') or '').strip()
+            if raw_code:
+                raise RuntimeError(f"Falha na autenticação (retCode={raw_code}): {raw_msg or 'verifique as chaves'}")
+            raise RuntimeError(raw_msg or 'Falha ao validar credenciais (saldo indisponível)')
+
+        payload['saldo_base'] = round(float(balance), 2)
         payload['status'] = 'ativo'
         record, _, local_synced = _save_client_everywhere(payload)
-        return {'valid': True, 'msg': 'Validado OK', 'record': record, 'synced_to_local': local_synced, 'balance': payload['saldo_base'], 'account_mode': 'real', 'exchange': payload['exchange']}
+        return {
+            'valid': True,
+            'msg': 'Validado OK',
+            'record': record,
+            'synced_to_local': local_synced,
+            'balance': payload['saldo_base'],
+            'account_mode': 'real',
+            'exchange': payload['exchange'],
+            'balance_source': payload.get('balance_source'),
+        }
     except Exception as e:
         payload['status'] = 'erro_api'
         payload['saldo_base'] = round(float((existing_client or {}).get('saldo_base') or 0.0), 2)
         record, _, local_synced = _save_client_everywhere(payload)
-        return {'valid': False, 'msg': str(e), 'record': record, 'synced_to_local': local_synced, 'balance': payload['saldo_base'], 'account_mode': 'real', 'exchange': payload['exchange']}
+        return {
+            'valid': False,
+            'msg': str(e),
+            'api_error': str(e),
+            'record': record,
+            'synced_to_local': local_synced,
+            'balance': payload['saldo_base'],
+            'account_mode': 'real',
+            'exchange': payload['exchange'],
+            'balance_source': payload.get('balance_source'),
+        }
 
 # ==============================================================================
 # 🌍 ROTA PEGA-TUDO DO FRONTEND (OBRIGATORIAMENTE NO FINAL DO ARQUIVO)
