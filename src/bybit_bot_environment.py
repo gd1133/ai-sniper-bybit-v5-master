@@ -115,7 +115,8 @@ class BybitBotEnvironment:
             if last_price >= take_price:
                 return "take_profit", self.take_profit_pct * 100
             return None, 0.0
-
+        if side_normalized != "sell":
+            raise ValueError(f"Lado inválido para simulação: {side}")
         stop_price = entry_price * (1 + self.stop_loss_pct)
         take_price = entry_price * (1 - self.take_profit_pct)
         if last_price >= stop_price:
@@ -140,7 +141,7 @@ class BybitBotEnvironment:
             current_price = await self.get_last_price(symbol)
 
             if open_side is None and last_price is not None:
-                open_side = "Buy" if current_price >= last_price else "Sell"
+                open_side = "buy" if current_price >= last_price else "sell"
                 entry_price = current_price
             elif open_side is not None:
                 reason, pnl_pct = self._calculate_exit(open_side, entry_price, current_price)
@@ -170,6 +171,7 @@ class BybitBotEnvironment:
         iterations: int = 30,
         poll_interval: float = 1.0,
     ) -> list[SimulatedExit]:
+        # Requisito do modo agressivo do Motor Sniper V60.7: 5 moedas simultâneas.
         if len(symbols) != 5:
             raise ValueError("A simulação paralela exige exatamente 5 moedas.")
 
