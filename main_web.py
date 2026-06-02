@@ -25,6 +25,7 @@ from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
 from src.config import get_bybit_base_url, get_environment_config, resolve_use_testnet
+from src.engine.advanced_trailing_stop import AdvancedTrailingStopMonitor
 
 try:
     from src.database import manager as db
@@ -62,12 +63,8 @@ def _env_float(name: str, default: float) -> float:
     except Exception:
         return default
 
-# 🟢 Rastreamento de Tendência Longa (Lucro Positivo Garantido)
-# - Só "arma" a reversão quando ROI atual ultrapassa o gatilho positivo (ex: +15%)
-# - Após armado, segue o topo e fecha a mercado apenas após recuo (ex: 20 p.p.) respeitando um piso > 0
-TRAILING_TRIGGER_ROI = max(0.0, _env_float("TRAILING_TRIGGER_ROI", 15.0))  # ROI mínimo para armar a trava
-TRAILING_REVERSAO_ROI = max(0.0, _env_float("TRAILING_REVERSAO_ROI", 20.0))  # Folga (pontos) desde o topo
-TRAILING_PROFIT_FLOOR_ROI = max(0.0, _env_float("TRAILING_PROFIT_FLOOR_ROI", 1.0))  # Piso mínimo de lucro (ROI)
+# 🟢 Trailing avançado com piso garantido (ativação em 100% ROI)
+TRAILING_CALLBACK_PCT = max(0.1, _env_float("TRAILING_CALLBACK_PCT", 2.0))
 
 class BrokerManager:
     _instance = None
@@ -570,7 +567,7 @@ def _monitor_financial_stop_loss():
     time.sleep(5)  # Aguarda inicialização do sistema
     print(f"🛡️ [MONITOR FINANCEIRO] Iniciado - Stop Loss financeiro ativo ({LIMITE_PERDA_STOP} USDT = 50% de {MARGEM_INPUT} USDT)", flush=True)
 
-    trailing_state = {}
+    trailing_monitors = {}
 
     while True:
         positions_seen = set()
@@ -604,6 +601,9 @@ def _monitor_financial_stop_loss():
                                 side = str(pos.get('side', '')).lower()
                                 position_idx = str(pos.get('positionIdx') or '').strip()
                                 unrealised_pnl = float(pos.get('unrealisedPnl') or 0)
+                                entry_price = float(pos.get('avgPrice') or pos.get('entryPrice') or 0)
+                                mark_price = float(pos.get('markPrice') or pos.get('lastPrice') or entry_price or 0)
+                                leverage = float(pos.get('leverage') or ALAVANCAGEM or 1.0)
                                 initial_margin = float(
                                     pos.get('positionIM')
                                     or pos.get('positionBalance')
@@ -620,56 +620,58 @@ def _monitor_financial_stop_loss():
 
                                 position_key = f"{cliente.get('id')}:{symbol}:{position_idx or side}"
                                 positions_seen.add(position_key)
-                                state = trailing_state.get(position_key, {
-                                    'trailing_ativo': False,
-                                    'max_roi_atingido': None
-                                })
+                                monitor = trailing_monitors.get(position_key)
+                                if monitor is None:
+                                    monitor = AdvancedTrailingStopMonitor(
+                                        entry_price=entry_price if entry_price > 0 else mark_price,
+                                        leverage=leverage if leverage > 0 else 1.0,
+                                        side=side,
+                                        callback_pct=TRAILING_CALLBACK_PCT,
+                                    )
+                                    trailing_monitors[position_key] = monitor
 
-                                # 1) Ativação da trava de lucro (só após ROI positivo)
-                                if roi_pct >= TRAILING_TRIGGER_ROI and not state['trailing_ativo']:
-                                    state['trailing_ativo'] = True
-                                    state['max_roi_atingido'] = roi_pct
+                                was_armed = monitor.trailing_armed
+                                snapshot = monitor.update_price(mark_price)
+
+                                if snapshot.trailing_armed and not was_armed and snapshot.floor_price is not None:
                                     print(
-                                        f"🎯 [TRAVA LUCRO] Ativada em {symbol} | ROI: {roi_pct:.2f}% (gatilho {TRAILING_TRIGGER_ROI:.2f}%) | Cliente: {cliente.get('nome')}",
+                                        f"🎯 [TRAVA LUCRO 100% ROI] {symbol} ativada em {snapshot.activation_price:.6f} | Cliente: {cliente.get('nome')}",
                                         flush=True
                                     )
-
-                                # 2) Segurar tendência: registra topo e calcula stop dinâmico (com piso de lucro)
-                                stop_roi = None
-                                if state['trailing_ativo']:
-                                    max_roi = state['max_roi_atingido']
-                                    if max_roi is None or roi_pct > max_roi:
-                                        state['max_roi_atingido'] = roi_pct
-                                    trailing_state[position_key] = state
-                                    if state['max_roi_atingido'] is not None:
-                                        stop_roi = max(
-                                            state['max_roi_atingido'] - TRAILING_REVERSAO_ROI,
-                                            TRAILING_PROFIT_FLOOR_ROI
-                                        )
 
                                 # 🔧 LIMITE FIXO DE PERDA: -$2.50 USDT (50% de $5.0)
                                 limite_perda = LIMITE_PERDA_STOP
 
-                                max_roi_atingido = state.get('max_roi_atingido')
-                                stop_roi_tag = f" | Stop ROI: {stop_roi:.2f}%" if stop_roi is not None else ""
+                                trigger_tag = (
+                                    f" | Gatilho: {snapshot.effective_trigger_price:.6f}"
+                                    if snapshot.effective_trigger_price is not None
+                                    else ""
+                                )
+                                piso_tag = (
+                                    f" | Piso: {snapshot.floor_price:.6f}"
+                                    if snapshot.floor_price is not None
+                                    else ""
+                                )
+                                extremo_tag = (
+                                    f" | Extremo: {snapshot.extreme_price:.6f}"
+                                    if snapshot.extreme_price is not None
+                                    else ""
+                                )
                                 print(
                                     f"   📊 [MONITOR] {symbol} | Size: {size} | ROI: {roi_pct:.2f}% | "
-                                    f"Topo ROI: {(max_roi_atingido or 0):.2f}% | "
-                                    f"unrealisedPnl: ${unrealised_pnl:.2f} | Limite: ${limite_perda:.2f}{stop_roi_tag}",
+                                    f"Preço: {mark_price:.6f} | Armado: {snapshot.trailing_armed} | "
+                                    f"unrealisedPnl: ${unrealised_pnl:.2f} | Limite: ${limite_perda:.2f}"
+                                    f"{piso_tag}{extremo_tag}{trigger_tag}",
                                     flush=True
                                 )
 
-                                trailing_reversao = False
-                                queda_roi = 0.0
-                                if stop_roi is not None and state['max_roi_atingido'] is not None:
-                                    queda_roi = state['max_roi_atingido'] - roi_pct
-                                    trailing_reversao = roi_pct <= stop_roi
+                                trailing_reversao = snapshot.should_close
 
                                 motivo_fechamento = None
                                 if unrealised_pnl <= limite_perda:
                                     motivo_fechamento = "STOP_FINANCEIRO"
                                 elif trailing_reversao:
-                                    motivo_fechamento = "TRAILING_REVERSAO"
+                                    motivo_fechamento = snapshot.close_reason or "TRAILING_REVERSAO"
 
                                 # 🔥 CONDIÇÃO DE FECHAMENTO FORÇADO
                                 if motivo_fechamento:
@@ -677,10 +679,10 @@ def _monitor_financial_stop_loss():
                                         print(f"🚨 [STOP FINANCEIRO] {symbol} atingiu limite de perda!", flush=True)
                                         print(f"   💔 unrealisedPnl: ${unrealised_pnl:.2f} <= Limite: ${limite_perda:.2f}", flush=True)
                                     else:
-                                        print(f"🏁 [TRAILING STOP] {symbol} detectou reversão de tendência!", flush=True)
+                                        print(f"🏁 [TRAILING STOP] {symbol} cruzou gatilho real de saída!", flush=True)
                                         print(
-                                            f"   📉 ROI atual: {roi_pct:.2f}% | Topo: {state['max_roi_atingido']:.2f}% | "
-                                            f"Stop: {(stop_roi or 0):.2f}% | Recuo: {queda_roi:.2f}% (folga {TRAILING_REVERSAO_ROI:.2f}%)",
+                                            f"   📉 Preço atual: {mark_price:.6f} | Piso: {(snapshot.floor_price or 0):.6f} | "
+                                            f"Extremo: {(snapshot.extreme_price or 0):.6f} | Gatilho real: {(snapshot.effective_trigger_price or 0):.6f}",
                                             flush=True
                                         )
                                     print(f"   🔒 Disparando fechamento forçado...", flush=True)
@@ -707,7 +709,9 @@ def _monitor_financial_stop_loss():
                                                     f" | STOP_FINANCEIRO_AUTO unrealisedPnl=${unrealised_pnl:.2f}"
                                                     if motivo_fechamento == "STOP_FINANCEIRO"
                                                     else (
-                                                        f" | TRAILING_TENDENCIA_POSITIVA roi={roi_pct:.2f}% topo={state['max_roi_atingido']:.2f}% stop={(stop_roi or 0):.2f}%"
+                                                        f" | TRAILING_ACTIVATION_FLOOR price={mark_price:.6f}"
+                                                        f" floor={(snapshot.floor_price or 0):.6f}"
+                                                        f" trigger={(snapshot.effective_trigger_price or 0):.6f}"
                                                     )
                                                 )
 
@@ -729,7 +733,7 @@ def _monitor_financial_stop_loss():
 
                                             # Sincroniza estado central
                                             _sync_active_trades_from_db()
-                                            trailing_state.pop(position_key, None)
+                                            trailing_monitors.pop(position_key, None)
                                         else:
                                             print(f"   ❌ [STOP FINANCEIRO] Falha ao fechar posição {symbol}", flush=True)
 
@@ -751,9 +755,9 @@ def _monitor_financial_stop_loss():
         except Exception as general_err:
             print(f"❌ [MONITOR FINANCEIRO] Erro geral: {general_err}", flush=True)
 
-        stale_keys = [key for key in trailing_state.keys() if key not in positions_seen]
+        stale_keys = [key for key in trailing_monitors.keys() if key not in positions_seen]
         for key in stale_keys:
-            trailing_state.pop(key, None)
+            trailing_monitors.pop(key, None)
 
         # Aguarda 5 segundos antes da próxima verificação
         time.sleep(5)
