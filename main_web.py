@@ -291,9 +291,10 @@ SNIPER_SIGNAL_RESERVATIONS = set()
 # 🧪 MODO DE TESTE RÁPIDO (TEMPORÁRIO)
 # ==============================================================================
 # Quando True:
-#  - O RADAR lê SEMPRE a Mainnet (dados reais) para preencher o card "RADAR LIVE"
-#  - O worker ignora filtros rígidos e força 1 sinal fictício (BUY/SELL) em <=60s
-FORCAR_SINAL_TESTE = True
+#  - Mantém o "bypass" de teste sempre habilitado (debug).
+# Por padrão (False), o bypass só é aplicado quando:
+#  - USE_TESTNET=True e não há posições abertas (positions == 0).
+FORCAR_SINAL_TESTE = False
 _FORCED_SIGNAL_FIRED = False
 
 central_state = {
@@ -322,6 +323,23 @@ central_state = {
     "max_moedas_ativas": MAX_MOEDAS_ATIVAS,
     "risk_mode": RISK_MODE,
 }
+
+def _is_rate_limit_error(err: Exception) -> bool:
+    msg = str(err or "").lower()
+    return ("429" in msg) or ("rate limit" in msg) or ("too many requests" in msg)
+
+def _apply_ai_rate_limit_cooldown(err: Exception, cooldown_seconds: int = 60) -> bool:
+    if not _is_rate_limit_error(err):
+        return False
+    print(f"⏸️  [IA RATE LIMIT] AGUARDANDO COOLDOWN de {cooldown_seconds} segundos...", flush=True)
+    time.sleep(int(cooldown_seconds))
+    return True
+
+def _handle_ai_rate_limit(err: Exception, cooldown_seconds: int = 60) -> bool:
+    if not _is_rate_limit_error(err):
+        return False
+    central_state["status"] = AI_RATE_LIMIT_STATUS_MESSAGE
+    return _apply_ai_rate_limit_cooldown(err, cooldown_seconds=cooldown_seconds)
 
 class CachedValue:
     def __init__(self, ttl_seconds=300):
@@ -1496,28 +1514,49 @@ def sniper_worker_loop():
             if not master_client:
                 time.sleep(10)
                 continue
-
-            # RADAR: sempre usa Mainnet para leitura de dados (tickers/OHLCV),
-            # mesmo quando USE_TESTNET=True para execução das ordens.
+            # RADAR/ANÁLISE: usa sempre Mainnet (dados reais), mesmo quando USE_TESTNET=True
+            # para execução de ordens (Testnet).
             radar_broker = _get_public_radar_broker_mainnet()
-            tickers = radar_broker.exchange.fetch_tickers(params={'category': 'linear'})
-            top_coins = sorted([t for t in tickers.values() if 'USDT' in t.get('symbol', '') and ':' in t['symbol']], key=lambda x: x.get('quoteVolume', 0), reverse=True)[:SCAN_TOP_COINS]
-            
+            try:
+                tickers = radar_broker.exchange.fetch_tickers(params={'category': 'linear'}) or {}
+            except Exception:
+                tickers = {}
+
+            radar_candidates = []
+            for t in (tickers.values() if isinstance(tickers, dict) else []):
+                sym = str((t or {}).get('symbol') or '').strip()
+                if not sym:
+                    continue
+                if 'USDT' not in sym:
+                    continue
+                radar_candidates.append(t)
+
+            top_coins = sorted(
+                radar_candidates,
+                key=lambda x: _coerce_float((x or {}).get('quoteVolume'), (x or {}).get('baseVolume'), default=0.0),
+                reverse=True,
+            )[:SCAN_TOP_COINS]
+
             validator = GroqValidator()
 
             # Alimenta o card RADAR LIVE imediatamente com a primeira moeda do radar.
+            positions_empty = len(central_state.get('active_trades') or []) == 0
+            force_testnet_bypass = bool(USE_TESTNET and positions_empty)
             if top_coins:
-                central_state['symbol'] = _limpar_simbolo(top_coins[0].get('symbol'))
-                if not FORCAR_SINAL_TESTE:
+                central_state['symbol'] = _limpar_simbolo((top_coins[0] or {}).get('symbol'))
+                if not central_state.get('last_sniper_signal'):
                     central_state['confidence'] = 0
             else:
                 central_state['symbol'] = '---'
-                central_state['confidence'] = 0
+                if not central_state.get('last_sniper_signal'):
+                    central_state['confidence'] = 0
 
-            # Modo involuntário/forçado: gera 1 sinal fictício em <=60s para validar fluxo de execução na Testnet.
-            if FORCAR_SINAL_TESTE and top_coins and (not _FORCED_SIGNAL_FIRED):
+            # BYPASS (MECANISMO DE DEBUG):
+            # Em Testnet, sem posições abertas, não espera "sinal institucional perfeito".
+            # Força 1 ordem imediata na Testnet para validar TP(+100%)/SL(-50%) e o pipeline de execução.
+            if USE_TESTNET and top_coins and (not _FORCED_SIGNAL_FIRED) and (FORCAR_SINAL_TESTE or force_testnet_bypass):
                 t = top_coins[0]
-                sym = t.get('symbol')
+                sym = (t or {}).get('symbol')
                 if sym:
                     side = 'buy' if int(time.time()) % 2 == 0 else 'sell'
                     decisao = 'COMPRAR' if side == 'buy' else 'VENDER'
@@ -1537,8 +1576,12 @@ def sniper_worker_loop():
 
                     if entry_price > 0:
                         central_state['symbol'] = _limpar_simbolo(sym)
-                        central_state['confidence'] = 95
-                        res = {"probabilidade": 95, "decisao": decisao, "motivo": "FORÇADO: teste rápido (ignora filtros SMC/Volume)"}
+                        central_state['confidence'] = 98
+                        res = {
+                            "probabilidade": 98,
+                            "decisao": decisao,
+                            "motivo": "TESTNET BYPASS: ordem de debug (ignora filtros SMC/Volume/IA) para validar execução/TP/SL",
+                        }
                         broadcast_ordem_global(sym, side, entry_price, res)
                         _FORCED_SIGNAL_FIRED = True
                         time.sleep(COOLDOWN_INSTITUCIONAL_SECS)
