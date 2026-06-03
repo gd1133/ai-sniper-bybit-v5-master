@@ -7,12 +7,15 @@
 ## 📊 O QUE FOI FEITO
 
 ### 🔴 Problema Crítico Identificado
+
 Investors com `account_mode='real'` na base de dados estavam sendo **forçados a usar testnet**, causando:
+
 - ❌ Erro 10003 "Invalid API Key"
 - ❌ Falha na execução de ordens reais
 - ❌ Logs sem identificação clara
 
 ### ✅ Solução Implementada
+
 Reescrita do sistema de inicialização de sessão Bybit/Binance para ser **independente por cliente**:
 
 ```
@@ -31,12 +34,12 @@ Logs mostram 🔴 REAL ou 🧪 SIMULAÇÃO
 
 ## 📁 4 ARQUIVOS MODIFICADOS
 
-| Arquivo | Mudança | Impacto |
-|---------|---------|---------|
-| **main_web.py** | BrokerManager lê BD | Cada cliente usa seu ambiente |
-| **src/broker/bybit_client.py** | Suporta client_name + logs | Identificação clara nos logs |
-| **src/broker/binance_client.py** | Suporta client_name + logs | Consistência entre brokers |
-| **src/database/manager.py** | Nova função resolve_client_testnet_flag() | Leitura confiável do BD |
+| Arquivo                          | Mudança                                   | Impacto                       |
+| -------------------------------- | ----------------------------------------- | ----------------------------- |
+| **main_web.py**                  | BrokerManager lê BD                       | Cada cliente usa seu ambiente |
+| **src/broker/bybit_client.py**   | Suporta client_name + logs                | Identificação clara nos logs  |
+| **src/broker/binance_client.py** | Suporta client_name + logs                | Consistência entre brokers    |
+| **src/database/manager.py**      | Nova função resolve_client_testnet_flag() | Leitura confiável do BD       |
 
 ---
 
@@ -77,6 +80,7 @@ Status: ✅ Pushed para origin
 ```
 
 ### Commits na Branch
+
 ```
 e833595 docs: Adicionar guias finais para Pull Request
 20f7682 Fix: Isolamento de ambientes (real vs testnet) por cliente - Motor Sniper V60.7.1
@@ -88,18 +92,23 @@ b0482a1 Clarify leverage validation errors (anterior)
 ## 🚀 PRÓXIMO PASSO: CRIAR PULL REQUEST
 
 ### 1️⃣ Link Direto (Mais Rápido)
+
 ```
 https://github.com/gd1133/ai-sniper-bybit-v5-master/compare/main...copilot/modify-leverage-functionality
 ```
+
 **Clique no botão verde "Create pull request"**
 
 ### 2️⃣ Se o botão não aparecer
+
 - Vá para: https://github.com/gd1133/ai-sniper-bybit-v5-master/pulls
 - Clique em "New pull request"
 - Base: `main` | Compare: `copilot/modify-leverage-functionality`
 
 ### 3️⃣ Preencha o Formulário
+
 **Title:**
+
 ```
 Fix: Isolamento de ambientes (real vs testnet) por cliente - Motor Sniper V60.7.1
 ```
@@ -126,6 +135,7 @@ Fix: Isolamento de ambientes (real vs testnet) por cliente - Motor Sniper V60.7.
 ## 🎯 O QUE FOI CORRIGIDO
 
 ### Antes ❌
+
 ```python
 def _make_broker(self, client, broker_cls):
     return self.broker_manager.get_broker(client, broker_cls, False)
@@ -133,6 +143,7 @@ def _make_broker(self, client, broker_cls):
 ```
 
 ### Depois ✅
+
 ```python
 def _make_broker(self, client, broker_cls):
     return self.broker_manager.get_broker(client, broker_cls, testnet_override=None)
@@ -150,13 +161,13 @@ else:
 
 ## 📊 IMPACTO DA MUDANÇA
 
-| Cenário | Antes | Depois |
-|---------|-------|--------|
-| Investor Paulo (real) | Testnet 🧪 ❌ | Produção 🔴 ✅ |
-| Investor Teste (testnet) | Testnet 🧪 ✅ | Testnet 🧪 ✅ |
-| Erro 10003 | SIM ❌ | NÃO ✅ |
-| Logs claros | NÃO ❌ | SIM ✅ |
-| Cache isolado | NÃO ❌ | SIM ✅ |
+| Cenário                  | Antes         | Depois         |
+| ------------------------ | ------------- | -------------- |
+| Investor Paulo (real)    | Testnet 🧪 ❌ | Produção 🔴 ✅ |
+| Investor Teste (testnet) | Testnet 🧪 ✅ | Testnet 🧪 ✅  |
+| Erro 10003               | SIM ❌        | NÃO ✅         |
+| Logs claros              | NÃO ❌        | SIM ✅         |
+| Cache isolado            | NÃO ❌        | SIM ✅         |
 
 ---
 
@@ -213,14 +224,17 @@ python -m py_compile src/database/manager.py
 ## 📞 SUPORTE
 
 **Perguntas sobre a implementação?**
+
 - Leia: CORRECAO_CRUZAMENTO_AMBIENTES_v61.md (técnico)
 - Leia: GUIA_CORRECAO_AMBIENTES.md (passo-a-passo)
 
 **Problema ao criar PR?**
+
 - Verifique: PR_PRONTO_GITHUB.md
 - Verifique: PR_CRIAR_NO_GITHUB.md
 
 **Precisa revisar o código?**
+
 - Use: QUICK_REFERENCE.md
 
 ---
