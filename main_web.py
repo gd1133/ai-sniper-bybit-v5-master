@@ -66,10 +66,27 @@ class BrokerManager:
     def _generate_cache_key(self, client_id, exchange, testnet):
         return f"{exchange}_{client_id}_{testnet}"
 
-    def get_broker(self, client, broker_cls, testnet):
+    def get_broker(self, client, broker_cls, testnet_override=None):
+        """
+        Obtém ou cria um broker para o cliente, determinando testnet dinamicamente:
+        1. Se testnet_override for passado (não None), usa esse valor
+        2. Caso contrário, lê account_mode do cliente do banco de dados
+        3. Passa client_name para logs de identificação clara
+        """
+        from src.database.manager import resolve_client_testnet_flag
+        
         client_id = client.get('id')
         exchange = str(client.get('exchange') or 'bybit').strip().lower()
-        cache_key = self._generate_cache_key(client_id, exchange, testnet)
+        client_name = client.get('nome', f'cliente-{client_id}')
+        
+        # ✅ FIX CRÍTICO: Determina testnet baseado em account_mode do cliente
+        if testnet_override is not None:
+            use_testnet = bool(testnet_override)
+        else:
+            account_mode = client.get('account_mode', 'real')
+            use_testnet = resolve_client_testnet_flag(account_mode)
+        
+        cache_key = self._generate_cache_key(client_id, exchange, use_testnet)
 
         with self._cache_lock:
             if cache_key in self._broker_cache:
@@ -81,9 +98,11 @@ class BrokerManager:
 
             api_key = str(client.get('bybit_key') or '').strip()
             api_secret = str(client.get('bybit_secret') or '').strip()
-            if not api_key or not api_secret: raise RuntimeError(f"Cliente sem credenciais (id={client_id})")
+            if not api_key or not api_secret: 
+                raise RuntimeError(f"Cliente sem credenciais (id={client_id}, nome={client_name})")
 
-            broker_instance = broker_cls(api_key, api_secret, testnet=testnet)
+            # ✅ PASSANDO client_name para logs claros
+            broker_instance = broker_cls(api_key, api_secret, testnet=use_testnet, client_name=client_name)
             self._broker_cache[cache_key] = broker_instance
             return broker_instance
 
@@ -369,9 +388,11 @@ def _ensure_broker_class(exchange='bybit'):
     return BybitClient
 
 def _make_broker(client):
+    """Cria ou recupera um broker para o cliente, lendo testnet do banco de dados"""
     exchange = str(client.get('exchange') or 'bybit').strip().lower()
     broker_cls = _ensure_broker_class(exchange)
-    return _get_broker_manager().get_broker(client, broker_cls, False)
+    # ✅ FIX: Passa None para permitir que get_broker leia testnet do account_mode do cliente
+    return _get_broker_manager().get_broker(client, broker_cls, testnet_override=None)
 
 def _get_registered_clients(active_only=False):
     try: return [{**dict(c), "storage_source": "local"} for c in (db.get_active_clients() if active_only else db.get_all_clients())]

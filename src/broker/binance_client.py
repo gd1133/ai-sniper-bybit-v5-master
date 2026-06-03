@@ -43,12 +43,13 @@ class BinanceClient:
     IA 1 (Binance): Responsável pela comunicação estrita com a Binance Futures.
     Mecanismo de proteção Decimal via String + amount_to_precision nativo do CCXT.
     """
-    def __init__(self, api_key=None, api_secret=None, testnet=False):
+    def __init__(self, api_key=None, api_secret=None, testnet=False, client_name=None):
         # Lazy loading de configurações internas para evitar importação circular
         from src.config import resolve_use_testnet
         from src.broker.order_calculator import OrderCalculator
 
         ccxt = _get_ccxt()
+        self.client_name = client_name or 'cliente-genérico'
         self.testnet = resolve_use_testnet(testnet)
         self.authenticated = bool(api_key and api_secret)
 
@@ -80,6 +81,10 @@ class BinanceClient:
                 print("✅ [BINANCE TIME SYNC] Relógio sincronizado com o servidor Futures")
             except Exception as sync_err:
                 print(f"⚠️ [BINANCE TIME SYNC] Aviso: {sync_err}")
+
+        # 🔍 LOG CLARO DE IDENTIFICAÇÃO: Mostra o ambiente e cliente
+        ambiente_tag = "🧪 [SIMULAÇÃO]" if self.testnet else "🔴 [CONTA REAL]"
+        print(f"{ambiente_tag} [BINANCE] Instanciando cliente '{self.client_name}' em modo {'SIMULAÇÃO' if self.testnet else 'CONTA REAL'}", flush=True)
 
         # Sistema de Cache Local
         self.cache_ohlcv = {}

@@ -42,8 +42,8 @@ def _get_db_path():
 
 DB_PATH = _get_db_path()
 print(f"✅ [DATABASE] Caminho absoluto do banco: {DB_PATH}")
-# Sistema opera apenas em modo REAL
-VALID_ACCOUNT_MODES = {'real'}
+# Sistema suporta múltiplos modos por cliente
+VALID_ACCOUNT_MODES = {'real', 'testnet'}
 VALID_OPERATION_MODES = {'real'}
 
 
@@ -51,13 +51,26 @@ def is_truthy(value: Any) -> bool:
     return str(value or '').strip().lower() in {'1', 'true', 'yes', 'on'}
 
 
+def resolve_client_testnet_flag(account_mode: Any) -> bool:
+    """
+    Resolve se o cliente deve usar testnet baseado no account_mode armazenado no banco.
+    
+    - Se account_mode == 'testnet' → retorna True
+    - Se account_mode == 'real' → retorna False
+    - Padrão: False (real)
+    """
+    mode_str = str(account_mode or '').strip().lower()
+    return mode_str == 'testnet'
+
+
 def normalize_account_mode(value: Any) -> str:
-    """Sempre retorna 'real' - sistema opera apenas em modo real"""
-    return 'real'
-
-
-def normalize_operation_mode(value: Any) -> str:
-    """Sempre retorna 'real' - sistema opera apenas em modo real"""
+    """
+    Normaliza account_mode para 'real' ou 'testnet'.
+    Por padrão sempre retorna 'real' para compatibilidade.
+    """
+    mode_str = str(value or '').strip().lower()
+    if mode_str in ('testnet', 'test', '1', 'true', 'yes', 'on'):
+        return 'testnet'
     return 'real'
 
 

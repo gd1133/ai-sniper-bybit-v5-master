@@ -67,7 +67,7 @@ class BybitClient:
     Versão 1.8.6: Correção estrita de tipos Decimal/Float + Tratamento nativo CCXT + Protocolo 100/50.
     Blindagem contra bloqueios de API e vazamento de memória.
     """
-    def __init__(self, api_key=None, api_secret=None, testnet=None):
+    def __init__(self, api_key=None, api_secret=None, testnet=None, client_name=None):
         # LAZY LOADING: Evita importação circular puxando apenas no escopo local
         from src.config import get_bybit_base_url, get_bybit_credentials, resolve_use_testnet
         from src.broker.order_calculator import OrderCalculator
@@ -80,6 +80,7 @@ class BybitClient:
         api_key = str(api_key or env_api_key or '').strip().replace('\n', '').replace('\r', '')
         api_secret = str(api_secret or env_api_secret or '').strip().replace('\n', '').replace('\r', '')
 
+        self.client_name = client_name or 'cliente-genérico'
         self.testnet = resolve_use_testnet(testnet)
         self.active_endpoint = get_bybit_base_url(self.testnet)
         self.pybit_session = None
@@ -119,7 +120,9 @@ class BybitClient:
         if api_key and api_secret:
             self._init_pybit_session(api_key, api_secret)
 
-        print(f"🔍 [BYBIT ENDPOINT] testnet={self.testnet} endpoint={self.active_endpoint}", flush=True)
+        # 🔍 LOG CLARO DE IDENTIFICAÇÃO: Mostra o ambiente e cliente
+        ambiente_tag = "🧪 [SIMULAÇÃO]" if self.testnet else "🔴 [CONTA REAL]"
+        print(f"{ambiente_tag} [BYBIT] Instanciando cliente '{self.client_name}' em modo {'SIMULAÇÃO' if self.testnet else 'CONTA REAL'} | endpoint={self.active_endpoint}", flush=True)
 
         self.authenticated = bool(api_key and api_secret)
 
