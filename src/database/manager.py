@@ -236,7 +236,7 @@ def add_client(data: Dict[str, Any]):
             data.get('chat_id'),
             data.get('status', 'ativo'),
             data.get('saldo_base', 1000.0),
-            0,  # is_testnet sempre False
+            1 if is_truthy(data.get('is_testnet')) else 0,
             account_mode,
             balance_source,
             exchange,
@@ -380,11 +380,12 @@ def update_client(client_id: int, data: Dict[str, Any]) -> bool:
     try:
         conn = _connect()
         cur = conn.cursor()
-        account_mode = normalize_account_mode(data.get('account_mode', data.get('is_testnet')))
+        is_testnet = 1 if is_truthy(data.get('is_testnet')) else 0
+        account_mode = normalize_account_mode(data.get('account_mode'))
         balance_source = normalize_balance_source(
             data.get(
                 'balance_source',
-                'broker_testnet_balance' if account_mode == 'testnet' else 'broker_real_balance',
+                'broker_real_balance',
             )
         )
         exchange = str(data.get('exchange') or 'bybit').strip().lower()
@@ -401,7 +402,7 @@ def update_client(client_id: int, data: Dict[str, Any]) -> bool:
                 data.get('chat_id'),
                 data.get('status', 'ativo'),
                 data.get('saldo_base', 1000.0),
-                1 if account_mode == 'testnet' else 0,
+                is_testnet,
                 account_mode,
                 balance_source,
                 exchange,

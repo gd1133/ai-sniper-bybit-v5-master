@@ -155,6 +155,18 @@ def _env_bool(name: str, default: bool) -> bool:
         return False
     return default
 
+def _coerce_bool(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    raw = str(value).strip().lower()
+    if raw in ('1', 'true', 'yes', 'y', 'on'):
+        return True
+    if raw in ('0', 'false', 'no', 'n', 'off'):
+        return False
+    return default
+
 def _is_training_fake_balance_enabled() -> bool:
     # Default: enabled on TESTNET to allow UI/training without valid API keys.
     try:
@@ -561,8 +573,9 @@ def _ensure_broker_class(exchange='bybit'):
 
 def _make_broker(client):
     exchange = str(client.get('exchange') or 'bybit').strip().lower()
+    use_testnet = _coerce_bool(client.get('is_testnet'), default=USE_TESTNET)
     broker_cls = _ensure_broker_class(exchange)
-    return _get_broker_manager().get_broker(client, broker_cls, USE_TESTNET)
+    return _get_broker_manager().get_broker(client, broker_cls, use_testnet)
 
 def _get_registered_clients(active_only=False):
     try: return [{**dict(c), "storage_source": "local"} for c in (db.get_active_clients() if active_only else db.get_all_clients())]
@@ -586,7 +599,8 @@ def _get_active_investor_bybit_credentials():
 
 def _save_client_everywhere(client_data):
     payload = dict(client_data or {})
-    payload['account_mode'], payload['is_testnet'] = 'real', USE_TESTNET
+    payload['account_mode'] = 'real'
+    payload['is_testnet'] = _coerce_bool(payload.get('is_testnet'), default=USE_TESTNET)
     payload['balance_source'] = _normalize_balance_source(payload.get('balance_source'))
     res = db.upsert_client_local(payload) if payload.get('id') is not None else db.add_client(payload)
     client_balance_cache.clear()
@@ -647,7 +661,7 @@ def _fetch_active_client_balances(force=False):
             except Exception as e: error = str(e)
             items.append({
                 "id": client.get('id'), "nome": client.get('nome'), "saldo_real": balance,
-                "saldo_base": float(client.get('saldo_base', 0) or 0), "is_testnet": USE_TESTNET,
+                "saldo_base": float(client.get('saldo_base', 0) or 0), "is_testnet": _coerce_bool(client.get('is_testnet'), default=USE_TESTNET),
                 "account_mode": "real", "exchange": str(client.get('exchange') or 'bybit').lower(),
                 "status": client.get('status'), "error": error, "is_fake_balance": is_fake_balance,
             })
@@ -1762,6 +1776,7 @@ def get_investidores():
                 "status": r.get('status'),
                 "mode": "REAL",
                 "account_mode": "real",
+                "is_testnet": _coerce_bool(r.get('is_testnet'), default=USE_TESTNET),
                 "balance_source": balance_source,
                 "is_fake_balance": bool(bm.get('is_fake_balance')) or balance_source == 'training_fake_balance',
                 "error": bm.get('error'),
@@ -1777,8 +1792,16 @@ def get_investidores():
 def add_cliente():
     data = request.json or {}
     try:
-        validation = validar_e_salvar_cliente(data.get('bybit_key'), data.get('bybit_secret'), False, client_payload=data)
-        if validation.get('record'): return jsonify({"status": "sucesso", "msg": "Investidor conectado!", "valid": True, "client": validation.get('record')}), 200
+        requested_is_testnet = _coerce_bool(data.get('is_testnet'), default=USE_TESTNET)
+        validation = validar_e_salvar_cliente(data.get('bybit_key'), data.get('bybit_secret'), requested_is_testnet, client_payload=data)
+        if validation.get('record'):
+            return jsonify({
+                "status": "sucesso",
+                "msg": validation.get("msg") or "Investidor conectado!",
+                "valid": bool(validation.get("valid")),
+                "api_error": validation.get("api_error"),
+                "client": validation.get('record'),
+            }), 200
         return jsonify({"status": "erro", "msg": "Falha ao salvar investidor"}), 500
     except Exception as e: return jsonify({"status": "erro", "msg": str(e)}), 400
 
@@ -1809,7 +1832,8 @@ def api_cliente_manage(client_id):
             return jsonify(c) if c else (jsonify({"error": "Não encontrado"}), 404)
         elif request.method == 'PUT':
             data = request.json or {}
-            v = validar_e_salvar_cliente(data.get('bybit_key'), data.get('bybit_secret'), False, client_payload=data, client_id=client_id, existing_client=_get_registered_client_by_id(client_id))
+            requested_is_testnet = _coerce_bool(data.get('is_testnet'), default=USE_TESTNET)
+            v = validar_e_salvar_cliente(data.get('bybit_key'), data.get('bybit_secret'), requested_is_testnet, client_payload=data, client_id=client_id, existing_client=_get_registered_client_by_id(client_id))
             return jsonify({"success": True, "client": v.get('record')})
         elif request.method == 'DELETE':
             return jsonify({"success": _delete_client_everywhere(client_id)[1]})
@@ -2056,8 +2080,7 @@ def api_market_intelligence():
 
 def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=None, client_id=None, existing_client=None):
     payload = dict(client_payload or {})
-    # Use explicit is_testnet if True, otherwise fall back to global USE_TESTNET setting
-    final_is_testnet = is_testnet if is_testnet else USE_TESTNET
+    final_is_testnet = _coerce_bool(payload.get('is_testnet', is_testnet), default=USE_TESTNET)
     payload['account_mode'], payload['is_testnet'] = 'real', final_is_testnet
     payload['balance_source'] = _normalize_balance_source(payload.get('balance_source'))
     payload['exchange'] = str(payload.get('exchange') or 'bybit').strip().lower()
@@ -2074,13 +2097,14 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
             record, _, local_synced = _save_client_everywhere(payload)
             return {
                 'valid': True,
-                'msg': 'Modo teste ativo (saldo fictício)',
+                'msg': 'Modo teste de saldo fictício ativo',
                 'record': record,
                 'synced_to_local': local_synced,
                 'balance': payload['saldo_base'],
                 'account_mode': 'real',
                 'exchange': payload['exchange'],
                 'balance_source': payload.get('balance_source'),
+                'is_testnet': final_is_testnet,
             }
 
         broker = _make_broker(payload)
@@ -2104,6 +2128,7 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
             'account_mode': 'real',
             'exchange': payload['exchange'],
             'balance_source': payload.get('balance_source'),
+            'is_testnet': final_is_testnet,
         }
     except Exception as e:
         payload['status'] = 'erro_api'
@@ -2119,6 +2144,7 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
             'account_mode': 'real',
             'exchange': payload['exchange'],
             'balance_source': payload.get('balance_source'),
+            'is_testnet': final_is_testnet,
         }
 
 # ==============================================================================

@@ -1,15 +1,18 @@
 # -*- coding: utf-8 -*-
 import time
 import sys
-import io
 import threading
 import json
 import re
 from decimal import Decimal
 
-# Força UTF-8 no stdout para evitar erros de encode com emojis no Render/Terminal
+# Força UTF-8 no stdout sem reempacotar o stream (evita fechar stdout no Windows)
 if sys.platform == 'win32':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    try:
+        if hasattr(sys.stdout, 'reconfigure'):
+            sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
 
 AUTH_10003_ALERT = (
     "ERRO DE AUTENTICAÇÃO: Verifique se a chave de API é de produção e se o 2FA está ativo na Bybit"
