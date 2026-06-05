@@ -14,12 +14,16 @@ import sqlite3
 import requests
 import re
 import sys
-import io
 import math
+import gc
 from datetime import datetime, timedelta
 
 if sys.platform == 'win32':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    try:
+        if hasattr(sys.stdout, 'reconfigure'):
+            sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
 
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
@@ -38,6 +42,7 @@ IndicatorEngine = None
 GroqValidator = None
 public_price_broker = None
 public_radar_broker = None
+public_price_brokers = {}
 
 RUNTIME_START_LOCK = threading.Lock()
 RUNTIME_STARTED = False
@@ -213,39 +218,111 @@ class BrokerManager:
 
     def __init__(self):
         if self._initialized: return
-        self._broker_cache = {}  
+        self._broker_cache = {}
+        self._broker_classes = {}
+        self._max_cached_brokers = max(1, int(_env_float('BROKER_MANAGER_MAX_CACHE', 6)))
+        self._stale_seconds = max(30, int(_env_float('BROKER_MANAGER_STALE_SECONDS', 600)))
         self._cache_lock = threading.Lock()
         self._initialized = True
-        print("🔄 [BROKER MANAGER] Singleton inicializado")
+        print(f"🔄 [BROKER MANAGER] Singleton inicializado | max_cache={self._max_cached_brokers} | stale={self._stale_seconds}s")
 
     def _generate_cache_key(self, client_id, exchange, testnet):
         return f"{exchange}_{client_id}_{testnet}"
 
-    def get_broker(self, client, broker_cls, testnet):
+    def _get_broker_class(self, exchange):
+        normalized_exchange = str(exchange or 'bybit').strip().lower()
+        broker_cls = self._broker_classes.get(normalized_exchange)
+        if broker_cls is not None:
+            return broker_cls
+
+        if normalized_exchange == 'binance':
+            from src.broker.binance_client import BinanceClient as _BC
+            broker_cls = _BC
+        else:
+            from src.broker.bybit_client import BybitClient as _BybitClient
+            broker_cls = _BybitClient
+            normalized_exchange = 'bybit'
+
+        self._broker_classes[normalized_exchange] = broker_cls
+        return broker_cls
+
+    def _prune_cache_unlocked(self, *, active_client_ids=None, active_exchanges=None):
+        now = time.time()
+        removed = []
+        for key, entry in list(self._broker_cache.items()):
+            if not isinstance(entry, dict):
+                removed.append(key)
+                continue
+            last_used = float(entry.get('last_used') or 0.0)
+            client_id = entry.get('client_id')
+            exchange = str(entry.get('exchange') or 'bybit').strip().lower()
+            if now - last_used > self._stale_seconds:
+                removed.append(key)
+                continue
+            if active_client_ids is not None and client_id not in active_client_ids:
+                removed.append(key)
+                continue
+            if active_exchanges is not None and exchange not in active_exchanges:
+                removed.append(key)
+                continue
+
+        for key in removed:
+            self._broker_cache.pop(key, None)
+
+        while len(self._broker_cache) > self._max_cached_brokers:
+            oldest_key = min(
+                self._broker_cache,
+                key=lambda k: float((self._broker_cache.get(k) or {}).get('last_used') or 0.0),
+            )
+            self._broker_cache.pop(oldest_key, None)
+            removed.append(oldest_key)
+
+        if removed:
+            gc.collect()
+
+    def get_broker(self, client, testnet):
         client_id = client.get('id')
         exchange = str(client.get('exchange') or 'bybit').strip().lower()
         cache_key = self._generate_cache_key(client_id, exchange, testnet)
 
         with self._cache_lock:
-            if cache_key in self._broker_cache:
-                cached_broker = self._broker_cache[cache_key]
+            self._prune_cache_unlocked()
+            cached_entry = self._broker_cache.get(cache_key)
+            if cached_entry:
+                cached_broker = cached_entry.get('broker')
                 api_key = str(client.get('bybit_key') or '').strip()
                 if hasattr(cached_broker, 'exchange') and hasattr(cached_broker.exchange, 'apiKey'):
-                    if cached_broker.exchange.apiKey == api_key: return cached_broker
-                del self._broker_cache[cache_key]
+                    if cached_broker.exchange.apiKey == api_key:
+                        cached_entry['last_used'] = time.time()
+                        return cached_broker
+                self._broker_cache.pop(cache_key, None)
 
             api_key = str(client.get('bybit_key') or '').strip()
             api_secret = str(client.get('bybit_secret') or '').strip()
             if not api_key or not api_secret: raise RuntimeError(f"Cliente sem credenciais (id={client_id})")
 
+            broker_cls = self._get_broker_class(exchange)
             broker_instance = broker_cls(api_key, api_secret, testnet=testnet)
-            self._broker_cache[cache_key] = broker_instance
+            self._broker_cache[cache_key] = {
+                'broker': broker_instance,
+                'last_used': time.time(),
+                'client_id': int(client_id or 0),
+                'exchange': exchange,
+            }
+            self._prune_cache_unlocked()
             return broker_instance
 
     def invalidate_client(self, client_id):
         with self._cache_lock:
-            keys_to_remove = [key for key in self._broker_cache.keys() if f"_{client_id}_" in f"_{key}_"]
-            for key in keys_to_remove: del self._broker_cache[key]
+            keys_to_remove = [key for key, entry in self._broker_cache.items() if int((entry or {}).get('client_id') or 0) == int(client_id or 0)]
+            for key in keys_to_remove:
+                self._broker_cache.pop(key, None)
+            if keys_to_remove:
+                gc.collect()
+
+    def prune_unused(self, *, active_client_ids=None, active_exchanges=None):
+        with self._cache_lock:
+            self._prune_cache_unlocked(active_client_ids=active_client_ids, active_exchanges=active_exchanges)
 
 _broker_manager = None
 _broker_manager_lock = threading.Lock()
@@ -512,31 +589,79 @@ def _extract_entry_price(trade):
 _public_price_broker_lock = threading.Lock()
 _public_radar_broker_lock = threading.Lock()
 
+class _NullPublicBroker:
+    def get_last_price(self, symbol):
+        return 0.0
+
+    def fetch_ohlcv(self, symbol, timeframe='15m'):
+        return None
+
+def _get_active_exchange_names() -> set:
+    exchanges = set()
+    for client in _get_registered_clients(active_only=True):
+        client_id = int(client.get('id') or 0)
+        if _is_training_fake_balance_client(client) or _is_client_temporarily_disabled(client_id):
+            continue
+        api_key = str(client.get('bybit_key') or '').strip()
+        api_secret = str(client.get('bybit_secret') or '').strip()
+        if not api_key or not api_secret:
+            continue
+        exchange = str(client.get('exchange') or 'bybit').strip().lower()
+        if exchange in ('bybit', 'binance'):
+            exchanges.add(exchange)
+    return exchanges
+
+def _get_active_investor_credentials(exchange='bybit'):
+    exchange_name = str(exchange or 'bybit').strip().lower()
+    for client in _get_registered_clients(active_only=True):
+        client_id = int(client.get('id') or 0)
+        if _is_training_fake_balance_client(client) or _is_client_temporarily_disabled(client_id):
+            continue
+        if str(client.get('exchange') or 'bybit').strip().lower() != exchange_name:
+            continue
+        persisted = _get_registered_client_by_id(client.get('id'))
+        if persisted:
+            k = str(persisted.get('bybit_key') or '').strip()
+            s = str(persisted.get('bybit_secret') or '').strip()
+            if k and s:
+                return persisted.get('id'), k, s
+    return None, '', ''
+
 def _get_public_price_broker():
-    global BybitClient, public_price_broker
-    if public_price_broker is not None: return public_price_broker
+    global BybitClient, public_price_broker, public_price_brokers
+    active_exchanges = _get_active_exchange_names()
+    if not active_exchanges:
+        return _NullPublicBroker()
+
+    preferred_exchange = 'bybit' if 'bybit' in active_exchanges else 'binance'
+    cached_public = public_price_brokers.get(preferred_exchange)
+    if cached_public is not None:
+        return cached_public
+
     with _public_price_broker_lock:
-        if public_price_broker is not None: return public_price_broker
-        if BybitClient is None:
-            from src.broker.bybit_client import BybitClient as _BybitClient
-            BybitClient = _BybitClient
-        _, bybit_api_key, bybit_api_secret = _get_active_investor_bybit_credentials()
-        if not bybit_api_key or not bybit_api_secret:
-            from src.broker.bybit_client import _get_ccxt as _get_ccxt_cached
-            class CCXTPublicPriceFallback:
-                def __init__(self):
-                    self._ccxt_exchange = _get_ccxt_cached().bybit()
-                def get_last_price(self, symbol):
-                    try: return float(self._ccxt_exchange.fetch_ticker(symbol)['last'])
-                    except Exception: return 0.0
-                def fetch_ohlcv(self, symbol, timeframe='15m'):
-                    try:
-                        from src.broker.bybit_client import _get_pd as _get_pd_cached
-                        pd = _get_pd_cached()
-                        return pd.DataFrame(self._ccxt_exchange.fetch_ohlcv(symbol, timeframe, limit=200), columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-                    except Exception: return None
-            return CCXTPublicPriceFallback()
-        public_price_broker = BybitClient(bybit_api_key, bybit_api_secret, testnet=ENV_CONFIG.use_testnet)
+        cached_public = public_price_brokers.get(preferred_exchange)
+        if cached_public is not None:
+            return cached_public
+
+        client_id, api_key, api_secret = _get_active_investor_credentials(preferred_exchange)
+        if not api_key or not api_secret:
+            return _NullPublicBroker()
+
+        if preferred_exchange == 'binance':
+            from src.broker.binance_client import BinanceClient as _BinanceClient
+            public_price_broker = _BinanceClient(api_key, api_secret, testnet=ENV_CONFIG.use_testnet)
+        else:
+            if BybitClient is None:
+                from src.broker.bybit_client import BybitClient as _BybitClient
+                BybitClient = _BybitClient
+            public_price_broker = BybitClient(api_key, api_secret, testnet=ENV_CONFIG.use_testnet)
+
+        public_price_brokers[preferred_exchange] = public_price_broker
+        _get_broker_manager().prune_unused(
+            active_client_ids={int(c.get('id') or 0) for c in _get_registered_clients(active_only=True)},
+            active_exchanges=active_exchanges,
+        )
+        gc.collect()
     return public_price_broker
 
 def _get_public_radar_broker_mainnet():
@@ -545,6 +670,8 @@ def _get_public_radar_broker_mainnet():
     Requisito: deve usar SEMPRE Mainnet (testnet=False), independentemente de USE_TESTNET.
     """
     global BybitClient, public_radar_broker
+    if 'bybit' not in _get_active_exchange_names():
+        return None
     if public_radar_broker is not None:
         return public_radar_broker
     with _public_radar_broker_lock:
@@ -555,27 +682,17 @@ def _get_public_radar_broker_mainnet():
             BybitClient = _BybitClient
         # Passa placeholders "truthy" para impedir fallback para chaves do .env.
         public_radar_broker = BybitClient(" ", " ", testnet=False)
+        gc.collect()
     return public_radar_broker
 
 def _ensure_broker_class(exchange='bybit'):
-    exchange = str(exchange or 'bybit').strip().lower()
-    if exchange == 'binance':
-        global _BinanceClient
-        if '_BinanceClient' not in globals() or _BinanceClient is None:
-            from src.broker.binance_client import BinanceClient as _BC
-            globals()['_BinanceClient'] = _BC
-        return globals()['_BinanceClient']
-    global BybitClient
-    if BybitClient is None:
-        from src.broker.bybit_client import BybitClient as _BybitClient
-        BybitClient = _BybitClient
-    return BybitClient
+    return _get_broker_manager()._get_broker_class(exchange)
 
 def _make_broker(client):
     exchange = str(client.get('exchange') or 'bybit').strip().lower()
     use_testnet = _coerce_bool(client.get('is_testnet'), default=USE_TESTNET)
-    broker_cls = _ensure_broker_class(exchange)
-    return _get_broker_manager().get_broker(client, broker_cls, use_testnet)
+    _ensure_broker_class(exchange)
+    return _get_broker_manager().get_broker(client, use_testnet)
 
 def _get_registered_clients(active_only=False):
     try: return [{**dict(c), "storage_source": "local"} for c in (db.get_active_clients() if active_only else db.get_all_clients())]
@@ -586,16 +703,7 @@ def _get_registered_client_by_id(client_id):
     return {**dict(local_client), "storage_source": "local"} if local_client else None
 
 def _get_active_investor_bybit_credentials():
-    for client in _get_registered_clients(active_only=True):
-        client_id = int(client.get('id') or 0)
-        if _is_training_fake_balance_client(client) or _is_client_temporarily_disabled(client_id):
-            continue
-        persisted = _get_registered_client_by_id(client.get('id'))
-        if persisted:
-            k = str(persisted.get('bybit_key') or '').strip()
-            s = str(persisted.get('bybit_secret') or '').strip()
-            if k and s: return persisted.get('id'), k, s
-    return None, '', ''
+    return _get_active_investor_credentials('bybit')
 
 def _save_client_everywhere(client_data):
     payload = dict(client_data or {})
@@ -607,7 +715,12 @@ def _save_client_everywhere(client_data):
     return _get_registered_client_by_id(payload.get('id') or res), False, bool(res)
 
 def _delete_client_everywhere(client_id):
+    global public_price_broker, public_radar_broker, public_price_brokers
     _get_broker_manager().invalidate_client(client_id)
+    public_price_broker = None
+    public_radar_broker = None
+    public_price_brokers.clear()
+    gc.collect()
     return True, db.delete_client(client_id)
 
 def _fetch_active_client_balances(force=False):
@@ -627,10 +740,15 @@ def _fetch_active_client_balances(force=False):
         return client_balance_cache.get() or {"items": [], "total": 0.0}
 
     items, total = [], 0.0
+    active_clients = _get_registered_clients(active_only=True)
+    active_client_ids = {int(c.get('id') or 0) for c in active_clients}
+    active_exchanges = _get_active_exchange_names()
     try:
-        _ensure_broker_class('bybit')
-        _ensure_broker_class('binance')
-        for client in _get_registered_clients(active_only=True):
+        _get_broker_manager().prune_unused(
+            active_client_ids=active_client_ids,
+            active_exchanges=active_exchanges,
+        )
+        for client in active_clients:
             balance = None
             error = None
             is_fake_balance = False
@@ -665,7 +783,10 @@ def _fetch_active_client_balances(force=False):
                 "account_mode": "real", "exchange": str(client.get('exchange') or 'bybit').lower(),
                 "status": client.get('status'), "error": error, "is_fake_balance": is_fake_balance,
             })
-    except Exception: pass
+    except Exception:
+        pass
+    finally:
+        gc.collect()
     
     res = {"items": items, "total": round(total, 2)}
     client_balance_cache.set(res)
@@ -1388,6 +1509,8 @@ def _monitor_dashboard_positions():
             print(f"❌ [DASHBOARD MONITOR] Erro geral: {general_err}", flush=True)
             import traceback
             traceback.print_exc()
+        finally:
+            gc.collect()
 
         # Aguarda 10 segundos antes da próxima sincronização
         time.sleep(10)
@@ -1450,11 +1573,7 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None):
 
         # Normaliza com as precisões da exchange
         try:
-            markets = broker.exchange.load_markets()
-            market = markets.get(symbol, {})
-            amount_precision = market.get('precision', {}).get('amount', 3)
-            qty = broker.exchange.amount_to_precision(symbol, qty)
-            qty = float(qty)
+            qty = float(broker.exchange.amount_to_precision(symbol, qty))
             print(f"   ✅ [CALC QTY] Qty normalizada: {qty}", flush=True)
         except Exception as precision_err:
             print(f"   ⚠️ [CALC QTY] Erro na precisão, usando arredondamento simples: {precision_err}", flush=True)
@@ -1492,7 +1611,6 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
 
 def sniper_worker_loop():
     time.sleep(1)
-    from src.broker.bybit_client import BybitClient
     from src.engine.indicators import IndicatorEngine
     from src.ai_brain.validator import GroqValidator
     global _FORCED_SIGNAL_FIRED
@@ -1531,6 +1649,10 @@ def sniper_worker_loop():
             # RADAR/ANÁLISE: usa sempre Mainnet (dados reais), mesmo quando USE_TESTNET=True
             # para execução de ordens (Testnet).
             radar_broker = _get_public_radar_broker_mainnet()
+            if radar_broker is None:
+                central_state['status'] = "💼 Sem investidores Bybit ativos para varredura."
+                time.sleep(10)
+                continue
             try:
                 tickers = radar_broker.exchange.fetch_tickers(params={'category': 'linear'}) or {}
             except Exception:
@@ -1620,7 +1742,10 @@ def sniper_worker_loop():
                     time.sleep(COOLDOWN_INSTITUCIONAL_SECS)
                     break
                 time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
-        except Exception: pass
+        except Exception:
+            pass
+        finally:
+            gc.collect()
         time.sleep(15)
 
 def _process_client_orders_background(symbol, side, entry_price, confidence, reason):

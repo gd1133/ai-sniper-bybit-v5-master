@@ -1,13 +1,17 @@
 # -*- coding: utf-8 -*-
 import time
 import sys
-import io
 import threading
+import gc
 from decimal import Decimal
 
-# Força UTF-8 no stdout do Windows
+# Força UTF-8 no stdout do Windows sem reempacotar stream
 if sys.platform == 'win32':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    try:
+        if hasattr(sys.stdout, 'reconfigure'):
+            sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
 
 # Globals para Lazy Loading com Thread Safety
 _ccxt_instance = None
@@ -68,7 +72,9 @@ class BinanceClient:
             cfg['secret'] = str(api_secret).strip()
 
         self.exchange = ccxt.binance(cfg)
+        self.exchange.enableRateLimit = True
         self.order_calculator = OrderCalculator(exchange_name='binance')
+        self._symbol_limits_cache = {}
 
         if self.testnet:
             self.exchange.set_sandbox_mode(True)
@@ -150,25 +156,27 @@ class BinanceClient:
         if current_price <= 0:
             raise ValueError(f"Preço inválido para {symbol}")
 
-        try:
-            self.exchange.load_markets()
-            market = self.exchange.market(symbol)
-            limits = market.get('limits', {})
-
-            min_amount = limits.get('amount', {}).get('min')
-            if min_amount is None or str(min_amount).lower() == 'none' or min_amount <= 0:
-                min_amount = 0.001
-
-            # Piso de custo padrão da Binance Futures é $5.0. Usamos $5.5 como margem de segurança.
-            min_cost = limits.get('cost', {}).get('min')
-            if min_cost is None or str(min_cost).lower() == 'none' or min_cost <= 0:
-                min_cost = 5.5
-
-            print(f"   📊 [BINANCE LIMITS] {symbol}: min_amount={min_amount}, min_notional={min_cost} USDT", flush=True)
-        except Exception as market_err:
-            print(f"⚠️ [BINANCE MARKET] Erro ao ler limites: {market_err}, usando defaults", flush=True)
+        cache_key = str(symbol or '').upper()
+        cached_limits = self._symbol_limits_cache.get(cache_key)
+        if cached_limits is not None:
+            min_amount, min_cost = cached_limits
+        else:
             min_amount = 0.001
             min_cost = 5.5
+            try:
+                market = self.exchange.market(symbol)
+                limits = (market or {}).get('limits') or {}
+                raw_min_amount = ((limits.get('amount') or {}).get('min'))
+                raw_min_cost = ((limits.get('cost') or {}).get('min'))
+                if raw_min_amount is not None and str(raw_min_amount).lower() != 'none' and float(raw_min_amount) > 0:
+                    min_amount = float(raw_min_amount)
+                if raw_min_cost is not None and str(raw_min_cost).lower() != 'none' and float(raw_min_cost) > 0:
+                    min_cost = float(raw_min_cost)
+            except Exception as market_err:
+                print(f"⚠️ [BINANCE MARKET] Limites não carregados para {symbol}: {market_err}. Usando defaults.", flush=True)
+            self._symbol_limits_cache[cache_key] = (min_amount, min_cost)
+
+        print(f"   📊 [BINANCE LIMITS] {symbol}: min_amount={min_amount}, min_notional={min_cost} USDT", flush=True)
 
         # Conversões seguras usando Decimal(str())
         min_cost_decimal = Decimal(str(min_cost))
@@ -196,6 +204,7 @@ class BinanceClient:
             print(f"   🔧 [BINANCE NOTIONAL RE-ADJUSTED] Elevando lote mínimo: qty={final_qty}", flush=True)
 
         print(f"   ✅ [BINANCE ORDER VALIDA] qty={final_qty} (notional={float(notional_value_decimal):.2f} USDT >= {float(min_cost_decimal)} USDT)", flush=True)
+        gc.collect()
         return str(final_qty)
 
     def execute_market_order(self, symbol, side, qty, raise_on_error=False):
