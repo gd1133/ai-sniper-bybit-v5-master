@@ -4,6 +4,7 @@ import sys
 import threading
 import json
 import re
+import gc
 from decimal import Decimal
 
 # Força UTF-8 no stdout sem reempacotar o stream (evita fechar stdout no Windows)
@@ -108,6 +109,7 @@ class BybitClient:
             cfg['secret'] = api_secret
 
         self.exchange = ccxt.bybit(cfg)
+        self.exchange.enableRateLimit = True
         self._configure_exchange_endpoint()
 
         # SINCRONIZAÇÃO DE TEMPO: Executa na inicialização para mitigar drift de timestamp
@@ -138,6 +140,7 @@ class BybitClient:
         self.last_request_time = {}
         self.adaptive_delay = 0.5
         self.rate_limit_block_until = 0
+        self._symbol_limits_cache = {}
 
     def _configure_exchange_endpoint(self):
         """Aplica e valida o endpoint exato exigido pelo ambiente configurado."""
@@ -292,6 +295,30 @@ class BybitClient:
         normalized = str(side or '').strip().lower()
         return 'Buy' if normalized == 'buy' else 'Sell'
 
+    def _get_symbol_limits(self, symbol):
+        cache_key = str(symbol or '').upper()
+        cached = self._symbol_limits_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        min_amount = 0.001
+        min_cost = 6.0
+        try:
+            market = self.exchange.market(symbol)
+            limits = (market or {}).get('limits') or {}
+            raw_min_amount = ((limits.get('amount') or {}).get('min'))
+            raw_min_cost = ((limits.get('cost') or {}).get('min'))
+            if raw_min_amount is not None and str(raw_min_amount).lower() != 'none' and float(raw_min_amount) > 0:
+                min_amount = float(raw_min_amount)
+            if raw_min_cost is not None and str(raw_min_cost).lower() != 'none' and float(raw_min_cost) > 0:
+                min_cost = float(raw_min_cost)
+        except Exception as market_err:
+            print(f"⚠️ [BYBIT MARKET] Limites não carregados para {symbol}: {market_err}. Usando defaults.", flush=True)
+
+        payload = (min_amount, min_cost)
+        self._symbol_limits_cache[cache_key] = payload
+        return payload
+
     def calculate_dynamic_order_qty(self, symbol: str, balance=None):
         """Calcula a quantidade de uma ordem baseada nos limites estritos da corretora."""
         current_price = self.get_last_price(symbol)
@@ -325,24 +352,8 @@ class BybitClient:
         if current_price <= 0:
             raise ValueError(f"Não foi possível obter preço atual para {symbol}")
 
-        try:
-            self.exchange.load_markets()
-            market = self.exchange.market(symbol)
-            limits = market.get('limits', {})
-
-            min_amount = limits.get('amount', {}).get('min')
-            if min_amount is None or str(min_amount).lower() == 'none' or min_amount <= 0:
-                min_amount = 0.001
-
-            min_cost = limits.get('cost', {}).get('min')
-            if min_cost is None or str(min_cost).lower() == 'none' or min_cost <= 0:
-                min_cost = 6.0
-
-            print(f"   📊 [BYBIT LIMITS] {symbol}: min_amount={min_amount}, min_notional={min_cost} USDT", flush=True)
-        except Exception as market_err:
-            print(f"⚠️ [BYBIT MARKET] Erro ao carregar limites: {market_err}, usando defaults", flush=True)
-            min_amount = 0.001
-            min_cost = 6.0
+        min_amount, min_cost = self._get_symbol_limits(symbol)
+        print(f"   📊 [BYBIT LIMITS] {symbol}: min_amount={min_amount}, min_notional={min_cost} USDT", flush=True)
 
         # Conversões seguras usando Decimal(str())
         min_cost_decimal = Decimal(str(min_cost))
@@ -369,6 +380,7 @@ class BybitClient:
             print(f"   🔧 [BYBIT NOTIONAL RE-ADJUSTED] Qty recalculada para cima para bater o piso: qty={final_qty}", flush=True)
 
         print(f"   ✅ [BYBIT ORDER VALIDA] qty={final_qty} (notional={float(notional_value_decimal):.2f} USDT >= {float(min_cost_decimal)} USDT)", flush=True)
+        gc.collect()
 
         return str(final_qty)
 
