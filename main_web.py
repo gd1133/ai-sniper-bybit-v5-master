@@ -16,6 +16,7 @@ import re
 import sys
 import math
 import gc
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime, timedelta
 
 if sys.platform == 'win32':
@@ -1968,15 +1969,17 @@ def add_cliente():
         requested_is_testnet = _coerce_bool(data.get('is_testnet'), default=USE_TESTNET)
         validation = validar_e_salvar_cliente(data.get('bybit_key'), data.get('bybit_secret'), requested_is_testnet, client_payload=data)
         if validation.get('record'):
+            is_valid = bool(validation.get("valid"))
             return jsonify({
-                "status": "sucesso",
+                "status": "sucesso" if is_valid else "erro",
                 "msg": validation.get("msg") or "Investidor conectado!",
-                "valid": bool(validation.get("valid")),
+                "valid": is_valid,
                 "api_error": validation.get("api_error"),
                 "client": validation.get('record'),
-            }), 200
+            }), (200 if is_valid else 400)
         return jsonify({"status": "erro", "msg": "Falha ao salvar investidor"}), 500
-    except Exception as e: return jsonify({"status": "erro", "msg": str(e)}), 400
+    except Exception as e:
+        return jsonify({"status": "erro", "msg": str(e)}), 500
 
 @app.route('/api/status', methods=['GET'])
 def get_status():
@@ -2007,7 +2010,14 @@ def api_cliente_manage(client_id):
             data = request.json or {}
             requested_is_testnet = _coerce_bool(data.get('is_testnet'), default=USE_TESTNET)
             v = validar_e_salvar_cliente(data.get('bybit_key'), data.get('bybit_secret'), requested_is_testnet, client_payload=data, client_id=client_id, existing_client=_get_registered_client_by_id(client_id))
-            return jsonify({"success": True, "client": v.get('record')})
+            is_valid = bool(v.get('valid'))
+            return jsonify({
+                "success": is_valid,
+                "valid": is_valid,
+                "api_error": v.get('api_error'),
+                "msg": v.get('msg'),
+                "client": v.get('record')
+            }), (200 if is_valid else 400)
         elif request.method == 'DELETE':
             return jsonify({"success": _delete_client_everywhere(client_id)[1]})
     except Exception as e: return jsonify({"error": str(e)}), 400
@@ -2251,6 +2261,44 @@ def api_market_intelligence():
         print(f"❌ [MARKET INTELLIGENCE] Erro ao gerar payload: {e}", flush=True)
         return jsonify({"success": False, "error": str(e)}), 500
 
+def _validate_broker_balance_fast_fail(payload: dict, timeout_seconds: float = 5.0):
+    """
+    Valida credenciais com timeout rígido para evitar request pendente no frontend.
+    """
+    def _run_validation():
+        broker = _make_broker(payload)
+        try:
+            if hasattr(broker, 'exchange') and getattr(broker, 'exchange') is not None:
+                broker.exchange.enableRateLimit = True
+                broker.exchange.timeout = int(timeout_seconds * 1000)
+        except Exception:
+            pass
+
+        # Melhor esforço para limitar chamadas da sessão pybit.
+        try:
+            pybit = getattr(broker, 'pybit_session', None)
+            if pybit is not None:
+                if hasattr(pybit, 'timeout'):
+                    pybit.timeout = int(timeout_seconds)
+                if hasattr(pybit, 'recv_window'):
+                    pybit.recv_window = min(int(getattr(pybit, 'recv_window', 5000) or 5000), 5000)
+        except Exception:
+            pass
+
+        return broker, broker.get_balance()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_run_validation)
+        try:
+            broker, balance = future.result(timeout=float(timeout_seconds))
+            return broker, balance
+        except FutureTimeoutError:
+            future.cancel()
+            raise RuntimeError(
+                f"Timeout ao validar credenciais ({int(timeout_seconds)}s). "
+                "A corretora não respondeu a tempo, tente novamente."
+            )
+
 def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=None, client_id=None, existing_client=None):
     payload = dict(client_payload or {})
     final_is_testnet = _coerce_bool(payload.get('is_testnet', is_testnet), default=USE_TESTNET)
@@ -2280,8 +2328,7 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
                 'is_testnet': final_is_testnet,
             }
 
-        broker = _make_broker(payload)
-        balance = broker.get_balance()
+        broker, balance = _validate_broker_balance_fast_fail(payload, timeout_seconds=5.0)
         if balance is None or not getattr(broker, 'authenticated', False):
             raw_msg = str(getattr(broker, 'last_auth_error_message', '') or '').strip()
             raw_code = str(getattr(broker, 'last_auth_error_code', '') or '').strip()
