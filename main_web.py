@@ -134,6 +134,8 @@ def _handle_invalid_api_key_10003_for_client(client, source_label='bybit'):
 ALAVANCAGEM = 20  # Alavancagem fixa (pode ser alterado para 30 ou 50 no futuro)
 MARGEM_INPUT = 5.0  # Margem de entrada fixa em USDT (anteriormente era 5% da banca)
 LIMITE_PERDA_STOP = -2.50  # Stop loss financeiro: -50% da margem de entrada ($5.0)
+ALVO_LUCRO_USDT = 2.50  # Take Profit absoluto em USDT (editável: 2.50, 3.00, 5.00, etc.)
+STOP_PERDA_USDT = -2.50  # Stop Loss absoluto em USDT (valor bruto negativo)
 
 def _env_float(name: str, default: float) -> float:
     raw = os.getenv(name)
@@ -893,40 +895,32 @@ def _calcular_pnl_trades():
     except Exception: pass
 
 def _monitor_sl_tp_automatico():
-    time.sleep(1)
+    """
+    Monitor percentual legado desativado.
+    A saída oficial é feita somente pelo _monitor_financial_stop_loss em USDT bruto.
+    """
+    print("⏸️ [MONITOR SL/TP LEGADO] Desativado — usando apenas alvo fixo em USDT.", flush=True)
     while True:
-        try:
-            for t in db.get_open_trades(100):
-                live = _get_live_price_snapshot(t.get('pair'), _extract_entry_price(t), t.get('side'))
-                pnl_pct = live.get('pnl_pct', 0.0)
-                motivo = "SL_AUTO -50%" if pnl_pct <= -50.0 else "TP_AUTO +100%" if pnl_pct >= 100.0 else None
-                if motivo:
-                    conn = db._connect(); cur = conn.cursor()
-                    cur.execute("UPDATE trades SET status='closed', pnl_pct=?, notes=COALESCE(notes,'') || ? WHERE id=?", (round(pnl_pct, 4), f" | {motivo}", t.get('id')))
-                    conn.commit(); conn.close()
-                    _sync_active_trades_from_db()
-        except Exception: pass
-        time.sleep(10)
+        time.sleep(60)
 
 def _monitor_financial_stop_loss():
     """
-    🎯 MONITOR FINANCEIRO V60.7 — REGRA BINÁRIA (ALVO FIXO NA PAREDE)
+    🎯 MONITOR FINANCEIRO V60.7 — ESCALONAMENTO RÁPIDO EM USDT (BINÁRIO)
 
     Monitora o unrealisedPnl em tempo real de todas as posições abertas.
-    Margem de entrada fixa: $5.00 USDT.
+    Regra estritamente em PnL bruto (USDT):
+    - Take Profit: fecha quando unrealisedPnl >= ALVO_LUCRO_USDT
+    - Stop Loss:  fecha quando unrealisedPnl <= STOP_PERDA_USDT
+    - Zona neutra: não faz nada.
 
-    Regra estritamente binária:
-    - Take Profit (+100%): fecha quando unrealisedPnl >= +$5.00 USDT
-    - Stop Loss  ( -50%): fecha quando unrealisedPnl <= -$2.50 USDT
-    - Zona neutra (-$2.49 a +$4.99): NÃO FAZ NADA — deixa a operação rodar.
-
-    Não há trailing stop, breakeven, nem saída antecipada por tendência.
+    Contingência:
+    - Se falhar leitura de preço/ticker, não executa fechamento.
     """
     time.sleep(5)  # Aguarda inicialização do sistema
-    ALVO_LUCRO = MARGEM_INPUT          # +$5.00 USDT  (100% da margem)
-    ALVO_PERDA = LIMITE_PERDA_STOP     # -$2.50 USDT  ( 50% da margem)
+    alvo_lucro = float(ALVO_LUCRO_USDT)
+    alvo_perda = float(STOP_PERDA_USDT)
     print(
-        f"🎯 [MONITOR FINANCEIRO] Iniciado — TP: +${ALVO_LUCRO:.2f} | SL: ${ALVO_PERDA:.2f} | Margem: ${MARGEM_INPUT:.2f}",
+        f"🎯 [MONITOR FINANCEIRO] Iniciado — TP: +${alvo_lucro:.2f} | SL: ${alvo_perda:.2f}",
         flush=True
     )
 
@@ -971,18 +965,27 @@ def _monitor_financial_stop_loss():
                                 if size <= 0:
                                     continue
 
-                                pnl_pct = (unrealised_pnl / MARGEM_INPUT) * 100 if MARGEM_INPUT > 0 else 0.0
+                                # Contingência: se preço não puder ser lido com confiança, não fecha posição.
+                                current_price = 0.0
+                                try:
+                                    current_price = float(broker.get_last_price(symbol) or 0.0)
+                                except Exception as ticker_err:
+                                    print(f"   ⚠️ [MONITOR] Falha no ticker de {symbol}: {ticker_err} — saída bloqueada", flush=True)
+                                if current_price <= 0 and mark_price <= 0:
+                                    print(f"   ⚠️ [MONITOR] Preço indisponível para {symbol} — saída bloqueada até reestabelecer conexão", flush=True)
+                                    continue
+
                                 print(
                                     f"   📊 [MONITOR] {symbol} | Size: {size} | "
-                                    f"unrealisedPnl: ${unrealised_pnl:.2f} | ROI: {pnl_pct:.1f}% | "
-                                    f"TP: +${ALVO_LUCRO:.2f} | SL: ${ALVO_PERDA:.2f}",
+                                    f"unrealisedPnl: ${unrealised_pnl:.2f} | "
+                                    f"TP: +${alvo_lucro:.2f} | SL: ${alvo_perda:.2f}",
                                     flush=True
                                 )
 
                                 # ── REGRA BINÁRIA ──────────────────────────────────────
-                                if unrealised_pnl >= ALVO_LUCRO:
+                                if unrealised_pnl >= alvo_lucro:
                                     motivo_fechamento = "TAKE_PROFIT"
-                                elif unrealised_pnl <= ALVO_PERDA:
+                                elif unrealised_pnl <= alvo_perda:
                                     motivo_fechamento = "STOP_LOSS"
                                 else:
                                     # Zona neutra — não faz nada
@@ -991,10 +994,10 @@ def _monitor_financial_stop_loss():
 
                                 if motivo_fechamento == "TAKE_PROFIT":
                                     print(f"🏆 [TAKE PROFIT] {symbol} atingiu alvo de lucro!", flush=True)
-                                    print(f"   💰 unrealisedPnl: ${unrealised_pnl:.2f} >= Alvo: +${ALVO_LUCRO:.2f}", flush=True)
+                                    print(f"   💰 unrealisedPnl: ${unrealised_pnl:.2f} >= Alvo: +${alvo_lucro:.2f}", flush=True)
                                 else:
                                     print(f"🚨 [STOP LOSS] {symbol} atingiu limite de perda!", flush=True)
-                                    print(f"   💔 unrealisedPnl: ${unrealised_pnl:.2f} <= Limite: ${ALVO_PERDA:.2f}", flush=True)
+                                    print(f"   💔 unrealisedPnl: ${unrealised_pnl:.2f} <= Limite: ${alvo_perda:.2f}", flush=True)
 
                                 print(f"   🔒 Disparando fechamento forçado...", flush=True)
 
@@ -1016,7 +1019,7 @@ def _monitor_financial_stop_loss():
                                             cur.execute(
                                                 "UPDATE trades SET status='closed', pnl_pct=?, profit=?, notes=COALESCE(notes,'') || ? WHERE pair=? AND client_id=? AND status='open'",
                                                 (
-                                                    round(pnl_pct, 2),
+                                                    0.0,
                                                     round(profit, 2),
                                                     note_tag,
                                                     symbol,
@@ -1044,7 +1047,8 @@ def _monitor_financial_stop_loss():
                                                 gross_pnl=round(unrealised_pnl, 4),
                                                 market_context={
                                                     'unrealised_pnl': unrealised_pnl,
-                                                    'roi_pct': round(pnl_pct, 2),
+                                                    'target_tp_usdt': round(alvo_lucro, 2),
+                                                    'target_sl_usdt': round(alvo_perda, 2),
                                                     'leverage': leverage,
                                                     'mark_price': mark_price,
                                                     'close_reason': motivo_fechamento,
