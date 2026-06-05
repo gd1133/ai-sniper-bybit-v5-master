@@ -73,8 +73,8 @@ def normalize_balance_source(value: Any) -> str:
 
 
 def _connect():
-    """Conecta ao banco com timeout de 5s para evitar travamentos"""
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=5.0)
+    """Conecta ao banco com timeout estendido para evitar lock contention."""
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30.0)
     conn.row_factory = sqlite3.Row
     # Habilita WAL mode para evitar travamentos
     conn.execute('PRAGMA journal_mode=WAL')
@@ -217,6 +217,7 @@ def get_all_clients() -> List[Dict[str, Any]]:
 
 def add_client(data: Dict[str, Any]):
     """Adiciona ou espelha um cliente localmente. Retorna o id persistido."""
+    conn = None
     try:
         print(f"🔵 [DATABASE] add_client: Iniciando inserção de cliente: {data.get('nome')}")
         conn = _connect()
@@ -248,6 +249,7 @@ def add_client(data: Dict[str, Any]):
             existing = get_client_by_id(int(explicit_id))
             if existing:
                 conn.close()
+                conn = None
                 print(f"🔵 [DATABASE] add_client: Cliente já existe, atualizando...")
                 return int(explicit_id) if update_client(int(explicit_id), data) else False
 
@@ -265,6 +267,7 @@ def add_client(data: Dict[str, Any]):
             inserted_id = cur.lastrowid
         conn.commit()
         conn.close()
+        conn = None
         print(f"✅ [DATABASE] add_client: Cliente inserido com sucesso! ID: {inserted_id}")
         return inserted_id
     except Exception as e:
@@ -272,6 +275,12 @@ def add_client(data: Dict[str, Any]):
         import traceback
         traceback.print_exc()
         return False
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
 
 
 def record_trade(
@@ -377,6 +386,7 @@ def get_client_by_id(client_id: int) -> Dict[str, Any]:
 
 def update_client(client_id: int, data: Dict[str, Any]) -> bool:
     """Atualiza informações de um cliente existente."""
+    conn = None
     try:
         conn = _connect()
         cur = conn.cursor()
@@ -411,10 +421,17 @@ def update_client(client_id: int, data: Dict[str, Any]) -> bool:
         )
         conn.commit()
         conn.close()
+        conn = None
         return True
     except Exception as e:
         print(f"⚠️ Erro ao atualizar cliente {client_id}: {e}")
         return False
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
 
 
 def upsert_client_local(data: Dict[str, Any]) -> bool:
