@@ -1169,6 +1169,7 @@ def _monitor_dashboard_positions():
             for cliente in clientes:
                 try:
                     client_id = int(cliente.get('id') or 0)
+                    exchange_name = str(cliente.get('exchange') or 'bybit').strip().lower()
                     if _is_training_fake_balance_client(cliente):
                         fake = _get_forced_training_fake_balance_usd()
                         total_wallet_balance += float(fake)
@@ -1195,8 +1196,8 @@ def _monitor_dashboard_positions():
 
                     broker = _make_broker(cliente)
 
-                    # Verifica se tem sessão pybit ativa
-                    if not broker.pybit_session or not broker.authenticated:
+                    # Verifica autenticação mínima de forma agnóstica de corretora
+                    if not getattr(broker, 'authenticated', False):
                         fake = _get_training_fake_balance_usd()
                         if fake is not None:
                             total_wallet_balance += float(fake)
@@ -1208,109 +1209,152 @@ def _monitor_dashboard_positions():
                             print(f"   ⚠️ [DASHBOARD] Cliente {cliente.get('nome')} sem autenticação ativa", flush=True)
                         continue
 
-                    # 1️⃣ BUSCA SALDO DA CONTA COM PARÂMETROS CORRETOS
-                    try:
-                        client_balance_added = False
-                        # Tenta buscar saldo usando a API V5 com accountType='UNIFIED'
-                        wallet_response = broker.pybit_session.get_wallet_balance(
-                            accountType='UNIFIED'
-                        )
-                        ok, err = broker._handle_v5_ret_code(wallet_response, 'get_wallet_balance')
+                    # 1️⃣/2️⃣ PROCESSAMENTO ESTRITAMENTE SEPARADO POR CORRETORA
+                    if exchange_name == 'bybit':
+                        if not getattr(broker, 'pybit_session', None):
+                            fake = _get_training_fake_balance_usd()
+                            if fake is not None:
+                                total_wallet_balance += float(fake)
+                            print(f"   ⚠️ [DASHBOARD] {cliente.get('nome')}: sessão Bybit indisponível", flush=True)
+                            continue
 
-                        if ok:
-                            result = wallet_response.get('result', {})
-                            wallet_list = result.get('list', [])
+                        # BYBIT - saldo
+                        try:
+                            client_balance_added = False
+                            wallet_response = broker.pybit_session.get_wallet_balance(accountType='UNIFIED')
+                            ok, err = broker._handle_v5_ret_code(wallet_response, 'get_wallet_balance')
 
-                            if wallet_list:
-                                wallet_data = wallet_list[0]
-                                # Busca o saldo USDT no campo coin
-                                coin_list = wallet_data.get('coin', [])
-
-                                for coin in coin_list:
-                                    if coin.get('coin') == 'USDT':
-                                        # Usa walletBalance ou equity como saldo principal
-                                        wallet_balance = float(coin.get('walletBalance') or coin.get('equity') or 0)
-                                        total_wallet_balance += wallet_balance
-                                        client_balance_added = True
-                                        print(f"   💰 [DASHBOARD] {cliente.get('nome')}: ${wallet_balance:.2f} USDT", flush=True)
-                                        break
-                        else:
-                            print(f"   ⚠️ [DASHBOARD] Erro ao buscar saldo de {cliente.get('nome')}: {err}", flush=True)
-                            code = _extract_bybit_ret_code_from_error(err)
-                            if not client_balance_added and str(code or '') == '10003':
-                                _handle_invalid_api_key_10003_for_client(cliente, source_label='DASHBOARD:get_wallet_balance')
+                            if ok:
+                                result = wallet_response.get('result', {})
+                                wallet_list = result.get('list', [])
+                                if wallet_list:
+                                    wallet_data = wallet_list[0]
+                                    for coin in wallet_data.get('coin', []):
+                                        if coin.get('coin') == 'USDT':
+                                            wallet_balance = float(coin.get('walletBalance') or coin.get('equity') or 0)
+                                            total_wallet_balance += wallet_balance
+                                            client_balance_added = True
+                                            print(f"   💰 [DASHBOARD] {cliente.get('nome')}: ${wallet_balance:.2f} USDT", flush=True)
+                                            break
+                            else:
+                                print(f"   ⚠️ [DASHBOARD] Erro ao buscar saldo de {cliente.get('nome')}: {err}", flush=True)
+                                code = _extract_bybit_ret_code_from_error(err)
+                                if not client_balance_added and str(code or '') == '10003':
+                                    _handle_invalid_api_key_10003_for_client(cliente, source_label='DASHBOARD:get_wallet_balance')
+                                    fake = _get_training_fake_balance_usd()
+                                    if fake is not None:
+                                        total_wallet_balance += float(fake)
+                                        print(
+                                            f"   🧪 [DASHBOARD] {cliente.get('nome')}: saldo fictício aplicado após erro 10003 (${float(fake):.2f} USDT)",
+                                            flush=True,
+                                        )
+                        except Exception as wallet_err:
+                            print(f"   ⚠️ [DASHBOARD] Exceção ao buscar saldo Bybit: {wallet_err}", flush=True)
+                            code = _extract_bybit_ret_code_from_error(wallet_err)
+                            if str(code or '') == '10003':
+                                _handle_invalid_api_key_10003_for_client(cliente, source_label='DASHBOARD:get_wallet_balance:exception')
                                 fake = _get_training_fake_balance_usd()
                                 if fake is not None:
                                     total_wallet_balance += float(fake)
                                     print(
-                                        f"   🧪 [DASHBOARD] {cliente.get('nome')}: saldo fictício aplicado após erro 10003 (${float(fake):.2f} USDT)",
+                                        f"   🧪 [DASHBOARD] {cliente.get('nome')}: saldo fictício aplicado após exceção 10003 (${float(fake):.2f} USDT)",
                                         flush=True,
                                     )
-                    except Exception as wallet_err:
-                        print(f"   ⚠️ [DASHBOARD] Exceção ao buscar saldo: {wallet_err}", flush=True)
-                        code = _extract_bybit_ret_code_from_error(wallet_err)
-                        if str(code or '') == '10003':
-                            _handle_invalid_api_key_10003_for_client(cliente, source_label='DASHBOARD:get_wallet_balance:exception')
-                            fake = _get_training_fake_balance_usd()
-                            if fake is not None:
-                                total_wallet_balance += float(fake)
-                                print(
-                                    f"   🧪 [DASHBOARD] {cliente.get('nome')}: saldo fictício aplicado após exceção 10003 (${float(fake):.2f} USDT)",
-                                    flush=True,
-                                )
 
-                    # 2️⃣ BUSCA POSIÇÕES ABERTAS COM PARÂMETROS CORRETOS
-                    try:
-                        # CORREÇÃO CRÍTICA: Usa category='linear' e settleCoin='USDT'
-                        positions_response = broker.pybit_session.get_positions(
-                            category='linear',
-                            settleCoin='USDT'
-                        )
-                        ok, err = broker._handle_v5_ret_code(positions_response, 'get_positions')
-
-                        if not ok:
-                            print(f"   ⚠️ [DASHBOARD] Erro ao buscar posições de {cliente.get('nome')}: {err}", flush=True)
-                            continue
-
-                        positions_list = (positions_response.get('result') or {}).get('list', [])
-
-                        for pos in positions_list:
-                            try:
-                                # Extrai dados da posição
-                                symbol = pos.get('symbol', '')
-                                size = float(pos.get('size') or 0)
-                                side = str(pos.get('side', '')).lower()
-                                entry_price = float(pos.get('avgPrice') or 0)
-                                unrealised_pnl = float(pos.get('unrealisedPnl') or 0)
-                                leverage = float(pos.get('leverage') or ALAVANCAGEM)
-
-                                # Pula se não houver posição aberta
-                                if size <= 0:
-                                    continue
-
-                                # Normaliza o lado da posição para o formato do sistema
-                                side_normalized = 'COMPRAR' if side in ('buy', 'long') else 'VENDER'
-
-                                # Adiciona à lista de posições
-                                all_positions.append({
-                                    'client_id': cliente.get('id'),
-                                    'client_nome': cliente.get('nome'),
-                                    'symbol': symbol,
-                                    'side': side_normalized,
-                                    'size': size,
-                                    'entry_price': entry_price,
-                                    'unrealised_pnl': unrealised_pnl,
-                                    'leverage': leverage
-                                })
-
-                                print(f"   📊 [DASHBOARD] {symbol}: {side_normalized} | Size: {size} | Entry: ${entry_price:.4f} | PnL: ${unrealised_pnl:.2f}", flush=True)
-
-                            except Exception as pos_parse_err:
-                                print(f"   ⚠️ [DASHBOARD] Erro ao processar posição: {pos_parse_err}", flush=True)
+                        # BYBIT - posições
+                        try:
+                            positions_response = broker.pybit_session.get_positions(
+                                category='linear',
+                                settleCoin='USDT'
+                            )
+                            ok, err = broker._handle_v5_ret_code(positions_response, 'get_positions')
+                            if not ok:
+                                print(f"   ⚠️ [DASHBOARD] Erro ao buscar posições de {cliente.get('nome')}: {err}", flush=True)
                                 continue
 
-                    except Exception as fetch_pos_err:
-                        print(f"   ⚠️ [DASHBOARD] Erro ao buscar posições: {fetch_pos_err}", flush=True)
+                            positions_list = (positions_response.get('result') or {}).get('list', [])
+                            for pos in positions_list:
+                                try:
+                                    symbol = pos.get('symbol', '')
+                                    size = float(pos.get('size') or 0)
+                                    side = str(pos.get('side', '')).lower()
+                                    entry_price = float(pos.get('avgPrice') or 0)
+                                    unrealised_pnl = float(pos.get('unrealisedPnl') or 0)
+                                    leverage = float(pos.get('leverage') or ALAVANCAGEM)
+                                    if size <= 0:
+                                        continue
+                                    side_normalized = 'COMPRAR' if side in ('buy', 'long') else 'VENDER'
+                                    all_positions.append({
+                                        'client_id': cliente.get('id'),
+                                        'client_nome': cliente.get('nome'),
+                                        'symbol': symbol,
+                                        'side': side_normalized,
+                                        'size': size,
+                                        'entry_price': entry_price,
+                                        'unrealised_pnl': unrealised_pnl,
+                                        'leverage': leverage
+                                    })
+                                    print(f"   📊 [DASHBOARD] {symbol}: {side_normalized} | Size: {size} | Entry: ${entry_price:.4f} | PnL: ${unrealised_pnl:.2f}", flush=True)
+                                except Exception as pos_parse_err:
+                                    print(f"   ⚠️ [DASHBOARD] Erro ao processar posição Bybit: {pos_parse_err}", flush=True)
+                                    continue
+                        except Exception as fetch_pos_err:
+                            print(f"   ⚠️ [DASHBOARD] Erro ao buscar posições Bybit: {fetch_pos_err}", flush=True)
+                            continue
+
+                    elif exchange_name == 'binance':
+                        # BINANCE - saldo (CCXT nativo)
+                        try:
+                            wallet_balance = broker.get_balance()
+                            if wallet_balance is not None:
+                                total_wallet_balance += float(wallet_balance)
+                                print(f"   💰 [DASHBOARD] {cliente.get('nome')} (Binance): ${float(wallet_balance):.2f} USDT", flush=True)
+                            else:
+                                print(f"   ⚠️ [DASHBOARD] Saldo Binance indisponível para {cliente.get('nome')}", flush=True)
+                        except Exception as wallet_err:
+                            print(f"   ⚠️ [DASHBOARD] Exceção ao buscar saldo Binance: {wallet_err}", flush=True)
+
+                        # BINANCE - posições (CCXT nativo, sem pybit_session)
+                        try:
+                            positions_response = broker.exchange.fetch_positions(params={'type': 'future'})
+                            positions_list = positions_response if isinstance(positions_response, list) else []
+                            for pos in positions_list:
+                                try:
+                                    info = pos.get('info') or {}
+                                    symbol = str(pos.get('symbol') or info.get('symbol') or '').strip()
+                                    raw_size = pos.get('contracts')
+                                    if raw_size is None:
+                                        raw_size = info.get('positionAmt')
+                                    size = abs(float(raw_size or 0))
+                                    if size <= 0:
+                                        continue
+                                    side = str(pos.get('side') or '').lower()
+                                    if not side:
+                                        side = 'long' if float(raw_size or 0) > 0 else 'short'
+                                    entry_price = float(pos.get('entryPrice') or info.get('entryPrice') or 0)
+                                    unrealised_pnl = float(pos.get('unrealizedPnl') or info.get('unRealizedProfit') or 0)
+                                    leverage = float(pos.get('leverage') or info.get('leverage') or ALAVANCAGEM)
+                                    side_normalized = 'COMPRAR' if side in ('buy', 'long') else 'VENDER'
+                                    all_positions.append({
+                                        'client_id': cliente.get('id'),
+                                        'client_nome': cliente.get('nome'),
+                                        'symbol': symbol,
+                                        'side': side_normalized,
+                                        'size': size,
+                                        'entry_price': entry_price,
+                                        'unrealised_pnl': unrealised_pnl,
+                                        'leverage': leverage
+                                    })
+                                    print(f"   📊 [DASHBOARD BINANCE] {symbol}: {side_normalized} | Size: {size} | Entry: ${entry_price:.4f} | PnL: ${unrealised_pnl:.2f}", flush=True)
+                                except Exception as pos_parse_err:
+                                    print(f"   ⚠️ [DASHBOARD] Erro ao processar posição Binance: {pos_parse_err}", flush=True)
+                                    continue
+                        except Exception as fetch_pos_err:
+                            print(f"   ⚠️ [DASHBOARD] Erro ao buscar posições Binance: {fetch_pos_err}", flush=True)
+                            continue
+
+                    else:
+                        print(f"   ⚠️ [DASHBOARD] Corretora não suportada para {cliente.get('nome')}: {exchange_name}", flush=True)
                         continue
 
                 except Exception as client_err:
