@@ -1931,11 +1931,26 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
 # 🎛️ ENDPOINTS DA API REST (FLASK)
 # ==============================================================================
 
+def _safe_fetch_active_client_balances(timeout_seconds: float = 6.0):
+    """
+    Evita travar a API de investidores quando monitor/corretora estiver lento.
+    """
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_fetch_active_client_balances)
+        try:
+            return future.result(timeout=float(timeout_seconds)) or {'items': []}
+        except FutureTimeoutError:
+            future.cancel()
+            cached = central_state.get('real_client_balances') or []
+            return {'items': cached if isinstance(cached, list) else []}
+        except Exception:
+            return {'items': []}
+
 @app.route('/api/investidores', methods=['GET'])
 def get_investidores():
     try:
         rows = _get_registered_clients(active_only=False)
-        balance_map = {item.get('id'): item for item in _fetch_active_client_balances().get('items', [])}
+        balance_map = {item.get('id'): item for item in _safe_fetch_active_client_balances(timeout_seconds=6.0).get('items', [])}
         payload = []
         for r in rows:
             client_id = int(r.get('id') or 0)

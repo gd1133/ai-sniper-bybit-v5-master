@@ -77,8 +77,9 @@ def _connect():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30.0)
     conn.row_factory = sqlite3.Row
     # Habilita WAL mode para evitar travamentos
-    conn.execute('PRAGMA journal_mode=WAL')
-    conn.execute('PRAGMA synchronous=NORMAL')
+    conn.execute('PRAGMA journal_mode=WAL;')
+    conn.execute('PRAGMA synchronous=NORMAL;')
+    conn.execute('PRAGMA busy_timeout=30000;')
     return conn
 
 
@@ -91,91 +92,98 @@ def _ensure_column(cur, table: str, column: str, definition: str):
 
 def init_db():
     """Inicializa banco com tabelas otimizadas e sem travamentos"""
+    conn = None
     db_dir = os.path.dirname(DB_PATH)
     if db_dir:  # Only create directory if there's a directory component
         os.makedirs(db_dir, exist_ok=True)
-    conn = _connect()
-    cur = conn.cursor()
-    
-    # Tabela principal: Clientes/Pessoas cadastradas
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS clientes_sniper (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nome TEXT NOT NULL,
-        bybit_key TEXT,
-        bybit_secret TEXT,
-        tg_token TEXT,
-        tg_api_key TEXT,
-        chat_id TEXT,
-        status TEXT DEFAULT 'ativo',
-        saldo_base REAL DEFAULT 1000.0,
-        is_testnet INTEGER DEFAULT 0,
-        account_mode TEXT DEFAULT 'real',
-        balance_source TEXT DEFAULT 'broker_real_balance',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
-    _ensure_column(cur, 'clientes_sniper', 'account_mode', "TEXT DEFAULT 'real'")
-    _ensure_column(cur, 'clientes_sniper', 'balance_source', "TEXT DEFAULT 'broker_real_balance'")
-    _ensure_column(cur, 'clientes_sniper', 'exchange', "TEXT DEFAULT 'bybit'")
-    # Atualiza registros existentes para modo real
-    cur.execute("""
-        UPDATE clientes_sniper
-        SET account_mode = 'real',
-            is_testnet = 0,
-            balance_source = 'broker_real_balance'
-        WHERE account_mode IS NULL OR TRIM(account_mode) = '' OR account_mode = 'testnet'
-    """)
-    cur.execute("""
-        UPDATE clientes_sniper
-        SET balance_source = CASE
-            WHEN COALESCE(account_mode, 'testnet') = 'testnet' THEN 'broker_testnet_balance'
-            ELSE 'broker_real_balance'
-        END
-        WHERE balance_source IS NULL OR TRIM(balance_source) = ''
-    """)
+    try:
+        conn = _connect()
+        cur = conn.cursor()
+        
+        # Tabela principal: Clientes/Pessoas cadastradas
+        cur.execute('''
+        CREATE TABLE IF NOT EXISTS clientes_sniper (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nome TEXT NOT NULL,
+            bybit_key TEXT,
+            bybit_secret TEXT,
+            tg_token TEXT,
+            tg_api_key TEXT,
+            chat_id TEXT,
+            status TEXT DEFAULT 'ativo',
+            saldo_base REAL DEFAULT 1000.0,
+            is_testnet INTEGER DEFAULT 0,
+            account_mode TEXT DEFAULT 'real',
+            balance_source TEXT DEFAULT 'broker_real_balance',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        _ensure_column(cur, 'clientes_sniper', 'account_mode', "TEXT DEFAULT 'real'")
+        _ensure_column(cur, 'clientes_sniper', 'balance_source', "TEXT DEFAULT 'broker_real_balance'")
+        _ensure_column(cur, 'clientes_sniper', 'exchange', "TEXT DEFAULT 'bybit'")
+        # Atualiza registros existentes para modo real
+        cur.execute("""
+            UPDATE clientes_sniper
+            SET account_mode = 'real',
+                is_testnet = 0,
+                balance_source = 'broker_real_balance'
+            WHERE account_mode IS NULL OR TRIM(account_mode) = '' OR account_mode = 'testnet'
+        """)
+        cur.execute("""
+            UPDATE clientes_sniper
+            SET balance_source = CASE
+                WHEN COALESCE(account_mode, 'testnet') = 'testnet' THEN 'broker_testnet_balance'
+                ELSE 'broker_real_balance'
+            END
+            WHERE balance_source IS NULL OR TRIM(balance_source) = ''
+        """)
 
-    # Tabela de histórico de trades (para P&L tracking)
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS trades (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        client_id INTEGER,
-        pair TEXT,
-        side TEXT,
-        pnl_pct REAL,
-        profit REAL,
-        entry_price REAL DEFAULT 0,
-        exit_price REAL DEFAULT 0,
-        quantity REAL DEFAULT 0,
-        margin REAL DEFAULT 0,
-        closed_at TEXT,
-        notes TEXT,
-        status TEXT DEFAULT 'closed',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
-    _ensure_column(cur, 'trades', 'entry_price', 'REAL DEFAULT 0')
-    _ensure_column(cur, 'trades', 'exit_price', 'REAL DEFAULT 0')
-    _ensure_column(cur, 'trades', 'quantity', 'REAL DEFAULT 0')
-    _ensure_column(cur, 'trades', 'margin', 'REAL DEFAULT 0')
+        # Tabela de histórico de trades (para P&L tracking)
+        cur.execute('''
+        CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_id INTEGER,
+            pair TEXT,
+            side TEXT,
+            pnl_pct REAL,
+            profit REAL,
+            entry_price REAL DEFAULT 0,
+            exit_price REAL DEFAULT 0,
+            quantity REAL DEFAULT 0,
+            margin REAL DEFAULT 0,
+            closed_at TEXT,
+            notes TEXT,
+            status TEXT DEFAULT 'closed',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        _ensure_column(cur, 'trades', 'entry_price', 'REAL DEFAULT 0')
+        _ensure_column(cur, 'trades', 'exit_price', 'REAL DEFAULT 0')
+        _ensure_column(cur, 'trades', 'quantity', 'REAL DEFAULT 0')
+        _ensure_column(cur, 'trades', 'margin', 'REAL DEFAULT 0')
 
-    # Tabela de configuração global (TEST_MODE, TEST_BALANCE, etc)
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS config (
-        k TEXT PRIMARY KEY,
-        v TEXT
-    )
-    ''')
+        # Tabela de configuração global (TEST_MODE, TEST_BALANCE, etc)
+        cur.execute('''
+        CREATE TABLE IF NOT EXISTS config (
+            k TEXT PRIMARY KEY,
+            v TEXT
+        )
+        ''')
 
-    # ÍNDICES PARA PERFORMANCE
-    cur.execute('CREATE INDEX IF NOT EXISTS idx_trades_client_id ON trades(client_id)')
-    cur.execute('CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)')
-    cur.execute('CREATE INDEX IF NOT EXISTS idx_trades_pair ON trades(pair)')
-    cur.execute('CREATE INDEX IF NOT EXISTS idx_clientes_status ON clientes_sniper(status)')
-    cur.execute('CREATE INDEX IF NOT EXISTS idx_config_k ON config(k)')
+        # ÍNDICES PARA PERFORMANCE
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_trades_client_id ON trades(client_id)')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_trades_pair ON trades(pair)')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_clientes_status ON clientes_sniper(status)')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_config_k ON config(k)')
 
-    conn.commit()
-    conn.close()
+        conn.commit()
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
 
     # Inicializa tabela de histórico avançado para a IA analista
     try:
@@ -187,32 +195,42 @@ def init_db():
 
 def get_active_clients() -> List[Dict[str, Any]]:
     """Retorna apenas clientes cadastrados com status ativo"""
+    conn = None
     try:
         conn = _connect()
         cur = conn.cursor()
         cur.execute("SELECT * FROM clientes_sniper WHERE status='ativo' ORDER BY created_at DESC")
         rows = cur.fetchall()
-        clients = [dict(r) for r in rows]
-        conn.close()
-        return clients
+        return [dict(r) for r in rows]
     except Exception as e:
         print(f"⚠️ Erro ao buscar clientes ativos: {e}")
         return []
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
 
 
 def get_all_clients() -> List[Dict[str, Any]]:
     """Retorna todos os clientes cadastrados"""
+    conn = None
     try:
         conn = _connect()
         cur = conn.cursor()
         cur.execute("SELECT * FROM clientes_sniper ORDER BY created_at DESC")
         rows = cur.fetchall()
-        clients = [dict(r) for r in rows]
-        conn.close()
-        return clients
+        return [dict(r) for r in rows]
     except Exception as e:
         print(f"⚠️ Erro ao buscar clientes: {e}")
         return []
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
 
 
 def add_client(data: Dict[str, Any]):
@@ -304,14 +322,21 @@ def record_trade(
     except Exception:
         notes_clean = str(notes_clean)
 
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute(
-        'INSERT INTO trades (client_id, pair, side, pnl_pct, profit, entry_price, exit_price, quantity, margin, closed_at, notes, status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-        (client_id, pair, side, pnl_pct, profit, entry_price, exit_price, quantity, margin, closed_at, notes_clean, status.lower())
-    )
-    conn.commit()
-    conn.close()
+    conn = None
+    try:
+        conn = _connect()
+        cur = conn.cursor()
+        cur.execute(
+            'INSERT INTO trades (client_id, pair, side, pnl_pct, profit, entry_price, exit_price, quantity, margin, closed_at, notes, status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+            (client_id, pair, side, pnl_pct, profit, entry_price, exit_price, quantity, margin, closed_at, notes_clean, status.lower())
+        )
+        conn.commit()
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
 
 
 def close_trade(
@@ -351,6 +376,7 @@ def close_trade(
     elif profit is None:
         profit = 0.0
 
+    conn = None
     try:
         conn = _connect()
         cur = conn.cursor()
@@ -368,20 +394,32 @@ def close_trade(
             (pnl_pct, profit, exit_price, closed_at, notes_clean, trade_id),
         )
         conn.commit()
-        conn.close()
         return True
     except Exception as e:
         print(f"⚠️ Erro ao fechar trade {trade_id}: {e}")
         return False
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
 
 
 def get_client_by_id(client_id: int) -> Dict[str, Any]:
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute('SELECT * FROM clientes_sniper WHERE id=?', (client_id,))
-    row = cur.fetchone()
-    conn.close()
-    return dict(row) if row else None
+    conn = None
+    try:
+        conn = _connect()
+        cur = conn.cursor()
+        cur.execute('SELECT * FROM clientes_sniper WHERE id=?', (client_id,))
+        row = cur.fetchone()
+        return dict(row) if row else None
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
 
 
 def update_client(client_id: int, data: Dict[str, Any]) -> bool:
@@ -448,6 +486,7 @@ def upsert_client_local(data: Dict[str, Any]) -> bool:
 
 def delete_client(client_id: int) -> bool:
     """Remove um cliente e seus trades associados para evitar erros de integridade."""
+    conn = None
     try:
         conn = _connect()
         cur = conn.cursor()
@@ -456,49 +495,73 @@ def delete_client(client_id: int) -> bool:
         # Depois remove o cliente
         cur.execute("DELETE FROM clientes_sniper WHERE id = ?", (client_id,))
         conn.commit()
-        conn.close()
         return True
     except Exception as e:
         print(f"⚠️ Erro ao deletar cliente {client_id}: {e}")
         return False
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
 
 
 def get_open_trades(limit: int = 50) -> List[Dict[str, Any]]:
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT t.*, c.nome FROM trades t "
-        "LEFT JOIN clientes_sniper c ON c.id = t.client_id "
-        "WHERE LOWER(COALESCE(t.status, 'closed')) = 'open' "
-        "ORDER BY t.id DESC LIMIT ?",
-        (limit,),
-    )
-    rows = cur.fetchall()
-    trades = [dict(r) for r in rows]
-    conn.close()
-    return trades
+    conn = None
+    try:
+        conn = _connect()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT t.*, c.nome FROM trades t "
+            "LEFT JOIN clientes_sniper c ON c.id = t.client_id "
+            "WHERE LOWER(COALESCE(t.status, 'closed')) = 'open' "
+            "ORDER BY t.id DESC LIMIT ?",
+            (limit,),
+        )
+        rows = cur.fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
 
 
 def get_recent_trades(limit: int = 50) -> List[Dict[str, Any]]:
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute('SELECT t.*, c.nome FROM trades t LEFT JOIN clientes_sniper c ON c.id = t.client_id ORDER BY t.id DESC LIMIT ?', (limit,))
-    rows = cur.fetchall()
-    trades = [dict(r) for r in rows]
-    conn.close()
-    return trades
+    conn = None
+    try:
+        conn = _connect()
+        cur = conn.cursor()
+        cur.execute('SELECT t.*, c.nome FROM trades t LEFT JOIN clientes_sniper c ON c.id = t.client_id ORDER BY t.id DESC LIMIT ?', (limit,))
+        rows = cur.fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
 
 
 def get_last_closed_trade(client_id: int) -> Dict[str, Any]:
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT * FROM trades WHERE client_id = ? AND LOWER(COALESCE(status, 'closed')) = 'closed' ORDER BY id DESC LIMIT 1",
-        (client_id,),
-    )
-    row = cur.fetchone()
-    conn.close()
-    return dict(row) if row else None
+    conn = None
+    try:
+        conn = _connect()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT * FROM trades WHERE client_id = ? AND LOWER(COALESCE(status, 'closed')) = 'closed' ORDER BY id DESC LIMIT 1",
+            (client_id,),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
 
 
 # ============================================================================
@@ -507,27 +570,40 @@ def get_last_closed_trade(client_id: int) -> Dict[str, Any]:
 
 def get_config(key: str, default: str = None) -> str:
     """Lê uma configuração do banco de dados"""
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute("SELECT v FROM config WHERE k = ?", (key,))
-    row = cur.fetchone()
-    conn.close()
-    return row[0] if row else default
+    conn = None
+    try:
+        conn = _connect()
+        cur = conn.cursor()
+        cur.execute("SELECT v FROM config WHERE k = ?", (key,))
+        row = cur.fetchone()
+        return row[0] if row else default
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
 
 
 def set_config(key: str, value: str) -> bool:
     """Escreve/atualiza uma configuração"""
+    conn = None
     try:
         conn = _connect()
         cur = conn.cursor()
         cur.execute("DELETE FROM config WHERE k = ?", (key,))
         cur.execute("INSERT INTO config (k, v) VALUES (?, ?)", (key, str(value)))
         conn.commit()
-        conn.close()
         return True
     except Exception as e:
         print(f"❌ Erro ao set_config({key}): {e}")
         return False
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
 
 
 def is_test_mode_enabled() -> bool:
