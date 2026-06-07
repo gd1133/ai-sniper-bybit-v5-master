@@ -170,9 +170,9 @@ def _coerce_bool(value, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
     raw = str(value).strip().lower()
-    if raw in ('1', 'true', 'yes', 'y', 'on'):
+    if raw in ('1', 'true', 'yes', 'y', 'on', 'test', 'teste', 'testnet', 'simulacao', 'simulação', 'demo', 'sandbox'):
         return True
-    if raw in ('0', 'false', 'no', 'n', 'off'):
+    if raw in ('0', 'false', 'no', 'n', 'off', 'real', 'mainnet', 'prod', 'producao', 'produção'):
         return False
     return default
 
@@ -182,7 +182,7 @@ def _resolve_request_is_testnet(payload, *, fallback: bool = False) -> bool:
     Não depende de USE_TESTNET global.
     """
     data = payload or {}
-    for key in ('is_testnet', 'testnet', 'use_testnet', 'isTestnet', 'modo_teste'):
+    for key in ('is_testnet', 'testnet', 'use_testnet', 'isTestnet', 'modo_teste', 'environment', 'ambiente'):
         if key not in data:
             continue
         value = data.get(key)
@@ -191,6 +191,20 @@ def _resolve_request_is_testnet(payload, *, fallback: bool = False) -> bool:
         if isinstance(value, str) and not value.strip():
             continue
         return _coerce_bool(value, default=fallback)
+    # Fallback semântico para payloads de UI antigos.
+    for key in ('account_mode', 'modo_conta', 'operation_mode'):
+        if key not in data:
+            continue
+        value = data.get(key)
+        if value is None:
+            continue
+        raw = str(value).strip().lower()
+        if not raw:
+            continue
+        if raw in ('test', 'teste', 'testnet', 'simulacao', 'simulação', 'sandbox'):
+            return True
+        if raw in ('real', 'mainnet', 'prod', 'producao', 'produção'):
+            return False
     return bool(fallback)
 
 def _is_training_fake_balance_enabled() -> bool:
@@ -2499,6 +2513,34 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
             'is_testnet': final_is_testnet,
         }
     except Exception as e:
+        # Auto-detecção de ambiente para chave Bybit quando usuário seleciona ambiente incorreto.
+        err_text = str(e or '')
+        if 'retCode=10003' in err_text and str(payload.get('exchange') or 'bybit').strip().lower() == 'bybit':
+            flipped_is_testnet = not bool(final_is_testnet)
+            probe_payload = dict(payload)
+            probe_payload['is_testnet'] = flipped_is_testnet
+            try:
+                probe_broker, probe_balance = _validate_broker_balance_fast_fail(probe_payload, timeout_seconds=5.0)
+                if probe_balance is not None and getattr(probe_broker, 'authenticated', False):
+                    payload['is_testnet'] = flipped_is_testnet
+                    payload['saldo_base'] = round(float(probe_balance), 2)
+                    payload['status'] = 'ativo'
+                    record, _, local_synced = _save_client_everywhere(payload)
+                    detected_env = 'TESTNET' if flipped_is_testnet else 'MAINNET'
+                    return {
+                        'valid': True,
+                        'msg': f'Chave validada no ambiente {detected_env}. Ambiente ajustado automaticamente.',
+                        'record': record,
+                        'synced_to_local': local_synced,
+                        'balance': payload['saldo_base'],
+                        'account_mode': 'real',
+                        'exchange': payload['exchange'],
+                        'balance_source': payload.get('balance_source'),
+                        'is_testnet': flipped_is_testnet,
+                    }
+            except Exception:
+                pass
+
         payload['status'] = 'erro_api'
         payload['saldo_base'] = round(float((existing_client or {}).get('saldo_base') or 0.0), 2)
         record, _, local_synced = _save_client_everywhere(payload)
