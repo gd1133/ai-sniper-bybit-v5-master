@@ -117,10 +117,10 @@ def _handle_invalid_api_key_10003_for_client(client, source_label='bybit'):
     if _is_client_temporarily_disabled(client_id):
         return
 
-    # Mensagem explícita e amigável para o Render (modo TESTNET)
-    if USE_TESTNET:
+    # Mensagem explícita por cliente (sem depender do USE_TESTNET global)
+    if _resolve_request_is_testnet(client, fallback=False):
         print(
-            f"❌ [CONFIGURAÇÃO] O cliente {nome} está usando chaves reais da MAINNET, mas o robô está em modo TESTNET (Simulação). "
+            f"❌ [CONFIGURAÇÃO] O cliente {nome} está configurado como TESTNET, mas as chaves parecem ser de MAINNET. "
             f"Altere as chaves no banco de dados para chaves geradas em testnet.bybit.com.",
             flush=True,
         )
@@ -174,6 +174,23 @@ def _coerce_bool(value, default: bool = False) -> bool:
     if raw in ('0', 'false', 'no', 'n', 'off'):
         return False
     return default
+
+def _resolve_request_is_testnet(payload, *, fallback: bool = False) -> bool:
+    """
+    Resolve is_testnet exclusivamente do payload/registro do cliente.
+    Não depende de USE_TESTNET global.
+    """
+    data = payload or {}
+    for key in ('is_testnet', 'testnet', 'use_testnet', 'isTestnet', 'modo_teste'):
+        if key not in data:
+            continue
+        value = data.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return _coerce_bool(value, default=fallback)
+    return bool(fallback)
 
 def _is_training_fake_balance_enabled() -> bool:
     # Default: enabled on TESTNET to allow UI/training without valid API keys.
@@ -693,7 +710,7 @@ def _ensure_broker_class(exchange='bybit'):
 
 def _make_broker(client):
     exchange = str(client.get('exchange') or 'bybit').strip().lower()
-    use_testnet = _coerce_bool(client.get('is_testnet'), default=USE_TESTNET)
+    use_testnet = _resolve_request_is_testnet(client, fallback=False)
     _ensure_broker_class(exchange)
     return _get_broker_manager().get_broker(client, use_testnet)
 
@@ -711,7 +728,7 @@ def _get_active_investor_bybit_credentials():
 def _save_client_everywhere(client_data):
     payload = dict(client_data or {})
     payload['account_mode'] = 'real'
-    payload['is_testnet'] = _coerce_bool(payload.get('is_testnet'), default=USE_TESTNET)
+    payload['is_testnet'] = _resolve_request_is_testnet(payload, fallback=False)
     payload['balance_source'] = _normalize_balance_source(payload.get('balance_source'))
     res = db.upsert_client_local(payload) if payload.get('id') is not None else db.add_client(payload)
     client_balance_cache.clear()
@@ -782,7 +799,7 @@ def _fetch_active_client_balances(force=False):
             except Exception as e: error = str(e)
             items.append({
                 "id": client.get('id'), "nome": client.get('nome'), "saldo_real": balance,
-                "saldo_base": float(client.get('saldo_base', 0) or 0), "is_testnet": _coerce_bool(client.get('is_testnet'), default=USE_TESTNET),
+                "saldo_base": float(client.get('saldo_base', 0) or 0), "is_testnet": _resolve_request_is_testnet(client, fallback=False),
                 "account_mode": "real", "exchange": str(client.get('exchange') or 'bybit').lower(),
                 "status": client.get('status'), "error": error, "is_fake_balance": is_fake_balance,
             })
@@ -1965,7 +1982,7 @@ def get_investidores():
                 "status": r.get('status'),
                 "mode": "REAL",
                 "account_mode": "real",
-                "is_testnet": _coerce_bool(r.get('is_testnet'), default=USE_TESTNET),
+                "is_testnet": _resolve_request_is_testnet(r, fallback=False),
                 "balance_source": balance_source,
                 "is_fake_balance": bool(bm.get('is_fake_balance')) or balance_source == 'training_fake_balance',
                 "error": bm.get('error'),
@@ -1981,7 +1998,7 @@ def get_investidores():
 def add_cliente():
     data = request.json or {}
     try:
-        requested_is_testnet = _coerce_bool(data.get('is_testnet'), default=USE_TESTNET)
+        requested_is_testnet = _resolve_request_is_testnet(data, fallback=False)
         validation = validar_e_salvar_cliente(data.get('bybit_key'), data.get('bybit_secret'), requested_is_testnet, client_payload=data)
         if validation.get('record'):
             is_valid = bool(validation.get("valid"))
@@ -2023,8 +2040,12 @@ def api_cliente_manage(client_id):
             return jsonify(c) if c else (jsonify({"error": "Não encontrado"}), 404)
         elif request.method == 'PUT':
             data = request.json or {}
-            requested_is_testnet = _coerce_bool(data.get('is_testnet'), default=USE_TESTNET)
-            v = validar_e_salvar_cliente(data.get('bybit_key'), data.get('bybit_secret'), requested_is_testnet, client_payload=data, client_id=client_id, existing_client=_get_registered_client_by_id(client_id))
+            existing = _get_registered_client_by_id(client_id)
+            requested_is_testnet = _resolve_request_is_testnet(
+                data,
+                fallback=_resolve_request_is_testnet(existing or {}, fallback=False),
+            )
+            v = validar_e_salvar_cliente(data.get('bybit_key'), data.get('bybit_secret'), requested_is_testnet, client_payload=data, client_id=client_id, existing_client=existing)
             is_valid = bool(v.get('valid'))
             return jsonify({
                 "success": is_valid,
@@ -2316,7 +2337,9 @@ def _validate_broker_balance_fast_fail(payload: dict, timeout_seconds: float = 5
 
 def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=None, client_id=None, existing_client=None):
     payload = dict(client_payload or {})
-    final_is_testnet = _coerce_bool(payload.get('is_testnet', is_testnet), default=USE_TESTNET)
+    existing_is_testnet = _resolve_request_is_testnet(existing_client or {}, fallback=False)
+    requested_is_testnet = _resolve_request_is_testnet(payload, fallback=_coerce_bool(is_testnet, default=existing_is_testnet))
+    final_is_testnet = requested_is_testnet
     payload['account_mode'], payload['is_testnet'] = 'real', final_is_testnet
     payload['balance_source'] = _normalize_balance_source(payload.get('balance_source'))
     payload['exchange'] = str(payload.get('exchange') or 'bybit').strip().lower()

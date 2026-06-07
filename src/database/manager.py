@@ -118,6 +118,7 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         ''')
+        _ensure_column(cur, 'clientes_sniper', 'is_testnet', 'INTEGER DEFAULT 0')
         _ensure_column(cur, 'clientes_sniper', 'account_mode', "TEXT DEFAULT 'real'")
         _ensure_column(cur, 'clientes_sniper', 'balance_source', "TEXT DEFAULT 'broker_real_balance'")
         _ensure_column(cur, 'clientes_sniper', 'exchange', "TEXT DEFAULT 'bybit'")
