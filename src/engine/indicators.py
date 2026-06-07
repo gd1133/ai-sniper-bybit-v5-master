@@ -29,6 +29,12 @@ class IndicatorEngine:
         loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=1).mean()
         rs = gain / (loss + 1e-9)
         self.df['rsi'] = 100 - (100 / (1 + rs))
+
+        # RSI rápido para leitura de microexaustão (proxy do 5m em dados comprimidos)
+        gain_fast = (delta.where(delta > 0, 0)).rolling(window=5, min_periods=1).mean()
+        loss_fast = (-delta.where(delta < 0, 0)).rolling(window=5, min_periods=1).mean()
+        rs_fast = gain_fast / (loss_fast + 1e-9)
+        self.df['rsi_fast'] = 100 - (100 / (1 + rs_fast))
         
         # ATR (14) - Volatilidade
         high_low = self.df['high'] - self.df['low']
@@ -83,6 +89,37 @@ class IndicatorEngine:
         # Volume Trend
         self.df['vol_ma'] = self.df['vol'].rolling(window=20, min_periods=1).mean()
         self.df['volume_ratio'] = self.df['vol'] / (self.df['vol_ma'] + 1e-9)
+
+        # Suportes/Resistências históricas (janela curta para armadilhas locais)
+        self.df['resistance_lookback'] = self.df['high'].rolling(window=60, min_periods=5).max()
+        self.df['support_lookback'] = self.df['low'].rolling(window=60, min_periods=5).min()
+
+        # Smart Money: identificação simples de sweep de liquidez com rejeição
+        candle_range = (self.df['high'] - self.df['low']).replace(0, 1e-9)
+        lower_wick = (self.df[['open', 'close']].min(axis=1) - self.df['low']).clip(lower=0)
+        upper_wick = (self.df['high'] - self.df[['open', 'close']].max(axis=1)).clip(lower=0)
+        self.df['lower_wick_ratio'] = lower_wick / candle_range
+        self.df['upper_wick_ratio'] = upper_wick / candle_range
+        self.df['volume_climax'] = self.df['volume_ratio'] >= 1.8
+
+        prev_low_break = self.df['low'] < self.df['low'].shift(1).rolling(window=10, min_periods=3).min()
+        prev_high_break = self.df['high'] > self.df['high'].shift(1).rolling(window=10, min_periods=3).max()
+        self.df['bullish_liquidity_sweep'] = (
+            prev_low_break
+            & (self.df['lower_wick_ratio'] >= 0.45)
+            & self.df['volume_climax']
+            & (self.df['close'] > self.df['open'])
+        )
+        self.df['bearish_liquidity_sweep'] = (
+            prev_high_break
+            & (self.df['upper_wick_ratio'] >= 0.45)
+            & self.df['volume_climax']
+            & (self.df['close'] < self.df['open'])
+        )
+
+        # FVG simplificado (3 candles)
+        self.df['bullish_fvg'] = self.df['low'] > self.df['high'].shift(2)
+        self.df['bearish_fvg'] = self.df['high'] < self.df['low'].shift(2)
 
     def get_signals(self):
         """
@@ -146,11 +183,40 @@ class IndicatorEngine:
         elif trend == "BAIXA" and recent_return_pct < 0 and float(last['volume_ratio']) >= 1.3:
             money_flow_side = "SELL"
 
+        resistance = float(last['resistance_lookback']) if pd.notna(last['resistance_lookback']) else float(current_price)
+        support = float(last['support_lookback']) if pd.notna(last['support_lookback']) else float(current_price)
+        near_resistance_pct = ((resistance - current_price) / current_price * 100) if current_price else 0.0
+        near_support_pct = ((current_price - support) / current_price * 100) if current_price else 0.0
+        near_resistance = resistance > 0 and near_resistance_pct <= 0.45
+        near_support = support > 0 and near_support_pct <= 0.45
+
+        # Zonas premium/discount da faixa recente para OB/FVG
+        swing_high = float(self.df['high'].iloc[-50:].max()) if len(self.df) >= 5 else float(current_price)
+        swing_low = float(self.df['low'].iloc[-50:].min()) if len(self.df) >= 5 else float(current_price)
+        swing_mid = (swing_high + swing_low) / 2.0 if swing_high > swing_low else float(current_price)
+        in_discount_zone = current_price <= swing_mid
+        in_premium_zone = current_price >= swing_mid
+
+        bullish_sweep = bool(last.get('bullish_liquidity_sweep', False))
+        bearish_sweep = bool(last.get('bearish_liquidity_sweep', False))
+        bullish_fvg = bool(last.get('bullish_fvg', False))
+        bearish_fvg = bool(last.get('bearish_fvg', False))
+        volume_climax = bool(last.get('volume_climax', False))
+
+        # "Order block" simplificado: zona institucional válida com volume e rejeição.
+        bullish_order_block = bool(in_discount_zone and (bullish_sweep or bullish_fvg) and float(last['volume_ratio']) >= 1.2)
+        bearish_order_block = bool(in_premium_zone and (bearish_sweep or bearish_fvg) and float(last['volume_ratio']) >= 1.2)
+
+        # Filtro anti-armadilha: proíbe compra em topo esticado e venda em fundo esticado.
+        block_long_trap = bool(near_resistance or float(last['rsi']) >= 70.0 or float(last['rsi_fast']) >= 72.0)
+        block_short_trap = bool(near_support or float(last['rsi']) <= 30.0 or float(last['rsi_fast']) <= 28.0)
+
         return {
             'trend': trend,
             'price': float(current_price),
             'sma_200': float(sma),
             'rsi': float(last['rsi']),
+            'rsi_fast': float(last['rsi_fast']),
             'fib_618': float(last['fib_618']),
             'volume_trend': vol_trend,
             'volume_ratio': float(last['volume_ratio']),
@@ -162,6 +228,23 @@ class IndicatorEngine:
             'range_expansion': float(range_expansion),
             'distance_from_sma_pct': float(distance_from_sma_pct),
             'money_flow_side': money_flow_side,
+            'support_lookback': support,
+            'resistance_lookback': resistance,
+            'near_resistance': bool(near_resistance),
+            'near_support': bool(near_support),
+            'near_resistance_pct': float(max(near_resistance_pct, 0.0)),
+            'near_support_pct': float(max(near_support_pct, 0.0)),
+            'volume_climax': volume_climax,
+            'bullish_liquidity_sweep': bullish_sweep,
+            'bearish_liquidity_sweep': bearish_sweep,
+            'bullish_fvg': bullish_fvg,
+            'bearish_fvg': bearish_fvg,
+            'bullish_order_block': bullish_order_block,
+            'bearish_order_block': bearish_order_block,
+            'in_discount_zone': bool(in_discount_zone),
+            'in_premium_zone': bool(in_premium_zone),
+            'block_long_trap': block_long_trap,
+            'block_short_trap': block_short_trap,
         }
 
     def get_smart_money_zones(self):

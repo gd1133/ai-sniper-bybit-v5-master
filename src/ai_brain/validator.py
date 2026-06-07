@@ -14,6 +14,32 @@ class DataAnalystAgent:
 
         trend = tech_data.get('trend', 'NEUTRO')
         st_signal = tech_data.get('supertrend_signal', 0)
+        rsi = float(tech_data.get('rsi', 50) or 50)
+        rsi_fast = float(tech_data.get('rsi_fast', 50) or 50)
+
+        # CÉREBRO 1 - Filtro estrutural anti-armadilha
+        near_resistance = bool(tech_data.get('near_resistance'))
+        near_support = bool(tech_data.get('near_support'))
+        block_long = bool(tech_data.get('block_long_trap'))
+        block_short = bool(tech_data.get('block_short_trap'))
+
+        macro_log = (
+            f"[CÉREBRO 1] Tendência Macro identificada: {trend}. "
+            f"Order Block Bull={bool(tech_data.get('bullish_order_block'))} | "
+            f"Order Block Bear={bool(tech_data.get('bearish_order_block'))}."
+        )
+        reasons.append(macro_log)
+
+        if trend == 'ALTA' and (near_resistance or block_long):
+            return 0, 'WAIT', (
+                f"{macro_log} Bloqueio Long: preço próximo da resistência/RSI esticado "
+                f"(RSI={rsi:.1f}, RSI_fast={rsi_fast:.1f})."
+            )
+        if trend == 'BAIXA' and (near_support or block_short):
+            return 0, 'WAIT', (
+                f"{macro_log} Bloqueio Short: preço próximo do suporte/RSI esticado "
+                f"(RSI={rsi:.1f}, RSI_fast={rsi_fast:.1f})."
+            )
 
         if trend == 'ALTA' and st_signal == 1:
             score += 30
@@ -36,13 +62,38 @@ class DataAnalystAgent:
             score += 20
             reasons.append(f'Volume institucional detectado ({volume_ratio:.1f}x média)')
 
-        rsi = float(tech_data.get('rsi', 50) or 50)
-        if trend == 'ALTA' and 50 < rsi < 75:
+        bullish_sweep = bool(tech_data.get('bullish_liquidity_sweep'))
+        bearish_sweep = bool(tech_data.get('bearish_liquidity_sweep'))
+        volume_climax = bool(tech_data.get('volume_climax'))
+        if (bullish_sweep and trend == 'ALTA') or (bearish_sweep and trend == 'BAIXA'):
+            score += 20
+            reasons.append('[CÉREBRO 2] Volume Clímax + sweep de liquidez validado')
+        elif volume_climax:
+            reasons.append('[CÉREBRO 2] Volume Clímax detectado, aguardando confirmação de rejeição')
+
+        bullish_ob = bool(tech_data.get('bullish_order_block'))
+        bearish_ob = bool(tech_data.get('bearish_order_block'))
+        bullish_fvg = bool(tech_data.get('bullish_fvg'))
+        bearish_fvg = bool(tech_data.get('bearish_fvg'))
+        if trend == 'ALTA' and bullish_ob:
             score += 15
-            reasons.append(f'RSI em zona de aceleração ({rsi:.1f})')
-        elif trend == 'BAIXA' and 25 < rsi < 50:
+            reasons.append('Preço em Bullish Order Block (zona de desconto)')
+        if trend == 'BAIXA' and bearish_ob:
             score += 15
-            reasons.append(f'RSI em zona de aceleração ({rsi:.1f})')
+            reasons.append('Preço em Bearish Order Block (zona premium)')
+        if trend == 'ALTA' and bullish_fvg:
+            score += 10
+            reasons.append('Reteste em FVG bullish confirmado')
+        if trend == 'BAIXA' and bearish_fvg:
+            score += 10
+            reasons.append('Reteste em FVG bearish confirmado')
+
+        if trend == 'ALTA' and 45 < rsi < 70:
+            score += 10
+            reasons.append(f'RSI saudável para continuidade ({rsi:.1f})')
+        elif trend == 'BAIXA' and 30 < rsi < 55:
+            score += 10
+            reasons.append(f'RSI saudável para continuidade ({rsi:.1f})')
         elif rsi > 80 or rsi < 20:
             score -= 40
             reasons.append('RSI em exaustão extrema - risco de reversão')
@@ -131,6 +182,10 @@ class GroqValidator:
             score += 40
         if float(tech_data.get('volume_ratio', 0) or 0) >= 1.5:
             score += 30
+        if trend == 'ALTA' and bool(tech_data.get('block_long_trap')):
+            score = 0
+        if trend == 'BAIXA' and bool(tech_data.get('block_short_trap')):
+            score = 0
         return min(100, score)
 
     def consensus_predict(self, tech_data, symbol, force_local_only=True):
@@ -154,9 +209,21 @@ class GroqValidator:
         elif probability >= 75:
             final_action = action_analyst
 
+        brain_logs = {
+            'brain1': (
+                f"[CÉREBRO 1] Tendência={trend} | "
+                f"OB(Bull/Bear)={bool(tech_data.get('bullish_order_block'))}/{bool(tech_data.get('bearish_order_block'))}"
+            ),
+            'brain2': (
+                f"[CÉREBRO 2] VolumeRatio={float(tech_data.get('volume_ratio', 0) or 0):.2f} | "
+                f"Sweep(Bull/Bear)={bool(tech_data.get('bullish_liquidity_sweep'))}/{bool(tech_data.get('bearish_liquidity_sweep'))}"
+            ),
+        }
+
         return {
             'probabilidade': probability,
             'decisao': final_action,
             'motivo': f'Analista: {motivo_analyst} | Aprendizado: {motivo_learner}',
             'brains': {'local': 'online', 'analyst': 'online', 'learner': 'online'},
+            'brain_logs': brain_logs,
         }

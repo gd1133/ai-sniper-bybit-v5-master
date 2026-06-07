@@ -16,6 +16,7 @@ import re
 import sys
 import math
 import gc
+import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime, timedelta
 
@@ -921,6 +922,58 @@ def _monitor_sl_tp_automatico():
     while True:
         time.sleep(60)
 
+def _normalize_position_side(raw_side: str) -> str:
+    side = str(raw_side or '').strip().lower()
+    if side in ('buy', 'long', 'comprar'):
+        return 'buy'
+    if side in ('sell', 'short', 'vender'):
+        return 'sell'
+    return side
+
+def _detect_flow_reversal_1m(broker, symbol: str, side: str):
+    """
+    CÉREBRO 3: detecta quebra estrutural (ChoCh/MSS) em 1m com volume forte.
+    Retorna: (reversal_detected, reason)
+    """
+    try:
+        df = broker.fetch_ohlcv(symbol, timeframe='1m')
+        if df is None or len(df) < 35:
+            return False, "insufficient_1m_data"
+
+        if not isinstance(df, pd.DataFrame):
+            return False, "invalid_1m_frame"
+
+        frame = df.tail(30).copy()
+        for col in ('close', 'high', 'low', 'vol'):
+            frame[col] = pd.to_numeric(frame[col], errors='coerce')
+        frame = frame.dropna(subset=['close', 'high', 'low', 'vol'])
+        if len(frame) < 20:
+            return False, "insufficient_numeric_1m_data"
+
+        last_closed = frame.iloc[-2]
+        history = frame.iloc[:-2]
+        if len(history) < 10:
+            return False, "insufficient_history_1m"
+
+        vol_ma = float(history['vol'].tail(20).mean() or 0.0)
+        vol_ratio = (float(last_closed['vol']) / vol_ma) if vol_ma > 0 else 0.0
+        strong_volume = vol_ratio >= 1.6
+        normalized_side = _normalize_position_side(side)
+
+        if normalized_side == 'buy':
+            last_higher_low = float(history['low'].tail(12).min())
+            broke_structure = float(last_closed['close']) < last_higher_low
+            if broke_structure and strong_volume:
+                return True, f"ChoCh bearish (close<{last_higher_low:.6f}) vol={vol_ratio:.2f}x"
+        elif normalized_side == 'sell':
+            last_lower_high = float(history['high'].tail(12).max())
+            broke_structure = float(last_closed['close']) > last_lower_high
+            if broke_structure and strong_volume:
+                return True, f"ChoCh bullish (close>{last_lower_high:.6f}) vol={vol_ratio:.2f}x"
+        return False, "no_flow_break"
+    except Exception as exc:
+        return False, f"flow_check_error: {exc}"
+
 def _monitor_financial_stop_loss():
     """
     🎯 MONITOR FINANCEIRO V60.7 — ESCALONAMENTO RÁPIDO EM USDT (BINÁRIO)
@@ -955,26 +1008,51 @@ def _monitor_financial_stop_loss():
                         continue
 
                     broker = _make_broker(cliente)
-
-                    if not broker.pybit_session or not broker.authenticated:
-                        continue
+                    exchange_name = str(cliente.get('exchange') or 'bybit').strip().lower()
+                    positions_list = []
 
                     try:
-                        positions_response = broker.pybit_session.get_positions(category='linear', settleCoin='USDT')
-                        ok, err = broker._handle_v5_ret_code(positions_response, 'get_positions')
+                        if exchange_name == 'bybit':
+                            if not broker.pybit_session or not broker.authenticated:
+                                continue
 
-                        if not ok:
-                            if str(_extract_bybit_ret_code_from_error(err)) == '10003' or 'retCode=10003' in str(err):
-                                _handle_invalid_api_key_10003_for_client(cliente, source_label='MONITOR FINANCEIRO:get_positions')
+                            positions_response = broker.pybit_session.get_positions(category='linear', settleCoin='USDT')
+                            ok, err = broker._handle_v5_ret_code(positions_response, 'get_positions')
+
+                            if not ok:
+                                if str(_extract_bybit_ret_code_from_error(err)) == '10003' or 'retCode=10003' in str(err):
+                                    _handle_invalid_api_key_10003_for_client(cliente, source_label='MONITOR FINANCEIRO:get_positions')
+                                continue
+
+                            positions_list = (positions_response.get('result') or {}).get('list', [])
+                        elif exchange_name == 'binance':
+                            if not getattr(broker, 'exchange', None):
+                                continue
+                            fetched = broker.exchange.fetch_positions(params={'type': 'future'}) or []
+                            for p in fetched:
+                                size = abs(float(p.get('contracts') or p.get('positionAmt') or p.get('size') or 0))
+                                if size <= 0:
+                                    continue
+                                side_raw = str(p.get('side') or p.get('positionSide') or '').lower()
+                                if not side_raw:
+                                    side_raw = 'buy' if float(p.get('contracts') or 0) > 0 else 'sell'
+                                positions_list.append({
+                                    'symbol': p.get('symbol') or '',
+                                    'size': size,
+                                    'side': side_raw,
+                                    'unrealisedPnl': p.get('unrealizedPnl') or p.get('unrealizedProfit') or 0,
+                                    'avgPrice': p.get('entryPrice') or p.get('avgPrice') or 0,
+                                    'markPrice': p.get('markPrice') or p.get('lastPrice') or 0,
+                                    'leverage': p.get('leverage') or ALAVANCAGEM,
+                                })
+                        else:
                             continue
-
-                        positions_list = (positions_response.get('result') or {}).get('list', [])
 
                         for pos in positions_list:
                             try:
                                 symbol = pos.get('symbol', '')
                                 size = float(pos.get('size') or 0)
-                                side = str(pos.get('side', '')).lower()
+                                side = _normalize_position_side(pos.get('side', ''))
                                 unrealised_pnl = float(pos.get('unrealisedPnl') or 0)
                                 entry_price = float(pos.get('avgPrice') or pos.get('entryPrice') or 0)
                                 mark_price = float(pos.get('markPrice') or pos.get('lastPrice') or entry_price or 0)
@@ -1000,8 +1078,16 @@ def _monitor_financial_stop_loss():
                                     flush=True
                                 )
 
-                                # ── REGRA BINÁRIA ──────────────────────────────────────
-                                if unrealised_pnl >= alvo_lucro:
+                                # CÉREBRO 3: proteção antirreversão por quebra estrutural.
+                                reversal_detected, reversal_reason = _detect_flow_reversal_1m(broker, symbol, side)
+                                if reversal_detected:
+                                    motivo_fechamento = "REVERSAO_FLUXO"
+                                    print(
+                                        f"[CÉREBRO 3] Alerta: Estrutura quebrou contra a operação em {symbol} "
+                                        f"({reversal_reason}). Abortando trade com PnL ${unrealised_pnl:.2f}.",
+                                        flush=True
+                                    )
+                                elif unrealised_pnl >= alvo_lucro:
                                     motivo_fechamento = "TAKE_PROFIT"
                                 elif unrealised_pnl <= alvo_perda:
                                     motivo_fechamento = "STOP_LOSS"
@@ -1013,9 +1099,11 @@ def _monitor_financial_stop_loss():
                                 if motivo_fechamento == "TAKE_PROFIT":
                                     print(f"🏆 [TAKE PROFIT] {symbol} atingiu alvo de lucro!", flush=True)
                                     print(f"   💰 unrealisedPnl: ${unrealised_pnl:.2f} >= Alvo: +${alvo_lucro:.2f}", flush=True)
-                                else:
+                                elif motivo_fechamento == "STOP_LOSS":
                                     print(f"🚨 [STOP LOSS] {symbol} atingiu limite de perda!", flush=True)
                                     print(f"   💔 unrealisedPnl: ${unrealised_pnl:.2f} <= Limite: ${alvo_perda:.2f}", flush=True)
+                                else:
+                                    print(f"🧠 [REVERSÃO] {symbol} fechamento defensivo por fluxo contrário", flush=True)
 
                                 print(f"   🔒 Disparando fechamento forçado...", flush=True)
 
@@ -1800,6 +1888,28 @@ def sniper_worker_loop():
                 res = validator.consensus_predict(signals, sym, force_local_only=True)
                 prob = float(res.get('probabilidade', 0))
                 decisao = str(res.get('decisao', 'ABORTAR')).upper()
+                brain_logs = res.get('brain_logs') or {}
+                brain1_log = str(brain_logs.get('brain1') or (
+                    f"[CÉREBRO 1] Tendência Macro identificada: {signals.get('trend')}."
+                ))
+                brain2_log = str(brain_logs.get('brain2') or (
+                    "[CÉREBRO 2] Aguardando validação de volume/sweep institucional."
+                ))
+                print(brain1_log, flush=True)
+                print(brain2_log, flush=True)
+
+                if decisao in ('BUY', 'COMPRAR'):
+                    print(
+                        f"[CÉREBRO 1] Price={float(signals.get('price') or 0.0):.6f} | "
+                        f"OrderBlockBull={bool(signals.get('bullish_order_block'))}",
+                        flush=True
+                    )
+                elif decisao in ('SELL', 'VENDER'):
+                    print(
+                        f"[CÉREBRO 1] Price={float(signals.get('price') or 0.0):.6f} | "
+                        f"OrderBlockBear={bool(signals.get('bearish_order_block'))}",
+                        flush=True
+                    )
                 central_state['symbol'] = _limpar_simbolo(sym)
                 central_state['confidence'] = round(prob, 2)
 
