@@ -447,6 +447,59 @@ central_state = {
     "max_moedas_ativas": MAX_MOEDAS_ATIVAS,
     "risk_mode": RISK_MODE,
 }
+LAST_TICKER_CACHE = {}
+LAST_TICKER_LOCK = threading.Lock()
+
+
+def _remember_last_price(symbol, price):
+    try:
+        normalized = _canonicalize_symbol(symbol)
+        value = float(price or 0.0)
+        if not normalized or value <= 0:
+            return
+        with LAST_TICKER_LOCK:
+            LAST_TICKER_CACHE[normalized] = {
+                "price": value,
+                "updated_at": time.time(),
+            }
+    except Exception:
+        pass
+
+
+def _get_cached_last_price(symbol):
+    try:
+        normalized = _canonicalize_symbol(symbol)
+        if not normalized:
+            return 0.0
+        with LAST_TICKER_LOCK:
+            entry = LAST_TICKER_CACHE.get(normalized) or {}
+        return float(entry.get("price") or 0.0)
+    except Exception:
+        return 0.0
+
+
+def _get_live_market_price(symbol, *, preferred_price=0.0):
+    """
+    Busca preço vivo com fallback para último preço conhecido em memória.
+    """
+    normalized = _canonicalize_symbol(symbol)
+    if not normalized:
+        return 0.0
+    live_price = float(preferred_price or 0.0)
+    if live_price > 0:
+        _remember_last_price(normalized, live_price)
+        return live_price
+
+    try:
+        pub_broker = _get_public_price_broker()
+        live_price = float(pub_broker.get_last_price(normalized) or 0.0)
+        if live_price > 0:
+            _remember_last_price(normalized, live_price)
+            return live_price
+    except Exception:
+        pass
+
+    return _get_cached_last_price(normalized)
 
 def _is_rate_limit_error(err: Exception) -> bool:
     msg = str(err or "").lower()
@@ -861,6 +914,17 @@ def _build_api_status_payload():
     active_trades = payload.get('active_trades')
     if not isinstance(active_trades, list):
         active_trades = []
+
+    normalized_trades = []
+    for t in active_trades:
+        if not isinstance(t, dict):
+            continue
+        row = dict(t)
+        row['preco_atual'] = _coerce_float(row.get('current_price'), row.get('preco_atual'), default=0.0)
+        row['pnl_flutuante'] = round(_coerce_float(row.get('open_pnl_value'), row.get('pnl_flutuante'), default=0.0), 2)
+        normalized_trades.append(row)
+
+    active_trades = normalized_trades
     payload['active_trades'] = active_trades
 
     payload['saldo_real'] = balance
@@ -869,14 +933,18 @@ def _build_api_status_payload():
     payload['posicoes'] = active_trades
     payload['radar'] = payload.get('symbol') or '---'
     payload['confianca_ia'] = _coerce_float(payload.get('confidence'), default=0.0)
+    payload['pnl_total_realizado'] = round(_coerce_float(payload.get('pnl_total'), default=0.0), 2)
     return payload
 
 def _refresh_real_balance_state(force=False):
     _fetch_active_client_balances(force=force)
 
 def _get_live_price_snapshot(symbol, entry_price, side):
-    try: return _calculate_live_trade_metrics(entry_price, _get_public_price_broker().get_last_price(symbol), side)
-    except Exception: return _calculate_live_trade_metrics(entry_price, 0.0, side)
+    try:
+        current_price = _get_live_market_price(symbol)
+        return _calculate_live_trade_metrics(entry_price, current_price, side)
+    except Exception:
+        return _calculate_live_trade_metrics(entry_price, _get_cached_last_price(symbol), side)
 
 def _refresh_last_sniper_signal():
     s = central_state.get('last_sniper_signal')
@@ -1615,6 +1683,7 @@ def _monitor_dashboard_positions():
 
             if all_positions:
                 central_state['status'] = f"✅ ONLINE | {len(all_positions)} posição(ões) ativa(s)"
+                print(f"🔄 [SINCRONIZAÇÃO] Atualizando Tickers e P&L para {len(all_positions)} posições ativas.", flush=True)
 
                 # Agrupa posições por símbolo para o painel
                 grouped_positions = {}
@@ -1628,6 +1697,7 @@ def _monitor_dashboard_positions():
                             'raw_symbol': symbol,
                             'side': pos['side'],
                             'entry_price': pos['entry_price'],
+                            'mark_price': _coerce_float(pos.get('mark_price'), default=0.0),
                             'unrealised_pnl': 0.0,
                             'size': 0.0,
                             'leverage': pos['leverage'],
@@ -1637,14 +1707,17 @@ def _monitor_dashboard_positions():
                     grouped_positions[key]['unrealised_pnl'] += pos['unrealised_pnl']
                     grouped_positions[key]['size'] += pos['size']
                     grouped_positions[key]['client_count'] += 1
+                    grouped_positions[key]['mark_price'] = _coerce_float(pos.get('mark_price'), grouped_positions[key].get('mark_price'), default=grouped_positions[key].get('mark_price', 0.0))
 
                 # Atualiza os trades ativos com preços em tempo real
                 active_trades_list = []
                 for key, pos_data in grouped_positions.items():
                     try:
-                        # Busca preço atual para calcular PnL%
-                        pub_broker = _get_public_price_broker()
-                        current_price = pub_broker.get_last_price(pos_data['raw_symbol'])
+                        # Busca preço atual para calcular PnL% com fallback em memória.
+                        current_price = _get_live_market_price(
+                            pos_data['raw_symbol'],
+                            preferred_price=pos_data.get('mark_price', 0.0),
+                        )
 
                         # Calcula métricas em tempo real
                         live_metrics = _calculate_live_trade_metrics(
@@ -1664,11 +1737,13 @@ def _monitor_dashboard_positions():
                             'side': pos_data['side'],
                             'entry_price': pos_data['entry_price'],
                             'current_price': live_metrics['current_price'],
+                            'preco_atual': live_metrics['current_price'],
                             'price_change_pct': live_metrics['price_change_pct'],
                             'pnl_pct': live_metrics['pnl_pct'],
                             'trend': live_metrics['trend'],
                             'is_favorable': live_metrics['is_favorable'],
                             'open_pnl_value': round(pos_data['unrealised_pnl'], 2),
+                            'pnl_flutuante': round(pos_data['unrealised_pnl'], 2),
                             'entry': round(margin_used, 2),
                             'size': pos_data['size'],
                             'client_count': pos_data['client_count']
