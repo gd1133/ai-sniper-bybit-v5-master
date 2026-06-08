@@ -886,12 +886,18 @@ def _repair_open_trades():
     try:
         open_trades = db.get_open_trades(100)
         if not open_trades: return
-        conn = db._connect(); cur = conn.cursor()
-        for t in open_trades:
-            canonical = _canonicalize_symbol(t.get('pair'))
-            if not canonical or _extract_entry_price(t) <= 0:
-                cur.execute("UPDATE trades SET status='closed', pnl_pct=0, closed_at=? WHERE id=?", (time.strftime("%d/%m %H:%M"), t.get('id')))
-        conn.commit(); conn.close()
+        conn = None
+        try:
+            conn = db._connect()
+            cur = conn.cursor()
+            for t in open_trades:
+                canonical = _canonicalize_symbol(t.get('pair'))
+                if not canonical or _extract_entry_price(t) <= 0:
+                    cur.execute("UPDATE trades SET status='closed', pnl_pct=0, closed_at=? WHERE id=?", (time.strftime("%d/%m %H:%M"), t.get('id')))
+            conn.commit()
+        finally:
+            if conn is not None:
+                conn.close()
     except Exception: pass
 
 def _can_open_new_signal(symbol):
@@ -1128,6 +1134,7 @@ def _monitor_financial_stop_loss():
                                         print(f"   ✅ [{motivo_fechamento}] Posição {symbol} fechada com sucesso!", flush=True)
 
                                         try:
+                                            conn = None
                                             conn = db._connect()
                                             cur = conn.cursor()
                                             profit = unrealised_pnl
@@ -1147,10 +1154,15 @@ def _monitor_financial_stop_loss():
                                                 )
                                             )
                                             conn.commit()
-                                            conn.close()
                                             print(f"   💾 [BANCO] Trade atualizado — P&L: ${profit:.2f}", flush=True)
                                         except Exception as db_err:
                                             print(f"   ⚠️ [BANCO] Erro ao atualizar trade: {db_err}", flush=True)
+                                        finally:
+                                            try:
+                                                if conn is not None:
+                                                    conn.close()
+                                            except Exception:
+                                                pass
 
                                         try:
                                             from src.trade_history import record_closed_trade_sync
@@ -1685,13 +1697,21 @@ def _monitor_dashboard_positions():
 
 def _close_stale_open_trades(max_age_minutes=180):
     try:
-        conn = db._connect(); cur = conn.cursor()
+        conn = None
+        conn = db._connect()
+        cur = conn.cursor()
         for t in db.get_open_trades(100):
             dt = datetime.fromisoformat(str(t.get('created_at')).replace('Z', ''))
             if (datetime.now() - dt) > timedelta(minutes=max_age_minutes):
                 cur.execute("UPDATE trades SET status='closed', notes=COALESCE(notes,'') || ' | STALE' WHERE id=?", (t.get('id'),))
-        conn.commit(); conn.close()
+        conn.commit()
     except Exception: pass
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
 
 def _calculate_dynamic_order_quantity(broker, symbol, banca=None):
     """

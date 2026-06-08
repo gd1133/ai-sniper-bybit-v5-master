@@ -1,5 +1,6 @@
 import sqlite3
 import os
+import threading
 from typing import List, Dict, Any
 from src.config import get_environment_config
 
@@ -42,6 +43,9 @@ def _get_db_path():
 
 DB_PATH = _get_db_path()
 print(f"✅ [DATABASE] Caminho absoluto do banco: {DB_PATH}")
+FALLBACK_DB_PATH = '/tmp/ai-sniper/database.db'
+_DB_RUNTIME_LOCK = threading.Lock()
+_DB_RUNTIME_PATH = DB_PATH
 # Sistema opera apenas em modo REAL
 VALID_ACCOUNT_MODES = {'real'}
 VALID_OPERATION_MODES = {'real'}
@@ -72,15 +76,58 @@ def normalize_balance_source(value: Any) -> str:
     return 'broker_real_balance'
 
 
+def _is_disk_io_error(err: Exception) -> bool:
+    msg = str(err or '').lower()
+    return (
+        'disk i/o error' in msg
+        or 'readonly database' in msg
+        or 'database disk image is malformed' in msg
+    )
+
+
+def _get_runtime_db_path() -> str:
+    with _DB_RUNTIME_LOCK:
+        return _DB_RUNTIME_PATH
+
+
+def _set_runtime_db_path(path: str, reason: str = ''):
+    global _DB_RUNTIME_PATH
+    normalized = os.path.abspath(path)
+    with _DB_RUNTIME_LOCK:
+        if _DB_RUNTIME_PATH != normalized:
+            _DB_RUNTIME_PATH = normalized
+            print(f"⚠️ [DATABASE] Alternando banco ativo para: {normalized} | motivo: {reason}")
+
+
+def _configure_connection(conn, *, prefer_wal: bool = True):
+    conn.row_factory = sqlite3.Row
+    conn.execute('PRAGMA busy_timeout=30000;')
+    conn.execute('PRAGMA synchronous=NORMAL;')
+    if prefer_wal:
+        try:
+            conn.execute('PRAGMA journal_mode=WAL;')
+            return
+        except Exception as wal_err:
+            print(f"⚠️ [DATABASE] Falha ao ativar WAL neste volume: {wal_err} | usando DELETE journal", flush=True)
+    conn.execute('PRAGMA journal_mode=DELETE;')
+
+
 def _connect():
     """Conecta ao banco com timeout estendido para evitar lock contention."""
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30.0)
-    conn.row_factory = sqlite3.Row
-    # Habilita WAL mode para evitar travamentos
-    conn.execute('PRAGMA journal_mode=WAL;')
-    conn.execute('PRAGMA synchronous=NORMAL;')
-    conn.execute('PRAGMA busy_timeout=30000;')
-    return conn
+    current_path = _get_runtime_db_path()
+    try:
+        conn = sqlite3.connect(current_path, check_same_thread=False, timeout=30.0)
+        _configure_connection(conn, prefer_wal=True)
+        return conn
+    except sqlite3.OperationalError as err:
+        if not _is_disk_io_error(err):
+            raise
+        # Failover em tempo de execução para manter API viva quando /data ficar indisponível.
+        os.makedirs(os.path.dirname(FALLBACK_DB_PATH), exist_ok=True)
+        _set_runtime_db_path(FALLBACK_DB_PATH, reason=f"sqlite I/O failure no volume primário: {err}")
+        conn = sqlite3.connect(_get_runtime_db_path(), check_same_thread=False, timeout=30.0)
+        _configure_connection(conn, prefer_wal=False)
+        return conn
 
 
 def _ensure_column(cur, table: str, column: str, definition: str):
