@@ -291,9 +291,8 @@ def add_client(data: Dict[str, Any]):
         # Sistema sempre opera em modo real
         account_mode = 'real'
         balance_source = normalize_balance_source(data.get('balance_source'))
-        exchange = str(data.get('exchange') or 'bybit').strip().lower()
-        if exchange not in ('bybit', 'binance'):
-            exchange = 'bybit'
+        # Plataforma unificada: Bybit-only.
+        exchange = 'bybit'
         payload = (
             data.get('nome'),
             data.get('bybit_key'),
@@ -484,9 +483,8 @@ def update_client(client_id: int, data: Dict[str, Any]) -> bool:
                 'broker_real_balance',
             )
         )
-        exchange = str(data.get('exchange') or 'bybit').strip().lower()
-        if exchange not in ('bybit', 'binance'):
-            exchange = 'bybit'
+        # Plataforma unificada: Bybit-only.
+        exchange = 'bybit'
         cur.execute(
             "UPDATE clientes_sniper SET nome=?, bybit_key=?, bybit_secret=?, tg_token=?, tg_api_key=?, chat_id=?, status=?, saldo_base=?, is_testnet=?, account_mode=?, balance_source=?, exchange=? WHERE id=?",
             (

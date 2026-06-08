@@ -167,10 +167,6 @@ const App = () => {
   const [modeUpdating, setModeUpdating] = useState(false);
   const [riskModeUpdating, setRiskModeUpdating] = useState(false);
   const [manualClosingSymbol, setManualClosingSymbol] = useState(null);
-  const [showManualEntryModal, setShowManualEntryModal] = useState(false);
-  const [manualEntryFields, setManualEntryFields] = useState({ symbol: '', side: 'buy', entry_price: '' });
-  const [manualEntryAnalysis, setManualEntryAnalysis] = useState(null);
-  const [manualEntryLoading, setManualEntryLoading] = useState(false);
   const [addFormFields, setAddFormFields] = useState({
     id: null, nome: '', saldo_base: 0, bybit_key: '', bybit_secret: '', tg_token: '', chat_id: '', account_mode: 'real', is_testnet: false, exchange: 'bybit', balance_source: 'broker_real_balance'
   });
@@ -492,91 +488,6 @@ const App = () => {
     }
   };
 
-  const handleManualEntryFieldChange = (key, value) => {
-    setManualEntryFields(prev => ({ ...prev, [key]: value }));
-  };
-
-  const handleGetManualEntryAnalysis = async () => {
-    if (!manualEntryFields.symbol) {
-      alert('Por favor, insira o símbolo do ativo (ex: BTC/USDT)');
-      return;
-    }
-
-    setManualEntryLoading(true);
-    setManualEntryAnalysis(null);
-
-    try {
-      const res = await fetch(`${API_BASE}/api/trade/manual-entry`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          symbol: manualEntryFields.symbol,
-          side: manualEntryFields.side,
-          entry_price: manualEntryFields.entry_price || null,
-          force_execute: false
-        }),
-      });
-
-      const json = await res.json();
-
-      if (!res.ok || !json.success) {
-        alert(json.error || 'Erro ao buscar análise');
-        return;
-      }
-
-      setManualEntryAnalysis(json);
-    } catch (e) {
-      console.error(e);
-      alert('Erro ao conectar com o servidor');
-    } finally {
-      setManualEntryLoading(false);
-    }
-  };
-
-  const handleExecuteManualEntry = async () => {
-    if (!manualEntryFields.symbol) {
-      alert('Por favor, insira o símbolo do ativo');
-      return;
-    }
-
-    if (!confirm(`Confirma a entrada manual em ${manualEntryFields.symbol} (${manualEntryFields.side === 'buy' ? 'COMPRAR' : 'VENDER'})?`)) {
-      return;
-    }
-
-    setManualEntryLoading(true);
-
-    try {
-      const res = await fetch(`${API_BASE}/api/trade/manual-entry`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          symbol: manualEntryFields.symbol,
-          side: manualEntryFields.side,
-          entry_price: manualEntryFields.entry_price || null,
-          force_execute: true
-        }),
-      });
-
-      const json = await res.json();
-
-      if (!res.ok || !json.success) {
-        alert(json.error || 'Erro ao executar entrada manual');
-        return;
-      }
-
-      alert('✅ Entrada manual executada com sucesso!');
-      setShowManualEntryModal(false);
-      setManualEntryFields({ symbol: '', side: 'buy', entry_price: '' });
-      setManualEntryAnalysis(null);
-      await refreshStatusSnapshot();
-    } catch (e) {
-      console.error(e);
-      alert('Erro ao conectar com o servidor');
-    } finally {
-      setManualEntryLoading(false);
-    }
-  };
-
   const handleFieldChange = (key, value) => setAddFormFields(prev => ({ ...prev, [key]: value }));
   const upsertInvestor = (client) => {
     if (!client?.id) return;
@@ -596,8 +507,8 @@ const App = () => {
   const [investidoresLoading, setInvestidoresLoading] = useState(true);
   const currentOperationMode = normalizeOperationMode(data.operation_mode);
   const currentOperationMeta = OPERATION_MODE_META[currentOperationMode] || OPERATION_MODE_META.real;
-  const formExchange = String(addFormFields.exchange || 'bybit').toLowerCase();
-  const formExchangeLabel = formExchange === 'binance' ? 'Binance' : 'Bybit';
+  const formExchange = 'bybit';
+  const formExchangeLabel = 'Bybit';
   const formIsTestnet = normalizeIsTestnet(addFormFields.is_testnet);
   const formBalanceLabel = `Saldo sincronizado (${formIsTestnet ? 'Testnet' : 'Mainnet'})`;
   const formBalancePlaceholder = formIsTestnet
@@ -687,15 +598,6 @@ const App = () => {
         </nav>
 
         <div className="hidden md:flex items-center gap-4">
-           <button
-             type="button"
-             onClick={() => setShowManualEntryModal(true)}
-             className="px-4 py-2 bg-green-500 hover:bg-green-600 text-black font-black text-xs rounded-xl uppercase tracking-wider transition-all flex items-center gap-2 shadow-lg shadow-green-500/30"
-           >
-             <Target size={16} />
-             ENTRADA MANUAL
-           </button>
-
            <div className={`px-4 py-1.5 rounded-full border flex items-center gap-2 ${currentOperationMeta.shell}`}>
               <div className={`w-1.5 h-1.5 rounded-full animate-pulse ${currentOperationMeta.dot}`} />
               <span className="text-[10px] font-black uppercase italic">
@@ -1044,7 +946,7 @@ const App = () => {
                      <span className="text-[10px] font-black text-zinc-200 uppercase tracking-widest">Certificação Tactical</span>
                   </div>
                   <p className="text-[9px] text-zinc-500 font-bold uppercase leading-relaxed italic">
-                      TRIPLO CÉREBRO COM RIGOR DE {evidence.threshold || 60}% • ATÉ {evidence.max_positions || 5} ENTRADAS SIMULTÂNEAS, SEM REPETIR MOEDA • TP 100% DA ENTRADA • SL 50% DA ENTRADA • BYBIT + BINANCE.
+                      TRIPLO CÉREBRO COM RIGOR DE {evidence.threshold || 60}% • ATÉ {evidence.max_positions || 5} ENTRADAS SIMULTÂNEAS, SEM REPETIR MOEDA • TP 100% DA ENTRADA • SL 50% DA ENTRADA • BYBIT ONLY.
                   </p>
                </div>
             </div>
@@ -1118,8 +1020,8 @@ const App = () => {
                               API inválida
                             </span>
                           ) : null}
-                          <span className={`px-3 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest ${String(inv.exchange || 'bybit').toLowerCase() === 'binance' ? 'bg-orange-500/10 border-orange-500/30 text-orange-300' : 'bg-yellow-500/10 border-yellow-500/30 text-yellow-300'}`}>
-                            {String(inv.exchange || 'BYBIT').toUpperCase()}
+                          <span className="px-3 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest bg-yellow-500/10 border-yellow-500/30 text-yellow-300">
+                            BYBIT
                           </span>
                         </div>
                       </td>
@@ -1248,26 +1150,16 @@ const App = () => {
                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div className="space-y-2 md:col-span-2">
                      <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">Corretora</label>
-                      <div className="grid grid-cols-2 gap-3">
+                      <div className="grid grid-cols-1 gap-3">
                          <button
                            type="button"
-                           onClick={() => handleFieldChange('exchange', 'bybit')}
-                           className={`px-4 py-3 rounded-2xl border text-sm font-black uppercase italic transition-all ${formExchange === 'bybit' ? 'bg-yellow-500/15 border-yellow-500/40 text-yellow-300' : 'bg-black border-white/10 text-zinc-500 hover:text-white'}`}
+                           className="px-4 py-3 rounded-2xl border text-sm font-black uppercase italic transition-all bg-yellow-500/15 border-yellow-500/40 text-yellow-300"
                          >
                            🟡 Bybit
                          </button>
-                         <button
-                           type="button"
-                           onClick={() => handleFieldChange('exchange', 'binance')}
-                           className={`px-4 py-3 rounded-2xl border text-sm font-black uppercase italic transition-all ${formExchange === 'binance' ? 'bg-orange-500/15 border-orange-500/40 text-orange-300' : 'bg-black border-white/10 text-zinc-500 hover:text-white'}`}
-                         >
-                           🟠 Binance
-                         </button>
                       </div>
                       <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest ml-1">
-                        {formExchange === 'binance'
-                          ? 'Use suas chaves da Binance Futures (USDM) REAIS.'
-                          : 'Use suas chaves da Bybit Perpetual REAIS.'}
+                        Use suas chaves da Bybit Perpetual REAIS.
                       </p>
                    </div>
                   <div className="space-y-2 md:col-span-2">
@@ -1356,180 +1248,6 @@ const App = () => {
         </div>
       )}
 
-      {/* MODAL DE ENTRADA MANUAL */}
-      {showManualEntryModal && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-md flex items-center justify-center z-50 p-4">
-          <div className="bg-[#0d0e12] border border-white/10 rounded-[2.5rem] p-8 max-w-2xl w-full shadow-2xl animate-in fade-in zoom-in duration-300">
-            <div className="flex items-center justify-between mb-6">
-              <div className="flex items-center gap-3">
-                <div className="w-12 h-12 bg-green-500/10 rounded-2xl flex items-center justify-center">
-                  <Target size={24} className="text-green-500" />
-                </div>
-                <div>
-                  <h3 className="text-xl font-black italic tracking-tighter">ENTRADA MANUAL</h3>
-                  <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest">Configure sua operação manual com análise de IA</p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setShowManualEntryModal(false);
-                  setManualEntryFields({ symbol: '', side: 'buy', entry_price: '' });
-                  setManualEntryAnalysis(null);
-                }}
-                className="p-2 hover:bg-white/5 rounded-xl transition-all"
-              >
-                <X size={24} className="text-zinc-500" />
-              </button>
-            </div>
-
-            <div className="space-y-4">
-              <div className="space-y-2">
-                <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">Símbolo do Ativo</label>
-                <input
-                  value={manualEntryFields.symbol}
-                  onChange={(e) => handleManualEntryFieldChange('symbol', e.target.value.toUpperCase())}
-                  placeholder="Ex: BTC/USDT, ETH/USDT"
-                  className="w-full bg-black border border-white/10 p-3 rounded-2xl focus:border-green-500 outline-none transition-all text-sm"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">Direção</label>
-                  <select
-                    value={manualEntryFields.side}
-                    onChange={(e) => handleManualEntryFieldChange('side', e.target.value)}
-                    className="w-full bg-black border border-white/10 p-3 rounded-2xl focus:border-green-500 outline-none transition-all text-sm"
-                  >
-                    <option value="buy">COMPRAR (BUY)</option>
-                    <option value="sell">VENDER (SELL)</option>
-                  </select>
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">Preço de Entrada (Opcional)</label>
-                  <input
-                    type="number"
-                    step="any"
-                    value={manualEntryFields.entry_price}
-                    onChange={(e) => handleManualEntryFieldChange('entry_price', e.target.value)}
-                    placeholder="Deixe vazio para usar preço de mercado"
-                    className="w-full bg-black border border-white/10 p-3 rounded-2xl focus:border-green-500 outline-none transition-all text-sm"
-                  />
-                </div>
-              </div>
-
-              {/* Análise de IA */}
-              {manualEntryAnalysis && (
-                <div className="bg-zinc-900/30 border border-white/5 rounded-2xl p-6 space-y-4">
-                  <div className="flex items-center justify-between">
-                    <h4 className="text-sm font-black uppercase tracking-wider text-green-500">📊 Análise de IA</h4>
-                    <span className={`px-3 py-1 rounded-full text-[10px] font-black uppercase ${
-                      manualEntryAnalysis.recommendation === 'EXECUTAR'
-                        ? 'bg-green-500/20 text-green-500 border border-green-500/30'
-                        : 'bg-yellow-500/20 text-yellow-500 border border-yellow-500/30'
-                    }`}>
-                      {manualEntryAnalysis.recommendation}
-                    </span>
-                  </div>
-
-                  <div className="grid grid-cols-3 gap-3">
-                    <div className="bg-black/50 rounded-xl p-3 border border-white/5">
-                      <p className="text-[9px] text-zinc-600 font-black uppercase mb-1">Groq</p>
-                      <p className="text-sm font-bold">{manualEntryAnalysis.ai_analysis?.groq_decision || 'N/A'}</p>
-                    </div>
-                    <div className="bg-black/50 rounded-xl p-3 border border-white/5">
-                      <p className="text-[9px] text-zinc-600 font-black uppercase mb-1">Gemini</p>
-                      <p className="text-sm font-bold">{manualEntryAnalysis.ai_analysis?.gemini_decision || 'N/A'}</p>
-                    </div>
-                    <div className="bg-black/50 rounded-xl p-3 border border-white/5">
-                      <p className="text-[9px] text-zinc-600 font-black uppercase mb-1">Local</p>
-                      <p className="text-sm font-bold">{manualEntryAnalysis.ai_analysis?.local_decision || 'N/A'}</p>
-                    </div>
-                  </div>
-
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <p className="text-[9px] text-zinc-600 font-black uppercase">Confiança IA</p>
-                      <p className="text-sm font-black text-green-500">{manualEntryAnalysis.ai_analysis?.confidence || 0}%</p>
-                    </div>
-                    <div className="w-full h-2 bg-zinc-900 rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-green-500 transition-all duration-500"
-                        style={{ width: `${manualEntryAnalysis.ai_analysis?.confidence || 0}%` }}
-                      />
-                    </div>
-                  </div>
-
-                  <div className="bg-black/50 rounded-xl p-4 border border-white/5">
-                    <p className="text-[9px] text-zinc-600 font-black uppercase mb-2">Motivo</p>
-                    <p className="text-xs text-zinc-300">{manualEntryAnalysis.ai_analysis?.reason || 'N/A'}</p>
-                  </div>
-
-                  {manualEntryAnalysis.tech_data && (
-                    <div className="grid grid-cols-2 gap-3 pt-2">
-                      <div className="bg-black/50 rounded-xl p-3 border border-white/5">
-                        <p className="text-[9px] text-zinc-600 font-black uppercase mb-1">Tendência</p>
-                        <p className="text-sm font-bold">{manualEntryAnalysis.tech_data.trend || 'N/A'}</p>
-                      </div>
-                      <div className="bg-black/50 rounded-xl p-3 border border-white/5">
-                        <p className="text-[9px] text-zinc-600 font-black uppercase mb-1">RSI</p>
-                        <p className="text-sm font-bold">{manualEntryAnalysis.tech_data.rsi || 'N/A'}</p>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              <div className="flex gap-3 pt-2">
-                {!manualEntryAnalysis ? (
-                  <button
-                    type="button"
-                    onClick={handleGetManualEntryAnalysis}
-                    disabled={manualEntryLoading}
-                    className="flex-1 bg-blue-500 hover:bg-blue-600 text-white font-black py-4 rounded-2xl transition-all shadow-lg flex items-center justify-center gap-3 uppercase italic disabled:opacity-50"
-                  >
-                    <Search size={18} />
-                    {manualEntryLoading ? 'Analisando...' : 'Obter Análise IA'}
-                  </button>
-                ) : (
-                  <>
-                    <button
-                      type="button"
-                      onClick={handleExecuteManualEntry}
-                      disabled={manualEntryLoading}
-                      className="flex-1 bg-green-500 hover:bg-green-600 text-black font-black py-4 rounded-2xl transition-all shadow-lg shadow-green-900/30 flex items-center justify-center gap-3 uppercase italic disabled:opacity-50"
-                    >
-                      <Target size={18} />
-                      {manualEntryLoading ? 'Executando...' : 'Executar Entrada'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setManualEntryAnalysis(null)}
-                      className="px-6 py-4 bg-zinc-900/30 border border-white/5 rounded-2xl text-zinc-300 uppercase font-black text-sm hover:bg-zinc-900/50 transition-all"
-                    >
-                      Nova Análise
-                    </button>
-                  </>
-                )}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowManualEntryModal(false);
-                    setManualEntryFields({ symbol: '', side: 'buy', entry_price: '' });
-                    setManualEntryAnalysis(null);
-                  }}
-                  className="px-6 py-4 bg-zinc-900/30 border border-white/5 rounded-2xl text-zinc-300 uppercase font-black text-sm hover:bg-zinc-900/50 transition-all"
-                >
-                  Fechar
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* FOOTER ELITE */}
       <footer className="fixed bottom-0 left-0 right-0 bg-[#0a0b0d]/90 backdrop-blur-md border-t border-white/5 px-10 py-4 flex justify-between items-center z-40">
         <div className="flex gap-10">
@@ -1539,7 +1257,7 @@ const App = () => {
           </div>
           <div className="flex items-center gap-3 text-[10px] font-black text-zinc-500 uppercase tracking-widest italic">
              <ShieldCheck size={14} className="text-zinc-600"/>
-             Protocolo 100/50 — Bybit + Binance
+             Protocolo 100/50 — Bybit
            </div>
          </div>
          <p className="text-[9px] font-black text-zinc-700 uppercase tracking-[0.5em] italic">Motor Sniper v60.7 &copy; 2026</p>
