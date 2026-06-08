@@ -232,6 +232,9 @@ def _normalize_balance_source(value) -> str:
     return raw if raw in _VALID_BALANCE_SOURCES else 'broker_real_balance'
 
 def _is_training_fake_balance_client(client) -> bool:
+    # Regra mandatória: is_testnet=1 roda como simulação local pura (sem rede/exchange).
+    if _resolve_request_is_testnet(client or {}, fallback=False):
+        return True
     return _normalize_balance_source((client or {}).get('balance_source')) == 'training_fake_balance'
 
 def _get_forced_training_fake_balance_usd() -> float:
@@ -265,18 +268,14 @@ class BrokerManager:
         return f"{exchange}_{client_id}_{testnet}"
 
     def _get_broker_class(self, exchange):
-        normalized_exchange = str(exchange or 'bybit').strip().lower()
+        normalized_exchange = 'bybit'
         broker_cls = self._broker_classes.get(normalized_exchange)
         if broker_cls is not None:
             return broker_cls
 
-        if normalized_exchange == 'binance':
-            from src.broker.binance_client import BinanceClient as _BC
-            broker_cls = _BC
-        else:
-            from src.broker.bybit_client import BybitClient as _BybitClient
-            broker_cls = _BybitClient
-            normalized_exchange = 'bybit'
+        from src.broker.bybit_client import BybitClient as _BybitClient
+        broker_cls = _BybitClient
+        normalized_exchange = 'bybit'
 
         self._broker_classes[normalized_exchange] = broker_cls
         return broker_cls
@@ -317,7 +316,7 @@ class BrokerManager:
 
     def get_broker(self, client, testnet):
         client_id = client.get('id')
-        exchange = str(client.get('exchange') or 'bybit').strip().lower()
+        exchange = 'bybit'
         cache_key = self._generate_cache_key(client_id, exchange, testnet)
 
         with self._cache_lock:
@@ -685,22 +684,18 @@ class _NullPublicBroker:
         return None
 
 def _get_active_exchange_names() -> set:
-    exchanges = set()
     for client in _get_registered_clients(active_only=True):
         client_id = int(client.get('id') or 0)
         if _is_training_fake_balance_client(client) or _is_client_temporarily_disabled(client_id):
             continue
         api_key = str(client.get('bybit_key') or '').strip()
         api_secret = str(client.get('bybit_secret') or '').strip()
-        if not api_key or not api_secret:
-            continue
-        exchange = str(client.get('exchange') or 'bybit').strip().lower()
-        if exchange in ('bybit', 'binance'):
-            exchanges.add(exchange)
-    return exchanges
+        if api_key and api_secret:
+            return {'bybit'}
+    return set()
 
 def _get_active_investor_credentials(exchange='bybit'):
-    exchange_name = str(exchange or 'bybit').strip().lower()
+    exchange_name = 'bybit'
     for client in _get_registered_clients(active_only=True):
         client_id = int(client.get('id') or 0)
         if _is_training_fake_balance_client(client) or _is_client_temporarily_disabled(client_id):
@@ -721,7 +716,7 @@ def _get_public_price_broker():
     if not active_exchanges:
         return _NullPublicBroker()
 
-    preferred_exchange = 'bybit' if 'bybit' in active_exchanges else 'binance'
+    preferred_exchange = 'bybit'
     cached_public = public_price_brokers.get(preferred_exchange)
     if cached_public is not None:
         return cached_public
@@ -735,14 +730,10 @@ def _get_public_price_broker():
         if not api_key or not api_secret:
             return _NullPublicBroker()
 
-        if preferred_exchange == 'binance':
-            from src.broker.binance_client import BinanceClient as _BinanceClient
-            public_price_broker = _BinanceClient(api_key, api_secret, testnet=ENV_CONFIG.use_testnet)
-        else:
-            if BybitClient is None:
-                from src.broker.bybit_client import BybitClient as _BybitClient
-                BybitClient = _BybitClient
-            public_price_broker = BybitClient(api_key, api_secret, testnet=ENV_CONFIG.use_testnet)
+        if BybitClient is None:
+            from src.broker.bybit_client import BybitClient as _BybitClient
+            BybitClient = _BybitClient
+        public_price_broker = BybitClient(api_key, api_secret, testnet=ENV_CONFIG.use_testnet)
 
         public_price_brokers[preferred_exchange] = public_price_broker
         _get_broker_manager().prune_unused(
@@ -777,7 +768,9 @@ def _ensure_broker_class(exchange='bybit'):
     return _get_broker_manager()._get_broker_class(exchange)
 
 def _make_broker(client):
-    exchange = str(client.get('exchange') or 'bybit').strip().lower()
+    if _is_training_fake_balance_client(client):
+        raise RuntimeError("Cliente em modo TESTE local não deve instanciar exchange")
+    exchange = 'bybit'
     use_testnet = _resolve_request_is_testnet(client, fallback=False)
     _ensure_broker_class(exchange)
     return _get_broker_manager().get_broker(client, use_testnet)
@@ -798,6 +791,7 @@ def _save_client_everywhere(client_data):
     payload['account_mode'] = 'real'
     payload['is_testnet'] = _resolve_request_is_testnet(payload, fallback=False)
     payload['balance_source'] = _normalize_balance_source(payload.get('balance_source'))
+    payload['exchange'] = 'bybit'
     res = db.upsert_client_local(payload) if payload.get('id') is not None else db.add_client(payload)
     client_balance_cache.clear()
     return _get_registered_client_by_id(payload.get('id') or res), False, bool(res)
@@ -810,6 +804,23 @@ def _delete_client_everywhere(client_id):
     public_price_brokers.clear()
     gc.collect()
     return True, db.delete_client(client_id)
+
+
+def _delete_client_sqlite_fast(client_id: int) -> bool:
+    """
+    DELETE blindado com conexão curta e timeout de 30s.
+    """
+    try:
+        db_path = getattr(db, 'DB_PATH', '/data/database.db')
+        with sqlite3.connect(db_path, timeout=30.0, check_same_thread=False) as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM trades WHERE client_id = ?", (int(client_id),))
+            cur.execute("DELETE FROM clientes_sniper WHERE id = ?", (int(client_id),))
+            conn.commit()
+        return True
+    except Exception as del_err:
+        print(f"⚠️ [DELETE INVESTIDOR] Falha ao remover ID {client_id}: {del_err}", flush=True)
+        return False
 
 def _fetch_active_client_balances(force=False):
     global _balance_refresh_in_progress
@@ -1097,6 +1108,8 @@ def _monitor_financial_stop_loss():
 
                     broker = _make_broker(cliente)
                     exchange_name = str(cliente.get('exchange') or 'bybit').strip().lower()
+                    if exchange_name != 'bybit':
+                        continue
                     positions_list = []
 
                     try:
@@ -1113,26 +1126,6 @@ def _monitor_financial_stop_loss():
                                 continue
 
                             positions_list = (positions_response.get('result') or {}).get('list', [])
-                        elif exchange_name == 'binance':
-                            if not getattr(broker, 'exchange', None):
-                                continue
-                            fetched = broker.exchange.fetch_positions(params={'type': 'future'}) or []
-                            for p in fetched:
-                                size = abs(float(p.get('contracts') or p.get('positionAmt') or p.get('size') or 0))
-                                if size <= 0:
-                                    continue
-                                side_raw = str(p.get('side') or p.get('positionSide') or '').lower()
-                                if not side_raw:
-                                    side_raw = 'buy' if float(p.get('contracts') or 0) > 0 else 'sell'
-                                positions_list.append({
-                                    'symbol': p.get('symbol') or '',
-                                    'size': size,
-                                    'side': side_raw,
-                                    'unrealisedPnl': p.get('unrealizedPnl') or p.get('unrealizedProfit') or 0,
-                                    'avgPrice': p.get('entryPrice') or p.get('avgPrice') or 0,
-                                    'markPrice': p.get('markPrice') or p.get('lastPrice') or 0,
-                                    'leverage': p.get('leverage') or ALAVANCAGEM,
-                                })
                         else:
                             continue
 
@@ -1374,6 +1367,8 @@ def _monitor_dashboard_positions():
                 try:
                     client_id = int(cliente.get('id') or 0)
                     exchange_name = str(cliente.get('exchange') or 'bybit').strip().lower()
+                    if exchange_name != 'bybit':
+                        continue
                     if _is_training_fake_balance_client(cliente):
                         fake = _get_forced_training_fake_balance_usd()
                         total_wallet_balance += float(fake)
@@ -1413,152 +1408,96 @@ def _monitor_dashboard_positions():
                             print(f"   ⚠️ [DASHBOARD] Cliente {cliente.get('nome')} sem autenticação ativa", flush=True)
                         continue
 
-                    # 1️⃣/2️⃣ PROCESSAMENTO ESTRITAMENTE SEPARADO POR CORRETORA
-                    if exchange_name == 'bybit':
-                        if not getattr(broker, 'pybit_session', None):
-                            fake = _get_training_fake_balance_usd()
-                            if fake is not None:
-                                total_wallet_balance += float(fake)
-                            print(f"   ⚠️ [DASHBOARD] {cliente.get('nome')}: sessão Bybit indisponível", flush=True)
-                            continue
+                    # 1️⃣/2️⃣ PROCESSAMENTO ESTRITAMENTE BYBIT
+                    if not getattr(broker, 'pybit_session', None):
+                        fake = _get_training_fake_balance_usd()
+                        if fake is not None:
+                            total_wallet_balance += float(fake)
+                        print(f"   ⚠️ [DASHBOARD] {cliente.get('nome')}: sessão Bybit indisponível", flush=True)
+                        continue
 
-                        # BYBIT - saldo
-                        try:
-                            client_balance_added = False
-                            wallet_response = broker.pybit_session.get_wallet_balance(accountType='UNIFIED')
-                            ok, err = broker._handle_v5_ret_code(wallet_response, 'get_wallet_balance')
+                    # BYBIT - saldo
+                    try:
+                        client_balance_added = False
+                        wallet_response = broker.pybit_session.get_wallet_balance(accountType='UNIFIED')
+                        ok, err = broker._handle_v5_ret_code(wallet_response, 'get_wallet_balance')
 
-                            if ok:
-                                result = wallet_response.get('result', {})
-                                wallet_list = result.get('list', [])
-                                if wallet_list:
-                                    wallet_data = wallet_list[0]
-                                    for coin in wallet_data.get('coin', []):
-                                        if coin.get('coin') == 'USDT':
-                                            wallet_balance = float(coin.get('walletBalance') or coin.get('equity') or 0)
-                                            total_wallet_balance += wallet_balance
-                                            client_balance_added = True
-                                            print(f"   💰 [DASHBOARD] {cliente.get('nome')}: ${wallet_balance:.2f} USDT", flush=True)
-                                            break
-                            else:
-                                print(f"   ⚠️ [DASHBOARD] Erro ao buscar saldo de {cliente.get('nome')}: {err}", flush=True)
-                                code = _extract_bybit_ret_code_from_error(err)
-                                if not client_balance_added and str(code or '') == '10003':
-                                    _handle_invalid_api_key_10003_for_client(cliente, source_label='DASHBOARD:get_wallet_balance')
-                                    fake = _get_training_fake_balance_usd()
-                                    if fake is not None:
-                                        total_wallet_balance += float(fake)
-                                        print(
-                                            f"   🧪 [DASHBOARD] {cliente.get('nome')}: saldo fictício aplicado após erro 10003 (${float(fake):.2f} USDT)",
-                                            flush=True,
-                                        )
-                        except Exception as wallet_err:
-                            print(f"   ⚠️ [DASHBOARD] Exceção ao buscar saldo Bybit: {wallet_err}", flush=True)
-                            code = _extract_bybit_ret_code_from_error(wallet_err)
-                            if str(code or '') == '10003':
-                                _handle_invalid_api_key_10003_for_client(cliente, source_label='DASHBOARD:get_wallet_balance:exception')
+                        if ok:
+                            result = wallet_response.get('result', {})
+                            wallet_list = result.get('list', [])
+                            if wallet_list:
+                                wallet_data = wallet_list[0]
+                                for coin in wallet_data.get('coin', []):
+                                    if coin.get('coin') == 'USDT':
+                                        wallet_balance = float(coin.get('walletBalance') or coin.get('equity') or 0)
+                                        total_wallet_balance += wallet_balance
+                                        client_balance_added = True
+                                        print(f"   💰 [DASHBOARD] {cliente.get('nome')}: ${wallet_balance:.2f} USDT", flush=True)
+                                        break
+                        else:
+                            print(f"   ⚠️ [DASHBOARD] Erro ao buscar saldo de {cliente.get('nome')}: {err}", flush=True)
+                            code = _extract_bybit_ret_code_from_error(err)
+                            if not client_balance_added and str(code or '') == '10003':
+                                _handle_invalid_api_key_10003_for_client(cliente, source_label='DASHBOARD:get_wallet_balance')
                                 fake = _get_training_fake_balance_usd()
                                 if fake is not None:
                                     total_wallet_balance += float(fake)
                                     print(
-                                        f"   🧪 [DASHBOARD] {cliente.get('nome')}: saldo fictício aplicado após exceção 10003 (${float(fake):.2f} USDT)",
+                                        f"   🧪 [DASHBOARD] {cliente.get('nome')}: saldo fictício aplicado após erro 10003 (${float(fake):.2f} USDT)",
                                         flush=True,
                                     )
+                    except Exception as wallet_err:
+                        print(f"   ⚠️ [DASHBOARD] Exceção ao buscar saldo Bybit: {wallet_err}", flush=True)
+                        code = _extract_bybit_ret_code_from_error(wallet_err)
+                        if str(code or '') == '10003':
+                            _handle_invalid_api_key_10003_for_client(cliente, source_label='DASHBOARD:get_wallet_balance:exception')
+                            fake = _get_training_fake_balance_usd()
+                            if fake is not None:
+                                total_wallet_balance += float(fake)
+                                print(
+                                    f"   🧪 [DASHBOARD] {cliente.get('nome')}: saldo fictício aplicado após exceção 10003 (${float(fake):.2f} USDT)",
+                                    flush=True,
+                                )
 
-                        # BYBIT - posições
-                        try:
-                            positions_response = broker.pybit_session.get_positions(
-                                category='linear',
-                                settleCoin='USDT'
-                            )
-                            ok, err = broker._handle_v5_ret_code(positions_response, 'get_positions')
-                            if not ok:
-                                print(f"   ⚠️ [DASHBOARD] Erro ao buscar posições de {cliente.get('nome')}: {err}", flush=True)
+                    # BYBIT - posições
+                    try:
+                        positions_response = broker.pybit_session.get_positions(
+                            category='linear',
+                            settleCoin='USDT'
+                        )
+                        ok, err = broker._handle_v5_ret_code(positions_response, 'get_positions')
+                        if not ok:
+                            print(f"   ⚠️ [DASHBOARD] Erro ao buscar posições de {cliente.get('nome')}: {err}", flush=True)
+                            continue
+
+                        positions_list = (positions_response.get('result') or {}).get('list', [])
+                        for pos in positions_list:
+                            try:
+                                symbol = pos.get('symbol', '')
+                                size = float(pos.get('size') or 0)
+                                side = str(pos.get('side', '')).lower()
+                                entry_price = float(pos.get('avgPrice') or 0)
+                                unrealised_pnl = float(pos.get('unrealisedPnl') or 0)
+                                leverage = float(pos.get('leverage') or ALAVANCAGEM)
+                                if size <= 0:
+                                    continue
+                                side_normalized = 'COMPRAR' if side in ('buy', 'long') else 'VENDER'
+                                all_positions.append({
+                                    'client_id': cliente.get('id'),
+                                    'client_nome': cliente.get('nome'),
+                                    'symbol': symbol,
+                                    'side': side_normalized,
+                                    'size': size,
+                                    'entry_price': entry_price,
+                                    'unrealised_pnl': unrealised_pnl,
+                                    'leverage': leverage
+                                })
+                                print(f"   📊 [DASHBOARD] {symbol}: {side_normalized} | Size: {size} | Entry: ${entry_price:.4f} | PnL: ${unrealised_pnl:.2f}", flush=True)
+                            except Exception as pos_parse_err:
+                                print(f"   ⚠️ [DASHBOARD] Erro ao processar posição Bybit: {pos_parse_err}", flush=True)
                                 continue
-
-                            positions_list = (positions_response.get('result') or {}).get('list', [])
-                            for pos in positions_list:
-                                try:
-                                    symbol = pos.get('symbol', '')
-                                    size = float(pos.get('size') or 0)
-                                    side = str(pos.get('side', '')).lower()
-                                    entry_price = float(pos.get('avgPrice') or 0)
-                                    unrealised_pnl = float(pos.get('unrealisedPnl') or 0)
-                                    leverage = float(pos.get('leverage') or ALAVANCAGEM)
-                                    if size <= 0:
-                                        continue
-                                    side_normalized = 'COMPRAR' if side in ('buy', 'long') else 'VENDER'
-                                    all_positions.append({
-                                        'client_id': cliente.get('id'),
-                                        'client_nome': cliente.get('nome'),
-                                        'symbol': symbol,
-                                        'side': side_normalized,
-                                        'size': size,
-                                        'entry_price': entry_price,
-                                        'unrealised_pnl': unrealised_pnl,
-                                        'leverage': leverage
-                                    })
-                                    print(f"   📊 [DASHBOARD] {symbol}: {side_normalized} | Size: {size} | Entry: ${entry_price:.4f} | PnL: ${unrealised_pnl:.2f}", flush=True)
-                                except Exception as pos_parse_err:
-                                    print(f"   ⚠️ [DASHBOARD] Erro ao processar posição Bybit: {pos_parse_err}", flush=True)
-                                    continue
-                        except Exception as fetch_pos_err:
-                            print(f"   ⚠️ [DASHBOARD] Erro ao buscar posições Bybit: {fetch_pos_err}", flush=True)
-                            continue
-
-                    elif exchange_name == 'binance':
-                        # BINANCE - saldo (CCXT nativo)
-                        try:
-                            wallet_balance = broker.get_balance()
-                            if wallet_balance is not None:
-                                total_wallet_balance += float(wallet_balance)
-                                print(f"   💰 [DASHBOARD] {cliente.get('nome')} (Binance): ${float(wallet_balance):.2f} USDT", flush=True)
-                            else:
-                                print(f"   ⚠️ [DASHBOARD] Saldo Binance indisponível para {cliente.get('nome')}", flush=True)
-                        except Exception as wallet_err:
-                            print(f"   ⚠️ [DASHBOARD] Exceção ao buscar saldo Binance: {wallet_err}", flush=True)
-
-                        # BINANCE - posições (CCXT nativo, sem pybit_session)
-                        try:
-                            positions_response = broker.exchange.fetch_positions(params={'type': 'future'})
-                            positions_list = positions_response if isinstance(positions_response, list) else []
-                            for pos in positions_list:
-                                try:
-                                    info = pos.get('info') or {}
-                                    symbol = str(pos.get('symbol') or info.get('symbol') or '').strip()
-                                    raw_size = pos.get('contracts')
-                                    if raw_size is None:
-                                        raw_size = info.get('positionAmt')
-                                    size = abs(float(raw_size or 0))
-                                    if size <= 0:
-                                        continue
-                                    side = str(pos.get('side') or '').lower()
-                                    if not side:
-                                        side = 'long' if float(raw_size or 0) > 0 else 'short'
-                                    entry_price = float(pos.get('entryPrice') or info.get('entryPrice') or 0)
-                                    unrealised_pnl = float(pos.get('unrealizedPnl') or info.get('unRealizedProfit') or 0)
-                                    leverage = float(pos.get('leverage') or info.get('leverage') or ALAVANCAGEM)
-                                    side_normalized = 'COMPRAR' if side in ('buy', 'long') else 'VENDER'
-                                    all_positions.append({
-                                        'client_id': cliente.get('id'),
-                                        'client_nome': cliente.get('nome'),
-                                        'symbol': symbol,
-                                        'side': side_normalized,
-                                        'size': size,
-                                        'entry_price': entry_price,
-                                        'unrealised_pnl': unrealised_pnl,
-                                        'leverage': leverage
-                                    })
-                                    print(f"   📊 [DASHBOARD BINANCE] {symbol}: {side_normalized} | Size: {size} | Entry: ${entry_price:.4f} | PnL: ${unrealised_pnl:.2f}", flush=True)
-                                except Exception as pos_parse_err:
-                                    print(f"   ⚠️ [DASHBOARD] Erro ao processar posição Binance: {pos_parse_err}", flush=True)
-                                    continue
-                        except Exception as fetch_pos_err:
-                            print(f"   ⚠️ [DASHBOARD] Erro ao buscar posições Binance: {fetch_pos_err}", flush=True)
-                            continue
-
-                    else:
-                        print(f"   ⚠️ [DASHBOARD] Corretora não suportada para {cliente.get('nome')}: {exchange_name}", flush=True)
+                    except Exception as fetch_pos_err:
+                        print(f"   ⚠️ [DASHBOARD] Erro ao buscar posições Bybit: {fetch_pos_err}", flush=True)
                         continue
 
                 except Exception as client_err:
@@ -2208,7 +2147,7 @@ def get_investidores():
                 "auth_disabled": _is_client_temporarily_disabled(client_id),
                 "auth_disabled_reason": _get_client_disable_reason(client_id),
                 "storage_source": "local",
-                "exchange": str(r.get('exchange') or 'bybit').lower(),
+                "exchange": "bybit",
             })
         return jsonify(payload), 200
     except Exception: return jsonify([]), 200
@@ -2233,6 +2172,7 @@ def api_investidores_alternar_modo():
         updated['is_testnet'] = 1 if is_teste else 0
         updated['account_mode'] = 'real'
         updated['status'] = 'ativo'
+        updated['exchange'] = 'bybit'
         updated['balance_source'] = 'training_fake_balance' if is_teste else 'broker_real_balance'
         if is_teste:
             updated['saldo_base'] = round(float(_get_forced_training_fake_balance_usd()), 2)
@@ -2319,8 +2259,20 @@ def api_cliente_manage(client_id):
                 "client": v.get('record')
             }), (200 if is_valid else 400)
         elif request.method == 'DELETE':
-            return jsonify({"success": _delete_client_everywhere(client_id)[1]})
-    except Exception as e: return jsonify({"error": str(e)}), 400
+            # Remoção local blindada para evitar deadlock e travamento do frontend.
+            _get_broker_manager().invalidate_client(client_id)
+            with _CLIENT_AUTH_LOCK:
+                _CLIENT_AUTH_RUNTIME.pop(int(client_id), None)
+            client_balance_cache.clear()
+            public_price_brokers.clear()
+            success = _delete_client_sqlite_fast(client_id)
+            return jsonify({
+                "success": bool(success),
+                "status": "ok" if success else "error",
+                "client_id": int(client_id),
+            }), 200
+    except Exception as e:
+        return jsonify({"success": False, "status": "error", "error": str(e), "client_id": int(client_id)}), 200
 
 @app.route('/api/cliente/<int:client_id>/balance-source', methods=['POST'])
 def api_cliente_balance_source(client_id):
@@ -2344,32 +2296,10 @@ def api_cliente_balance_source(client_id):
 
 @app.route('/api/trade/manual-entry', methods=['POST'])
 def api_manual_entry_trade():
-    try:
-        data = request.json or {}
-        symbol, side, force_execute = data.get('symbol', '').strip(), data.get('side', '').strip().upper(), data.get('force_execute', False)
-        if not symbol or side not in ['BUY', 'SELL', 'COMPRAR', 'VENDER']: return jsonify({"success": False, "error": "Parâmetros inválidos"}), 400
-        side_normalized = 'COMPRAR' if side in ['BUY', 'COMPRAR'] else 'VENDER'
-        pub_broker = _get_public_price_broker()
-        entry_price = float(pub_broker.get_last_price(symbol))
-        
-        global IndicatorEngine, GroqValidator
-        from src.engine.indicators import IndicatorEngine
-        from src.ai_brain.validator import GroqValidator
-
-        if force_execute:
-            if not _reserve_signal_slot(symbol): return jsonify({"success": False, "error": "Limite atingido"}), 409
-            try:
-                db.record_trade(1, symbol, side_normalized, 0, 10, time.strftime("%d/%m %H:%M"), "ENTRADA MANUAL", "open", entry_price)
-                _sync_active_trades_from_db()
-                threading.Thread(target=_process_client_orders_background, args=(symbol, side_normalized, entry_price, 70, "Manual"), daemon=True).start()
-                return jsonify({"success": True, "message": "Ordem manual enviada"}), 200
-            finally: _release_signal_slot(symbol)
-        
-        df = pub_broker.fetch_ohlcv(symbol, timeframe='15m')
-        tech_data = IndicatorEngine(df).get_signals() if df is not None and len(df) >= 200 else {'trend': 'ALTA', 'price': entry_price, 'sma_200': entry_price}
-        ai_result = GroqValidator().consensus_predict(tech_data, symbol, force_local_only=True)
-        return jsonify({"success": True, "analysis_only": True, "symbol": symbol, "side": side_normalized, "entry_price": entry_price, "ai_analysis": {"confidence": ai_result.get('probabilidade', 70), "reason": ai_result.get('motivo', 'Aprovado')}}), 200
-    except Exception as e: return jsonify({"success": False, "error": str(e)}), 400
+    return jsonify({
+        "success": False,
+        "error": "Entrada manual desativada nesta versão (Bybit-only sem teste manual)."
+    }), 410
 
 @app.route('/api/trade/manual-close', methods=['POST'])
 def api_manual_close_trade():
@@ -2606,13 +2536,32 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
     final_is_testnet = requested_is_testnet
     payload['account_mode'], payload['is_testnet'] = 'real', final_is_testnet
     payload['balance_source'] = _normalize_balance_source(payload.get('balance_source'))
-    payload['exchange'] = str(payload.get('exchange') or 'bybit').strip().lower()
+    payload['exchange'] = 'bybit'
     if client_id is not None: payload['id'] = client_id
     if api_key: payload['bybit_key'] = api_key
     if api_secret: payload['bybit_secret'] = api_secret
     if existing_client is not None and 'nome' not in payload: payload['nome'] = existing_client.get('nome')
 
     try:
+        # Versão de simulação local pura: TESTE não depende de API externa.
+        if final_is_testnet:
+            fake = float(payload.get('saldo_base') or 0) or _get_forced_training_fake_balance_usd()
+            payload['saldo_base'] = round(float(fake), 2)
+            payload['status'] = 'ativo'
+            payload['balance_source'] = 'training_fake_balance'
+            record, _, local_synced = _save_client_everywhere(payload)
+            return {
+                'valid': True,
+                'msg': 'Modo TESTE local ativo (simulação sem conexão de exchange).',
+                'record': record,
+                'synced_to_local': local_synced,
+                'balance': payload['saldo_base'],
+                'account_mode': 'real',
+                'exchange': payload['exchange'],
+                'balance_source': payload.get('balance_source'),
+                'is_testnet': final_is_testnet,
+            }
+
         if payload.get('balance_source') == 'training_fake_balance':
             fake = float(payload.get('saldo_base') or 0) or _get_forced_training_fake_balance_usd()
             payload['saldo_base'] = round(float(fake), 2)
