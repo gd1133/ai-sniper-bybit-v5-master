@@ -351,21 +351,44 @@ const App = () => {
   const toggleInvestorBalanceSource = async (inv) => {
     if (!inv?.id) return;
     const current = String(inv.balance_source || 'broker_real_balance');
-    const next = current === 'training_fake_balance' ? 'broker_real_balance' : 'training_fake_balance';
+    const novoModo = current === 'training_fake_balance' ? 'real' : 'teste';
+    const previous = normalizeInvestorRecord(inv);
+    const simulatedBalance = Number(import.meta.env.VITE_TRAINING_FAKE_BALANCE_USD || 500);
+
+    // Atualização otimista: alterna instantaneamente no card.
+    setInvestidores(prev => prev.map(item => {
+      if (item.id !== inv.id) return item;
+      const patched = {
+        ...item,
+        status: 'ativo',
+        is_testnet: novoModo === 'teste',
+        balance_source: novoModo === 'teste' ? 'training_fake_balance' : 'broker_real_balance',
+        is_fake_balance: novoModo === 'teste',
+        saldo_real: novoModo === 'teste' ? simulatedBalance : item.saldo_real,
+        banca: novoModo === 'teste' ? simulatedBalance : item.banca,
+      };
+      return normalizeInvestorRecord(patched);
+    }));
+
     try {
-      const res = await fetch(`${API_BASE}/api/cliente/${inv.id}/balance-source`, {
+      const res = await fetch(`${API_BASE}/api/investidores/alternar_modo`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ balance_source: next }),
+        body: JSON.stringify({ investidor_id: inv.id, novo_modo: novoModo }),
       });
       const json = await res.json();
       if (!res.ok || !json.success) {
+        // Reverte caso backend recuse.
+        setInvestidores(prev => prev.map(item => (item.id === inv.id ? previous : item)));
         alert(json.error || 'Erro ao alternar fonte de saldo');
         return;
       }
       if (json.client) upsertInvestor(json.client);
+      // Snapshot rápido para sincronizar cards de saldo/status.
+      await refreshStatusSnapshot();
     } catch (e) {
       console.error(e);
+      setInvestidores(prev => prev.map(item => (item.id === inv.id ? previous : item)));
       alert('Erro ao conectar com o servidor');
     }
   };
@@ -1086,9 +1109,9 @@ const App = () => {
                             type="button"
                             onClick={() => toggleInvestorBalanceSource(inv)}
                             className={`px-3 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest transition-all ${String(inv.balance_source || 'broker_real_balance') === 'training_fake_balance' ? 'bg-purple-500/15 border-purple-500/40 text-purple-200 hover:bg-purple-500/20' : 'bg-green-500/10 border-green-500/30 text-green-400 hover:bg-green-500/15'}`}
-                            title="Alternar fonte de saldo (Real/Teste)"
+                            title="Alternar modo rápido (REAL/TESTE)"
                           >
-                            {String(inv.balance_source || 'broker_real_balance') === 'training_fake_balance' ? '🧪 Saldo Teste' : '💰 Saldo Real'}
+                            {String(inv.balance_source || 'broker_real_balance') === 'training_fake_balance' ? '🧪 SALDO TESTE' : '💰 SALDO REAL'}
                           </button>
                           {inv.auth_disabled ? (
                             <span className="px-3 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest bg-red-500/10 border-red-500/30 text-red-300">

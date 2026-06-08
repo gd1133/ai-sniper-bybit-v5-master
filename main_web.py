@@ -2138,6 +2138,51 @@ def get_investidores():
         return jsonify(payload), 200
     except Exception: return jsonify([]), 200
 
+@app.route('/api/investidores/alternar_modo', methods=['POST'])
+def api_investidores_alternar_modo():
+    try:
+        data = request.json or {}
+        investor_id = int(data.get('investidor_id') or data.get('investor_id') or data.get('id') or 0)
+        novo_modo = str(data.get('novo_modo') or data.get('mode') or '').strip().lower()
+        if investor_id <= 0:
+            return jsonify({"success": False, "error": "investidor_id inválido"}), 400
+        if novo_modo not in ('real', 'teste'):
+            return jsonify({"success": False, "error": "novo_modo deve ser 'real' ou 'teste'"}), 400
+
+        existing = _get_registered_client_by_id(investor_id)
+        if not existing:
+            return jsonify({"success": False, "error": "Investidor não encontrado"}), 404
+
+        updated = dict(existing)
+        is_teste = (novo_modo == 'teste')
+        updated['is_testnet'] = 1 if is_teste else 0
+        updated['account_mode'] = 'real'
+        updated['status'] = 'ativo'
+        updated['balance_source'] = 'training_fake_balance' if is_teste else 'broker_real_balance'
+        if is_teste:
+            updated['saldo_base'] = round(float(_get_forced_training_fake_balance_usd()), 2)
+
+        ok = db.update_client(investor_id, updated)
+        if not ok:
+            return jsonify({"success": False, "error": "Falha ao atualizar modo do investidor"}), 500
+
+        # Limpa cache/runtime deste cliente para sincronizar monitor na próxima varredura.
+        client_balance_cache.clear()
+        _get_broker_manager().invalidate_client(investor_id)
+        with _CLIENT_AUTH_LOCK:
+            _CLIENT_AUTH_RUNTIME.pop(int(investor_id), None)
+
+        return jsonify({
+            "success": True,
+            "status": "ok",
+            "investidor_id": investor_id,
+            "novo_modo": novo_modo,
+            "is_testnet": bool(updated.get('is_testnet')),
+            "client": _get_registered_client_by_id(investor_id),
+        }), 200
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
 @app.route('/api/vincular_cliente', methods=['POST'])
 def add_cliente():
     data = request.json or {}
