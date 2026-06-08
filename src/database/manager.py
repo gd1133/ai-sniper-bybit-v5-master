@@ -130,6 +130,15 @@ def _connect():
         return conn
 
 
+def _force_runtime_failover(reason: str = ''):
+    """Força failover do runtime DB para o caminho de fallback."""
+    try:
+        os.makedirs(os.path.dirname(FALLBACK_DB_PATH), exist_ok=True)
+    except Exception:
+        pass
+    _set_runtime_db_path(FALLBACK_DB_PATH, reason=reason or "forced failover")
+
+
 def _ensure_column(cur, table: str, column: str, definition: str):
     cur.execute(f"PRAGMA table_info({table})")
     columns = {row[1] for row in cur.fetchall()}
@@ -241,7 +250,7 @@ def init_db():
         print(f"⚠️ [DATABASE] Aviso ao inicializar trade_history: {th_err}")
 
 
-def get_active_clients() -> List[Dict[str, Any]]:
+def get_active_clients(_retry_on_disk_io: bool = True) -> List[Dict[str, Any]]:
     """Retorna apenas clientes cadastrados com status ativo"""
     conn = None
     try:
@@ -250,6 +259,12 @@ def get_active_clients() -> List[Dict[str, Any]]:
         cur.execute("SELECT * FROM clientes_sniper WHERE status='ativo' ORDER BY created_at DESC")
         rows = cur.fetchall()
         return [dict(r) for r in rows]
+    except sqlite3.OperationalError as e:
+        if _retry_on_disk_io and _is_disk_io_error(e):
+            _force_runtime_failover(reason=f"disk I/O em get_active_clients: {e}")
+            return get_active_clients(_retry_on_disk_io=False)
+        print(f"⚠️ Erro ao buscar clientes ativos: {e}")
+        return []
     except Exception as e:
         print(f"⚠️ Erro ao buscar clientes ativos: {e}")
         return []
@@ -261,7 +276,7 @@ def get_active_clients() -> List[Dict[str, Any]]:
             pass
 
 
-def get_all_clients() -> List[Dict[str, Any]]:
+def get_all_clients(_retry_on_disk_io: bool = True) -> List[Dict[str, Any]]:
     """Retorna todos os clientes cadastrados"""
     conn = None
     try:
@@ -270,6 +285,12 @@ def get_all_clients() -> List[Dict[str, Any]]:
         cur.execute("SELECT * FROM clientes_sniper ORDER BY created_at DESC")
         rows = cur.fetchall()
         return [dict(r) for r in rows]
+    except sqlite3.OperationalError as e:
+        if _retry_on_disk_io and _is_disk_io_error(e):
+            _force_runtime_failover(reason=f"disk I/O em get_all_clients: {e}")
+            return get_all_clients(_retry_on_disk_io=False)
+        print(f"⚠️ Erro ao buscar clientes: {e}")
+        return []
     except Exception as e:
         print(f"⚠️ Erro ao buscar clientes: {e}")
         return []
@@ -281,7 +302,7 @@ def get_all_clients() -> List[Dict[str, Any]]:
             pass
 
 
-def add_client(data: Dict[str, Any]):
+def add_client(data: Dict[str, Any], _retry_on_disk_io: bool = True):
     """Adiciona ou espelha um cliente localmente. Retorna o id persistido."""
     conn = None
     try:
@@ -335,6 +356,15 @@ def add_client(data: Dict[str, Any]):
         conn = None
         print(f"✅ [DATABASE] add_client: Cliente inserido com sucesso! ID: {inserted_id}")
         return inserted_id
+    except sqlite3.OperationalError as e:
+        if _retry_on_disk_io and _is_disk_io_error(e):
+            print(f"⚠️ [DATABASE] add_client detectou disk I/O; acionando failover e retry único...", flush=True)
+            _force_runtime_failover(reason=f"disk I/O em add_client: {e}")
+            return add_client(data, _retry_on_disk_io=False)
+        print(f"❌ [DATABASE] add_client: Erro ao adicionar cliente: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
     except Exception as e:
         print(f"❌ [DATABASE] add_client: Erro ao adicionar cliente: {e}")
         import traceback

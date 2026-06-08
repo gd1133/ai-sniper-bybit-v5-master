@@ -489,6 +489,18 @@ def _get_live_market_price(symbol, *, preferred_price=0.0):
         _remember_last_price(normalized, live_price)
         return live_price
 
+    # Prioriza broker público sem credenciais (mainnet) para evitar retCode 10003
+    # em ambiente com clientes inválidos misturados no cache.
+    try:
+        radar_broker = _get_public_radar_broker_mainnet()
+        if radar_broker is not None:
+            live_price = float(radar_broker.get_last_price(normalized) or 0.0)
+            if live_price > 0:
+                _remember_last_price(normalized, live_price)
+                return live_price
+    except Exception:
+        pass
+
     try:
         pub_broker = _get_public_price_broker()
         live_price = float(pub_broker.get_last_price(normalized) or 0.0)
@@ -652,7 +664,12 @@ def _sanitize_signal_payload(raw_data):
     side_raw = str(data.get('side') or data.get('decision') or '').strip().upper()
     side = 'COMPRAR' if side_raw in ('BUY', 'LONG', 'COMPRAR') else 'VENDER'
     entry_price = _coerce_float(data.get('entry_price'), data.get('price'), default=0.0)
-    if entry_price <= 0: entry_price = _coerce_float(_get_public_price_broker().get_last_price(symbol), default=0.0)
+    if entry_price <= 0:
+        radar_broker = _get_public_radar_broker_mainnet()
+        if radar_broker is not None:
+            entry_price = _coerce_float(radar_broker.get_last_price(symbol), default=0.0)
+        if entry_price <= 0:
+            entry_price = _coerce_float(_get_public_price_broker().get_last_price(symbol), default=0.0)
     return {'symbol': symbol, 'side': side, 'entry_price': round(entry_price, 8), 'confidence': max(0.0, min(100.0, _coerce_float(data.get('confidence'), default=70.0))), 'reason': str(data.get('reason') or 'Sinal').strip()}
 
 def _build_last_sniper_signal(symbol, side, entry_price, confidence, reason):
