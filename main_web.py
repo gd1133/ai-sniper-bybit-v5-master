@@ -1119,6 +1119,59 @@ def _monitor_financial_stop_loss():
                 try:
                     client_id = int(cliente.get('id') or 0)
                     if _is_training_fake_balance_client(cliente):
+                        try:
+                            open_trades = [
+                                t for t in db.get_open_trades(limit=200)
+                                if int(t.get('client_id') or 0) == client_id
+                            ]
+                            for trade in open_trades:
+                                symbol = _canonicalize_symbol(trade.get('pair') or '')
+                                if not symbol:
+                                    continue
+                                entry_price = _coerce_float(trade.get('entry_price'), default=0.0)
+                                qty = _coerce_float(trade.get('quantity'), default=0.0)
+                                if entry_price <= 0 or qty <= 0:
+                                    continue
+                                side = _normalize_position_side(trade.get('side') or '')
+                                current_price = _coerce_float(_get_live_market_price(symbol, preferred_price=entry_price), default=0.0)
+                                if current_price <= 0:
+                                    continue
+                                if side == 'sell':
+                                    unrealised_pnl = (entry_price - current_price) * qty
+                                else:
+                                    unrealised_pnl = (current_price - entry_price) * qty
+
+                                print(
+                                    f"   📊 [MONITOR PAPER] {symbol} | Qty: {qty} | unrealisedPnl: ${unrealised_pnl:.2f} | "
+                                    f"TP: +${alvo_lucro:.2f} | SL: ${alvo_perda:.2f}",
+                                    flush=True
+                                )
+
+                                motivo_fechamento = None
+                                if unrealised_pnl >= alvo_lucro:
+                                    motivo_fechamento = "TAKE_PROFIT_PAPER"
+                                elif unrealised_pnl <= alvo_perda:
+                                    motivo_fechamento = "STOP_LOSS_PAPER"
+
+                                if motivo_fechamento:
+                                    db.close_trade(
+                                        trade_id=int(trade.get('id') or 0),
+                                        pnl_pct=0.0,
+                                        profit=round(unrealised_pnl, 2),
+                                        exit_price=current_price,
+                                        closed_at=time.strftime("%d/%m %H:%M"),
+                                        notes=f"PAPER_AUTO_CLOSE | {motivo_fechamento}",
+                                        entry_price=entry_price,
+                                        quantity=qty,
+                                        side=str(trade.get('side') or ''),
+                                    )
+                                    print(
+                                        f"   ✅ [PAPER CLOSE] {symbol} encerrada ({motivo_fechamento}) com PnL ${unrealised_pnl:.2f}",
+                                        flush=True
+                                    )
+                                    _sync_active_trades_from_db()
+                        except Exception as paper_err:
+                            print(f"   ⚠️ [MONITOR PAPER] Erro ao processar posições simuladas: {paper_err}", flush=True)
                         continue
                     if _is_client_temporarily_disabled(client_id):
                         continue
@@ -1309,9 +1362,12 @@ def _sync_active_trades_from_db():
             if not raw_symbol: continue
 
             key = _normalize_symbol_key(raw_symbol)
-            margin = float(t.get('profit', 0) or 0)
+            qty = _coerce_float(t.get('quantity'), default=0.0)
             entry_price = _extract_entry_price(t)
             if entry_price <= 0: continue
+            margin = _coerce_float(t.get('margin'), default=0.0)
+            if margin <= 0 and qty > 0:
+                margin = abs((qty * entry_price) / float(ALAVANCAGEM or 1))
 
             if key not in grouped:
                 grouped[key] = {
@@ -1329,11 +1385,13 @@ def _sync_active_trades_from_db():
                     'notes': t.get('notes', ''),
                     'client_count': 0,
                     'trade_count': 0,
+                    'quantity': 0.0,
                     'latest_trade_id': int(t.get('id') or 0),
                 }
 
             trade_group = grouped[key]
             trade_group['entry'] = round(float(trade_group.get('entry', 0) or 0) + margin, 2)
+            trade_group['quantity'] = float(trade_group.get('quantity', 0.0) or 0.0) + qty
             trade_group['client_count'] += 1
             trade_group['trade_count'] += 1
 
@@ -1342,9 +1400,19 @@ def _sync_active_trades_from_db():
         for trade in central_state['active_trades']:
             live = _get_live_price_snapshot(trade.get('raw_symbol') or trade.get('symbol'), trade.get('entry_price'), trade.get('side'))
             trade.update(live)
-            entry_margin = float(trade.get('entry', 0) or 0)
-            pnl_pct = float(trade.get('pnl_pct', 0) or 0)
-            trade['open_pnl_value'] = round((entry_margin * pnl_pct) / 100, 2) if entry_margin else 0.0
+            qty = _coerce_float(trade.get('quantity'), default=0.0)
+            entry_price = _coerce_float(trade.get('entry_price'), default=0.0)
+            current_price = _coerce_float(trade.get('current_price'), default=0.0)
+            side_raw = str(trade.get('side') or '').upper()
+            if qty > 0 and entry_price > 0 and current_price > 0:
+                if side_raw in ('VENDER', 'SELL', 'SHORT'):
+                    open_pnl = (entry_price - current_price) * qty
+                else:
+                    open_pnl = (current_price - entry_price) * qty
+                trade['open_pnl_value'] = round(open_pnl, 2)
+            else:
+                trade['open_pnl_value'] = 0.0
+            trade['pnl_flutuante'] = trade['open_pnl_value']
     except Exception:
         central_state['active_trades'] = []
 
@@ -1379,6 +1447,16 @@ def _monitor_dashboard_positions():
 
             total_wallet_balance = 0.0
             all_positions = []
+            open_trades_snapshot = db.get_open_trades(limit=300)
+            simulated_trades_by_client = {}
+            for _t in open_trades_snapshot:
+                try:
+                    _cid = int(_t.get('client_id') or 0)
+                except Exception:
+                    _cid = 0
+                if _cid <= 0:
+                    continue
+                simulated_trades_by_client.setdefault(_cid, []).append(_t)
 
             for cliente in clientes:
                 try:
@@ -1389,6 +1467,39 @@ def _monitor_dashboard_positions():
                     if _is_training_fake_balance_client(cliente):
                         fake = _get_forced_training_fake_balance_usd()
                         total_wallet_balance += float(fake)
+                        client_open_trades = simulated_trades_by_client.get(client_id, [])
+                        for trade in client_open_trades:
+                            try:
+                                symbol = _canonicalize_symbol(trade.get('pair') or '')
+                                if not symbol:
+                                    continue
+                                qty = _coerce_float(trade.get('quantity'), default=0.0)
+                                entry_price = _coerce_float(trade.get('entry_price'), default=0.0)
+                                if qty <= 0 or entry_price <= 0:
+                                    continue
+                                side = _normalize_position_side(trade.get('side') or '')
+                                side_normalized = 'COMPRAR' if side in ('buy', 'long') else 'VENDER'
+                                current_price = _get_live_market_price(symbol, preferred_price=entry_price)
+                                if current_price <= 0:
+                                    continue
+                                if side_normalized == 'VENDER':
+                                    unrealised_pnl = (entry_price - current_price) * qty
+                                else:
+                                    unrealised_pnl = (current_price - entry_price) * qty
+                                all_positions.append({
+                                    'client_id': client_id,
+                                    'client_nome': cliente.get('nome'),
+                                    'symbol': symbol,
+                                    'side': side_normalized,
+                                    'size': qty,
+                                    'entry_price': entry_price,
+                                    'unrealised_pnl': round(unrealised_pnl, 8),
+                                    'leverage': float(ALAVANCAGEM or 1),
+                                    'mark_price': current_price,
+                                })
+                            except Exception as sim_err:
+                                print(f"   ⚠️ [DASHBOARD] Erro ao processar posição simulada: {sim_err}", flush=True)
+                                continue
                         print(
                             f"   🧪 [DASHBOARD] Cliente {cliente.get('nome')} em modo TESTE — usando saldo fictício: ${float(fake):.2f} USDT",
                             flush=True,
@@ -1803,6 +1914,24 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None):
         print(f"❌ [CALC QTY] Erro no cálculo: {calc_err}", flush=True)
         return 0.0, 0.0, banca if banca and banca > 0 else 1000.0
 
+
+def _calculate_paper_order_quantity(symbol, entry_price, banca=None):
+    """
+    Calcula quantidade para PAPER TRADE local (sem API externa).
+    Fórmula fixa: Qty = (MARGEM_INPUT × ALAVANCAGEM) / entry_price.
+    """
+    try:
+        entry = float(entry_price or 0.0)
+        if entry <= 0:
+            return 0.0, 0.0, float(banca or _get_forced_training_fake_balance_usd())
+        margem = float(MARGEM_INPUT)
+        qty = (margem * float(ALAVANCAGEM)) / entry
+        qty = round(float(qty), 6)
+        saldo_ref = float(banca or _get_forced_training_fake_balance_usd())
+        return round(margem, 2), qty, saldo_ref
+    except Exception:
+        return 0.0, 0.0, float(banca or _get_forced_training_fake_balance_usd())
+
 def _is_order_execution_enabled(client_context):
     """
     Verifica se a execução de ordens está habilitada no sistema.
@@ -2003,7 +2132,41 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
             try:
                 client_id = int(c.get('id') or 0)
                 if _is_training_fake_balance_client(c):
-                    print(f"   🧪 [EXEC] Cliente {c.get('nome')} em modo TESTE — ignorando execução de ordens", flush=True)
+                    symbol_norm = _canonicalize_symbol(symbol)
+                    sim_entry_price = float(_get_live_market_price(symbol_norm, preferred_price=entry_price) or 0.0)
+                    margem, qty, saldo_atualizado = _calculate_paper_order_quantity(
+                        symbol_norm,
+                        sim_entry_price,
+                        banca=float(c.get('saldo_base', _get_forced_training_fake_balance_usd()) or _get_forced_training_fake_balance_usd()),
+                    )
+                    if qty <= 0 or sim_entry_price <= 0:
+                        print(
+                            f"   ⚠️ [PAPER] Cliente {c.get('nome')} sem preço válido para simular ordem em {symbol_norm}",
+                            flush=True,
+                        )
+                        continue
+
+                    side_label = 'COMPRAR' if side.lower() in ('buy', 'comprar') else 'VENDER'
+                    db.record_trade(
+                        client_id=client_id,
+                        pair=symbol_norm,
+                        side=side_label,
+                        pnl_pct=0.0,
+                        profit=0.0,
+                        closed_at=time.strftime("%d/%m %H:%M"),
+                        notes="PAPER_TRADE_LOCAL",
+                        status="open",
+                        entry_price=sim_entry_price,
+                        exit_price=0.0,
+                        quantity=qty,
+                        margin=margem,
+                    )
+                    print(
+                        f"   🧪 [PAPER] Ordem virtual aberta para {c.get('nome')} | {symbol_norm} | {side_label} | "
+                        f"entry=${sim_entry_price:.4f} | qty={qty} | margem=${margem:.2f}",
+                        flush=True,
+                    )
+                    _sync_active_trades_from_db()
                     continue
                 if _is_client_temporarily_disabled(client_id):
                     print(f"   ⚠️ [EXEC] Cliente {c.get('nome')} desativado por autenticação — ignorando execução de ordens", flush=True)
