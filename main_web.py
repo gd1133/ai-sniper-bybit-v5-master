@@ -766,8 +766,6 @@ def _get_public_radar_broker_mainnet():
     Requisito: deve usar SEMPRE Mainnet (testnet=False), independentemente de USE_TESTNET.
     """
     global BybitClient, public_radar_broker
-    if 'bybit' not in _get_active_exchange_names():
-        return None
     if public_radar_broker is not None:
         return public_radar_broker
     with _public_radar_broker_lock:
@@ -1974,24 +1972,21 @@ def sniper_worker_loop():
                 time.sleep(15)
                 continue
 
-            _, key, sec = _get_active_investor_bybit_credentials()
-            if not key or not sec:
-                time.sleep(10)
-                continue
-
-            # Reutiliza broker via BrokerManager (singleton cacheado) em vez de instanciar novo BybitClient
             active_clients = _get_registered_clients(active_only=True)
             if not active_clients:
                 time.sleep(10)
                 continue
-            master_client = None
-            for c in active_clients:
-                cid = int(c.get('id') or 0)
-                if _is_training_fake_balance_client(c) or _is_client_temporarily_disabled(cid):
-                    continue
-                master_client = c
-                break
-            if not master_client:
+
+            has_paper_clients = any(
+                _is_training_fake_balance_client(c)
+                for c in active_clients
+            )
+            _, key, sec = _get_active_investor_bybit_credentials()
+            has_real_credentials = bool(key and sec)
+
+            # Permite varredura também no modo PAPER (TESTE local),
+            # sem exigir cliente real autenticado.
+            if not has_real_credentials and not has_paper_clients:
                 time.sleep(10)
                 continue
             # RADAR/ANÁLISE: usa sempre Mainnet (dados reais), mesmo quando USE_TESTNET=True
@@ -2025,7 +2020,7 @@ def sniper_worker_loop():
 
             # Alimenta o card RADAR LIVE imediatamente com a primeira moeda do radar.
             positions_empty = len(central_state.get('active_trades') or []) == 0
-            force_testnet_bypass = bool(USE_TESTNET and positions_empty)
+            force_testnet_bypass = bool((USE_TESTNET or has_paper_clients) and positions_empty)
             if top_coins:
                 central_state['symbol'] = _limpar_simbolo((top_coins[0] or {}).get('symbol'))
                 if not central_state.get('last_sniper_signal'):
@@ -2038,7 +2033,7 @@ def sniper_worker_loop():
             # BYPASS (MECANISMO DE DEBUG):
             # Em Testnet, sem posições abertas, não espera "sinal institucional perfeito".
             # Força 1 ordem imediata na Testnet para validar TP(+100%)/SL(-50%) e o pipeline de execução.
-            if USE_TESTNET and top_coins and (not _FORCED_SIGNAL_FIRED) and (FORCAR_SINAL_TESTE or force_testnet_bypass):
+            if (USE_TESTNET or has_paper_clients) and top_coins and (not _FORCED_SIGNAL_FIRED) and (FORCAR_SINAL_TESTE or force_testnet_bypass):
                 t = top_coins[0]
                 sym = (t or {}).get('symbol')
                 if sym:
