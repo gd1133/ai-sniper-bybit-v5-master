@@ -2563,6 +2563,71 @@ def api_manual_close_trade():
         normalized_symbol = _normalize_symbol_key(symbol)
         for c in clients_to_close:
             try:
+                # PAPER MODE: fecha apenas no SQLite (sem chamada de API externa)
+                if _is_training_fake_balance_client(c):
+                    paper_closed = 0
+                    open_trades = db.get_open_trades(limit=300)
+                    for trade in open_trades:
+                        if int(trade.get('client_id') or 0) != int(c.get('id') or 0):
+                            continue
+                        trade_canonical = _canonicalize_symbol(trade.get('pair'))
+                        if not trade_canonical:
+                            continue
+                        trade_symbol = _normalize_symbol_key(trade_canonical)
+                        if trade_symbol != normalized_symbol:
+                            continue
+                        if str(trade.get('status') or '').lower() != 'open':
+                            continue
+
+                        trade_side_raw = _normalize_position_side(trade.get('side') or '')
+                        if trade_side_raw not in position_sides:
+                            continue
+
+                        entry_price = _coerce_float(trade.get('entry_price'), default=0.0)
+                        qty = _coerce_float(trade.get('quantity'), default=0.0)
+                        current_price = _coerce_float(_get_live_market_price(trade_canonical, preferred_price=0.0), default=0.0)
+                        if current_price <= 0:
+                            current_price = entry_price
+
+                        if qty > 0 and entry_price > 0 and current_price > 0:
+                            if trade_side_raw == 'sell':
+                                profit = (entry_price - current_price) * qty
+                            else:
+                                profit = (current_price - entry_price) * qty
+                        else:
+                            profit = 0.0
+
+                        db.close_trade(
+                            trade_id=int(trade.get('id') or 0),
+                            pnl_pct=0.0,
+                            profit=round(profit, 2),
+                            exit_price=current_price,
+                            closed_at=time.strftime("%d/%m %H:%M"),
+                            notes="FECHAMENTO MANUAL PAPER",
+                            entry_price=entry_price,
+                            quantity=qty,
+                            side=str(trade.get('side') or ''),
+                        )
+                        paper_closed += 1
+
+                    _sync_active_trades_from_db()
+                    if paper_closed > 0:
+                        results.append({
+                            "client_id": c.get('id'),
+                            "client_name": c.get('nome'),
+                            "success": True,
+                            "message": f"{paper_closed} posição(ões) PAPER fechada(s) com sucesso"
+                        })
+                        print(f"✅ [MANUAL CLOSE PAPER] {paper_closed} posição(ões) fechada(s) para {c.get('nome')}", flush=True)
+                    else:
+                        results.append({
+                            "client_id": c.get('id'),
+                            "client_name": c.get('nome'),
+                            "success": False,
+                            "message": f"Nenhuma posição PAPER aberta encontrada para {symbol}"
+                        })
+                    continue
+
                 broker = _make_broker(c)
                 success = False
                 used_symbol = symbol
