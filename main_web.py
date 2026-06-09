@@ -1135,7 +1135,9 @@ def _monitor_financial_stop_loss():
                                 if entry_price <= 0 or qty <= 0:
                                     continue
                                 side = _normalize_position_side(trade.get('side') or '')
-                                current_price = _coerce_float(_get_live_market_price(symbol, preferred_price=entry_price), default=0.0)
+                                # IMPORTANTE: em paper-trade não usar entry_price como preferred,
+                                # senão o PnL trava em 0.00 para sempre.
+                                current_price = _coerce_float(_get_live_market_price(symbol, preferred_price=0.0), default=0.0)
                                 if current_price <= 0:
                                     continue
                                 if side == 'sell':
@@ -1490,7 +1492,9 @@ def _monitor_dashboard_positions():
                                     continue
                                 side = _normalize_position_side(trade.get('side') or '')
                                 side_normalized = 'COMPRAR' if side in ('buy', 'long') else 'VENDER'
-                                current_price = _get_live_market_price(symbol, preferred_price=entry_price)
+                                # IMPORTANTE: em paper-trade não usar entry_price como preferred,
+                                # senão o PnL do dashboard fica congelado.
+                                current_price = _get_live_market_price(symbol, preferred_price=0.0)
                                 if current_price <= 0:
                                     continue
                                 if side_normalized == 'VENDER':
@@ -2163,7 +2167,9 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                 client_id = int(c.get('id') or 0)
                 if _is_training_fake_balance_client(c):
                     symbol_norm = _canonicalize_symbol(symbol)
-                    sim_entry_price = float(_get_live_market_price(symbol_norm, preferred_price=entry_price) or 0.0)
+                    # Usa ticker vivo para a abertura virtual; não reutiliza entry_price
+                    # para evitar trades simulados com preço congelado.
+                    sim_entry_price = float(_get_live_market_price(symbol_norm, preferred_price=0.0) or 0.0)
                     margem, qty, saldo_atualizado = _calculate_paper_order_quantity(
                         symbol_norm,
                         sim_entry_price,
