@@ -610,6 +610,43 @@ def _coerce_float(*values, default=0.0):
         except Exception: continue
     return float(default)
 
+
+def _send_telegram_message_for_client(client: dict, message: str, *, global_token: str = '', global_chat: str = '') -> bool:
+    """
+    Envia mensagem Telegram usando prioridade:
+    1) token/chat globais (env)
+    2) token/chat do próprio cliente salvo no banco
+    """
+    try:
+        client_tk = str(
+            global_token
+            or (client or {}).get('tg_token')
+            or (client or {}).get('tg_api_key')
+            or (client or {}).get('telegram_token')
+            or (client or {}).get('token_telegram')
+            or ''
+        ).strip()
+        client_chat = str(
+            global_chat
+            or (client or {}).get('chat_id')
+            or (client or {}).get('telegram_chat_id')
+            or ''
+        ).strip()
+        if not client_tk or not client_chat:
+            return False
+
+        clean_chat = int(client_chat) if str(client_chat).strip().isdigit() else str(client_chat).strip()
+        requests.post(
+            f"https://api.telegram.org/bot{client_tk}/sendMessage",
+            json={"chat_id": clean_chat, "text": str(message or '').strip()},
+            timeout=5,
+        )
+        print(f"✅ [TELEGRAM] Notificação enviada para {(client or {}).get('nome') or 'cliente'}", flush=True)
+        return True
+    except Exception as tg_err:
+        print(f"❌ [TELEGRAM ERROR] Falha ao enviar notificação para {(client or {}).get('nome') or 'cliente'}: {tg_err}", flush=True)
+        return False
+
 # ==============================================================================
 # 📊 FUNÇÃO DE CÁLCULO DE MÉTRICAS DE PREÇO LIVE (PNL OSCILANTE)
 # ==============================================================================
@@ -863,6 +900,8 @@ def _fetch_active_client_balances(force=False):
         return client_balance_cache.get() or {"items": [], "total": 0.0}
 
     items, total = [], 0.0
+    historico_map = db.get_historico_pnl_map()
+    historico_total = 0.0
     active_clients = _get_registered_clients(active_only=True)
     active_client_ids = {int(c.get('id') or 0) for c in active_clients}
     active_exchanges = _get_active_exchange_names()
@@ -875,10 +914,14 @@ def _fetch_active_client_balances(force=False):
             balance = None
             error = None
             is_fake_balance = False
+            client_hist = 0.0
             try:
                 client_id = int(client.get('id') or 0)
+                client_hist = float(historico_map.get(client_id, 0.0))
+                historico_total += client_hist
                 if _is_training_fake_balance_client(client):
-                    balance = _get_forced_training_fake_balance_usd()
+                    # Saldo de teste parte de 500 e aplica P&L histórico acumulado.
+                    balance = float(_get_forced_training_fake_balance_usd()) + client_hist
                     is_fake_balance = True
                 elif _is_client_temporarily_disabled(client_id):
                     error = _get_client_disable_reason(client_id) or 'Cliente temporariamente desativado por erro de autenticação'
@@ -905,6 +948,7 @@ def _fetch_active_client_balances(force=False):
                 "saldo_base": float(client.get('saldo_base', 0) or 0), "is_testnet": _resolve_request_is_testnet(client, fallback=False),
                 "account_mode": "real", "exchange": str(client.get('exchange') or 'bybit').lower(),
                 "status": client.get('status'), "error": error, "is_fake_balance": is_fake_balance,
+                "pnl_historico_acumulado": round(client_hist, 2),
             })
     except Exception:
         pass
@@ -935,6 +979,7 @@ def _fetch_active_client_balances(force=False):
         central_state['status'] = f"🧪 TESTNET: saldo fictício ativo para {len(fake_items)} investidores"
     else:
         central_state['status'] = "💼 CONTA REAL: aguardando pareamento de chaves..."
+    central_state['pnl_historico_acumulado'] = round(float(historico_total), 2)
         
     return res
 
@@ -969,6 +1014,7 @@ def _build_api_status_payload():
     payload['radar'] = payload.get('symbol') or '---'
     payload['confianca_ia'] = _coerce_float(payload.get('confidence'), default=0.0)
     payload['pnl_total_realizado'] = round(_coerce_float(payload.get('pnl_total'), default=0.0), 2)
+    payload['pnl_historico_acumulado'] = round(_coerce_float(payload.get('pnl_historico_acumulado'), default=0.0), 2)
     return payload
 
 def _refresh_real_balance_state(force=False):
@@ -1179,6 +1225,17 @@ def _monitor_financial_stop_loss():
                                         f"   ✅ [PAPER CLOSE] {symbol} encerrada ({motivo_fechamento}) com PnL ${unrealised_pnl:.2f}",
                                         flush=True
                                     )
+                                    _send_telegram_message_for_client(
+                                        cliente,
+                                        (
+                                            f"✅ SAÍDA PAPER ({motivo_fechamento})\n\n"
+                                            f"👤 Investidor: {cliente.get('nome')}\n"
+                                            f"📦 Ativo: {symbol}\n"
+                                            f"📊 Qty: {qty}\n"
+                                            f"💰 PnL: ${unrealised_pnl:.2f}\n"
+                                            f"💵 Preço saída: ${current_price:.6f}"
+                                        ),
+                                    )
                                     _sync_active_trades_from_db()
                         except Exception as paper_err:
                             print(f"   ⚠️ [MONITOR PAPER] Erro ao processar posições simuladas: {paper_err}", flush=True)
@@ -1242,16 +1299,8 @@ def _monitor_financial_stop_loss():
                                     flush=True
                                 )
 
-                                # CÉREBRO 3: proteção antirreversão por quebra estrutural.
-                                reversal_detected, reversal_reason = _detect_flow_reversal_1m(broker, symbol, side)
-                                if reversal_detected:
-                                    motivo_fechamento = "REVERSAO_FLUXO"
-                                    print(
-                                        f"[CÉREBRO 3] Alerta: Estrutura quebrou contra a operação em {symbol} "
-                                        f"({reversal_reason}). Abortando trade com PnL ${unrealised_pnl:.2f}.",
-                                        flush=True
-                                    )
-                                elif unrealised_pnl >= alvo_lucro:
+                                # Estratégia rígida: sem saída precoce por reversão.
+                                if unrealised_pnl >= alvo_lucro:
                                     motivo_fechamento = "TAKE_PROFIT"
                                 elif unrealised_pnl <= alvo_perda:
                                     motivo_fechamento = "STOP_LOSS"
@@ -1266,9 +1315,6 @@ def _monitor_financial_stop_loss():
                                 elif motivo_fechamento == "STOP_LOSS":
                                     print(f"🚨 [STOP LOSS] {symbol} atingiu limite de perda!", flush=True)
                                     print(f"   💔 unrealisedPnl: ${unrealised_pnl:.2f} <= Limite: ${alvo_perda:.2f}", flush=True)
-                                else:
-                                    print(f"🧠 [REVERSÃO] {symbol} fechamento defensivo por fluxo contrário", flush=True)
-
                                 print(f"   🔒 Disparando fechamento forçado...", flush=True)
 
                                 try:
@@ -1276,37 +1322,50 @@ def _monitor_financial_stop_loss():
 
                                     if success:
                                         print(f"   ✅ [{motivo_fechamento}] Posição {symbol} fechada com sucesso!", flush=True)
+                                        _send_telegram_message_for_client(
+                                            cliente,
+                                            (
+                                                f"✅ SAÍDA REAL ({motivo_fechamento})\n\n"
+                                                f"👤 Investidor: {cliente.get('nome')}\n"
+                                                f"📦 Ativo: {symbol}\n"
+                                                f"📊 Size: {size}\n"
+                                                f"💰 PnL: ${unrealised_pnl:.2f}\n"
+                                                f"💵 Preço saída: ${current_price or mark_price:.6f}"
+                                            ),
+                                        )
 
                                         try:
-                                            conn = None
-                                            conn = db._connect()
-                                            cur = conn.cursor()
                                             profit = unrealised_pnl
                                             note_tag = (
-                                                f" | TAKE_PROFIT_AUTO unrealisedPnl=${unrealised_pnl:.2f}"
+                                                f"TAKE_PROFIT_AUTO unrealisedPnl=${unrealised_pnl:.2f}"
                                                 if motivo_fechamento == "TAKE_PROFIT"
-                                                else f" | STOP_LOSS_AUTO unrealisedPnl=${unrealised_pnl:.2f}"
+                                                else f"STOP_LOSS_AUTO unrealisedPnl=${unrealised_pnl:.2f}"
                                             )
-                                            cur.execute(
-                                                "UPDATE trades SET status='closed', pnl_pct=?, profit=?, notes=COALESCE(notes,'') || ? WHERE pair=? AND client_id=? AND status='open'",
-                                                (
-                                                    0.0,
-                                                    round(profit, 2),
-                                                    note_tag,
-                                                    symbol,
-                                                    cliente.get('id')
+                                            open_trades = db.get_open_trades(limit=500)
+                                            closed_count = 0
+                                            target_symbol_key = _normalize_symbol_key(_canonicalize_symbol(symbol))
+                                            for trade in open_trades:
+                                                if int(trade.get('client_id') or 0) != int(cliente.get('id') or 0):
+                                                    continue
+                                                trade_symbol_key = _normalize_symbol_key(_canonicalize_symbol(trade.get('pair')))
+                                                if trade_symbol_key != target_symbol_key:
+                                                    continue
+                                                ok_closed = db.close_trade(
+                                                    trade_id=int(trade.get('id') or 0),
+                                                    pnl_pct=0.0,
+                                                    profit=round(profit, 2),
+                                                    exit_price=float(current_price or mark_price or 0.0),
+                                                    closed_at=time.strftime("%d/%m %H:%M"),
+                                                    notes=note_tag,
+                                                    entry_price=float(trade.get('entry_price') or 0.0),
+                                                    quantity=float(trade.get('quantity') or 0.0),
+                                                    side=str(trade.get('side') or ''),
                                                 )
-                                            )
-                                            conn.commit()
-                                            print(f"   💾 [BANCO] Trade atualizado — P&L: ${profit:.2f}", flush=True)
+                                                if ok_closed:
+                                                    closed_count += 1
+                                            print(f"   💾 [BANCO] Trades encerrados no ciclo: {closed_count}", flush=True)
                                         except Exception as db_err:
                                             print(f"   ⚠️ [BANCO] Erro ao atualizar trade: {db_err}", flush=True)
-                                        finally:
-                                            try:
-                                                if conn is not None:
-                                                    conn.close()
-                                            except Exception:
-                                                pass
 
                                         try:
                                             from src.trade_history import record_closed_trade_sync
@@ -2203,6 +2262,20 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                         f"entry=${sim_entry_price:.4f} | qty={qty} | margem=${margem:.2f}",
                         flush=True,
                     )
+                    _send_telegram_message_for_client(
+                        c,
+                        (
+                            f"🧪 ENTRADA PAPER EXECUTADA\n\n"
+                            f"👤 Investidor: {c.get('nome')}\n"
+                            f"📦 Ativo: {symbol_norm}\n"
+                            f"📈 Direção: {side_label}\n"
+                            f"📊 Qty: {qty}\n"
+                            f"💰 Margem: ${margem:.2f}\n"
+                            f"💵 Preço entrada: ${sim_entry_price:.6f}"
+                        ),
+                        global_token=tk,
+                        global_chat=chat,
+                    )
                     _sync_active_trades_from_db()
                     continue
                 if _is_client_temporarily_disabled(client_id):
@@ -2293,32 +2366,21 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
 
                         broker.set_tp_sl_sniper(symbol, side.lower(), entry_price, qty)
 
-                        # 2. DEPURAÇÃO ATIVA + 3. HIGIENIZAÇÃO DE ENVIO
-                        if client_tk and client_chat:
-                            msg_tg = (
-                                f"🔥 OPERACAO REAL EXECUTADA\n\n"
+                        _send_telegram_message_for_client(
+                            c,
+                            (
+                                f"🔥 ENTRADA REAL EXECUTADA\n\n"
                                 f"👤 Investidor: {c.get('nome')}\n"
                                 f"📦 Ativo: {symbol}\n"
-                                f"📈 Direcao: {side_label}\n"
+                                f"📈 Direção: {side_label}\n"
                                 f"📊 Lote: {qty}\n"
-                                f"💰 Margem Separada: ${margem:.2f} USDT\n"
-                                f"💼 Saldo Atualizado: ${saldo_atualizado:.2f} USDT\n"
-                                f"🆔 Hash ID: {order_id}"
-                            )
-                            try:
-                                # Higienização: limpa espaços e converte chat_id numérico para int
-                                clean_chat = str(client_chat).strip()
-                                if clean_chat.isdigit():
-                                    clean_chat = int(clean_chat)
-
-                                requests.post(
-                                    f"https://api.telegram.org/bot{client_tk}/sendMessage",
-                                    json={"chat_id": clean_chat, "text": msg_tg},
-                                    timeout=5
-                                )
-                                print(f"✅ [TELEGRAM] Notificação enviada com sucesso para {c.get('nome')} (chat_id: {clean_chat})", flush=True)
-                            except Exception as tg_err:
-                                print(f"❌ [TELEGRAM ERROR] Falha ao enviar notificação para {c.get('nome')}: {tg_err}", flush=True)
+                                f"💰 Margem: ${margem:.2f} USDT\n"
+                                f"💼 Saldo: ${saldo_atualizado:.2f} USDT\n"
+                                f"🆔 Ordem: {order_id}"
+                            ),
+                            global_token=tk,
+                            global_chat=chat,
+                        )
             except Exception as client_err:
                 print(f"⚠️ [CLIENT ERROR] Falha ao processar ordem para cliente {c.get('nome', 'Unknown')}: {client_err}", flush=True)
     except Exception as general_err:
@@ -2370,6 +2432,7 @@ def get_investidores():
                 "auth_disabled_reason": _get_client_disable_reason(client_id),
                 "storage_source": "local",
                 "exchange": "bybit",
+                "pnl_historico_acumulado": round(_coerce_float(bm.get('pnl_historico_acumulado'), default=0.0), 2),
             })
         return jsonify(payload), 200
     except Exception: return jsonify([]), 200
