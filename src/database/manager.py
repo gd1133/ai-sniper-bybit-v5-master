@@ -227,12 +227,26 @@ def init_db():
         )
         ''')
 
+        # Histórico permanente de P&L para ranking/acumulado diário (paper + real)
+        cur.execute('''
+        CREATE TABLE IF NOT EXISTS historico_trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cliente_id INTEGER,
+            symbol TEXT,
+            side TEXT,
+            lucro_lucrado REAL,
+            data_fechamento TEXT
+        )
+        ''')
+
         # ÍNDICES PARA PERFORMANCE
         cur.execute('CREATE INDEX IF NOT EXISTS idx_trades_client_id ON trades(client_id)')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_trades_pair ON trades(pair)')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_clientes_status ON clientes_sniper(status)')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_config_k ON config(k)')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_historico_cliente ON historico_trades(cliente_id)')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_historico_symbol ON historico_trades(symbol)')
 
         conn.commit()
     finally:
@@ -457,6 +471,16 @@ def close_trade(
     try:
         conn = _connect()
         cur = conn.cursor()
+        cur.execute("SELECT client_id, pair, side, status FROM trades WHERE id = ?", (trade_id,))
+        row = cur.fetchone()
+        if not row:
+            return False
+        row_data = dict(row)
+        current_status = str(row_data.get('status') or '').lower()
+        if current_status != 'open':
+            # Já estava encerrado; evita duplicar histórico.
+            return True
+
         cur.execute(
             '''
             UPDATE trades
@@ -469,6 +493,20 @@ def close_trade(
             WHERE id = ?
             ''',
             (pnl_pct, profit, exit_price, closed_at, notes_clean, trade_id),
+        )
+        # Persistência definitiva do fechamento para acumulado/ranking.
+        cur.execute(
+            '''
+            INSERT INTO historico_trades (cliente_id, symbol, side, lucro_lucrado, data_fechamento)
+            VALUES (?, ?, ?, ?, ?)
+            ''',
+            (
+                int(row_data.get('client_id') or 0),
+                str(row_data.get('pair') or ''),
+                str(row_data.get('side') or side or ''),
+                float(profit or 0.0),
+                str(closed_at or ''),
+            ),
         )
         conn.commit()
         return True
@@ -632,6 +670,69 @@ def get_last_closed_trade(client_id: int) -> Dict[str, Any]:
         )
         row = cur.fetchone()
         return dict(row) if row else None
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+
+
+def get_historico_pnl_map() -> Dict[int, float]:
+    """
+    Retorna acumulado histórico por cliente:
+    {cliente_id: soma(lucro_lucrado)}
+    """
+    conn = None
+    try:
+        conn = _connect()
+        cur = conn.cursor()
+        cur.execute(
+            '''
+            SELECT cliente_id, COALESCE(SUM(lucro_lucrado), 0.0) AS pnl_historico_acumulado
+            FROM historico_trades
+            GROUP BY cliente_id
+            '''
+        )
+        rows = cur.fetchall()
+        return {
+            int((r['cliente_id'] if isinstance(r, sqlite3.Row) else r[0]) or 0): float(
+                (r['pnl_historico_acumulado'] if isinstance(r, sqlite3.Row) else r[1]) or 0.0
+            )
+            for r in rows
+            if int((r['cliente_id'] if isinstance(r, sqlite3.Row) else r[0]) or 0) > 0
+        }
+    except Exception as e:
+        print(f"⚠️ Erro ao calcular mapa de histórico de P&L: {e}")
+        return {}
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+
+
+def get_historico_pnl_total(cliente_id: int | None = None) -> float:
+    """Retorna o total acumulado no historico_trades (global ou por cliente)."""
+    conn = None
+    try:
+        conn = _connect()
+        cur = conn.cursor()
+        if cliente_id is None:
+            cur.execute("SELECT COALESCE(SUM(lucro_lucrado), 0.0) FROM historico_trades")
+        else:
+            cur.execute(
+                "SELECT COALESCE(SUM(lucro_lucrado), 0.0) FROM historico_trades WHERE cliente_id = ?",
+                (int(cliente_id),),
+            )
+        row = cur.fetchone()
+        if row is None:
+            return 0.0
+        return float((row[0] if not isinstance(row, sqlite3.Row) else list(row)[0]) or 0.0)
+    except Exception as e:
+        print(f"⚠️ Erro ao calcular histórico acumulado: {e}")
+        return 0.0
     finally:
         try:
             if conn is not None:
