@@ -610,6 +610,43 @@ def _coerce_float(*values, default=0.0):
         except Exception: continue
     return float(default)
 
+
+def _send_telegram_message_for_client(client: dict, message: str, *, global_token: str = '', global_chat: str = '') -> bool:
+    """
+    Envia mensagem Telegram usando prioridade:
+    1) token/chat globais (env)
+    2) token/chat do próprio cliente salvo no banco
+    """
+    try:
+        client_tk = str(
+            global_token
+            or (client or {}).get('tg_token')
+            or (client or {}).get('tg_api_key')
+            or (client or {}).get('telegram_token')
+            or (client or {}).get('token_telegram')
+            or ''
+        ).strip()
+        client_chat = str(
+            global_chat
+            or (client or {}).get('chat_id')
+            or (client or {}).get('telegram_chat_id')
+            or ''
+        ).strip()
+        if not client_tk or not client_chat:
+            return False
+
+        clean_chat = int(client_chat) if str(client_chat).strip().isdigit() else str(client_chat).strip()
+        requests.post(
+            f"https://api.telegram.org/bot{client_tk}/sendMessage",
+            json={"chat_id": clean_chat, "text": str(message or '').strip()},
+            timeout=5,
+        )
+        print(f"✅ [TELEGRAM] Notificação enviada para {(client or {}).get('nome') or 'cliente'}", flush=True)
+        return True
+    except Exception as tg_err:
+        print(f"❌ [TELEGRAM ERROR] Falha ao enviar notificação para {(client or {}).get('nome') or 'cliente'}: {tg_err}", flush=True)
+        return False
+
 # ==============================================================================
 # 📊 FUNÇÃO DE CÁLCULO DE MÉTRICAS DE PREÇO LIVE (PNL OSCILANTE)
 # ==============================================================================
@@ -1179,6 +1216,17 @@ def _monitor_financial_stop_loss():
                                         f"   ✅ [PAPER CLOSE] {symbol} encerrada ({motivo_fechamento}) com PnL ${unrealised_pnl:.2f}",
                                         flush=True
                                     )
+                                    _send_telegram_message_for_client(
+                                        cliente,
+                                        (
+                                            f"✅ SAÍDA PAPER ({motivo_fechamento})\n\n"
+                                            f"👤 Investidor: {cliente.get('nome')}\n"
+                                            f"📦 Ativo: {symbol}\n"
+                                            f"📊 Qty: {qty}\n"
+                                            f"💰 PnL: ${unrealised_pnl:.2f}\n"
+                                            f"💵 Preço saída: ${current_price:.6f}"
+                                        ),
+                                    )
                                     _sync_active_trades_from_db()
                         except Exception as paper_err:
                             print(f"   ⚠️ [MONITOR PAPER] Erro ao processar posições simuladas: {paper_err}", flush=True)
@@ -1242,16 +1290,8 @@ def _monitor_financial_stop_loss():
                                     flush=True
                                 )
 
-                                # CÉREBRO 3: proteção antirreversão por quebra estrutural.
-                                reversal_detected, reversal_reason = _detect_flow_reversal_1m(broker, symbol, side)
-                                if reversal_detected:
-                                    motivo_fechamento = "REVERSAO_FLUXO"
-                                    print(
-                                        f"[CÉREBRO 3] Alerta: Estrutura quebrou contra a operação em {symbol} "
-                                        f"({reversal_reason}). Abortando trade com PnL ${unrealised_pnl:.2f}.",
-                                        flush=True
-                                    )
-                                elif unrealised_pnl >= alvo_lucro:
+                                # Estratégia rígida: sem saída precoce por reversão.
+                                if unrealised_pnl >= alvo_lucro:
                                     motivo_fechamento = "TAKE_PROFIT"
                                 elif unrealised_pnl <= alvo_perda:
                                     motivo_fechamento = "STOP_LOSS"
@@ -1266,9 +1306,6 @@ def _monitor_financial_stop_loss():
                                 elif motivo_fechamento == "STOP_LOSS":
                                     print(f"🚨 [STOP LOSS] {symbol} atingiu limite de perda!", flush=True)
                                     print(f"   💔 unrealisedPnl: ${unrealised_pnl:.2f} <= Limite: ${alvo_perda:.2f}", flush=True)
-                                else:
-                                    print(f"🧠 [REVERSÃO] {symbol} fechamento defensivo por fluxo contrário", flush=True)
-
                                 print(f"   🔒 Disparando fechamento forçado...", flush=True)
 
                                 try:
@@ -1276,6 +1313,17 @@ def _monitor_financial_stop_loss():
 
                                     if success:
                                         print(f"   ✅ [{motivo_fechamento}] Posição {symbol} fechada com sucesso!", flush=True)
+                                        _send_telegram_message_for_client(
+                                            cliente,
+                                            (
+                                                f"✅ SAÍDA REAL ({motivo_fechamento})\n\n"
+                                                f"👤 Investidor: {cliente.get('nome')}\n"
+                                                f"📦 Ativo: {symbol}\n"
+                                                f"📊 Size: {size}\n"
+                                                f"💰 PnL: ${unrealised_pnl:.2f}\n"
+                                                f"💵 Preço saída: ${current_price or mark_price:.6f}"
+                                            ),
+                                        )
 
                                         try:
                                             conn = None
@@ -2203,6 +2251,20 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                         f"entry=${sim_entry_price:.4f} | qty={qty} | margem=${margem:.2f}",
                         flush=True,
                     )
+                    _send_telegram_message_for_client(
+                        c,
+                        (
+                            f"🧪 ENTRADA PAPER EXECUTADA\n\n"
+                            f"👤 Investidor: {c.get('nome')}\n"
+                            f"📦 Ativo: {symbol_norm}\n"
+                            f"📈 Direção: {side_label}\n"
+                            f"📊 Qty: {qty}\n"
+                            f"💰 Margem: ${margem:.2f}\n"
+                            f"💵 Preço entrada: ${sim_entry_price:.6f}"
+                        ),
+                        global_token=tk,
+                        global_chat=chat,
+                    )
                     _sync_active_trades_from_db()
                     continue
                 if _is_client_temporarily_disabled(client_id):
@@ -2293,32 +2355,21 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
 
                         broker.set_tp_sl_sniper(symbol, side.lower(), entry_price, qty)
 
-                        # 2. DEPURAÇÃO ATIVA + 3. HIGIENIZAÇÃO DE ENVIO
-                        if client_tk and client_chat:
-                            msg_tg = (
-                                f"🔥 OPERACAO REAL EXECUTADA\n\n"
+                        _send_telegram_message_for_client(
+                            c,
+                            (
+                                f"🔥 ENTRADA REAL EXECUTADA\n\n"
                                 f"👤 Investidor: {c.get('nome')}\n"
                                 f"📦 Ativo: {symbol}\n"
-                                f"📈 Direcao: {side_label}\n"
+                                f"📈 Direção: {side_label}\n"
                                 f"📊 Lote: {qty}\n"
-                                f"💰 Margem Separada: ${margem:.2f} USDT\n"
-                                f"💼 Saldo Atualizado: ${saldo_atualizado:.2f} USDT\n"
-                                f"🆔 Hash ID: {order_id}"
-                            )
-                            try:
-                                # Higienização: limpa espaços e converte chat_id numérico para int
-                                clean_chat = str(client_chat).strip()
-                                if clean_chat.isdigit():
-                                    clean_chat = int(clean_chat)
-
-                                requests.post(
-                                    f"https://api.telegram.org/bot{client_tk}/sendMessage",
-                                    json={"chat_id": clean_chat, "text": msg_tg},
-                                    timeout=5
-                                )
-                                print(f"✅ [TELEGRAM] Notificação enviada com sucesso para {c.get('nome')} (chat_id: {clean_chat})", flush=True)
-                            except Exception as tg_err:
-                                print(f"❌ [TELEGRAM ERROR] Falha ao enviar notificação para {c.get('nome')}: {tg_err}", flush=True)
+                                f"💰 Margem: ${margem:.2f} USDT\n"
+                                f"💼 Saldo: ${saldo_atualizado:.2f} USDT\n"
+                                f"🆔 Ordem: {order_id}"
+                            ),
+                            global_token=tk,
+                            global_chat=chat,
+                        )
             except Exception as client_err:
                 print(f"⚠️ [CLIENT ERROR] Falha ao processar ordem para cliente {c.get('nome', 'Unknown')}: {client_err}", flush=True)
     except Exception as general_err:
