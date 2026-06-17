@@ -1,6 +1,7 @@
 import sqlite3
 import os
 import threading
+from datetime import datetime
 from typing import List, Dict, Any
 from src.config import get_environment_config
 
@@ -146,6 +147,40 @@ def _ensure_column(cur, table: str, column: str, definition: str):
         cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
+def _cleanup_duplicate_historico_trades(cur) -> int:
+    """
+    Remove duplicidades antigas no histórico mantendo somente o último registro
+    por chave de fechamento (trade_id quando existir, senão assinatura lógica).
+    """
+    before_count_row = cur.execute("SELECT COUNT(1) FROM historico_trades").fetchone()
+    before_count = int((before_count_row[0] if before_count_row else 0) or 0)
+
+    cur.execute(
+        '''
+        DELETE FROM historico_trades
+        WHERE id NOT IN (
+            SELECT MAX(h.id)
+            FROM historico_trades h
+            GROUP BY
+                CASE
+                    WHEN h.trade_id IS NOT NULL THEN 'T|' || CAST(h.trade_id AS TEXT)
+                    ELSE
+                        'S|' ||
+                        CAST(COALESCE(h.cliente_id, 0) AS TEXT) || '|' ||
+                        UPPER(COALESCE(h.symbol, '')) || '|' ||
+                        COALESCE(h.data_fechamento, '') || '|' ||
+                        printf('%.8f', ROUND(COALESCE(h.lucro_lucrado, 0.0), 8))
+                END
+        )
+        '''
+    )
+
+    after_count_row = cur.execute("SELECT COUNT(1) FROM historico_trades").fetchone()
+    after_count = int((after_count_row[0] if after_count_row else 0) or 0)
+    removed = max(0, before_count - after_count)
+    return removed
+
+
 def init_db():
     """Inicializa banco com tabelas otimizadas e sem travamentos"""
     conn = None
@@ -231,6 +266,7 @@ def init_db():
         cur.execute('''
         CREATE TABLE IF NOT EXISTS historico_trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_id INTEGER,
             cliente_id INTEGER,
             symbol TEXT,
             side TEXT,
@@ -238,6 +274,7 @@ def init_db():
             data_fechamento TEXT
         )
         ''')
+        _ensure_column(cur, 'historico_trades', 'trade_id', 'INTEGER')
 
         # ÍNDICES PARA PERFORMANCE
         cur.execute('CREATE INDEX IF NOT EXISTS idx_trades_client_id ON trades(client_id)')
@@ -247,6 +284,12 @@ def init_db():
         cur.execute('CREATE INDEX IF NOT EXISTS idx_config_k ON config(k)')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_historico_cliente ON historico_trades(cliente_id)')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_historico_symbol ON historico_trades(symbol)')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_historico_fechamento ON historico_trades(data_fechamento)')
+        cur.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_historico_trade_id_unique ON historico_trades(trade_id) WHERE trade_id IS NOT NULL')
+
+        removed_duplicates = _cleanup_duplicate_historico_trades(cur)
+        if removed_duplicates > 0:
+            print(f"🧹 [DATABASE] Limpeza de duplicados no histórico: {removed_duplicates} registro(s) removido(s).", flush=True)
 
         conn.commit()
     finally:
@@ -471,7 +514,12 @@ def close_trade(
     try:
         conn = _connect()
         cur = conn.cursor()
-        cur.execute("SELECT client_id, pair, side, status FROM trades WHERE id = ?", (trade_id,))
+        # Lock de escrita evita corrida entre loops paralelos no fechamento.
+        cur.execute("BEGIN IMMEDIATE")
+        cur.execute(
+            "SELECT client_id, pair, side, status, closed_at, profit FROM trades WHERE id = ?",
+            (trade_id,),
+        )
         row = cur.fetchone()
         if not row:
             return False
@@ -480,6 +528,15 @@ def close_trade(
         if current_status != 'open':
             # Já estava encerrado; evita duplicar histórico.
             return True
+
+        closed_at_value = str(closed_at or row_data.get('closed_at') or '').strip()
+        if not closed_at_value:
+            closed_at_value = datetime.now().isoformat(timespec='seconds')
+
+        historico_cliente_id = int(row_data.get('client_id') or 0)
+        historico_symbol = str(row_data.get('pair') or '')
+        historico_side = str(row_data.get('side') or side or '')
+        historico_profit = round(float(profit or 0.0), 8)
 
         cur.execute(
             '''
@@ -492,22 +549,58 @@ def close_trade(
                 status = 'closed'
             WHERE id = ?
             ''',
-            (pnl_pct, profit, exit_price, closed_at, notes_clean, trade_id),
+            (pnl_pct, profit, exit_price, closed_at_value, notes_clean, trade_id),
         )
-        # Persistência definitiva do fechamento para acumulado/ranking.
+        # 1) Trava por ID de posição (trade_id) - evita duplicação de loop concorrente.
         cur.execute(
-            '''
-            INSERT INTO historico_trades (cliente_id, symbol, side, lucro_lucrado, data_fechamento)
-            VALUES (?, ?, ?, ?, ?)
-            ''',
-            (
-                int(row_data.get('client_id') or 0),
-                str(row_data.get('pair') or ''),
-                str(row_data.get('side') or side or ''),
-                float(profit or 0.0),
-                str(closed_at or ''),
-            ),
+            "SELECT 1 FROM historico_trades WHERE trade_id = ? LIMIT 1",
+            (trade_id,),
         )
+        duplicate_by_trade_id = cur.fetchone() is not None
+
+        # 2) Pré-checagem por assinatura do fechamento (cliente/símbolo/data/lucro).
+        duplicate_by_signature = False
+        if not duplicate_by_trade_id:
+            cur.execute(
+                '''
+                SELECT 1
+                FROM historico_trades
+                WHERE cliente_id = ?
+                  AND symbol = ?
+                  AND data_fechamento = ?
+                  AND ROUND(COALESCE(lucro_lucrado, 0.0), 8) = ?
+                LIMIT 1
+                ''',
+                (
+                    historico_cliente_id,
+                    historico_symbol,
+                    closed_at_value,
+                    historico_profit,
+                ),
+            )
+            duplicate_by_signature = cur.fetchone() is not None
+
+        # Persistência definitiva do fechamento para acumulado/ranking.
+        if not duplicate_by_trade_id and not duplicate_by_signature:
+            cur.execute(
+                '''
+                INSERT INTO historico_trades (trade_id, cliente_id, symbol, side, lucro_lucrado, data_fechamento)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ''',
+                (
+                    trade_id,
+                    historico_cliente_id,
+                    historico_symbol,
+                    historico_side,
+                    historico_profit,
+                    closed_at_value,
+                ),
+            )
+        else:
+            print(
+                f"⚠️ [HISTORICO] Registro duplicado ignorado para trade_id={trade_id} ({historico_symbol})",
+                flush=True,
+            )
         conn.commit()
         return True
     except Exception as e:
@@ -648,7 +741,42 @@ def get_recent_trades(limit: int = 50) -> List[Dict[str, Any]]:
     try:
         conn = _connect()
         cur = conn.cursor()
-        cur.execute('SELECT t.*, c.nome FROM trades t LEFT JOIN clientes_sniper c ON c.id = t.client_id ORDER BY t.id DESC LIMIT ?', (limit,))
+        cur.execute(
+            '''
+            WITH dedup_ids AS (
+                SELECT MAX(t.id) AS trade_id
+                FROM trades t
+                GROUP BY
+                    CASE
+                        WHEN LOWER(COALESCE(t.status, 'closed')) = 'closed' THEN COALESCE(t.client_id, 0)
+                        ELSE t.id
+                    END,
+                    CASE
+                        WHEN LOWER(COALESCE(t.status, 'closed')) = 'closed' THEN UPPER(COALESCE(t.pair, ''))
+                        ELSE printf('OPEN_PAIR|%s', t.id)
+                    END,
+                    CASE
+                        WHEN LOWER(COALESCE(t.status, 'closed')) = 'closed' THEN UPPER(COALESCE(t.side, ''))
+                        ELSE printf('OPEN_SIDE|%s', t.id)
+                    END,
+                    CASE
+                        WHEN LOWER(COALESCE(t.status, 'closed')) = 'closed' THEN COALESCE(t.closed_at, '')
+                        ELSE printf('OPEN_TIME|%s', t.id)
+                    END,
+                    CASE
+                        WHEN LOWER(COALESCE(t.status, 'closed')) = 'closed' THEN ROUND(COALESCE(t.profit, 0.0), 8)
+                        ELSE CAST(t.id AS REAL)
+                    END
+            )
+            SELECT t.*, c.nome
+            FROM trades t
+            INNER JOIN dedup_ids d ON d.trade_id = t.id
+            LEFT JOIN clientes_sniper c ON c.id = t.client_id
+            ORDER BY t.id DESC
+            LIMIT ?
+            ''',
+            (limit,),
+        )
         rows = cur.fetchall()
         return [dict(r) for r in rows]
     finally:
