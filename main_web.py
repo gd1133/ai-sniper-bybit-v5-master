@@ -17,6 +17,7 @@ import sys
 import math
 import gc
 import pandas as pd
+from decimal import Decimal, ROUND_DOWN
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime, timedelta
 
@@ -147,6 +148,9 @@ PERCENTUAL_ENTRADA_BANCA = 0.05
 PERCENTUAL_ENTRADA_POS_STOP = 0.03
 TP_MULTIPLIER_MARGIN = 1.0
 SL_MULTIPLIER_MARGIN = -0.5
+ADX_MIN_THRESHOLD = 20.0
+SIDEWAYS_RANGE_MAX_PCT = 0.004
+SIDEWAYS_CANDLES_WINDOW = 5
 
 def _env_float(name: str, default: float) -> float:
     raw = os.getenv(name)
@@ -591,6 +595,11 @@ def _limpar_simbolo(sym):
 
 def _normalize_symbol_key(sym): return re.sub(r'[^A-Z0-9]', '', str(sym or '').upper())
 
+
+def _normalized_symbol_for_compare(sym):
+    canonical = _canonicalize_symbol(sym) or str(sym or '').strip()
+    return _normalize_symbol_key(canonical)
+
 def _canonicalize_symbol(sym):
     raw = str(sym or '').strip().upper()
     if not raw: return ""
@@ -609,6 +618,230 @@ def _coerce_float(*values, default=0.0):
             if numeric == numeric: return numeric
         except Exception: continue
     return float(default)
+
+
+def _safe_ohlcv_frame(raw_ohlcv):
+    if raw_ohlcv is None:
+        return None
+    try:
+        frame = raw_ohlcv.copy() if isinstance(raw_ohlcv, pd.DataFrame) else pd.DataFrame(raw_ohlcv)
+        if frame is None or frame.empty:
+            return None
+        expected_cols = ['ts', 'open', 'high', 'low', 'close', 'vol']
+        if len(frame.columns) >= 6 and not set(expected_cols).issubset(set(frame.columns)):
+            frame = frame.iloc[:, :6].copy()
+            frame.columns = expected_cols
+        for col in ('high', 'low', 'close', 'vol'):
+            frame[col] = pd.to_numeric(frame[col], errors='coerce')
+        frame = frame.dropna(subset=['high', 'low', 'close'])
+        if frame.empty:
+            return None
+        return frame.reset_index(drop=True)
+    except Exception:
+        return None
+
+
+def _calculate_adx_from_ohlcv(raw_ohlcv, period: int = 14) -> float:
+    frame = _safe_ohlcv_frame(raw_ohlcv)
+    if frame is None or len(frame) < max(period + 3, 20):
+        return 0.0
+    try:
+        high = frame['high']
+        low = frame['low']
+        close = frame['close']
+
+        up_move = high.diff()
+        down_move = -low.diff()
+
+        plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+        minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+
+        tr1 = high - low
+        tr2 = (high - close.shift(1)).abs()
+        tr3 = (low - close.shift(1)).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(window=period, min_periods=period).mean()
+
+        plus_di = 100.0 * (plus_dm.rolling(window=period, min_periods=period).mean() / (atr + 1e-9))
+        minus_di = 100.0 * (minus_dm.rolling(window=period, min_periods=period).mean() / (atr + 1e-9))
+        dx = ((plus_di - minus_di).abs() / (plus_di + minus_di + 1e-9)) * 100.0
+        adx = dx.rolling(window=period, min_periods=period).mean()
+        return round(float(adx.iloc[-1] or 0.0), 4)
+    except Exception:
+        return 0.0
+
+
+def _is_narrow_range(raw_ohlcv, candles: int = SIDEWAYS_CANDLES_WINDOW, max_range_pct: float = SIDEWAYS_RANGE_MAX_PCT) -> tuple[bool, float]:
+    frame = _safe_ohlcv_frame(raw_ohlcv)
+    if frame is None or len(frame) < max(3, candles):
+        return True, 0.0
+    sample = frame.tail(max(3, int(candles))).copy()
+    try:
+        highest = float(sample['high'].max() or 0.0)
+        lowest = float(sample['low'].min() or 0.0)
+        mean_close = float(sample['close'].mean() or 0.0)
+        if mean_close <= 0:
+            return True, 0.0
+        range_pct = (highest - lowest) / mean_close
+        return bool(range_pct <= float(max_range_pct)), round(float(range_pct), 6)
+    except Exception:
+        return True, 0.0
+
+
+def _evaluate_trend_regime_filter(radar_broker, symbol: str, df_15m=None):
+    df15 = _safe_ohlcv_frame(df_15m)
+    if df15 is None:
+        df15 = _safe_ohlcv_frame(radar_broker.fetch_ohlcv(symbol, timeframe='15m'))
+    df5 = _safe_ohlcv_frame(radar_broker.fetch_ohlcv(symbol, timeframe='5m'))
+
+    adx_15m = _calculate_adx_from_ohlcv(df15)
+    adx_5m = _calculate_adx_from_ohlcv(df5)
+    narrow_range, range_pct = _is_narrow_range(df15, candles=SIDEWAYS_CANDLES_WINDOW, max_range_pct=SIDEWAYS_RANGE_MAX_PCT)
+
+    is_lateralized = bool(adx_15m < ADX_MIN_THRESHOLD or adx_5m < ADX_MIN_THRESHOLD or narrow_range)
+    return {
+        'adx_15m': adx_15m,
+        'adx_5m': adx_5m,
+        'narrow_range': narrow_range,
+        'range_pct': range_pct,
+        'is_lateralized': is_lateralized,
+        'status': 'LATERALIZADO' if is_lateralized else 'TENDENCIA',
+    }
+
+
+def _resolve_symbol_qty_step(broker, symbol: str) -> tuple[float, float]:
+    step = 0.000001
+    min_amount = 0.0
+    try:
+        exchange = getattr(broker, 'exchange', None) if broker is not None else None
+        if exchange is not None:
+            market = exchange.market(symbol)
+            limits = (market or {}).get('limits') or {}
+            raw_min_amount = ((limits.get('amount') or {}).get('min'))
+            min_amount = _coerce_float(raw_min_amount, default=0.0) if raw_min_amount is not None else 0.0
+
+            info = (market or {}).get('info') or {}
+            lot_filter = (
+                info.get('lotSizeFilter')
+                or info.get('lotSize')
+                or info.get('lot_filter')
+                or {}
+            )
+            raw_step = lot_filter.get('qtyStep') or lot_filter.get('stepSize')
+            if raw_step is not None:
+                parsed_step = _coerce_float(raw_step, default=0.0)
+                if parsed_step > 0:
+                    step = parsed_step
+            else:
+                amount_precision = (market or {}).get('precision', {}).get('amount')
+                if amount_precision is not None:
+                    amount_precision = _coerce_float(amount_precision, default=6.0)
+                    if 0 < amount_precision < 1:
+                        step = amount_precision
+                    else:
+                        step = 10 ** (-max(0, int(amount_precision)))
+    except Exception:
+        pass
+
+    if step <= 0:
+        step = 0.000001
+    return float(step), max(0.0, float(min_amount or 0.0))
+
+
+def _floor_to_step(value: float, step: float) -> float:
+    try:
+        if value <= 0 or step <= 0:
+            return 0.0
+        scaled = (Decimal(str(value)) / Decimal(str(step))).to_integral_value(rounding=ROUND_DOWN)
+        return float(scaled * Decimal(str(step)))
+    except Exception:
+        return 0.0
+
+
+def _calculate_margin_locked_qty(symbol: str, entry_price: float, leverage_value: float, broker=None):
+    fixed_margin = round(float(MARGEM_INPUT or 5.0), 2)
+    if entry_price <= 0 or leverage_value <= 0 or fixed_margin <= 0:
+        return fixed_margin, 0.0, 0.0
+
+    raw_qty = (fixed_margin * leverage_value) / entry_price
+    qty_step, min_amount = _resolve_symbol_qty_step(broker, symbol)
+    floored_qty = _floor_to_step(raw_qty, qty_step)
+
+    if min_amount > 0 and floored_qty < min_amount:
+        floored_qty = _floor_to_step(min_amount, qty_step) or float(min_amount)
+
+    margin_used = abs((floored_qty * entry_price) / leverage_value) if floored_qty > 0 else 0.0
+
+    # Blindagem rígida: se ultrapassar $5.00 por ajuste de step/min amount, rejeita ordem.
+    if margin_used > fixed_margin + 1e-8:
+        print(
+            f"   ❌ [VALIDADOR MARGEM] Rejeitado {symbol}: margem calculada ${margin_used:.4f} excede limite fixo ${fixed_margin:.2f}",
+            flush=True,
+        )
+        return fixed_margin, 0.0, margin_used
+
+    return fixed_margin, round(float(floored_qty), 8), margin_used
+
+
+def _is_symbol_open_for_client(symbol: str, client_id: int | None = None, broker=None):
+    symbol_key = _normalized_symbol_for_compare(symbol)
+    if not symbol_key:
+        return False, "invalid_symbol"
+
+    try:
+        for trade in db.get_open_trades(limit=500):
+            if client_id and int(trade.get('client_id') or 0) != int(client_id):
+                continue
+            trade_key = _normalized_symbol_for_compare(trade.get('pair'))
+            if trade_key == symbol_key:
+                return True, "sqlite_open_trade"
+    except Exception:
+        pass
+
+    try:
+        if broker is not None and getattr(broker, 'pybit_session', None) and getattr(broker, 'authenticated', False):
+            positions_response = broker.pybit_session.get_positions(category='linear', settleCoin='USDT')
+            ok, err = broker._handle_v5_ret_code(positions_response, 'get_positions')
+            if ok:
+                positions_list = (positions_response.get('result') or {}).get('list', [])
+                for pos in positions_list:
+                    size = _coerce_float(pos.get('size'), default=0.0)
+                    pos_key = _normalized_symbol_for_compare(pos.get('symbol'))
+                    if size > 0 and pos_key == symbol_key:
+                        return True, "exchange_open_position"
+            else:
+                print(f"   ⚠️ [ANTI-OVERTRADING] Falha ao consultar posições abertas: {err}", flush=True)
+    except Exception as pos_err:
+        print(f"   ⚠️ [ANTI-OVERTRADING] Exceção ao validar posição aberta: {pos_err}", flush=True)
+
+    return False, "ok"
+
+
+def _print_sniper_criteria_report(
+    symbol: str,
+    price: float,
+    brain1_ok: bool,
+    brain2_ok: bool,
+    trend_filter: dict | None,
+    margin_value: float,
+    approved: bool,
+    rejection_reason: str = '',
+):
+    trend_filter = trend_filter or {}
+    adx_log = max(
+        _coerce_float(trend_filter.get('adx_5m'), default=0.0),
+        _coerce_float(trend_filter.get('adx_15m'), default=0.0),
+    )
+    trend_status = str(trend_filter.get('status') or ('TENDENCIA' if not trend_filter.get('is_lateralized') else 'LATERALIZADO'))
+    final_decision = "ORDEM APROVADA" if approved else f"SINAL REJEITADO {rejection_reason}".strip()
+
+    print("📊 [RELATÓRIO DE CRITÉRIO SNIPER]", flush=True)
+    print(f"-> Ativo: {_limpar_simbolo(symbol)} | Preço: ${float(price or 0.0):.6f}", flush=True)
+    print(f"-> Cérebro 1 (SMC): Estrutura validada? {'SIM' if brain1_ok else 'NÃO'}", flush=True)
+    print(f"-> Cérebro 2 (Volume): Volume institucional detectado? {'SIM' if brain2_ok else 'NÃO'}", flush=True)
+    print(f"-> Filtro de Tendência: ADX = {adx_log:.2f} | Status: {trend_status}", flush=True)
+    print(f"-> Validador de Margem: Calculado ${float(margin_value or 0.0):.2f} USDT para entrada.", flush=True)
+    print(f"-> DECISÃO FINAL: {final_decision}", flush=True)
 
 
 def _send_telegram_message_for_client(client: dict, message: str, *, global_token: str = '', global_chat: str = '') -> bool:
@@ -1051,19 +1284,26 @@ def _repair_open_trades():
 
 def _can_open_new_signal(symbol):
     _repair_open_trades()
-    open_symbols = {_normalize_symbol_key(t.get('pair')) for t in db.get_open_trades(100) if t.get('pair')}
-    if _normalize_symbol_key(_canonicalize_symbol(symbol)) in open_symbols: return False, "Moeda já ativa."
-    if len(open_symbols) >= MAX_MOEDAS_ATIVAS: return False, f"Limite de {MAX_MOEDAS_ATIVAS} ativos atingido."
+    symbol_key = _normalized_symbol_for_compare(symbol)
+    open_symbols = {_normalized_symbol_for_compare(t.get('pair')) for t in db.get_open_trades(100) if t.get('pair')}
+    if symbol_key in SNIPER_SIGNAL_RESERVATIONS:
+        return False, "Moeda já reservada para execução."
+    if symbol_key in open_symbols:
+        return False, "Moeda já ativa."
+    if len(open_symbols) >= MAX_MOEDAS_ATIVAS:
+        return False, f"Limite de {MAX_MOEDAS_ATIVAS} ativos atingido."
     return True, "ok"
 
 def _reserve_signal_slot(symbol):
     with SNIPER_SIGNAL_LOCK:
         ok, reason = _can_open_new_signal(symbol)
-        if ok: SNIPER_SIGNAL_RESERVATIONS.add(_normalize_symbol_key(_canonicalize_symbol(symbol)))
+        if ok:
+            SNIPER_SIGNAL_RESERVATIONS.add(_normalized_symbol_for_compare(symbol))
         return ok, reason
 
 def _release_signal_slot(symbol):
-    with SNIPER_SIGNAL_LOCK: SNIPER_SIGNAL_RESERVATIONS.discard(_normalize_symbol_key(_canonicalize_symbol(symbol)))
+    with SNIPER_SIGNAL_LOCK:
+        SNIPER_SIGNAL_RESERVATIONS.discard(_normalized_symbol_for_compare(symbol))
 
 def _calcular_pnl_trades():
     try:
@@ -1941,10 +2181,7 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None, client_context
     Retorna (margem_separada, quantidade_normalizada, saldo_atualizado)
     """
     try:
-        # 🔥 Entrada padrão por percentual da banca (5%),
-        # com fallback para margem fixa legado.
-        risk_margin = float(MARGEM_INPUT)
-        leverage_value = ALAVANCAGEM  # 20x
+        leverage_value = float(ALAVANCAGEM or 1.0)
 
         # Busca saldo atual para referência (não mais usado para cálculo de margem)
         saldo_atual = broker.get_balance()
@@ -1953,22 +2190,6 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None, client_context
             saldo_atual = banca if banca and banca > 0 else 1000.0
         
         saldo_atual = float(saldo_atual)
-        
-        margem = max(0.0, saldo_atual * float(PERCENTUAL_ENTRADA_BANCA))
-        if margem <= 0:
-            margem = risk_margin
-
-        # Pós-stop: reduz para 3% da banca para recuperação conservadora.
-        client_id = int((client_context or {}).get('id') or 0)
-        if client_id > 0:
-            try:
-                last_closed = db.get_last_closed_trade(client_id)
-                notes = str((last_closed or {}).get('notes') or '').upper()
-                if 'STOP_LOSS' in notes:
-                    margem = max(0.0, saldo_atual * float(PERCENTUAL_ENTRADA_POS_STOP))
-                    print(f"   🛡️ [CALC QTY] Último fechamento foi STOP_LOSS, aplicando entrada de recuperação em {PERCENTUAL_ENTRADA_POS_STOP*100:.1f}% da banca", flush=True)
-            except Exception:
-                pass
 
         # Busca o preço atual do símbolo
         last_price = float(broker.get_last_price(symbol) or 0)
@@ -1976,21 +2197,21 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None, client_context
             print(f"❌ [CALC QTY] Preço inválido para {symbol}", flush=True)
             return 0.0, 0.0, saldo_atual
 
-        # Qty = (Margem × Alavancagem) / Preço Atual
-        qty = (margem * leverage_value) / last_price
+        # Blindagem rígida de margem fixa: sempre calcula para $5.00 (MARGEM_INPUT).
+        margem, qty, margin_used = _calculate_margin_locked_qty(
+            symbol,
+            last_price,
+            leverage_value,
+            broker=broker,
+        )
 
         print(f"   💰 [CALC QTY] Saldo Atual (BYBIT V5): ${saldo_atual:.2f} USDT", flush=True)
-        print(f"   💰 [CALC QTY] Margem de Entrada: ${margem:.2f} USDT", flush=True)
+        print(f"   💰 [CALC QTY] Margem alvo fixa: ${margem:.2f} USDT", flush=True)
         print(f"   📊 [CALC QTY] Preço: ${last_price:.4f} | Alavancagem: {leverage_value}x", flush=True)
-        print(f"   🔢 [CALC QTY] Qty calculada: {qty:.6f} (Fórmula: {margem:.2f} × {leverage_value} / {last_price:.4f})", flush=True)
-
-        # Normaliza com as precisões da exchange
-        try:
-            qty = float(broker.exchange.amount_to_precision(symbol, qty))
-            print(f"   ✅ [CALC QTY] Qty normalizada: {qty}", flush=True)
-        except Exception as precision_err:
-            print(f"   ⚠️ [CALC QTY] Erro na precisão, usando arredondamento simples: {precision_err}", flush=True)
-            qty = round(qty, 3)
+        print(f"   🔢 [CALC QTY] Qty calculada com floor por qtyStep: {qty:.8f}", flush=True)
+        print(f"   ✅ [VALIDADOR MARGEM] Margem real calculada: ${margin_used:.4f} USDT", flush=True)
+        if qty <= 0:
+            print("   ❌ [CALC QTY] Ordem bloqueada para proteger margem fixa de $5.00", flush=True)
 
         return round(margem, 2), qty, saldo_atual
     except Exception as calc_err:
@@ -2008,22 +2229,18 @@ def _calculate_paper_order_quantity(symbol, entry_price, banca=None, client_cont
         if entry <= 0:
             return 0.0, 0.0, float(banca or _get_forced_training_fake_balance_usd())
         saldo_ref = float(banca or _get_forced_training_fake_balance_usd())
-        margem = max(0.0, saldo_ref * float(PERCENTUAL_ENTRADA_BANCA))
-        if margem <= 0:
-            margem = float(MARGEM_INPUT)
-
-        client_id = int((client_context or {}).get('id') or 0)
-        if client_id > 0:
-            try:
-                last_closed = db.get_last_closed_trade(client_id)
-                notes = str((last_closed or {}).get('notes') or '').upper()
-                if 'STOP_LOSS' in notes:
-                    margem = max(0.0, saldo_ref * float(PERCENTUAL_ENTRADA_POS_STOP))
-            except Exception:
-                pass
-
-        qty = (margem * float(ALAVANCAGEM)) / entry
-        qty = round(float(qty), 6)
+        public_broker = _get_public_radar_broker_mainnet()
+        margem, qty, margin_used = _calculate_margin_locked_qty(
+            symbol,
+            entry,
+            float(ALAVANCAGEM or 1.0),
+            broker=public_broker,
+        )
+        if qty <= 0:
+            print(
+                f"   ❌ [PAPER MARGEM] Ordem bloqueada para {symbol}: margem calculada ${margin_used:.4f} acima de ${margem:.2f}",
+                flush=True,
+            )
         return round(margem, 2), qty, saldo_ref
     except Exception:
         return 0.0, 0.0, float(banca or _get_forced_training_fake_balance_usd())
@@ -2047,7 +2264,7 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
         
         threading.Thread(
             target=_process_client_orders_background,
-            args=(symbol, side, entry_price, res_ia.get('probabilidade', 70), res_ia.get('motivo', '')),
+            args=(symbol, side, entry_price, res_ia.get('probabilidade', 70), res_ia),
             daemon=True
         ).start()
     finally:
@@ -2117,8 +2334,6 @@ def sniper_worker_loop():
             validator = GroqValidator()
 
             # Alimenta o card RADAR LIVE imediatamente com a primeira moeda do radar.
-            positions_empty = len(central_state.get('active_trades') or []) == 0
-            force_testnet_bypass = bool((USE_TESTNET or has_paper_clients) and positions_empty)
             if top_coins:
                 central_state['symbol'] = _limpar_simbolo((top_coins[0] or {}).get('symbol'))
                 if not central_state.get('last_sniper_signal'):
@@ -2128,10 +2343,8 @@ def sniper_worker_loop():
                 if not central_state.get('last_sniper_signal'):
                     central_state['confidence'] = 0
 
-            # BYPASS (MECANISMO DE DEBUG):
-            # Em Testnet, sem posições abertas, não espera "sinal institucional perfeito".
-            # Força 1 ordem imediata na Testnet para validar TP(+100%)/SL(-50%) e o pipeline de execução.
-            if (USE_TESTNET or has_paper_clients) and top_coins and (not _FORCED_SIGNAL_FIRED) and (FORCAR_SINAL_TESTE or force_testnet_bypass):
+            # BYPASS DE DEBUG (somente quando explicitamente habilitado)
+            if (USE_TESTNET or has_paper_clients) and top_coins and (not _FORCED_SIGNAL_FIRED) and FORCAR_SINAL_TESTE:
                 t = top_coins[0]
                 sym = (t or {}).get('symbol')
                 if sym:
@@ -2171,6 +2384,26 @@ def sniper_worker_loop():
                 
                 signals = IndicatorEngine(df).get_signals()
                 if signals['trend'] == 'NEUTRO' or validator.local_signal(signals) < 25: continue
+
+                trend_filter = _evaluate_trend_regime_filter(radar_broker, sym, df_15m=df)
+                if trend_filter.get('is_lateralized'):
+                    _print_sniper_criteria_report(
+                        symbol=sym,
+                        price=float(signals.get('price') or 0.0),
+                        brain1_ok=False,
+                        brain2_ok=False,
+                        trend_filter=trend_filter,
+                        margin_value=float(MARGEM_INPUT or 5.0),
+                        approved=False,
+                        rejection_reason="POR MERCADO LATERALIZADO",
+                    )
+                    print(
+                        f"   🚫 [TREND FILTER] {sym} rejeitado | ADX5m={trend_filter.get('adx_5m', 0):.2f} | "
+                        f"ADX15m={trend_filter.get('adx_15m', 0):.2f} | range5={trend_filter.get('range_pct', 0):.4%}",
+                        flush=True,
+                    )
+                    time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
+                    continue
                 
                 res = validator.consensus_predict(signals, sym, force_local_only=True)
                 prob = float(res.get('probabilidade', 0))
@@ -2201,7 +2434,25 @@ def sniper_worker_loop():
                 central_state['confidence'] = round(prob, 2)
 
                 if prob >= THRESHOLD_ENTRADA and decisao in ['COMPRAR', 'VENDER', 'BUY', 'SELL']:
-                    broadcast_ordem_global(sym, 'buy' if decisao in ('BUY', 'COMPRAR') else 'sell', float(signals['price']), res)
+                    decision_side = 'buy' if decisao in ('BUY', 'COMPRAR') else 'sell'
+                    smc_ok = bool(
+                        signals.get('bullish_order_block')
+                        or signals.get('bearish_order_block')
+                        or signals.get('bullish_sweep')
+                        or signals.get('bearish_sweep')
+                        or signals.get('bullish_fvg')
+                        or signals.get('bearish_fvg')
+                    )
+                    volume_ok = bool(
+                        _coerce_float(signals.get('volume_ratio'), default=0.0) >= 1.5
+                        or bool(signals.get('volume_climax'))
+                    )
+                    res['criteria'] = {
+                        'brain1_ok': smc_ok,
+                        'brain2_ok': volume_ok,
+                        'trend_filter': trend_filter,
+                    }
+                    broadcast_ordem_global(sym, decision_side, float(signals['price']), res)
                     time.sleep(COOLDOWN_INSTITUCIONAL_SECS)
                     break
                 time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
@@ -2214,6 +2465,25 @@ def sniper_worker_loop():
 def _process_client_orders_background(symbol, side, entry_price, confidence, reason):
     """ Loop assíncrono com salvamento local e disparo protegido anti-400 do Telegram """
     try:
+        reason_payload = reason if isinstance(reason, dict) else {'motivo': str(reason or '')}
+        criteria_payload = reason_payload.get('criteria') or {}
+        trend_filter = criteria_payload.get('trend_filter') or {}
+        brain1_ok = bool(criteria_payload.get('brain1_ok'))
+        brain2_ok = bool(criteria_payload.get('brain2_ok'))
+
+        if trend_filter.get('is_lateralized'):
+            _print_sniper_criteria_report(
+                symbol=symbol,
+                price=float(entry_price or 0.0),
+                brain1_ok=brain1_ok,
+                brain2_ok=brain2_ok,
+                trend_filter=trend_filter,
+                margin_value=float(MARGEM_INPUT or 5.0),
+                approved=False,
+                rejection_reason="POR MERCADO LATERALIZADO",
+            )
+            return
+
         # 1. DUALIDADE DE CONFIGURAÇÃO (FALLBACK DO BANCO)
         # Primeiro tenta ler do .env, depois fallback para variáveis do banco
         tk = f"{os.getenv('TELEGRAM_TOKEN') or ''}".strip()
@@ -2226,6 +2496,19 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                 client_id = int(c.get('id') or 0)
                 if _is_training_fake_balance_client(c):
                     symbol_norm = _canonicalize_symbol(symbol)
+                    already_open, source = _is_symbol_open_for_client(symbol_norm, client_id=None, broker=None)
+                    if already_open:
+                        _print_sniper_criteria_report(
+                            symbol=symbol_norm,
+                            price=float(entry_price or 0.0),
+                            brain1_ok=brain1_ok,
+                            brain2_ok=brain2_ok,
+                            trend_filter=trend_filter,
+                            margin_value=float(MARGEM_INPUT or 5.0),
+                            approved=False,
+                            rejection_reason=f"POR ATIVO JÁ ABERTO ({source})",
+                        )
+                        continue
                     # Usa ticker vivo para a abertura virtual; não reutiliza entry_price
                     # para evitar trades simulados com preço congelado.
                     sim_entry_price = float(_get_live_market_price(symbol_norm, preferred_price=0.0) or 0.0)
@@ -2242,6 +2525,15 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                         )
                         continue
 
+                    _print_sniper_criteria_report(
+                        symbol=symbol_norm,
+                        price=sim_entry_price,
+                        brain1_ok=brain1_ok,
+                        brain2_ok=brain2_ok,
+                        trend_filter=trend_filter,
+                        margin_value=margem,
+                        approved=True,
+                    )
                     side_label = 'COMPRAR' if side.lower() in ('buy', 'comprar') else 'VENDER'
                     db.record_trade(
                         client_id=client_id,
@@ -2290,35 +2582,49 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                 broker = _make_broker(c)
                 banca = float(c.get('saldo_base', 1000.0))
 
-                # 🔒 CORREÇÃO MODO CONSERVADOR: Bloqueia nova entrada se já houver posição aberta
-                if RISK_MODE == 'conservative':
-                    try:
-                        # Verifica quantas posições reais o cliente tem abertas na Bybit
-                        if broker.pybit_session and broker.authenticated:
-                            positions_response = broker.pybit_session.get_positions(
-                                category='linear',
-                                settleCoin='USDT'
-                            )
-                            ok, err = broker._handle_v5_ret_code(positions_response, 'get_positions')
-
-                            if ok:
-                                positions_list = (positions_response.get('result') or {}).get('list', [])
-                                open_positions_count = sum(1 for pos in positions_list if float(pos.get('size') or 0) > 0)
-
-                                if open_positions_count >= 1:
-                                    print(f"   🔒 [CONSERVADOR] Cliente {c.get('nome')} já tem {open_positions_count} posição(ões) aberta(s). Bloqueando nova entrada.", flush=True)
-                                    continue  # Pula para o próximo cliente
-                            else:
-                                print(f"   ⚠️ [CONSERVADOR] Erro ao verificar posições para {c.get('nome')}: {err}", flush=True)
-                    except Exception as pos_check_err:
-                        print(f"   ⚠️ [CONSERVADOR] Exceção ao verificar posições: {pos_check_err}", flush=True)
+                symbol_norm = _canonicalize_symbol(symbol)
+                already_open, source = _is_symbol_open_for_client(symbol_norm, client_id=None, broker=broker)
+                if already_open:
+                    _print_sniper_criteria_report(
+                        symbol=symbol_norm,
+                        price=float(entry_price or 0.0),
+                        brain1_ok=brain1_ok,
+                        brain2_ok=brain2_ok,
+                        trend_filter=trend_filter,
+                        margin_value=float(MARGEM_INPUT or 5.0),
+                        approved=False,
+                        rejection_reason=f"POR ATIVO JÁ ABERTO ({source})",
+                    )
+                    continue
 
                 # 🔥 CORREÇÃO 1: Busca saldo atual da Bybit e calcula margem dinamicamente
                 margem, qty, saldo_atualizado = _calculate_dynamic_order_quantity(
                     broker,
-                    symbol,
+                    symbol_norm,
                     banca,
                     client_context=c,
+                )
+                if qty <= 0:
+                    _print_sniper_criteria_report(
+                        symbol=symbol_norm,
+                        price=float(entry_price or 0.0),
+                        brain1_ok=brain1_ok,
+                        brain2_ok=brain2_ok,
+                        trend_filter=trend_filter,
+                        margin_value=margem,
+                        approved=False,
+                        rejection_reason="POR VALIDADOR DE MARGEM",
+                    )
+                    continue
+
+                _print_sniper_criteria_report(
+                    symbol=symbol_norm,
+                    price=float(entry_price or 0.0),
+                    brain1_ok=brain1_ok,
+                    brain2_ok=brain2_ok,
+                    trend_filter=trend_filter,
+                    margin_value=margem,
+                    approved=True,
                 )
 
                 if qty > 0 and _is_order_execution_enabled(None):
@@ -2326,7 +2632,7 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                     # Define alavancagem conforme ALAVANCAGEM global antes de enviar ordem
                     if broker.pybit_session:
                         try:
-                            v5_symbol = broker._normalize_v5_symbol(symbol)
+                            v5_symbol = broker._normalize_v5_symbol(symbol_norm)
                             leverage_str = str(ALAVANCAGEM)
                             rsp_leverage = broker.pybit_session.set_leverage(
                                 category='linear',
@@ -2343,7 +2649,7 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                             # Ignora erros se moeda já estiver na alavancagem desejada
                             print(f"   ⚠️ [LEVERAGE] Erro ao configurar para {ALAVANCAGEM}x (pode já estar neste valor): {lev_err}", flush=True)
 
-                    order_result = broker.execute_market_order(symbol, side.lower(), qty, raise_on_error=True)
+                    order_result = broker.execute_market_order(symbol_norm, side.lower(), qty, raise_on_error=True)
                     if order_result:
                         order_id = order_result.get('id', order_result.get('orderId', 'N/A'))
                         side_label = 'COMPRAR' if side.lower() in ('buy', 'comprar') else 'VENDER'
@@ -2351,7 +2657,7 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                         # 🔥 CORREÇÃO 2: Armazena margem, quantidade e saldo para cálculo posterior de P&L
                         db.record_trade(
                             client_id=c.get('id', 1), 
-                            pair=symbol, 
+                            pair=symbol_norm, 
                             side=side_label, 
                             pnl_pct=0,
                             profit=0.0,  # Será calculado ao fechar
@@ -2364,14 +2670,14 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                             margin=margem
                         )
 
-                        broker.set_tp_sl_sniper(symbol, side.lower(), entry_price, qty)
+                        broker.set_tp_sl_sniper(symbol_norm, side.lower(), entry_price, qty)
 
                         _send_telegram_message_for_client(
                             c,
                             (
                                 f"🔥 ENTRADA REAL EXECUTADA\n\n"
                                 f"👤 Investidor: {c.get('nome')}\n"
-                                f"📦 Ativo: {symbol}\n"
+                                f"📦 Ativo: {symbol_norm}\n"
                                 f"📈 Direção: {side_label}\n"
                                 f"📊 Lote: {qty}\n"
                                 f"💰 Margem: ${margem:.2f} USDT\n"
