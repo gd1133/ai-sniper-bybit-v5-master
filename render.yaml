@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: ai-sniper-bybit-v5-mestre
+    env: python
+    plan: free
+    envVars:
+      - key: ENVIRONMENT
+        value: development
+    buildCommand: pip install -r requirements.txt && npm ci && npm run build
+    startCommand: python -m gunicorn main_web:app --bind 0.0.0.0:$PORT --workers 1 --timeout 120

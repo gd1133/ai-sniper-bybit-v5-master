@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="pt-pt">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Ícone institucional de tecnologia -->
+    <link rel="icon" type="image/svg+xml" href="https://cdn-icons-png.flaticon.com/512/2091/2091665.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Duo-IA Master v13.0 -Supreme</title>
+    
+    <!-- Tailwind CSS via CDN para garantir o visual moderno e arredondado -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <style>
+      /* Reset base e fundo escuro institucional */
+      body {
+        margin: 0;
+        padding: 0;
+        background-color: #020617;
+        color: #ffffff;
+        overflow-x: hidden;
+        font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      }
+
+      #root {
+        min-height: 100vh;
+      }
+
+      /* Animações suaves para os cartões de sinal */
+      .scale-up { 
+        animation: scaleUp 0.4s ease-out forwards; 
+      }
+
+      @keyframes scaleUp {
+        from { 
+          opacity: 0; 
+          transform: scale(0.95); 
+        }
+        to { 
+          opacity: 1; 
+          transform: scale(1); 
+        }
+      }
+
+      /* Scrollbar personalizada para manter a estética do robô */
+      ::-webkit-scrollbar {
+        width: 8px;
+      }
+      ::-webkit-scrollbar-track {
+        background: #020617;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #1e293b;
+        border-radius: 10px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: #3b82f6;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Onde o Dashboard v13.0 será injetado pelo React -->
+    <div id="root"></div>
+
+    <!-- 
+      PONTO DE ENTRADA CRÍTICO: 
+      Garante que o ficheiro do teu código React se chama 'main.jsx' 
+      e que está na mesma pasta que este index.html.
+    -->
+    <script type="module" src="/main.jsx"></script>
+  </body>
+</html>
