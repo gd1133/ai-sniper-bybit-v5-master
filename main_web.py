@@ -3309,6 +3309,16 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
     if api_secret: payload['bybit_secret'] = api_secret
     if existing_client is not None and 'nome' not in payload: payload['nome'] = existing_client.get('nome')
 
+    # Evita apagar credenciais válidas quando o frontend envia campos vazios no UPDATE.
+    existing_key = str((existing_client or {}).get('bybit_key') or '').strip()
+    existing_secret = str((existing_client or {}).get('bybit_secret') or '').strip()
+    incoming_key = str(payload.get('bybit_key') or '').strip()
+    incoming_secret = str(payload.get('bybit_secret') or '').strip()
+    if not incoming_key and existing_key:
+        payload['bybit_key'] = existing_key
+    if not incoming_secret and existing_secret:
+        payload['bybit_secret'] = existing_secret
+
     try:
         if payload.get('balance_source') == 'training_fake_balance':
             fake = float(payload.get('saldo_base') or 0) or _get_forced_training_fake_balance_usd()
