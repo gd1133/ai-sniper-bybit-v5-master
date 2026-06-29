@@ -385,8 +385,12 @@ class BrokerManager:
             if cached_entry:
                 cached_broker = cached_entry.get('broker')
                 api_key = str(client.get('bybit_key') or '').strip()
+                api_secret = str(client.get('bybit_secret') or '').strip()
                 if hasattr(cached_broker, 'exchange') and hasattr(cached_broker.exchange, 'apiKey'):
-                    if cached_broker.exchange.apiKey == api_key:
+                    cached_key = str(getattr(cached_broker.exchange, 'apiKey', '') or '').strip()
+                    cached_secret = str(getattr(cached_broker.exchange, 'secret', '') or '').strip()
+                    cached_auth = bool(getattr(cached_broker, 'authenticated', False))
+                    if cached_key == api_key and cached_secret == api_secret and cached_auth:
                         cached_entry['last_used'] = time.time()
                         return cached_broker
                 self._broker_cache.pop(cache_key, None)
@@ -3349,6 +3353,7 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
         payload['status'] = 'ativo'
         record, _, local_synced = _save_client_everywhere(payload)
         _clear_client_auth_runtime((record or {}).get('id') or client_id)
+        _get_broker_manager().invalidate_client((record or {}).get('id') or client_id)
         return {
             'valid': True,
             'msg': 'Validado OK',
@@ -3381,6 +3386,7 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
                     payload['status'] = 'ativo'
                     record, _, local_synced = _save_client_everywhere(payload)
                     _clear_client_auth_runtime((record or {}).get('id') or client_id)
+                    _get_broker_manager().invalidate_client((record or {}).get('id') or client_id)
                     detected_env = 'TESTNET' if flipped_is_testnet else 'MAINNET'
                     return {
                         'valid': True,
