@@ -127,8 +127,10 @@ def _handle_invalid_api_key_10003_for_client(client, source_label='bybit'):
 # 🔧 CONFIGURAÇÃO DE GERENCIAMENTO DE RISCO MOTOR SNIPER V60.7
 # Altere estes valores conforme necessário para diferentes estratégias de trading
 ALAVANCAGEM = 20  # Alavancagem fixa (pode ser alterado para 30 ou 50 no futuro)
-MARGEM_INPUT = 5.0  # Margem de entrada fixa em USDT (anteriormente era 5% da banca)
+MARGEM_INPUT = 5.0  # fallback legado quando capital não estiver disponível
 LIMITE_PERDA_STOP = -2.50  # Stop loss financeiro: -50% da margem de entrada ($5.0)
+PERCENTUAL_ENTRADA_BANCA = 0.05  # Entrada padrão: 5% do capital
+PERCENTUAL_ENTRADA_POS_STOP = 0.03  # Após STOP_LOSS: 3% do capital
 
 def _env_float(name: str, default: float) -> float:
     raw = os.getenv(name)
@@ -195,11 +197,8 @@ def _resolve_request_is_testnet(data: dict, default: bool = False) -> bool:
     return default
 
 def _is_training_fake_balance_enabled() -> bool:
-    # Default: enabled on TESTNET to allow UI/training without valid API keys.
-    try:
-        default_enabled = bool(USE_TESTNET)
-    except Exception:
-        default_enabled = False
+    # Default: desabilitado. Só ativa saldo fictício quando explicitamente configurado.
+    default_enabled = False
     return _env_bool('ENABLE_TRAINING_FAKE_BALANCE', default_enabled)
 
 def _get_training_fake_balance_usd() -> float | None:
@@ -224,6 +223,39 @@ def _is_training_fake_balance_client(client) -> bool:
 def _get_forced_training_fake_balance_usd() -> float:
     value = float(_env_float('TRAINING_FAKE_BALANCE_USD', 500.0))
     return value if value > 0 else 500.0
+
+
+def _extract_unified_usdt_available_balance(wallet_response) -> float | None:
+    """
+    Extrai saldo disponível USDT de `get_wallet_balance(accountType="UNIFIED")`.
+    Prioridade:
+    1) coin.USDT.availableBalance
+    2) coin.USDT.availableToWithdraw
+    3) account.totalAvailableBalance
+    4) wallet/equity como fallback de compatibilidade
+    """
+    try:
+        result = (wallet_response or {}).get('result') or {}
+        accounts = result.get('list') or []
+        for account in accounts:
+            coins = account.get('coin') or []
+            for coin in coins:
+                if str(coin.get('coin') or '').upper() != 'USDT':
+                    continue
+                for field in ('availableBalance', 'availableToWithdraw', 'walletBalance', 'equity'):
+                    raw = coin.get(field)
+                    if raw is None:
+                        continue
+                    return float(raw)
+
+            for field in ('totalAvailableBalance', 'totalWalletBalance'):
+                raw = account.get(field)
+                if raw is None:
+                    continue
+                return float(raw)
+    except Exception:
+        return None
+    return None
 
 
 class BrokerManager:
@@ -663,9 +695,15 @@ def _fetch_active_client_balances(force=False):
             is_fake_balance = False
             try:
                 client_id = int(client.get('id') or 0)
-                if _is_training_fake_balance_client(client):
+                is_testnet_client = _coerce_bool(client.get('is_testnet'), default=USE_TESTNET)
+                if _is_training_fake_balance_client(client) and not is_testnet_client:
                     balance = _get_forced_training_fake_balance_usd()
                     is_fake_balance = True
+                elif _is_training_fake_balance_client(client) and is_testnet_client:
+                    print(
+                        f"   🔄 [BALANCE] Ignorando saldo fictício para {client.get('nome')} (TESTNET) e buscando saldo real da Bybit",
+                        flush=True,
+                    )
                 elif _is_client_temporarily_disabled(client_id):
                     error = _get_client_disable_reason(client_id) or 'Cliente temporariamente desativado por erro de autenticação'
                     fake = _get_training_fake_balance_usd()
@@ -1075,7 +1113,8 @@ def _monitor_dashboard_positions():
             for cliente in clientes:
                 try:
                     client_id = int(cliente.get('id') or 0)
-                    if _is_training_fake_balance_client(cliente):
+                    is_testnet_client = _coerce_bool(cliente.get('is_testnet'), default=USE_TESTNET)
+                    if _is_training_fake_balance_client(cliente) and not is_testnet_client:
                         fake = _get_forced_training_fake_balance_usd()
                         total_wallet_balance += float(fake)
                         print(
@@ -1083,6 +1122,11 @@ def _monitor_dashboard_positions():
                             flush=True,
                         )
                         continue
+                    elif _is_training_fake_balance_client(cliente) and is_testnet_client:
+                        print(
+                            f"   🔄 [DASHBOARD] Cliente {cliente.get('nome')} TESTNET: ignorando saldo fictício e sincronizando via Bybit UNIFIED",
+                            flush=True,
+                        )
 
                     if _is_client_temporarily_disabled(client_id):
                         fake = _get_training_fake_balance_usd()
@@ -1129,13 +1173,26 @@ def _monitor_dashboard_positions():
 
                             if wallet_list:
                                 wallet_data = wallet_list[0]
-                                # Busca o saldo USDT no campo coin
+                                # Busca saldo disponível USDT (conta UNIFIED)
                                 coin_list = wallet_data.get('coin', [])
-
+                                usdt_available = _extract_unified_usdt_available_balance(wallet_response)
+                                if usdt_available is not None:
+                                    total_wallet_balance += float(usdt_available)
+                                    client_balance_added = True
+                                    print(
+                                        f"   💰 [DASHBOARD] {cliente.get('nome')}: saldo disponível UNIFIED ${float(usdt_available):.2f} USDT",
+                                        flush=True,
+                                    )
+                                    continue
                                 for coin in coin_list:
                                     if coin.get('coin') == 'USDT':
-                                        # Usa walletBalance ou equity como saldo principal
-                                        wallet_balance = float(coin.get('walletBalance') or coin.get('equity') or 0)
+                                        wallet_balance = float(
+                                            coin.get('availableBalance')
+                                            or coin.get('availableToWithdraw')
+                                            or coin.get('walletBalance')
+                                            or coin.get('equity')
+                                            or 0
+                                        )
                                         total_wallet_balance += wallet_balance
                                         client_balance_added = True
                                         print(f"   💰 [DASHBOARD] {cliente.get('nome')}: ${wallet_balance:.2f} USDT", flush=True)
@@ -1429,59 +1486,60 @@ def _close_stale_open_trades(max_age_minutes=180):
         conn.commit(); conn.close()
     except Exception: pass
 
-def _calculate_dynamic_order_quantity(broker, symbol, banca=None):
+def _calculate_dynamic_order_quantity(broker, symbol, banca=None, client_context=None):
     """
-    🎯 GESTÃO ESTRITAMENTE FINANCEIRA V60.7 - COM MARGEM FIXA
-    
-    Utiliza margem de entrada fixa: MARGEM_INPUT = 5.0 USDT
-    Alavancagem fixa: ALAVANCAGEM = 20x
-    
-    Calcula quantidade baseada em:
-    - Margem de entrada: 5.0 USDT (MARGEM_INPUT, fixo)
-    - Alavancagem: 20x fixo (ALAVANCAGEM)
-    - Fórmula: Qty = (5.0 × 20) / Preço Atual
-    
-    Retorna (margem_separada, quantidade_normalizada, saldo_atualizado)
+    Gestão de entrada por percentual de capital:
+    - Entrada padrão: 5%
+    - Após STOP_LOSS: 3%
     """
     try:
-        # 🔥 CONFIGURAÇÃO FIXA: Usa as variáveis de módulo definidas
-        risk_margin = MARGEM_INPUT  # 5.0 USDT
-        leverage_value = ALAVANCAGEM  # 20x
+        leverage_value = float(ALAVANCAGEM or 1.0)
 
-        # Busca saldo atual para referência (não mais usado para cálculo de margem)
         saldo_atual = broker.get_balance()
         if saldo_atual is None or saldo_atual <= 0:
-            print(f"⚠️ [CALC QTY] Falha ao buscar saldo da Bybit, usando padrão: ${banca:.2f}", flush=True)
+            print(f"⚠️ [CALC QTY] Falha ao buscar saldo da Bybit, usando banca configurada: ${banca:.2f}", flush=True)
             saldo_atual = banca if banca and banca > 0 else 1000.0
-        
         saldo_atual = float(saldo_atual)
-        
-        # 🔧 MARGEM FIXA: Sempre 5.0 USDT independente do saldo
-        margem = risk_margin
 
-        # Busca o preço atual do símbolo
+        # Prioriza saldo dinâmico da Bybit; banca manual é somente fallback.
+        capital_ref = saldo_atual if saldo_atual > 0 else float(banca or 0.0)
+        if capital_ref <= 0:
+            capital_ref = float(MARGEM_INPUT or 5.0) / float(PERCENTUAL_ENTRADA_BANCA or 0.05)
+
+        margem_pct = float(PERCENTUAL_ENTRADA_BANCA)
+        client_id = int((client_context or {}).get('id') or 0)
+        if client_id > 0:
+            try:
+                last_closed = db.get_last_closed_trade(client_id)
+                last_notes = str((last_closed or {}).get('notes') or '').upper()
+                if 'STOP_LOSS' in last_notes:
+                    margem_pct = float(PERCENTUAL_ENTRADA_POS_STOP)
+                    print(
+                        f"   🛡️ [CALC QTY] Último fechamento foi STOP_LOSS: entrada reduzida para {margem_pct*100:.1f}%",
+                        flush=True,
+                    )
+            except Exception:
+                pass
+
+        margem = max(0.0, capital_ref * margem_pct)
+        if margem <= 0:
+            margem = float(MARGEM_INPUT or 5.0)
+
         last_price = float(broker.get_last_price(symbol) or 0)
         if last_price <= 0:
             print(f"❌ [CALC QTY] Preço inválido para {symbol}", flush=True)
             return 0.0, 0.0, saldo_atual
 
-        # 🔧 FÓRMULA FIXA COM MARGEM E ALAVANCAGEM
-        # Qty = (Margem Fixa × Alavancagem) / Preço Atual
-        # Qty = (5.0 × 20) / Preço Atual = 100 / Preço Atual
         qty = (margem * leverage_value) / last_price
 
         print(f"   💰 [CALC QTY] Saldo Atual (BYBIT V5): ${saldo_atual:.2f} USDT", flush=True)
-        print(f"   💰 [CALC QTY] Margem Fixa: ${margem:.2f} USDT (conforme MARGEM_INPUT)", flush=True)
+        print(f"   💰 [CALC QTY] Capital de referência: ${capital_ref:.2f} USDT", flush=True)
+        print(f"   💰 [CALC QTY] Margem de entrada: ${margem:.2f} USDT ({margem_pct*100:.1f}%)", flush=True)
         print(f"   📊 [CALC QTY] Preço: ${last_price:.4f} | Alavancagem: {leverage_value}x", flush=True)
-        print(f"   🔢 [CALC QTY] Qty calculada: {qty:.6f} (Fórmula: {margem:.2f} × {leverage_value} / {last_price:.4f})", flush=True)
+        print(f"   🔢 [CALC QTY] Qty calculada: {qty:.6f}", flush=True)
 
-        # Normaliza com as precisões da exchange
         try:
-            markets = broker.exchange.load_markets()
-            market = markets.get(symbol, {})
-            amount_precision = market.get('precision', {}).get('amount', 3)
-            qty = broker.exchange.amount_to_precision(symbol, qty)
-            qty = float(qty)
+            qty = float(broker.exchange.amount_to_precision(symbol, qty))
             print(f"   ✅ [CALC QTY] Qty normalizada: {qty}", flush=True)
         except Exception as precision_err:
             print(f"   ⚠️ [CALC QTY] Erro na precisão, usando arredondamento simples: {precision_err}", flush=True)
@@ -1702,7 +1760,12 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                         print(f"   ⚠️ [CONSERVADOR] Exceção ao verificar posições: {pos_check_err}", flush=True)
 
                 # 🔥 CORREÇÃO 1: Busca saldo atual da Bybit e calcula margem dinamicamente
-                margem, qty, saldo_atualizado = _calculate_dynamic_order_quantity(broker, symbol, banca)
+                margem, qty, saldo_atualizado = _calculate_dynamic_order_quantity(
+                    broker,
+                    symbol,
+                    banca,
+                    client_context=c,
+                )
 
                 if qty > 0 and _is_order_execution_enabled(None):
                     # 🔧 CONFIGURAÇÃO AUTOMÁTICA DE ALAVANCAGEM (VARIÁVEL)
@@ -1876,6 +1939,12 @@ def api_cliente_balance_source(client_id):
         existing = _get_registered_client_by_id(client_id)
         if not existing:
             return jsonify({"success": False, "error": "Não encontrado"}), 404
+
+        if _coerce_bool(existing.get('is_testnet'), default=USE_TESTNET) and balance_source == 'training_fake_balance':
+            return jsonify({
+                "success": False,
+                "error": "Conta TESTNET usa saldo dinâmico da Bybit (UNIFIED). Saldo fictício manual foi bloqueado."
+            }), 400
 
         existing['balance_source'] = balance_source
         ok = db.update_client(int(client_id), existing)
@@ -2112,6 +2181,8 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
     final_is_testnet = _coerce_bool(payload.get('is_testnet', is_testnet), default=USE_TESTNET)
     payload['account_mode'], payload['is_testnet'] = 'real', final_is_testnet
     payload['balance_source'] = _normalize_balance_source(payload.get('balance_source'))
+    if final_is_testnet:
+        payload['balance_source'] = 'broker_real_balance'
     payload['exchange'] = str(payload.get('exchange') or 'bybit').strip().lower()
     if client_id is not None: payload['id'] = client_id
     if api_key: payload['bybit_key'] = api_key
