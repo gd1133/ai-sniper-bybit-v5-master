@@ -221,11 +221,8 @@ def _resolve_request_is_testnet(payload, *, fallback: bool = False) -> bool:
     return bool(fallback)
 
 def _is_training_fake_balance_enabled() -> bool:
-    # Default: enabled on TESTNET to allow UI/training without valid API keys.
-    try:
-        default_enabled = bool(USE_TESTNET)
-    except Exception:
-        default_enabled = False
+    # Default: desabilitado. Só ativa saldo fictício quando explicitamente configurado.
+    default_enabled = False
     return _env_bool('ENABLE_TRAINING_FAKE_BALANCE', default_enabled)
 
 def _get_training_fake_balance_usd() -> float | None:
@@ -253,6 +250,39 @@ def _is_training_fake_balance_client(client) -> bool:
 def _get_forced_training_fake_balance_usd() -> float:
     value = float(_env_float('TRAINING_FAKE_BALANCE_USD', 500.0))
     return value if value > 0 else 500.0
+
+
+def _extract_unified_usdt_available_balance(wallet_response) -> float | None:
+    """
+    Extrai saldo disponível USDT de `get_wallet_balance(accountType="UNIFIED")`.
+    Prioridade:
+    1) coin.USDT.availableBalance
+    2) coin.USDT.availableToWithdraw
+    3) account.totalAvailableBalance
+    4) wallet/equity como fallback de compatibilidade
+    """
+    try:
+        result = (wallet_response or {}).get('result') or {}
+        accounts = result.get('list') or []
+        for account in accounts:
+            coins = account.get('coin') or []
+            for coin in coins:
+                if str(coin.get('coin') or '').upper() != 'USDT':
+                    continue
+                for field in ('availableBalance', 'availableToWithdraw', 'walletBalance', 'equity'):
+                    raw = coin.get(field)
+                    if raw is None:
+                        continue
+                    return float(raw)
+
+            for field in ('totalAvailableBalance', 'totalWalletBalance'):
+                raw = account.get(field)
+                if raw is None:
+                    continue
+                return float(raw)
+    except Exception:
+        return None
+    return None
 
 
 class BrokerManager:
@@ -1152,10 +1182,16 @@ def _fetch_active_client_balances(force=False):
                 client_id = int(client.get('id') or 0)
                 client_hist = float(historico_map.get(client_id, 0.0))
                 historico_total += client_hist
-                if _is_training_fake_balance_client(client):
+                is_testnet_client = _resolve_request_is_testnet(client, fallback=False)
+                if _is_training_fake_balance_client(client) and not is_testnet_client:
                     # Saldo de teste parte de 500 e aplica P&L histórico acumulado.
                     balance = float(_get_forced_training_fake_balance_usd()) + client_hist
                     is_fake_balance = True
+                elif _is_training_fake_balance_client(client) and is_testnet_client:
+                    print(
+                        f"   🔄 [BALANCE] Ignorando saldo fictício para {client.get('nome')} (TESTNET) e buscando saldo real da Bybit",
+                        flush=True,
+                    )
                 elif _is_client_temporarily_disabled(client_id):
                     error = _get_client_disable_reason(client_id) or 'Cliente temporariamente desativado por erro de autenticação'
                     fake = _get_training_fake_balance_usd()
@@ -1776,7 +1812,8 @@ def _monitor_dashboard_positions():
                     exchange_name = str(cliente.get('exchange') or 'bybit').strip().lower()
                     if exchange_name != 'bybit':
                         continue
-                    if _is_training_fake_balance_client(cliente):
+                    is_testnet_client = _resolve_request_is_testnet(cliente, fallback=False)
+                    if _is_training_fake_balance_client(cliente) and not is_testnet_client:
                         fake = _get_forced_training_fake_balance_usd()
                         total_wallet_balance += float(fake)
                         client_open_trades = simulated_trades_by_client.get(client_id, [])
@@ -1819,6 +1856,11 @@ def _monitor_dashboard_positions():
                             flush=True,
                         )
                         continue
+                    elif _is_training_fake_balance_client(cliente) and is_testnet_client:
+                        print(
+                            f"   🔄 [DASHBOARD] Cliente {cliente.get('nome')} TESTNET: ignorando saldo fictício e sincronizando via Bybit UNIFIED",
+                            flush=True,
+                        )
 
                     if _is_client_temporarily_disabled(client_id):
                         fake = _get_training_fake_balance_usd()
@@ -1869,9 +1911,24 @@ def _monitor_dashboard_positions():
                             wallet_list = result.get('list', [])
                             if wallet_list:
                                 wallet_data = wallet_list[0]
+                                usdt_available = _extract_unified_usdt_available_balance(wallet_response)
+                                if usdt_available is not None:
+                                    total_wallet_balance += float(usdt_available)
+                                    client_balance_added = True
+                                    print(
+                                        f"   💰 [DASHBOARD] {cliente.get('nome')}: saldo disponível UNIFIED ${float(usdt_available):.2f} USDT",
+                                        flush=True,
+                                    )
+                                    continue
                                 for coin in wallet_data.get('coin', []):
                                     if coin.get('coin') == 'USDT':
-                                        wallet_balance = float(coin.get('walletBalance') or coin.get('equity') or 0)
+                                        wallet_balance = float(
+                                            coin.get('availableBalance')
+                                            or coin.get('availableToWithdraw')
+                                            or coin.get('walletBalance')
+                                            or coin.get('equity')
+                                            or 0
+                                        )
                                         total_wallet_balance += wallet_balance
                                         client_balance_added = True
                                         print(f"   💰 [DASHBOARD] {cliente.get('nome')}: ${wallet_balance:.2f} USDT", flush=True)
@@ -2183,35 +2240,55 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None, client_context
     try:
         leverage_value = float(ALAVANCAGEM or 1.0)
 
-        # Busca saldo atual para referência (não mais usado para cálculo de margem)
+        # Saldo dinâmico da exchange em tempo real (Bybit UNIFIED/Testnet/Mainnet).
         saldo_atual = broker.get_balance()
         if saldo_atual is None or saldo_atual <= 0:
-            print(f"⚠️ [CALC QTY] Falha ao buscar saldo da Bybit, usando padrão: ${banca:.2f}", flush=True)
+            print(f"⚠️ [CALC QTY] Falha ao buscar saldo da Bybit, usando fallback local: ${banca:.2f}", flush=True)
             saldo_atual = banca if banca and banca > 0 else 1000.0
-        
         saldo_atual = float(saldo_atual)
 
-        # Busca o preço atual do símbolo
+        capital_ref = saldo_atual if saldo_atual > 0 else float(banca or 0.0)
+        if capital_ref <= 0:
+            capital_ref = float(MARGEM_INPUT or 5.0) / float(PERCENTUAL_ENTRADA_BANCA or 0.05)
+
+        margem_pct = float(PERCENTUAL_ENTRADA_BANCA)
+        client_id = int((client_context or {}).get('id') or 0)
+        if client_id > 0:
+            try:
+                last_closed = db.get_last_closed_trade(client_id)
+                notes = str((last_closed or {}).get('notes') or '').upper()
+                if 'STOP_LOSS' in notes:
+                    margem_pct = float(PERCENTUAL_ENTRADA_POS_STOP)
+                    print(
+                        f"   🛡️ [CALC QTY] Último fechamento foi STOP_LOSS, aplicando entrada de recuperação em {margem_pct*100:.1f}%",
+                        flush=True,
+                    )
+            except Exception:
+                pass
+
+        margem = max(0.0, capital_ref * margem_pct)
+        if margem <= 0:
+            margem = float(MARGEM_INPUT or 5.0)
+
         last_price = float(broker.get_last_price(symbol) or 0)
         if last_price <= 0:
             print(f"❌ [CALC QTY] Preço inválido para {symbol}", flush=True)
             return 0.0, 0.0, saldo_atual
 
-        # Blindagem rígida de margem fixa: sempre calcula para $5.00 (MARGEM_INPUT).
-        margem, qty, margin_used = _calculate_margin_locked_qty(
-            symbol,
-            last_price,
-            leverage_value,
-            broker=broker,
-        )
+        qty = (margem * leverage_value) / last_price
 
         print(f"   💰 [CALC QTY] Saldo Atual (BYBIT V5): ${saldo_atual:.2f} USDT", flush=True)
-        print(f"   💰 [CALC QTY] Margem alvo fixa: ${margem:.2f} USDT", flush=True)
+        print(f"   💰 [CALC QTY] Capital de referência: ${capital_ref:.2f} USDT", flush=True)
+        print(f"   💰 [CALC QTY] Margem de entrada: ${margem:.2f} USDT ({margem_pct*100:.1f}%)", flush=True)
         print(f"   📊 [CALC QTY] Preço: ${last_price:.4f} | Alavancagem: {leverage_value}x", flush=True)
-        print(f"   🔢 [CALC QTY] Qty calculada com floor por qtyStep: {qty:.8f}", flush=True)
-        print(f"   ✅ [VALIDADOR MARGEM] Margem real calculada: ${margin_used:.4f} USDT", flush=True)
-        if qty <= 0:
-            print("   ❌ [CALC QTY] Ordem bloqueada para proteger margem fixa de $5.00", flush=True)
+        print(f"   🔢 [CALC QTY] Qty calculada: {qty:.6f}", flush=True)
+
+        try:
+            qty = float(broker.exchange.amount_to_precision(symbol, qty))
+            print(f"   ✅ [CALC QTY] Qty normalizada: {qty}", flush=True)
+        except Exception as precision_err:
+            print(f"   ⚠️ [CALC QTY] Erro na precisão, usando arredondamento simples: {precision_err}", flush=True)
+            qty = round(qty, 3)
 
         return round(margem, 2), qty, saldo_atual
     except Exception as calc_err:
@@ -2874,6 +2951,12 @@ def api_cliente_balance_source(client_id):
         if not existing:
             return jsonify({"success": False, "error": "Não encontrado"}), 404
 
+        if _resolve_request_is_testnet(existing, fallback=False) and balance_source == 'training_fake_balance':
+            return jsonify({
+                "success": False,
+                "error": "Conta TESTNET usa saldo dinâmico da Bybit (UNIFIED). Saldo fictício manual foi bloqueado."
+            }), 400
+
         existing['balance_source'] = balance_source
         ok = db.update_client(int(client_id), existing)
         client_balance_cache.clear()
@@ -3192,6 +3275,8 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
     final_is_testnet = requested_is_testnet
     payload['account_mode'], payload['is_testnet'] = 'real', final_is_testnet
     payload['balance_source'] = _normalize_balance_source(payload.get('balance_source'))
+    if final_is_testnet:
+        payload['balance_source'] = 'broker_real_balance'
     payload['exchange'] = 'bybit'
     if client_id is not None: payload['id'] = client_id
     if api_key: payload['bybit_key'] = api_key
@@ -3199,25 +3284,6 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
     if existing_client is not None and 'nome' not in payload: payload['nome'] = existing_client.get('nome')
 
     try:
-        # Versão de simulação local pura: TESTE não depende de API externa.
-        if final_is_testnet:
-            fake = float(payload.get('saldo_base') or 0) or _get_forced_training_fake_balance_usd()
-            payload['saldo_base'] = round(float(fake), 2)
-            payload['status'] = 'ativo'
-            payload['balance_source'] = 'training_fake_balance'
-            record, _, local_synced = _save_client_everywhere(payload)
-            return {
-                'valid': True,
-                'msg': 'Modo TESTE local ativo (simulação sem conexão de exchange).',
-                'record': record,
-                'synced_to_local': local_synced,
-                'balance': payload['saldo_base'],
-                'account_mode': 'real',
-                'exchange': payload['exchange'],
-                'balance_source': payload.get('balance_source'),
-                'is_testnet': final_is_testnet,
-            }
-
         if payload.get('balance_source') == 'training_fake_balance':
             fake = float(payload.get('saldo_base') or 0) or _get_forced_training_fake_balance_usd()
             payload['saldo_base'] = round(float(fake), 2)

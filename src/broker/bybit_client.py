@@ -412,6 +412,29 @@ class BybitClient:
             usdt = total.get('USDT')
             return float(usdt) if usdt is not None else None
 
+        def _extract_unified_available_usdt(wallet_response):
+            try:
+                result = (wallet_response or {}).get('result') or {}
+                wallet_list = result.get('list') or []
+                for wallet_data in wallet_list:
+                    coin_list = wallet_data.get('coin') or []
+                    for coin in coin_list:
+                        if str(coin.get('coin') or '').upper() != 'USDT':
+                            continue
+                        for field in ('availableBalance', 'availableToWithdraw', 'walletBalance', 'equity'):
+                            raw = coin.get(field)
+                            if raw is None:
+                                continue
+                            return float(raw)
+                    for field in ('totalAvailableBalance', 'totalWalletBalance'):
+                        raw = wallet_data.get(field)
+                        if raw is None:
+                            continue
+                        return float(raw)
+            except Exception:
+                return None
+            return None
+
         ccxt = _get_ccxt()
 
         def _handle_ccxt_balance_error(scope_label, err):
@@ -433,19 +456,10 @@ class BybitClient:
                 ok, err = self._handle_v5_ret_code(wallet_response, 'get_wallet_balance')
 
                 if ok:
-                    result = wallet_response.get('result', {})
-                    wallet_list = result.get('list', [])
-
-                    if wallet_list:
-                        wallet_data = wallet_list[0]
-                        coin_list = wallet_data.get('coin', [])
-
-                        for coin in coin_list:
-                            if coin.get('coin') == 'USDT':
-                                wallet_balance = float(coin.get('walletBalance') or coin.get('equity') or 0)
-                                if wallet_balance > 0:
-                                    print(f"✅ [BYBIT] Saldo via pybit: ${wallet_balance:.2f} USDT", flush=True)
-                                    return wallet_balance
+                    wallet_balance = _extract_unified_available_usdt(wallet_response)
+                    if wallet_balance is not None:
+                        print(f"✅ [BYBIT] Saldo disponível UNIFIED via pybit: ${float(wallet_balance):.2f} USDT", flush=True)
+                        return float(wallet_balance)
                 else:
                     print(f"⚠️ [BYBIT] Erro pybit get_wallet_balance: {err}", flush=True)
                     self._record_last_auth_error(wallet_response)

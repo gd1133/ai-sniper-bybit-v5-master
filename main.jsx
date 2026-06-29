@@ -1081,7 +1081,6 @@ const App = () => {
                 setAddFormMsg(null);
                   const payload = {
                     nome: addFormFields.nome,
-                    saldo_base: parseFloat(addFormFields.saldo_base) || 0,
                     bybit_key: addFormFields.bybit_key,
                     bybit_secret: addFormFields.bybit_secret,
                     tg_token: addFormFields.tg_token,
@@ -1168,7 +1167,7 @@ const App = () => {
                         💼 Conta Real (Fixo)
                       </div>
                       <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest ml-1">
-                        Conta real é fixa. Você pode alternar apenas a fonte de saldo do painel para testes (saldo fictício) sem executar ordens.
+                        O saldo é sincronizado automaticamente da Bybit (Mainnet/Testnet) — sem entrada manual.
                       </p>
                    </div>
                   <div className="space-y-2 md:col-span-2">
@@ -1207,7 +1206,7 @@ const App = () => {
                         className="w-full p-3 rounded-2xl outline-none font-mono border bg-zinc-950 border-white/5 text-zinc-500 cursor-not-allowed"
                         placeholder={formBalancePlaceholder}
                       />
-                      <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest ml-1">Saldo aparece após validar a chave.</p>
+                      <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest ml-1">Saldo exibido em tempo real via API Bybit V5 (UNIFIED).</p>
                    </div>
                 </div>
                
