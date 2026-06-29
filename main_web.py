@@ -239,6 +239,9 @@ def _get_training_fake_balance_usd() -> float | None:
     return value if value > 0 else None
 
 _VALID_BALANCE_SOURCES = {'broker_real_balance', 'training_fake_balance'}
+BYBIT_MAINNET_ENDPOINT = "https://api.bybit.com"
+BYBIT_TESTNET_ENDPOINT = "https://api-testnet.bybit.com"
+BYBIT_DEMO_ENDPOINT = "https://api-demo.bybit.com"
 
 def _normalize_balance_source(value) -> str:
     raw = str(value or '').strip().lower()
@@ -263,6 +266,46 @@ def _should_use_testnet_api(client) -> bool:
         return True
     # Compatibilidade com registros antigos marcados como "SALDO TESTE".
     return _normalize_balance_source((client or {}).get('balance_source')) == 'training_fake_balance'
+
+def _client_bybit_endpoint_mode_key(client_id: int) -> str:
+    return f"bybit_endpoint_mode_{int(client_id or 0)}"
+
+def _endpoint_url_for_mode(mode: str) -> str:
+    normalized = str(mode or '').strip().lower()
+    if normalized == 'demo':
+        return BYBIT_DEMO_ENDPOINT
+    if normalized == 'mainnet':
+        return BYBIT_MAINNET_ENDPOINT
+    return BYBIT_TESTNET_ENDPOINT
+
+def _get_client_endpoint_mode(client, fallback_mode: str | None = None) -> str:
+    explicit = str((client or {}).get('bybit_endpoint_mode') or '').strip().lower()
+    if explicit in ('mainnet', 'testnet', 'demo'):
+        return explicit
+
+    client_id = int((client or {}).get('id') or 0)
+    if client_id > 0:
+        try:
+            persisted = str(db.get_config(_client_bybit_endpoint_mode_key(client_id)) or '').strip().lower()
+            if persisted in ('mainnet', 'testnet', 'demo'):
+                return persisted
+        except Exception:
+            pass
+
+    fallback = str(fallback_mode or '').strip().lower()
+    if fallback in ('mainnet', 'testnet', 'demo'):
+        return fallback
+    return 'testnet' if _should_use_testnet_api(client) else 'mainnet'
+
+def _set_client_endpoint_mode(client_id, mode: str):
+    cid = int(client_id or 0)
+    normalized = str(mode or '').strip().lower()
+    if cid <= 0 or normalized not in ('mainnet', 'testnet', 'demo'):
+        return
+    try:
+        db.set_config(_client_bybit_endpoint_mode_key(cid), normalized)
+    except Exception:
+        pass
 
 def _get_forced_training_fake_balance_usd() -> float:
     value = float(_env_float('TRAINING_FAKE_BALANCE_USD', 500.0))
@@ -324,8 +367,9 @@ class BrokerManager:
         self._initialized = True
         print(f"🔄 [BROKER MANAGER] Singleton inicializado | max_cache={self._max_cached_brokers} | stale={self._stale_seconds}s")
 
-    def _generate_cache_key(self, client_id, exchange, testnet):
-        return f"{exchange}_{client_id}_{testnet}"
+    def _generate_cache_key(self, client_id, exchange, testnet, endpoint_url=None):
+        endpoint_tag = str(endpoint_url or '').strip().lower()
+        return f"{exchange}_{client_id}_{testnet}_{endpoint_tag}"
 
     def _get_broker_class(self, exchange):
         normalized_exchange = 'bybit'
@@ -374,10 +418,10 @@ class BrokerManager:
         if removed:
             gc.collect()
 
-    def get_broker(self, client, testnet):
+    def get_broker(self, client, testnet, endpoint_url=None):
         client_id = client.get('id')
         exchange = 'bybit'
-        cache_key = self._generate_cache_key(client_id, exchange, testnet)
+        cache_key = self._generate_cache_key(client_id, exchange, testnet, endpoint_url=endpoint_url)
 
         with self._cache_lock:
             self._prune_cache_unlocked()
@@ -400,7 +444,7 @@ class BrokerManager:
             if not api_key or not api_secret: raise RuntimeError(f"Cliente sem credenciais (id={client_id})")
 
             broker_cls = self._get_broker_class(exchange)
-            broker_instance = broker_cls(api_key, api_secret, testnet=testnet)
+            broker_instance = broker_cls(api_key, api_secret, testnet=testnet, base_url=endpoint_url)
             self._broker_cache[cache_key] = {
                 'broker': broker_instance,
                 'last_used': time.time(),
@@ -1116,9 +1160,11 @@ def _make_broker(client):
     if _is_training_fake_balance_client(client):
         raise RuntimeError("Cliente em modo TESTE local não deve instanciar exchange")
     exchange = 'bybit'
-    use_testnet = _should_use_testnet_api(client)
+    endpoint_mode = _get_client_endpoint_mode(client)
+    use_testnet = endpoint_mode == 'testnet'
+    endpoint_url = _endpoint_url_for_mode(endpoint_mode)
     _ensure_broker_class(exchange)
-    return _get_broker_manager().get_broker(client, use_testnet)
+    return _get_broker_manager().get_broker(client, use_testnet, endpoint_url=endpoint_url)
 
 def _get_registered_clients(active_only=False):
     try: return [{**dict(c), "storage_source": "local"} for c in (db.get_active_clients() if active_only else db.get_all_clients())]
@@ -3354,6 +3400,8 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
         record, _, local_synced = _save_client_everywhere(payload)
         _clear_client_auth_runtime((record or {}).get('id') or client_id)
         _get_broker_manager().invalidate_client((record or {}).get('id') or client_id)
+        endpoint_mode = _get_client_endpoint_mode(payload)
+        _set_client_endpoint_mode((record or {}).get('id') or client_id, endpoint_mode)
         return {
             'valid': True,
             'msg': 'Validado OK',
@@ -3387,6 +3435,8 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
                     record, _, local_synced = _save_client_everywhere(payload)
                     _clear_client_auth_runtime((record or {}).get('id') or client_id)
                     _get_broker_manager().invalidate_client((record or {}).get('id') or client_id)
+                    endpoint_mode = 'testnet' if flipped_is_testnet else 'mainnet'
+                    _set_client_endpoint_mode((record or {}).get('id') or client_id, endpoint_mode)
                     detected_env = 'TESTNET' if flipped_is_testnet else 'MAINNET'
                     return {
                         'valid': True,
@@ -3402,11 +3452,44 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
             except Exception:
                 pass
 
+            # Fallback adicional para chaves criadas no "Conta de Teste" (DEMO) do bybit.com.
+            if final_is_testnet:
+                demo_payload = dict(payload)
+                demo_payload['bybit_endpoint_mode'] = 'demo'
+                demo_payload['is_testnet'] = True
+                try:
+                    demo_broker, demo_balance = _validate_broker_balance_fast_fail(demo_payload, timeout_seconds=5.0)
+                    if demo_balance is not None and getattr(demo_broker, 'authenticated', False):
+                        payload['bybit_endpoint_mode'] = 'demo'
+                        payload['is_testnet'] = True
+                        payload['saldo_base'] = round(float(demo_balance), 2)
+                        payload['status'] = 'ativo'
+                        record, _, local_synced = _save_client_everywhere(payload)
+                        _clear_client_auth_runtime((record or {}).get('id') or client_id)
+                        _get_broker_manager().invalidate_client((record or {}).get('id') or client_id)
+                        _set_client_endpoint_mode((record or {}).get('id') or client_id, 'demo')
+                        return {
+                            'valid': True,
+                            'msg': 'Chave validada no ambiente DEMO da Bybit (api-demo.bybit.com).',
+                            'record': record,
+                            'synced_to_local': local_synced,
+                            'balance': payload['saldo_base'],
+                            'account_mode': 'real',
+                            'exchange': payload['exchange'],
+                            'balance_source': payload.get('balance_source'),
+                            'is_testnet': True,
+                        }
+                except Exception:
+                    pass
+
         payload['status'] = 'erro_api'
         payload['saldo_base'] = round(float((existing_client or {}).get('saldo_base') or 0.0), 2)
         record, _, local_synced = _save_client_everywhere(payload)
         if final_is_testnet and is_invalid_key:
-            err_text = "Falha na autenticação da Bybit TESTNET (retCode 10003). Gere novas chaves em testnet.bybit.com e habilite permissões de leitura da carteira."
+            err_text = (
+                "Falha na autenticação da Bybit Testnet/Conta de Teste (retCode 10003). "
+                "Use chaves de testnet.bybit.com ou da Conta de Teste (Demo) com permissões de Wallet."
+            )
         return {
             'valid': False,
             'msg': err_text,

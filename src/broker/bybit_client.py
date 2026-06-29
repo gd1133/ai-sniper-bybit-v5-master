@@ -73,7 +73,7 @@ class BybitClient:
     Versão 1.8.6: Correção estrita de tipos Decimal/Float + Tratamento nativo CCXT + Protocolo 100/50.
     Blindagem contra bloqueios de API e vazamento de memória.
     """
-    def __init__(self, api_key=None, api_secret=None, testnet=None):
+    def __init__(self, api_key=None, api_secret=None, testnet=None, base_url=None):
         # LAZY LOADING: Evita importação circular puxando apenas no escopo local
         from src.config import get_bybit_base_url, get_bybit_credentials, resolve_use_testnet
         from src.broker.order_calculator import OrderCalculator
@@ -86,8 +86,13 @@ class BybitClient:
         api_key = str(api_key or env_api_key or '').strip().replace('\n', '').replace('\r', '')
         api_secret = str(api_secret or env_api_secret or '').strip().replace('\n', '').replace('\r', '')
 
-        self.testnet = resolve_use_testnet(testnet)
-        self.active_endpoint = get_bybit_base_url(self.testnet)
+        normalized_base_url = str(base_url or '').strip()
+        if normalized_base_url:
+            self.active_endpoint = normalized_base_url
+            self.testnet = 'api-testnet.bybit.com' in normalized_base_url
+        else:
+            self.testnet = resolve_use_testnet(testnet)
+            self.active_endpoint = get_bybit_base_url(self.testnet)
         self.pybit_session = None
 
         cfg = {
