@@ -1163,11 +1163,16 @@ const App = () => {
                    </div>
                   <div className="space-y-2 md:col-span-2">
                      <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">Modo da Conta</label>
-                      <div className="px-4 py-3 rounded-2xl border bg-green-500/15 border-green-500/40 text-green-300 text-sm font-black uppercase italic text-center">
-                        💼 Conta Real (Fixo)
+                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                       <div className="px-4 py-3 rounded-2xl border bg-green-500/15 border-green-500/40 text-green-300 text-sm font-black uppercase italic text-center">
+                         💼 Conta Real (Fixo)
+                       </div>
+                       <div className="px-4 py-3 rounded-2xl border bg-purple-500/15 border-purple-500/40 text-purple-200 text-sm font-black uppercase italic text-center">
+                         🧪 Conta Demos (Fixo)
+                       </div>
                       </div>
                       <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest ml-1">
-                        O saldo é sincronizado automaticamente da Bybit (Mainnet/Testnet) — sem entrada manual.
+                       O saldo é sincronizado automaticamente da Bybit (Mainnet/Testnet/Demo) — sem entrada manual.
                       </p>
                    </div>
                   <div className="space-y-2 md:col-span-2">
@@ -1185,11 +1190,11 @@ const App = () => {
                            onClick={() => handleFieldChange('is_testnet', true)}
                            className={`px-4 py-3 rounded-2xl border text-sm font-black uppercase italic transition-all ${formIsTestnet ? 'bg-purple-500/15 border-purple-500/40 text-purple-200' : 'bg-black border-white/10 text-zinc-500 hover:text-white'}`}
                          >
-                           🧪 Teste
+                          🧪 Teste / Demos
                          </button>
                       </div>
                       <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest ml-1">
-                        {formIsTestnet ? 'Modo Simulação: O robô executará ordens de verdade usando o saldo simulado da sua conta em testnet.bybit.com.' : 'Modo Real: O robô executará ordens de verdade na Mainnet da corretora.'}
+                       {formIsTestnet ? 'Modo Teste/Demos: o robô executará ordens no ambiente de testes da Bybit (Testnet ou Demo) com saldo da conta de teste.' : 'Modo Real: o robô executará ordens de verdade na Mainnet da corretora.'}
                       </p>
                    </div>
                   <div className="space-y-2">
