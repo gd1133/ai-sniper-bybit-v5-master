@@ -1199,7 +1199,7 @@ def _fetch_active_client_balances(force=False):
                         f"   🔄 [BALANCE] Ignorando saldo fictício para {client.get('nome')} (TESTNET) e buscando saldo real da Bybit",
                         flush=True,
                     )
-                elif _is_client_temporarily_disabled(client_id):
+                elif _is_client_temporarily_disabled(client_id) and not is_testnet_client:
                     error = _get_client_disable_reason(client_id) or 'Cliente temporariamente desativado por erro de autenticação'
                     fake = _get_training_fake_balance_usd()
                     if not is_testnet_client and fake is not None:
@@ -1869,7 +1869,7 @@ def _monitor_dashboard_positions():
                             flush=True,
                         )
 
-                    if _is_client_temporarily_disabled(client_id):
+                    if _is_client_temporarily_disabled(client_id) and not is_testnet_client:
                         fake = _get_training_fake_balance_usd()
                         if not is_testnet_client and fake is not None:
                             total_wallet_balance += float(fake)
