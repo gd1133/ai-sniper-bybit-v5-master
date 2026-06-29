@@ -95,6 +95,13 @@ def _get_client_disable_reason(client_id):
         entry = _CLIENT_AUTH_RUNTIME.get(int(client_id or 0)) or {}
         return str(entry.get('reason') or '').strip() or None
 
+def _clear_client_auth_runtime(client_id):
+    cid = int(client_id or 0)
+    if cid <= 0:
+        return
+    with _CLIENT_AUTH_LOCK:
+        _CLIENT_AUTH_RUNTIME.pop(cid, None)
+
 def _disable_client_temporarily(client, reason, cooldown_seconds=_CLIENT_AUTH_COOLDOWN_SECONDS):
     client_id = int((client or {}).get('id') or 0)
     if not client_id:
@@ -1195,7 +1202,7 @@ def _fetch_active_client_balances(force=False):
                 elif _is_client_temporarily_disabled(client_id):
                     error = _get_client_disable_reason(client_id) or 'Cliente temporariamente desativado por erro de autenticação'
                     fake = _get_training_fake_balance_usd()
-                    if fake is not None:
+                    if not is_testnet_client and fake is not None:
                         balance = fake
                         is_fake_balance = True
                 else:
@@ -1205,7 +1212,7 @@ def _fetch_active_client_balances(force=False):
                     if code == '10003' and balance is None:
                         _handle_invalid_api_key_10003_for_client(client, source_label='fetch_balance')
                         fake = _get_training_fake_balance_usd()
-                        if fake is not None:
+                        if not is_testnet_client and fake is not None:
                             balance = fake
                             is_fake_balance = True
                 if balance is not None:
@@ -1864,7 +1871,7 @@ def _monitor_dashboard_positions():
 
                     if _is_client_temporarily_disabled(client_id):
                         fake = _get_training_fake_balance_usd()
-                        if fake is not None:
+                        if not is_testnet_client and fake is not None:
                             total_wallet_balance += float(fake)
                             print(
                                 f"   🧪 [DASHBOARD] Cliente {cliente.get('nome')} desativado por autenticação — usando saldo fictício: ${float(fake):.2f} USDT",
@@ -1882,7 +1889,7 @@ def _monitor_dashboard_positions():
                     # Verifica autenticação mínima de forma agnóstica de corretora
                     if not getattr(broker, 'authenticated', False):
                         fake = _get_training_fake_balance_usd()
-                        if fake is not None:
+                        if not is_testnet_client and fake is not None:
                             total_wallet_balance += float(fake)
                             print(
                                 f"   🧪 [DASHBOARD] Cliente {cliente.get('nome')} sem autenticação ativa — usando saldo fictício: ${float(fake):.2f} USDT",
@@ -1895,7 +1902,7 @@ def _monitor_dashboard_positions():
                     # 1️⃣/2️⃣ PROCESSAMENTO ESTRITAMENTE BYBIT
                     if not getattr(broker, 'pybit_session', None):
                         fake = _get_training_fake_balance_usd()
-                        if fake is not None:
+                        if not is_testnet_client and fake is not None:
                             total_wallet_balance += float(fake)
                         print(f"   ⚠️ [DASHBOARD] {cliente.get('nome')}: sessão Bybit indisponível", flush=True)
                         continue
@@ -3312,6 +3319,7 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
         payload['saldo_base'] = round(float(balance), 2)
         payload['status'] = 'ativo'
         record, _, local_synced = _save_client_everywhere(payload)
+        _clear_client_auth_runtime((record or {}).get('id') or client_id)
         return {
             'valid': True,
             'msg': 'Validado OK',
@@ -3326,7 +3334,13 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
     except Exception as e:
         # Auto-detecção de ambiente para chave Bybit quando usuário seleciona ambiente incorreto.
         err_text = str(e or '')
-        if 'retCode=10003' in err_text and str(payload.get('exchange') or 'bybit').strip().lower() == 'bybit':
+        err_upper = err_text.upper()
+        is_invalid_key = (
+            'RETCODE=10003' in err_upper
+            or '"RETCODE":10003' in err_upper
+            or 'API KEY IS INVALID' in err_upper
+        )
+        if is_invalid_key and str(payload.get('exchange') or 'bybit').strip().lower() == 'bybit':
             flipped_is_testnet = not bool(final_is_testnet)
             probe_payload = dict(payload)
             probe_payload['is_testnet'] = flipped_is_testnet
@@ -3337,6 +3351,7 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
                     payload['saldo_base'] = round(float(probe_balance), 2)
                     payload['status'] = 'ativo'
                     record, _, local_synced = _save_client_everywhere(payload)
+                    _clear_client_auth_runtime((record or {}).get('id') or client_id)
                     detected_env = 'TESTNET' if flipped_is_testnet else 'MAINNET'
                     return {
                         'valid': True,
@@ -3355,10 +3370,12 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
         payload['status'] = 'erro_api'
         payload['saldo_base'] = round(float((existing_client or {}).get('saldo_base') or 0.0), 2)
         record, _, local_synced = _save_client_everywhere(payload)
+        if final_is_testnet and is_invalid_key:
+            err_text = "Falha na autenticação da Bybit TESTNET (retCode 10003). Gere novas chaves em testnet.bybit.com e habilite permissões de leitura da carteira."
         return {
             'valid': False,
-            'msg': str(e),
-            'api_error': str(e),
+            'msg': err_text,
+            'api_error': err_text,
             'record': record,
             'synced_to_local': local_synced,
             'balance': payload['saldo_base'],
