@@ -252,6 +252,16 @@ def _is_training_fake_balance_client(client) -> bool:
     # TESTNET deve usar API real da Bybit Testnet (não saldo fictício local).
     if _resolve_request_is_testnet(client or {}, fallback=False):
         return False
+    # Se houver credenciais, tratamos "saldo teste" como conta Testnet real da Bybit.
+    has_api_credentials = bool(str((client or {}).get('bybit_key') or '').strip() and str((client or {}).get('bybit_secret') or '').strip())
+    if has_api_credentials and _normalize_balance_source((client or {}).get('balance_source')) == 'training_fake_balance':
+        return False
+    return _normalize_balance_source((client or {}).get('balance_source')) == 'training_fake_balance'
+
+def _should_use_testnet_api(client) -> bool:
+    if _resolve_request_is_testnet(client or {}, fallback=False):
+        return True
+    # Compatibilidade com registros antigos marcados como "SALDO TESTE".
     return _normalize_balance_source((client or {}).get('balance_source')) == 'training_fake_balance'
 
 def _get_forced_training_fake_balance_usd() -> float:
@@ -1102,7 +1112,7 @@ def _make_broker(client):
     if _is_training_fake_balance_client(client):
         raise RuntimeError("Cliente em modo TESTE local não deve instanciar exchange")
     exchange = 'bybit'
-    use_testnet = _resolve_request_is_testnet(client, fallback=False)
+    use_testnet = _should_use_testnet_api(client)
     _ensure_broker_class(exchange)
     return _get_broker_manager().get_broker(client, use_testnet)
 
@@ -1244,7 +1254,8 @@ def _fetch_active_client_balances(force=False):
         # (incluindo clientes com saldo fictício / training_fake_balance).
         central_state['balance'] = round(sum(float(i["saldo_real"]) for i in valid_items), 2)
     else:
-        central_state['balance'] = 0.0
+        # Preserva o último saldo conhecido quando nenhuma leitura real foi obtida no ciclo.
+        central_state['balance'] = round(_coerce_float(central_state.get('balance'), default=0.0), 2)
 
     if real_items:
         msg = f"💼 CONTA REAL: saldo sincronizado para {len(real_items)} investidores"
@@ -1801,6 +1812,7 @@ def _monitor_dashboard_positions():
                 continue
 
             total_wallet_balance = 0.0
+            successful_balance_clients = 0
             all_positions = []
             open_trades_snapshot = db.get_open_trades(limit=300)
             simulated_trades_by_client = {}
@@ -1922,6 +1934,7 @@ def _monitor_dashboard_positions():
                                 if usdt_available is not None:
                                     total_wallet_balance += float(usdt_available)
                                     client_balance_added = True
+                                    successful_balance_clients += 1
                                     print(
                                         f"   💰 [DASHBOARD] {cliente.get('nome')}: saldo disponível UNIFIED ${float(usdt_available):.2f} USDT",
                                         flush=True,
@@ -1938,6 +1951,7 @@ def _monitor_dashboard_positions():
                                         )
                                         total_wallet_balance += wallet_balance
                                         client_balance_added = True
+                                        successful_balance_clients += 1
                                         print(f"   💰 [DASHBOARD] {cliente.get('nome')}: ${wallet_balance:.2f} USDT", flush=True)
                                         break
                         else:
@@ -1946,7 +1960,7 @@ def _monitor_dashboard_positions():
                             if not client_balance_added and str(code or '') == '10003':
                                 _handle_invalid_api_key_10003_for_client(cliente, source_label='DASHBOARD:get_wallet_balance')
                                 fake = _get_training_fake_balance_usd()
-                                if fake is not None:
+                                if not is_testnet_client and fake is not None:
                                     total_wallet_balance += float(fake)
                                     print(
                                         f"   🧪 [DASHBOARD] {cliente.get('nome')}: saldo fictício aplicado após erro 10003 (${float(fake):.2f} USDT)",
@@ -1958,7 +1972,7 @@ def _monitor_dashboard_positions():
                         if str(code or '') == '10003':
                             _handle_invalid_api_key_10003_for_client(cliente, source_label='DASHBOARD:get_wallet_balance:exception')
                             fake = _get_training_fake_balance_usd()
-                            if fake is not None:
+                            if not is_testnet_client and fake is not None:
                                 total_wallet_balance += float(fake)
                                 print(
                                     f"   🧪 [DASHBOARD] {cliente.get('nome')}: saldo fictício aplicado após exceção 10003 (${float(fake):.2f} USDT)",
@@ -2124,7 +2138,12 @@ def _monitor_dashboard_positions():
                 traceback.print_exc()
 
             # 3️⃣ ATUALIZA O ESTADO CENTRAL DO DASHBOARD
-            central_state['balance'] = round(total_wallet_balance, 2)
+            if successful_balance_clients > 0:
+                central_state['balance'] = round(total_wallet_balance, 2)
+            else:
+                # Não zera painel por falha de API; mantém último saldo conhecido.
+                total_wallet_balance = round(_coerce_float(central_state.get('balance'), default=0.0), 2)
+                central_state['balance'] = total_wallet_balance
 
             if all_positions:
                 central_state['status'] = f"✅ ONLINE | {len(all_positions)} posição(ões) ativa(s)"
