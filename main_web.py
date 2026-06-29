@@ -242,9 +242,9 @@ def _normalize_balance_source(value) -> str:
     return raw if raw in _VALID_BALANCE_SOURCES else 'broker_real_balance'
 
 def _is_training_fake_balance_client(client) -> bool:
-    # Regra mandatória: is_testnet=1 roda como simulação local pura (sem rede/exchange).
+    # TESTNET deve usar API real da Bybit Testnet (não saldo fictício local).
     if _resolve_request_is_testnet(client or {}, fallback=False):
-        return True
+        return False
     return _normalize_balance_source((client or {}).get('balance_source')) == 'training_fake_balance'
 
 def _get_forced_training_fake_balance_usd() -> float:

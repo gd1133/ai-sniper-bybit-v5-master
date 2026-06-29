@@ -154,7 +154,6 @@ def _apply_schema(cur):
     cur.execute("""
         UPDATE clientes_sniper
         SET account_mode = 'real',
-            is_testnet = 0,
             balance_source = 'broker_real_balance'
         WHERE account_mode IS NULL OR TRIM(account_mode) = '' OR account_mode = 'testnet'
     """)
