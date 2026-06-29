@@ -47,6 +47,8 @@ print(f"✅ [DATABASE] Caminho absoluto do banco: {DB_PATH}")
 FALLBACK_DB_PATH = '/tmp/ai-sniper/database.db'
 _DB_RUNTIME_LOCK = threading.Lock()
 _DB_RUNTIME_PATH = DB_PATH
+_SCHEMA_READY_LOCK = threading.Lock()
+_SCHEMA_READY_PATHS = set()
 # Sistema opera apenas em modo REAL
 VALID_ACCOUNT_MODES = {'real'}
 VALID_OPERATION_MODES = {'real'}
@@ -100,6 +102,18 @@ def _set_runtime_db_path(path: str, reason: str = ''):
             print(f"⚠️ [DATABASE] Alternando banco ativo para: {normalized} | motivo: {reason}")
 
 
+def _is_schema_ready_for_path(path: str) -> bool:
+    normalized = os.path.abspath(path)
+    with _SCHEMA_READY_LOCK:
+        return normalized in _SCHEMA_READY_PATHS
+
+
+def _mark_schema_ready_for_path(path: str):
+    normalized = os.path.abspath(path)
+    with _SCHEMA_READY_LOCK:
+        _SCHEMA_READY_PATHS.add(normalized)
+
+
 def _configure_connection(conn, *, prefer_wal: bool = True):
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA busy_timeout=30000;')
@@ -113,12 +127,130 @@ def _configure_connection(conn, *, prefer_wal: bool = True):
     conn.execute('PRAGMA journal_mode=DELETE;')
 
 
-def _connect():
+def _apply_schema(cur):
+    # Tabela principal: Clientes/Pessoas cadastradas
+    cur.execute('''
+    CREATE TABLE IF NOT EXISTS clientes_sniper (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nome TEXT NOT NULL,
+        bybit_key TEXT,
+        bybit_secret TEXT,
+        tg_token TEXT,
+        tg_api_key TEXT,
+        chat_id TEXT,
+        status TEXT DEFAULT 'ativo',
+        saldo_base REAL DEFAULT 1000.0,
+        is_testnet INTEGER DEFAULT 0,
+        account_mode TEXT DEFAULT 'real',
+        balance_source TEXT DEFAULT 'broker_real_balance',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    ''')
+    _ensure_column(cur, 'clientes_sniper', 'is_testnet', 'INTEGER DEFAULT 0')
+    _ensure_column(cur, 'clientes_sniper', 'account_mode', "TEXT DEFAULT 'real'")
+    _ensure_column(cur, 'clientes_sniper', 'balance_source', "TEXT DEFAULT 'broker_real_balance'")
+    _ensure_column(cur, 'clientes_sniper', 'exchange', "TEXT DEFAULT 'bybit'")
+    # Atualiza registros existentes para modo real
+    cur.execute("""
+        UPDATE clientes_sniper
+        SET account_mode = 'real',
+            is_testnet = 0,
+            balance_source = 'broker_real_balance'
+        WHERE account_mode IS NULL OR TRIM(account_mode) = '' OR account_mode = 'testnet'
+    """)
+    cur.execute("""
+        UPDATE clientes_sniper
+        SET balance_source = CASE
+            WHEN COALESCE(account_mode, 'testnet') = 'testnet' THEN 'broker_testnet_balance'
+            ELSE 'broker_real_balance'
+        END
+        WHERE balance_source IS NULL OR TRIM(balance_source) = ''
+    """)
+
+    # Tabela de histórico de trades (para P&L tracking)
+    cur.execute('''
+    CREATE TABLE IF NOT EXISTS trades (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        client_id INTEGER,
+        pair TEXT,
+        side TEXT,
+        pnl_pct REAL,
+        profit REAL,
+        entry_price REAL DEFAULT 0,
+        exit_price REAL DEFAULT 0,
+        quantity REAL DEFAULT 0,
+        margin REAL DEFAULT 0,
+        closed_at TEXT,
+        notes TEXT,
+        status TEXT DEFAULT 'closed',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    ''')
+    _ensure_column(cur, 'trades', 'entry_price', 'REAL DEFAULT 0')
+    _ensure_column(cur, 'trades', 'exit_price', 'REAL DEFAULT 0')
+    _ensure_column(cur, 'trades', 'quantity', 'REAL DEFAULT 0')
+    _ensure_column(cur, 'trades', 'margin', 'REAL DEFAULT 0')
+
+    # Tabela de configuração global (TEST_MODE, TEST_BALANCE, etc)
+    cur.execute('''
+    CREATE TABLE IF NOT EXISTS config (
+        k TEXT PRIMARY KEY,
+        v TEXT
+    )
+    ''')
+
+    # Histórico permanente de P&L para ranking/acumulado diário (paper + real)
+    cur.execute('''
+    CREATE TABLE IF NOT EXISTS historico_trades (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trade_id INTEGER,
+        cliente_id INTEGER,
+        symbol TEXT,
+        side TEXT,
+        lucro_lucrado REAL,
+        data_fechamento TEXT
+    )
+    ''')
+    _ensure_column(cur, 'historico_trades', 'trade_id', 'INTEGER')
+
+    # ÍNDICES PARA PERFORMANCE
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_trades_client_id ON trades(client_id)')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_trades_pair ON trades(pair)')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_clientes_status ON clientes_sniper(status)')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_config_k ON config(k)')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_historico_cliente ON historico_trades(cliente_id)')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_historico_symbol ON historico_trades(symbol)')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_historico_fechamento ON historico_trades(data_fechamento)')
+    cur.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_historico_trade_id_unique ON historico_trades(trade_id) WHERE trade_id IS NOT NULL')
+
+    # Só tenta deduplicar quando a tabela existe e está acessível.
+    try:
+        removed_duplicates = _cleanup_duplicate_historico_trades(cur)
+        if removed_duplicates > 0:
+            print(f"🧹 [DATABASE] Limpeza de duplicados no histórico: {removed_duplicates} registro(s) removido(s).", flush=True)
+    except Exception as dedup_err:
+        print(f"⚠️ [DATABASE] Aviso ao deduplicar histórico: {dedup_err}", flush=True)
+
+
+def _ensure_runtime_schema(conn, db_path: str):
+    if _is_schema_ready_for_path(db_path):
+        return
+    cur = conn.cursor()
+    _apply_schema(cur)
+    conn.commit()
+    _mark_schema_ready_for_path(db_path)
+    print(f"✅ [DATABASE] Schema validado em runtime: {os.path.abspath(db_path)}", flush=True)
+
+
+def _connect(*, ensure_schema: bool = True):
     """Conecta ao banco com timeout estendido para evitar lock contention."""
     current_path = _get_runtime_db_path()
     try:
         conn = sqlite3.connect(current_path, check_same_thread=False, timeout=30.0)
         _configure_connection(conn, prefer_wal=True)
+        if ensure_schema:
+            _ensure_runtime_schema(conn, current_path)
         return conn
     except sqlite3.OperationalError as err:
         if not _is_disk_io_error(err):
@@ -128,6 +260,8 @@ def _connect():
         _set_runtime_db_path(FALLBACK_DB_PATH, reason=f"sqlite I/O failure no volume primário: {err}")
         conn = sqlite3.connect(_get_runtime_db_path(), check_same_thread=False, timeout=30.0)
         _configure_connection(conn, prefer_wal=False)
+        if ensure_schema:
+            _ensure_runtime_schema(conn, _get_runtime_db_path())
         return conn
 
 
@@ -188,110 +322,11 @@ def init_db():
     if db_dir:  # Only create directory if there's a directory component
         os.makedirs(db_dir, exist_ok=True)
     try:
-        conn = _connect()
+        conn = _connect(ensure_schema=False)
         cur = conn.cursor()
-        
-        # Tabela principal: Clientes/Pessoas cadastradas
-        cur.execute('''
-        CREATE TABLE IF NOT EXISTS clientes_sniper (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nome TEXT NOT NULL,
-            bybit_key TEXT,
-            bybit_secret TEXT,
-            tg_token TEXT,
-            tg_api_key TEXT,
-            chat_id TEXT,
-            status TEXT DEFAULT 'ativo',
-            saldo_base REAL DEFAULT 1000.0,
-            is_testnet INTEGER DEFAULT 0,
-            account_mode TEXT DEFAULT 'real',
-            balance_source TEXT DEFAULT 'broker_real_balance',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        ''')
-        _ensure_column(cur, 'clientes_sniper', 'is_testnet', 'INTEGER DEFAULT 0')
-        _ensure_column(cur, 'clientes_sniper', 'account_mode', "TEXT DEFAULT 'real'")
-        _ensure_column(cur, 'clientes_sniper', 'balance_source', "TEXT DEFAULT 'broker_real_balance'")
-        _ensure_column(cur, 'clientes_sniper', 'exchange', "TEXT DEFAULT 'bybit'")
-        # Atualiza registros existentes para modo real
-        cur.execute("""
-            UPDATE clientes_sniper
-            SET account_mode = 'real',
-                is_testnet = 0,
-                balance_source = 'broker_real_balance'
-            WHERE account_mode IS NULL OR TRIM(account_mode) = '' OR account_mode = 'testnet'
-        """)
-        cur.execute("""
-            UPDATE clientes_sniper
-            SET balance_source = CASE
-                WHEN COALESCE(account_mode, 'testnet') = 'testnet' THEN 'broker_testnet_balance'
-                ELSE 'broker_real_balance'
-            END
-            WHERE balance_source IS NULL OR TRIM(balance_source) = ''
-        """)
-
-        # Tabela de histórico de trades (para P&L tracking)
-        cur.execute('''
-        CREATE TABLE IF NOT EXISTS trades (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            client_id INTEGER,
-            pair TEXT,
-            side TEXT,
-            pnl_pct REAL,
-            profit REAL,
-            entry_price REAL DEFAULT 0,
-            exit_price REAL DEFAULT 0,
-            quantity REAL DEFAULT 0,
-            margin REAL DEFAULT 0,
-            closed_at TEXT,
-            notes TEXT,
-            status TEXT DEFAULT 'closed',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        ''')
-        _ensure_column(cur, 'trades', 'entry_price', 'REAL DEFAULT 0')
-        _ensure_column(cur, 'trades', 'exit_price', 'REAL DEFAULT 0')
-        _ensure_column(cur, 'trades', 'quantity', 'REAL DEFAULT 0')
-        _ensure_column(cur, 'trades', 'margin', 'REAL DEFAULT 0')
-
-        # Tabela de configuração global (TEST_MODE, TEST_BALANCE, etc)
-        cur.execute('''
-        CREATE TABLE IF NOT EXISTS config (
-            k TEXT PRIMARY KEY,
-            v TEXT
-        )
-        ''')
-
-        # Histórico permanente de P&L para ranking/acumulado diário (paper + real)
-        cur.execute('''
-        CREATE TABLE IF NOT EXISTS historico_trades (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            trade_id INTEGER,
-            cliente_id INTEGER,
-            symbol TEXT,
-            side TEXT,
-            lucro_lucrado REAL,
-            data_fechamento TEXT
-        )
-        ''')
-        _ensure_column(cur, 'historico_trades', 'trade_id', 'INTEGER')
-
-        # ÍNDICES PARA PERFORMANCE
-        cur.execute('CREATE INDEX IF NOT EXISTS idx_trades_client_id ON trades(client_id)')
-        cur.execute('CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)')
-        cur.execute('CREATE INDEX IF NOT EXISTS idx_trades_pair ON trades(pair)')
-        cur.execute('CREATE INDEX IF NOT EXISTS idx_clientes_status ON clientes_sniper(status)')
-        cur.execute('CREATE INDEX IF NOT EXISTS idx_config_k ON config(k)')
-        cur.execute('CREATE INDEX IF NOT EXISTS idx_historico_cliente ON historico_trades(cliente_id)')
-        cur.execute('CREATE INDEX IF NOT EXISTS idx_historico_symbol ON historico_trades(symbol)')
-        cur.execute('CREATE INDEX IF NOT EXISTS idx_historico_fechamento ON historico_trades(data_fechamento)')
-        cur.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_historico_trade_id_unique ON historico_trades(trade_id) WHERE trade_id IS NOT NULL')
-
-        removed_duplicates = _cleanup_duplicate_historico_trades(cur)
-        if removed_duplicates > 0:
-            print(f"🧹 [DATABASE] Limpeza de duplicados no histórico: {removed_duplicates} registro(s) removido(s).", flush=True)
-
+        _apply_schema(cur)
         conn.commit()
+        _mark_schema_ready_for_path(_get_runtime_db_path())
     finally:
         try:
             if conn is not None:
