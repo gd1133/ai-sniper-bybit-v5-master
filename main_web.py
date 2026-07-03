@@ -218,7 +218,28 @@ def _normalize_balance_source(value) -> str:
     return raw if raw in _VALID_BALANCE_SOURCES else 'broker_real_balance'
 
 def _is_training_fake_balance_client(client) -> bool:
+    if _coerce_bool((client or {}).get('is_testnet'), default=False):
+        return False
     return _normalize_balance_source((client or {}).get('balance_source')) == 'training_fake_balance'
+
+def _resolve_client_account_mode(client) -> str:
+    endpoint_mode = _get_client_endpoint_mode(client)
+    if endpoint_mode == 'demo':
+        return 'demo'
+    explicit = str((client or {}).get('account_mode') or '').strip().lower()
+    if explicit == 'demo':
+        return 'demo'
+    if explicit == 'testnet' or _coerce_bool((client or {}).get('is_testnet'), default=False):
+        return 'testnet'
+    return 'real'
+
+def _client_mode_label(account_mode: str) -> str:
+    normalized = str(account_mode or '').strip().lower()
+    if normalized == 'demo':
+        return 'DEMO'
+    if normalized == 'testnet':
+        return 'TESTNET'
+    return 'REAL'
 
 def _get_forced_training_fake_balance_usd() -> float:
     value = float(_env_float('TRAINING_FAKE_BALANCE_USD', 500.0))
@@ -708,12 +729,19 @@ def _get_active_investor_bybit_credentials():
 
 def _save_client_everywhere(client_data):
     payload = dict(client_data or {})
-    payload['account_mode'] = 'real'
-    payload['is_testnet'] = _coerce_bool(payload.get('is_testnet'), default=USE_TESTNET)
+    account_mode = _resolve_client_account_mode(payload)
+    payload['account_mode'] = account_mode
+    payload['is_testnet'] = account_mode in ('testnet', 'demo')
     payload['balance_source'] = _normalize_balance_source(payload.get('balance_source'))
+    if account_mode == 'demo':
+        payload['bybit_endpoint_mode'] = 'demo'
     res = db.upsert_client_local(payload) if payload.get('id') is not None else db.add_client(payload)
+    saved_id = int(payload.get('id') or res or 0)
+    if saved_id > 0:
+        endpoint_mode = 'demo' if account_mode == 'demo' else ('testnet' if account_mode == 'testnet' else 'mainnet')
+        _set_client_endpoint_mode(saved_id, endpoint_mode)
     client_balance_cache.clear()
-    return _get_registered_client_by_id(payload.get('id') or res), False, bool(res)
+    return _get_registered_client_by_id(saved_id or payload.get('id')), False, bool(res)
 
 def _delete_client_everywhere(client_id):
     _get_broker_manager().invalidate_client(client_id)
@@ -774,10 +802,15 @@ def _fetch_active_client_balances(force=False):
                     balance = round(float(balance), 2)
                     total += balance
             except Exception as e: error = str(e)
+            endpoint_mode = _get_client_endpoint_mode(client)
+            account_mode = _resolve_client_account_mode({**client, 'bybit_endpoint_mode': endpoint_mode})
             items.append({
                 "id": client.get('id'), "nome": client.get('nome'), "saldo_real": balance,
-                "saldo_base": float(client.get('saldo_base', 0) or 0), "is_testnet": _coerce_bool(client.get('is_testnet'), default=USE_TESTNET),
-                "account_mode": "real", "exchange": str(client.get('exchange') or 'bybit').lower(),
+                "saldo_base": float(client.get('saldo_base', 0) or 0),
+                "is_testnet": account_mode in ('testnet', 'demo'),
+                "account_mode": account_mode,
+                "bybit_endpoint_mode": endpoint_mode,
+                "exchange": str(client.get('exchange') or 'bybit').lower(),
                 "status": client.get('status'), "error": error, "is_fake_balance": is_fake_balance,
             })
     except Exception: pass
@@ -1907,6 +1940,8 @@ def get_investidores():
             client_id = int(r.get('id') or 0)
             bm = balance_map.get(r.get('id')) or {}
             balance_source = _normalize_balance_source(r.get('balance_source'))
+            endpoint_mode = _get_client_endpoint_mode(r)
+            account_mode = _resolve_client_account_mode({**r, 'bybit_endpoint_mode': endpoint_mode})
             payload.append({
                 "id": r.get('id'),
                 "nome": r.get('nome'),
@@ -1914,9 +1949,10 @@ def get_investidores():
                 "saldo_real": bm.get('saldo_real'),
                 "saldo_configurado": r.get('saldo_base', 0),
                 "status": r.get('status'),
-                "mode": "REAL",
-                "account_mode": "real",
-                "is_testnet": _coerce_bool(r.get('is_testnet'), default=USE_TESTNET),
+                "mode": _client_mode_label(account_mode),
+                "account_mode": account_mode,
+                "bybit_endpoint_mode": endpoint_mode,
+                "is_testnet": account_mode in ('testnet', 'demo'),
                 "balance_source": balance_source,
                 "is_fake_balance": bool(bm.get('is_fake_balance')) or balance_source == 'training_fake_balance',
                 "error": bm.get('error'),
@@ -1936,13 +1972,14 @@ def add_cliente():
         data['is_testnet'] = requested_is_testnet
         validation = validar_e_salvar_cliente(data.get('bybit_key'), data.get('bybit_secret'), requested_is_testnet, client_payload=data)
         if validation.get('record'):
+            status_code = 200 if validation.get('valid') else 400
             return jsonify({
-                "status": "sucesso",
-                "msg": validation.get("msg") or "Investidor conectado!",
+                "status": "sucesso" if validation.get('valid') else "erro",
+                "msg": validation.get("msg") or ("Investidor conectado!" if validation.get('valid') else "Falha na autenticação"),
                 "valid": bool(validation.get("valid")),
                 "api_error": validation.get("api_error"),
                 "client": validation.get('record'),
-            }), 200
+            }), status_code
         return jsonify({"status": "erro", "msg": "Falha ao salvar investidor"}), 500
     except Exception as e: return jsonify({"status": "erro", "msg": str(e)}), 400
 
@@ -2229,10 +2266,14 @@ def api_market_intelligence():
 def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=None, client_id=None, existing_client=None):
     payload = dict(client_payload or {})
     final_is_testnet = _coerce_bool(payload.get('is_testnet', is_testnet), default=USE_TESTNET)
-    payload['account_mode'], payload['is_testnet'] = 'real', final_is_testnet
-    payload['balance_source'] = _normalize_balance_source(payload.get('balance_source'))
     if final_is_testnet:
+        payload['account_mode'] = 'testnet'
+        payload['is_testnet'] = True
         payload['balance_source'] = 'broker_real_balance'
+    else:
+        payload['account_mode'] = 'real'
+        payload['is_testnet'] = False
+    payload['balance_source'] = _normalize_balance_source(payload.get('balance_source'))
     payload['exchange'] = str(payload.get('exchange') or 'bybit').strip().lower()
     if client_id is not None: payload['id'] = client_id
     if api_key: payload['bybit_key'] = api_key
@@ -2286,16 +2327,17 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
         _get_broker_manager().invalidate_client((record or {}).get('id') or client_id)
         endpoint_mode = _get_client_endpoint_mode(payload)
         _set_client_endpoint_mode((record or {}).get('id') or client_id, endpoint_mode)
+        saved_mode = _resolve_client_account_mode({**payload, 'bybit_endpoint_mode': endpoint_mode})
         return {
             'valid': True,
             'msg': 'Validado OK',
             'record': record,
             'synced_to_local': local_synced,
             'balance': payload['saldo_base'],
-            'account_mode': 'real',
+            'account_mode': saved_mode,
             'exchange': payload['exchange'],
             'balance_source': payload.get('balance_source'),
-            'is_testnet': final_is_testnet,
+            'is_testnet': saved_mode in ('testnet', 'demo'),
         }
     except Exception as e:
         err_text = str(e or '')
@@ -2318,6 +2360,7 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
                     demo_broker, demo_balance = _try_validate(demo_payload)
                     if demo_balance is not None and getattr(demo_broker, 'authenticated', False):
                         payload['bybit_endpoint_mode'] = 'demo'
+                        payload['account_mode'] = 'demo'
                         payload['is_testnet'] = True
                         payload['saldo_base'] = round(float(demo_balance), 2)
                         payload['status'] = 'ativo'
@@ -2330,7 +2373,7 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
                             'record': record,
                             'synced_to_local': local_synced,
                             'balance': payload['saldo_base'],
-                            'account_mode': 'real',
+                            'account_mode': 'demo',
                             'exchange': payload['exchange'],
                             'balance_source': payload.get('balance_source'),
                             'is_testnet': True,
@@ -2348,6 +2391,7 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
                 probe_broker, probe_balance = _try_validate(probe_payload)
                 if probe_balance is not None and getattr(probe_broker, 'authenticated', False):
                     payload['is_testnet'] = flipped_is_testnet
+                    payload['account_mode'] = 'testnet' if flipped_is_testnet else 'real'
                     payload['saldo_base'] = round(float(probe_balance), 2)
                     payload['status'] = 'ativo'
                     record, _, local_synced = _save_client_everywhere(payload)
@@ -2360,7 +2404,7 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
                         'record': record,
                         'synced_to_local': local_synced,
                         'balance': payload['saldo_base'],
-                        'account_mode': 'real',
+                        'account_mode': 'testnet' if flipped_is_testnet else 'real',
                         'exchange': payload['exchange'],
                         'balance_source': payload.get('balance_source'),
                         'is_testnet': flipped_is_testnet,
@@ -2381,6 +2425,7 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
                 "Falha ao ler saldo no ambiente Demo (retCode 10032). "
                 "Crie a chave em bybit.com → Demo Trading → API (não use testnet.bybit.com)."
             )
+        failed_mode = _resolve_client_account_mode(payload)
         return {
             'valid': False,
             'msg': err_text,
@@ -2388,10 +2433,10 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
             'record': record,
             'synced_to_local': local_synced,
             'balance': payload['saldo_base'],
-            'account_mode': 'real',
+            'account_mode': failed_mode,
             'exchange': payload['exchange'],
             'balance_source': payload.get('balance_source'),
-            'is_testnet': final_is_testnet,
+            'is_testnet': failed_mode in ('testnet', 'demo'),
         }
 
 # ==============================================================================

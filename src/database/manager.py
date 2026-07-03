@@ -53,7 +53,15 @@ def is_truthy(value: Any) -> bool:
 
 
 def normalize_account_mode(value: Any) -> str:
-    """Sempre retorna 'real' - sistema opera apenas em modo real"""
+    raw = str(value or '').strip().lower()
+    if raw in ('demo', 'demos', 'demo_trading'):
+        return 'demo'
+    if raw in ('testnet', 'test', 'teste'):
+        return 'testnet'
+    if raw in ('real', 'mainnet', 'producao', 'produção', 'prod'):
+        return 'real'
+    if value is True or raw in ('1', 'true', 'yes', 'on'):
+        return 'testnet'
     return 'real'
 
 
@@ -118,13 +126,14 @@ def init_db():
     _ensure_column(cur, 'clientes_sniper', 'account_mode', "TEXT DEFAULT 'real'")
     _ensure_column(cur, 'clientes_sniper', 'balance_source', "TEXT DEFAULT 'broker_real_balance'")
     _ensure_column(cur, 'clientes_sniper', 'exchange', "TEXT DEFAULT 'bybit'")
-    # Atualiza registros existentes para modo real
+    # Preenche account_mode vazio sem resetar is_testnet de clientes existentes.
     cur.execute("""
         UPDATE clientes_sniper
-        SET account_mode = 'real',
-            is_testnet = 0,
-            balance_source = 'broker_real_balance'
-        WHERE account_mode IS NULL OR TRIM(account_mode) = '' OR account_mode = 'testnet'
+        SET account_mode = CASE
+            WHEN COALESCE(is_testnet, 0) = 1 THEN 'testnet'
+            ELSE 'real'
+        END
+        WHERE account_mode IS NULL OR TRIM(account_mode) = ''
     """)
     cur.execute("""
         UPDATE clientes_sniper
@@ -221,8 +230,8 @@ def add_client(data: Dict[str, Any]):
         print(f"🔵 [DATABASE] add_client: Iniciando inserção de cliente: {data.get('nome')}")
         conn = _connect()
         cur = conn.cursor()
-        # Sistema sempre opera em modo real
-        account_mode = 'real'
+        account_mode = normalize_account_mode(data.get('account_mode', data.get('is_testnet')))
+        is_testnet_flag = 1 if account_mode in ('testnet', 'demo') else 0
         balance_source = normalize_balance_source(data.get('balance_source'))
         exchange = str(data.get('exchange') or 'bybit').strip().lower()
         if exchange not in ('bybit', 'binance'):
@@ -236,7 +245,7 @@ def add_client(data: Dict[str, Any]):
             data.get('chat_id'),
             data.get('status', 'ativo'),
             data.get('saldo_base', 1000.0),
-            1 if is_truthy(data.get('is_testnet')) else 0,
+            1 if is_testnet_flag else 0,
             account_mode,
             balance_source,
             exchange,
@@ -380,8 +389,8 @@ def update_client(client_id: int, data: Dict[str, Any]) -> bool:
     try:
         conn = _connect()
         cur = conn.cursor()
-        is_testnet = 1 if is_truthy(data.get('is_testnet')) else 0
-        account_mode = normalize_account_mode(data.get('account_mode'))
+        account_mode = normalize_account_mode(data.get('account_mode', data.get('is_testnet')))
+        is_testnet = 1 if account_mode in ('testnet', 'demo') else 0
         balance_source = normalize_balance_source(
             data.get(
                 'balance_source',

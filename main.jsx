@@ -42,17 +42,43 @@ const normalizeOperationMode = (value) => {
   return 'real';
 };
 
-const normalizeAccountMode = (value) => {
-  // Sempre retorna 'real'
-  return 'real';
-};
-
 const normalizeIsTestnet = (value) => {
   const raw = String(value ?? '').trim().toLowerCase();
   return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
 };
 
+const normalizeAccountMode = (value, isTestnet = false, endpointMode = '') => {
+  const endpoint = String(endpointMode || '').trim().toLowerCase();
+  if (endpoint === 'demo') return 'demo';
+  const raw = String(value ?? '').trim().toLowerCase();
+  if (raw === 'demo') return 'demo';
+  if (raw === 'testnet' || normalizeIsTestnet(isTestnet ?? value)) return 'testnet';
+  return 'real';
+};
+
+const getInvestorEnvMeta = (inv) => {
+  const mode = normalizeAccountMode(inv?.account_mode, inv?.is_testnet, inv?.bybit_endpoint_mode);
+  if (mode === 'demo') {
+    return {
+      label: '🧪 Conta Demo',
+      className: 'bg-purple-500/15 border-purple-500/40 text-purple-200 hover:bg-purple-500/20',
+    };
+  }
+  if (mode === 'testnet') {
+    return {
+      label: '🛰️ Testnet',
+      className: 'bg-blue-500/10 border-blue-500/30 text-blue-300 hover:bg-blue-500/15',
+    };
+  }
+  return {
+    label: '💰 Saldo Real',
+    className: 'bg-green-500/10 border-green-500/30 text-green-400 hover:bg-green-500/15',
+  };
+};
+
 const normalizeInvestorRecord = (client) => {
+  const endpointMode = client?.bybit_endpoint_mode || '';
+  const accountMode = normalizeAccountMode(client?.account_mode, client?.is_testnet, endpointMode);
   return {
     ...client,
     banca: client?.saldo_real ?? client?.saldo_base ?? client?.banca ?? 0,
@@ -60,9 +86,10 @@ const normalizeInvestorRecord = (client) => {
     saldo_configurado: client?.saldo_base ?? client?.saldo_configurado ?? 0,
     balance_source: client?.balance_source ?? 'broker_real_balance',
     is_fake_balance: Boolean(client?.is_fake_balance) || String(client?.balance_source || '') === 'training_fake_balance',
-    mode: 'REAL',
-    account_mode: 'real',
-    is_testnet: normalizeIsTestnet(client?.is_testnet),
+    mode: accountMode === 'demo' ? 'DEMO' : accountMode === 'testnet' ? 'TESTNET' : 'REAL',
+    account_mode: accountMode,
+    bybit_endpoint_mode: endpointMode,
+    is_testnet: accountMode !== 'real',
     storage_source: String(client?.storage_source || client?.source || 'local').toUpperCase(),
     pnl: client?.pnl ?? '+0.0%',
   };
@@ -1077,19 +1104,16 @@ const App = () => {
                         </p>
                       </td>
                     </tr>
-                  ) : investidores.map(inv => (
+                  ) : investidores.map(inv => {
+                    const envMeta = getInvestorEnvMeta(inv);
+                    return (
                     <tr key={inv.id} className="hover:bg-green-500/[0.02] transition-all">
                       <td className="p-8">
                         <div className="font-black italic text-xl uppercase">{inv.nome}</div>
                         <div className="flex items-center gap-2 mt-3 flex-wrap">
-                          <button
-                            type="button"
-                            onClick={() => toggleInvestorBalanceSource(inv)}
-                            className={`px-3 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest transition-all ${String(inv.balance_source || 'broker_real_balance') === 'training_fake_balance' ? 'bg-purple-500/15 border-purple-500/40 text-purple-200 hover:bg-purple-500/20' : 'bg-green-500/10 border-green-500/30 text-green-400 hover:bg-green-500/15'}`}
-                            title="Alternar fonte de saldo (Real/Teste)"
-                          >
-                            {String(inv.balance_source || 'broker_real_balance') === 'training_fake_balance' ? '🧪 Saldo Teste' : '💰 Saldo Real'}
-                          </button>
+                          <span className={`px-3 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest ${envMeta.className}`}>
+                            {envMeta.label}
+                          </span>
                           {inv.auth_disabled ? (
                             <span className="px-3 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest bg-red-500/10 border-red-500/30 text-red-300">
                               API inválida
@@ -1104,7 +1128,7 @@ const App = () => {
                       <td className="p-8 font-black text-green-500 italic text-lg">{inv.pnl}</td>
                       <td className="p-8">
                         <div className="flex items-center gap-2">
-                           <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" />
+                           <div className={`w-1.5 h-1.5 rounded-full ${String(inv.status || '').toLowerCase() === 'ativo' ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
                            <span className="text-[10px] font-black uppercase tracking-widest text-zinc-500">{inv.status}</span>
                         </div>
                       </td>
@@ -1115,7 +1139,7 @@ const App = () => {
                         </div>
                       </td>
                     </tr>
-                  ))}
+                  );})}
                 </tbody>
               </table>
             </div>
