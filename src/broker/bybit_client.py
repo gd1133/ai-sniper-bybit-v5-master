@@ -72,7 +72,7 @@ class BybitClient:
     Versão 1.8.6: Correção estrita de tipos Decimal/Float + Tratamento nativo CCXT + Protocolo 100/50.
     Blindagem contra bloqueios de API e vazamento de memória.
     """
-    def __init__(self, api_key=None, api_secret=None, testnet=None):
+    def __init__(self, api_key=None, api_secret=None, testnet=None, base_url=None):
         # LAZY LOADING: Evita importação circular puxando apenas no escopo local
         from src.config import get_bybit_base_url, get_bybit_credentials, resolve_use_testnet
         from src.broker.order_calculator import OrderCalculator
@@ -85,8 +85,16 @@ class BybitClient:
         api_key = str(api_key or env_api_key or '').strip().replace('\n', '').replace('\r', '')
         api_secret = str(api_secret or env_api_secret or '').strip().replace('\n', '').replace('\r', '')
 
-        self.testnet = resolve_use_testnet(testnet)
-        self.active_endpoint = get_bybit_base_url(self.testnet)
+        normalized_base_url = str(base_url or '').strip()
+        if normalized_base_url:
+            self.active_endpoint = normalized_base_url
+            self.is_demo = 'api-demo.bybit.com' in normalized_base_url
+            self.testnet = 'api-testnet.bybit.com' in normalized_base_url
+        else:
+            self.testnet = resolve_use_testnet(testnet)
+            self.is_demo = False
+            self.active_endpoint = get_bybit_base_url(self.testnet)
+        self.use_sandbox = bool(self.testnet or self.is_demo)
         self.pybit_session = None
 
         cfg = {
@@ -124,7 +132,10 @@ class BybitClient:
         if api_key and api_secret:
             self._init_pybit_session(api_key, api_secret)
 
-        print(f"🔍 [BYBIT ENDPOINT] testnet={self.testnet} endpoint={self.active_endpoint}", flush=True)
+        print(
+            f"🔍 [BYBIT ENDPOINT] testnet={self.testnet} demo={self.is_demo} endpoint={self.active_endpoint}",
+            flush=True,
+        )
 
         self.authenticated = bool(api_key and api_secret)
 
@@ -141,7 +152,7 @@ class BybitClient:
 
     def _configure_exchange_endpoint(self):
         """Aplica e valida o endpoint exato exigido pelo ambiente configurado."""
-        if self.testnet:
+        if self.use_sandbox:
             self.exchange.set_sandbox_mode(True)
 
         api_urls = self.exchange.urls.get('api')
@@ -174,12 +185,18 @@ class BybitClient:
 
             self.pybit_session = HTTP(
                 testnet=self.testnet,
+                demo=self.is_demo,
                 api_key=api_key,
                 api_secret=api_secret,
                 recv_window=20000,
             )
-            self.pybit_session.endpoint = self.active_endpoint
-            print(f"🔌 [PYBIT V5] módulo={self.pybit_sdk_module} endpoint={self.active_endpoint} recv_window=20000ms", flush=True)
+            if not self.is_demo and not self.testnet:
+                self.pybit_session.endpoint = self.active_endpoint
+            print(
+                f"🔌 [PYBIT V5] módulo={self.pybit_sdk_module} testnet={self.testnet} demo={self.is_demo} "
+                f"endpoint={self.pybit_session.endpoint} recv_window=20000ms",
+                flush=True,
+            )
         except Exception as e:
             print(f"⚠️ [PYBIT] Sessão HTTP indisponível: {e}", flush=True)
             self.pybit_session = None
@@ -455,6 +472,11 @@ class BybitClient:
                 self._record_last_auth_error(e)
                 print(f"⚠️ [BYBIT] Exceção em pybit get_wallet_balance: {e}", flush=True)
 
+        # Demo Trading: CCXT chama endpoints não suportados (retCode 10032).
+        if self.is_demo:
+            print("⚠️ [BYBIT] Saldo indisponível via pybit no ambiente DEMO.", flush=True)
+            return None
+
         # Fallback 1: Conta Unificada (UTA) via CCXT
         try:
             print(f"📊 [BYBIT] Tentando fetch_balance (UNIFIED) para {self.exchange.apiKey[:4]}...", flush=True)
@@ -488,7 +510,7 @@ class BybitClient:
             print(f"[ERRO BROKER] Falha crítica ao consultar saldo total: {msg}", flush=True)
             return None
 
-        return 0.0
+        return None
 
     def fetch_ohlcv(self, symbol, timeframe="15m"):
         """Busca base de dados histórica filtrada por cache atômico."""
