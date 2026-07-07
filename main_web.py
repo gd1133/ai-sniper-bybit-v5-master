@@ -129,6 +129,7 @@ def _handle_invalid_api_key_10003_for_client(client, source_label='bybit'):
 from src.risk.position_sizing import (
     calculate_order_margin as _shared_calculate_order_margin,
     calculate_position_qty as _shared_calculate_position_qty,
+    calcular_tamanho_posicao,
     calculate_tp_sl_prices,
     financial_targets_from_margin,
     format_entry_pct,
@@ -1623,9 +1624,8 @@ def _client_had_last_stop_loss(client_id: int) -> bool:
 
 def _calculate_dynamic_order_quantity(broker, symbol, banca=None, client_context=None):
     """
-    Gestão de entrada por percentual de capital (NÃO mínimo da moeda):
-    - Entrada padrão: 5% da banca (RISK_PER_TRADE_PCT)
-    - Após STOP_LOSS: 3% da banca (ENTRY_AFTER_STOP_PCT)
+    Gestão de entrada por percentual de capital (perpétuos Bybit):
+      MI = Saldo × 5%  |  Valor = MI × L  |  Qty = Valor / Preço
     """
     try:
         leverage_value = float(ALAVANCAGEM or 1.0)
@@ -1654,18 +1654,17 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None, client_context
             print(f"❌ [CALC QTY] Preço inválido para {symbol}", flush=True)
             return 0.0, 0.0, saldo_atual
 
-        margem, qty = _shared_calculate_position_qty(
-            capital_ref, last_price, leverage_value, after_stop=after_stop,
+        sizing = calcular_tamanho_posicao(
+            capital_ref, leverage_value, last_price, pct_banca=margem_pct,
         )
-        if margem <= 0:
-            margem = float(MARGEM_INPUT or 5.0)
-            qty = (margem * leverage_value) / last_price
+        margem = float(sizing['margem_inicial'])
+        qty = float(sizing['quantidade'])
 
-        print(f"   💰 [CALC QTY] Saldo Atual (BYBIT V5): ${saldo_atual:.2f} USDT", flush=True)
-        print(f"   💰 [CALC QTY] Capital de referência: ${capital_ref:.2f} USDT", flush=True)
-        print(f"   💰 [CALC QTY] Margem de entrada: ${margem:.2f} USDT ({margem_pct*100:.1f}% da banca)", flush=True)
-        print(f"   📊 [CALC QTY] Preço: ${last_price:.4f} | Alavancagem: {leverage_value}x", flush=True)
-        print(f"   🔢 [CALC QTY] Qty calculada (5% banca, não mínimo moeda): {qty:.6f}", flush=True)
+        print(f"   💰 [CALC QTY] Saldo UNIFIED (atualizado): ${saldo_atual:.2f} USDT", flush=True)
+        print(f"   💰 [CALC QTY] MI = Saldo × {margem_pct*100:.1f}% = ${margem:.2f} USDT", flush=True)
+        print(f"   📊 [CALC QTY] Valor posição = MI × {leverage_value}x = ${sizing['valor_posicao_usdt']:.2f}", flush=True)
+        print(f"   📊 [CALC QTY] Preço: ${last_price:.4f}", flush=True)
+        print(f"   🔢 [CALC QTY] Qty = Valor/Preço = {qty:.6f}", flush=True)
 
         try:
             qty, ok, reason = broker.validate_pct_sizing_qty(symbol, qty, strict=True)
@@ -1716,6 +1715,7 @@ def sniper_worker_loop():
     from src.engine.indicators import IndicatorEngine
     from src.ai_brain.validator import GroqValidator
     from src.intelligence.market_intelligence import get_market_intelligence
+    from src.engine.entry_timing import confirmar_timing_entrada
     global _FORCED_SIGNAL_FIRED
 
     while True:
@@ -1859,6 +1859,18 @@ def sniper_worker_loop():
                     if prob < THRESHOLD_ENTRADA or decisao not in ['COMPRAR', 'VENDER', 'BUY', 'SELL']:
                         time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
                         continue
+
+                    side_exec = 'sell' if decisao in ('SELL', 'VENDER') else 'buy'
+                    timing_ok, timing_reasons = confirmar_timing_entrada(side_exec, df, signals)
+                    if not timing_ok:
+                        print(
+                            f"   ⏳ [TIMING] {clean_sym} aguardando fim de repique: "
+                            f"{' | '.join(timing_reasons)}",
+                            flush=True,
+                        )
+                        time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
+                        continue
+                    print(f"   ✅ [TIMING] {clean_sym}: {' | '.join(timing_reasons)}", flush=True)
 
                     money_flow = _build_money_flow_metrics(signals, t, decisao)
                     edge = _get_symbol_trade_edge(sym, decisao)

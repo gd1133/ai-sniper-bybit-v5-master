@@ -84,6 +84,10 @@ class IndicatorEngine:
         self.df['vol_ma'] = self.df['vol'].rolling(window=20, min_periods=1).mean()
         self.df['volume_ratio'] = self.df['vol'] / (self.df['vol_ma'] + 1e-9)
 
+        # EMA 9 / EMA 21 — timing de entrada (fim de repique)
+        self.df['ema_9'] = self.df['close'].ewm(span=9, adjust=False).mean()
+        self.df['ema_21'] = self.df['close'].ewm(span=21, adjust=False).mean()
+
     def get_signals(self):
         """
         Retorna sinais técnicos consolidados para o Cérebro Triplo.
@@ -182,6 +186,8 @@ class IndicatorEngine:
             'adx': float(regime.get('adx', 0) or 0),
             'choppiness': float(regime.get('choppiness', 50) or 50),
             'regime_label': str(regime.get('regime_label', '')),
+            'ema_9': float(last['ema_9']) if 'ema_9' in last else 0.0,
+            'ema_21': float(last['ema_21']) if 'ema_21' in last else 0.0,
         }
 
     def get_smart_money_zones(self):

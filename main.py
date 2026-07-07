@@ -91,8 +91,9 @@ from src.engine.indicators import IndicatorEngine
 from src.ai_brain.validator import GroqValidator
 from src.ai_brain.learning import TradeLearner
 from src.ai_brain.local_ml_engine import LocalMLEngine
-from src.risk.position_sizing import calculate_position_qty, load_entry_after_stop_pct
+from src.risk.position_sizing import calculate_position_qty, load_entry_after_stop_pct, calcular_tamanho_posicao
 from src.intelligence.market_intelligence import get_market_intelligence
+from src.engine.entry_timing import confirmar_timing_entrada
 
 
 
@@ -280,9 +281,8 @@ def configure_leverage_and_margin(client: BybitClient, symbol: str) -> bool:
 
 def calculate_entry_qty(client: BybitClient, price: float, entry_pct: float) -> float:
     """
-    Calcula quantidade com percentual da banca (padrão 5%), NÃO o mínimo da moeda.
-
-    qty = (saldo × entry_pct × alavancagem) / preço
+    Calcula quantidade com fórmula obrigatória de perpétuos:
+      MI = Saldo × 5%  |  Qty = (MI × L) / Preço
     """
     balance = client.get_balance()
 
@@ -293,10 +293,13 @@ def calculate_entry_qty(client: BybitClient, price: float, entry_pct: float) -> 
     try:
         symbol = SYMBOL
         after_stop = entry_pct <= load_entry_after_stop_pct() + 1e-9 and entry_pct < RISK_PER_TRADE_PCT
+        pct = entry_pct
 
-        print(f"💰 [RISCO] Saldo={balance:.2f} USDT | Entrada={entry_pct*100:.1f}% da banca")
-        margin, qty = calculate_position_qty(balance, price, LEVERAGE, after_stop=after_stop)
-        print(f"   💵 Margem: ${margin:.2f} | Qty bruta: {qty:.6f}")
+        print(f"💰 [RISCO] Saldo UNIFIED={balance:.2f} USDT | Entrada={pct*100:.1f}% da banca")
+        sizing = calcular_tamanho_posicao(balance, LEVERAGE, price, pct_banca=pct)
+        margin = float(sizing['margem_inicial'])
+        qty = float(sizing['quantidade'])
+        print(f"   💵 MI=${margin:.2f} | Valor=${sizing['valor_posicao_usdt']:.2f} | Qty bruta: {qty:.6f}")
 
         qty, ok, reason = client.validate_pct_sizing_qty(symbol, qty, strict=True)
         if not ok:
@@ -749,6 +752,14 @@ def run_sniper(symbol: str = SYMBOL):
 
             # ── ETAPA 9: Cálculo de Tamanho da Entrada (Risco Dinâmico) ──────
             side = "BUY" if decisao in ("COMPRAR", "BUY") else "SELL"
+
+            timing_ok, timing_reasons = confirmar_timing_entrada(side.lower(), df, tech_data)
+            if not timing_ok:
+                print(f"⏳ [TIMING] Aguardando fim de repique: {' | '.join(timing_reasons)}")
+                time.sleep(SCAN_INTERVAL)
+                continue
+            print(f"✅ [TIMING] Entrada confirmada: {' | '.join(timing_reasons)}")
+
             entry_pct = risk_manager.current_entry_pct
             qty = calculate_entry_qty(client, price, entry_pct)
             if qty <= 0:

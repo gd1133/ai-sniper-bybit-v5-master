@@ -87,8 +87,9 @@ def calculate_position_qty(
     if margin <= 0:
         return 0.0, 0.0
 
-    qty = (margin * leverage) / price
-    return margin, qty
+    pct = load_entry_after_stop_pct() if after_stop else load_entry_pct()
+    sizing = calcular_tamanho_posicao(balance, leverage, price, pct_banca=pct)
+    return float(sizing['margem_inicial']), float(sizing['quantidade'])
 
 
 def calculate_tp_sl_prices(
@@ -128,3 +129,52 @@ def financial_targets_from_margin(margin: float) -> Tuple[float, float]:
     if margin <= 0:
         margin = calculate_order_margin(100.0)  # fallback ~$5 em banca $100
     return margin * DEFAULT_TP_MARGIN_RATIO, -margin * DEFAULT_SL_MARGIN_RATIO
+
+
+def calcular_tamanho_posicao(
+    saldo_banca: float,
+    alavancagem: float,
+    preco_entrada: float,
+    *,
+    pct_banca: float | None = None,
+) -> dict:
+    """
+    Fórmula obrigatória para perpétuos Bybit:
+
+      MI = Saldo × 5%
+      Valor_Posição (USDT) = MI × L
+      Qty = Valor_Posição / Preço
+
+    A margem inicial NUNCA excede o percentual da banca (padrão 5%).
+    Se a alavancagem mudar, apenas Qty muda — o capital em risco (MI) permanece fixo em %.
+    """
+    saldo = float(saldo_banca or 0)
+    leverage = max(float(alavancagem or 1), 1.0)
+    price = float(preco_entrada or 0)
+    pct = float(pct_banca if pct_banca is not None else load_entry_pct())
+    pct = min(pct, DEFAULT_ENTRY_PCT) if pct > DEFAULT_ENTRY_PCT else pct
+
+    if saldo <= 0 or price <= 0:
+        return {
+            'margem_inicial': 0.0,
+            'valor_posicao_usdt': 0.0,
+            'quantidade': 0.0,
+            'alavancagem': leverage,
+            'preco_entrada': price,
+            'pct_banca': pct,
+            'saldo_referencia': saldo,
+        }
+
+    margem_inicial = saldo * pct
+    valor_posicao = margem_inicial * leverage
+    quantidade = valor_posicao / price
+
+    return {
+        'margem_inicial': round(margem_inicial, 8),
+        'valor_posicao_usdt': round(valor_posicao, 8),
+        'quantidade': quantidade,
+        'alavancagem': leverage,
+        'preco_entrada': price,
+        'pct_banca': pct,
+        'saldo_referencia': round(saldo, 8),
+    }
