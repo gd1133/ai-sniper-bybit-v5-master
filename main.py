@@ -92,6 +92,7 @@ from src.ai_brain.validator import GroqValidator
 from src.ai_brain.learning import TradeLearner
 from src.ai_brain.local_ml_engine import LocalMLEngine
 from src.risk.position_sizing import calculate_position_qty, load_entry_after_stop_pct
+from src.intelligence.market_intelligence import get_market_intelligence
 
 
 
@@ -699,8 +700,21 @@ def run_sniper(symbol: str = SYMBOL):
                 f"| SuperTrend={'▲' if tech_data['supertrend_signal'] == 1 else '▼'}"
             )
 
+            if tech_data.get('is_lateral'):
+                print(f"🔒 [IA] Mercado LATERAL detectado (ADX={tech_data.get('adx')}) — aguardando tendência.")
+                time.sleep(SCAN_INTERVAL)
+                continue
+
+            intel_ctx = get_market_intelligence().evaluate(symbol, df, tech_data, {})
+            if not intel_ctx.get('allow_entry'):
+                print(f"🔒 [IA INSTITUCIONAL] Entrada bloqueada: {' | '.join(intel_ctx.get('veto_reasons', []))}")
+                time.sleep(SCAN_INTERVAL)
+                continue
+
+            print(f"🐋 [BALEIAS] Score={intel_ctx.get('whale_score')} | Timing={intel_ctx.get('timing_score')} | {intel_ctx.get('summary', '')}")
+
             # ── ETAPA 5: Consenso local autonomo ──────────────────────────────
-            consensus = validator.consensus_predict(tech_data, symbol)
+            consensus = validator.consensus_predict(tech_data, symbol, intelligence_context=intel_ctx)
             confidence = consensus.get("probabilidade", 0)
             decisao = consensus.get("decisao", "SCANNER")
 
@@ -715,7 +729,7 @@ def run_sniper(symbol: str = SYMBOL):
                 time.sleep(SCAN_INTERVAL)
                 continue
 
-            if decisao not in ("COMPRAR", "VENDER"):
+            if decisao not in ("COMPRAR", "VENDER", "BUY", "SELL"):
                 print(f"⏸️  Decisão={decisao}. Nenhuma ação neste ciclo.")
                 time.sleep(SCAN_INTERVAL)
                 continue
@@ -734,7 +748,7 @@ def run_sniper(symbol: str = SYMBOL):
                 continue
 
             # ── ETAPA 9: Cálculo de Tamanho da Entrada (Risco Dinâmico) ──────
-            side = "BUY" if decisao == "COMPRAR" else "SELL"
+            side = "BUY" if decisao in ("COMPRAR", "BUY") else "SELL"
             entry_pct = risk_manager.current_entry_pct
             qty = calculate_entry_qty(client, price, entry_pct)
             if qty <= 0:

@@ -54,6 +54,38 @@ class DataAnalystAgent:
         return min(100, score), action, ' | '.join(reasons)
 
 
+class IntelligenceAgent:
+    """Agente de inteligência de mercado — regime, baleias, notícias e timing."""
+
+    def get_signal(self, tech_data, symbol, intelligence_context=None):
+        ctx = intelligence_context or {}
+        score = float(ctx.get('intelligence_score', 50) or 50)
+        reasons = [str(ctx.get('summary', 'Sem dados de inteligência'))]
+
+        if not ctx.get('allow_entry', True):
+            return 0, 'WAIT', ' | '.join(ctx.get('veto_reasons', ['Entrada bloqueada pela IA']))
+
+        if ctx.get('whale_aligned'):
+            score = min(100.0, score + 10)
+            reasons.append('Baleias alinhadas com a tendência')
+
+        if ctx.get('is_trending'):
+            score = min(100.0, score + 8)
+            reasons.append('Moeda em destaque global')
+
+        timing = float(ctx.get('timing_score', 50) or 50)
+        if timing >= 80:
+            score = min(100.0, score + 10)
+            reasons.append(f'Timing institucional favorável ({timing:.0f}/100)')
+
+        trend = tech_data.get('trend', 'NEUTRO')
+        action = 'WAIT'
+        if score >= 55 and trend in ('ALTA', 'BAIXA'):
+            action = 'BUY' if trend == 'ALTA' else 'SELL'
+
+        return max(0, min(100, score)), action, ' | '.join(reasons)
+
+
 class LearningAgent:
     """
     Agente de aprendizado local.
@@ -119,6 +151,7 @@ class GroqValidator:
 
     def __init__(self, api_key_gemini=None, api_key_groq=None):
         self.analyst = DataAnalystAgent()
+        self.intelligence = IntelligenceAgent()
         self.learner = LearningAgent()
         self.memory = TradeLearner()
 
@@ -133,7 +166,7 @@ class GroqValidator:
             score += 30
         return min(100, score)
 
-    def consensus_predict(self, tech_data, symbol, force_local_only=True):
+    def consensus_predict(self, tech_data, symbol, force_local_only=True, intelligence_context=None):
         trend = tech_data.get('trend', 'NEUTRO')
         if trend == 'NEUTRO':
             return {
@@ -142,21 +175,55 @@ class GroqValidator:
                 'motivo': 'Tendência neutra - bloqueio de scanner',
             }
 
+        if intelligence_context and not intelligence_context.get('allow_entry', True):
+            vetos = intelligence_context.get('veto_reasons', [])
+            return {
+                'probabilidade': 0,
+                'decisao': 'WAIT',
+                'motivo': f"IA institucional bloqueou: {' | '.join(vetos)}",
+                'intelligence': intelligence_context,
+            }
+
         score_local = self.local_signal(tech_data)
         score_analyst, action_analyst, motivo_analyst = self.analyst.get_signal(tech_data, symbol)
+        score_intel, action_intel, motivo_intel = self.intelligence.get_signal(
+            tech_data, symbol, intelligence_context,
+        )
         score_learner, action_learner, motivo_learner = self.learner.get_signal(tech_data, symbol)
 
-        probability = (score_local * 0.25) + (score_analyst * 0.40) + (score_learner * 0.35)
+        probability = (
+            (score_local * 0.20) +
+            (score_analyst * 0.30) +
+            (score_intel * 0.30) +
+            (score_learner * 0.20)
+        )
 
         final_action = 'WAIT'
-        if action_analyst == action_learner and probability >= 60:
-            final_action = action_analyst
+        actions = [action_analyst, action_intel, action_learner]
+        buy_votes = sum(1 for a in actions if a == 'BUY')
+        sell_votes = sum(1 for a in actions if a == 'SELL')
+        if buy_votes >= 2 and probability >= 60:
+            final_action = 'BUY'
+        elif sell_votes >= 2 and probability >= 60:
+            final_action = 'SELL'
         elif probability >= 75:
             final_action = action_analyst
 
-        return {
+        result = {
             'probabilidade': probability,
             'decisao': final_action,
-            'motivo': f'Analista: {motivo_analyst} | Aprendizado: {motivo_learner}',
-            'brains': {'local': 'online', 'analyst': 'online', 'learner': 'online'},
+            'motivo': (
+                f'Analista: {motivo_analyst} | '
+                f'IA Mercado: {motivo_intel} | '
+                f'Aprendizado: {motivo_learner}'
+            ),
+            'brains': {
+                'local': 'online',
+                'analyst': 'online',
+                'intelligence': 'online',
+                'learner': 'online',
+            },
         }
+        if intelligence_context:
+            result['intelligence'] = intelligence_context
+        return result

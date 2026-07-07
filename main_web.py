@@ -475,8 +475,8 @@ central_state = {
     "losing_trades": 0,  
     "win_rate": 0.0,  
     "ia2_decision": {
-        "motivo": "Varrendo o mercado com analise local, estatistica e historico...",
-        "brains": {"local": "online", "analyst": "online", "learner": "online"}
+        "motivo": "Varrendo mercado com IA institucional: regime, baleias, notícias e timing...",
+        "brains": {"local": "online", "analyst": "online", "intelligence": "online", "learner": "online"}
     },
     "max_moedas_ativas": MAX_MOEDAS_ATIVAS,
     "risk_mode": RISK_MODE,
@@ -1715,6 +1715,7 @@ def sniper_worker_loop():
     from src.broker.bybit_client import BybitClient
     from src.engine.indicators import IndicatorEngine
     from src.ai_brain.validator import GroqValidator
+    from src.intelligence.market_intelligence import get_market_intelligence
     global _FORCED_SIGNAL_FIRED
 
     while True:
@@ -1772,6 +1773,8 @@ def sniper_worker_loop():
             )[:SCAN_TOP_COINS]
 
             validator = GroqValidator()
+            market_intel = get_market_intelligence()
+            oportunidades = []
 
             # Alimenta o card RADAR LIVE imediatamente com a primeira moeda do radar.
             positions_empty = len(central_state.get('active_trades') or []) == 0
@@ -1823,23 +1826,103 @@ def sniper_worker_loop():
 
             for t in top_coins:
                 sym = t['symbol']
-                df = radar_broker.fetch_ohlcv(sym, timeframe='15m')
-                if df is None or len(df) < 200: continue
-                
-                signals = IndicatorEngine(df).get_signals()
-                if signals['trend'] == 'NEUTRO' or validator.local_signal(signals) < 25: continue
-                
-                res = validator.consensus_predict(signals, sym, force_local_only=True)
-                prob = float(res.get('probabilidade', 0))
-                decisao = str(res.get('decisao', 'ABORTAR')).upper()
-                central_state['symbol'] = _limpar_simbolo(sym)
-                central_state['confidence'] = round(prob, 2)
+                clean_sym = _limpar_simbolo(sym)
+                central_state['status'] = f'🔍 Radar IA: {clean_sym}'
+                try:
+                    df = radar_broker.fetch_ohlcv(sym, timeframe='15m')
+                    if df is None or len(df) < 200:
+                        continue
 
-                if prob >= THRESHOLD_ENTRADA and decisao in ['COMPRAR', 'VENDER', 'BUY', 'SELL']:
-                    broadcast_ordem_global(sym, 'buy' if decisao in ('BUY', 'COMPRAR') else 'sell', float(signals['price']), res)
-                    time.sleep(COOLDOWN_INSTITUCIONAL_SECS)
-                    break
+                    signals = IndicatorEngine(df).get_signals()
+                    if signals.get('is_lateral') or signals['trend'] == 'NEUTRO':
+                        continue
+                    if validator.local_signal(signals) < 25:
+                        continue
+
+                    intel_ctx = market_intel.evaluate(sym, df, signals, t)
+                    if not intel_ctx.get('allow_entry'):
+                        print(
+                            f"   🚫 [IA] {clean_sym} bloqueado: "
+                            f"{' | '.join(intel_ctx.get('veto_reasons', []))}",
+                            flush=True,
+                        )
+                        continue
+
+                    res = validator.consensus_predict(
+                        signals, sym, force_local_only=True, intelligence_context=intel_ctx,
+                    )
+                    prob = float(res.get('probabilidade', 0))
+                    decisao = str(res.get('decisao', 'ABORTAR')).upper()
+                    central_state['symbol'] = clean_sym
+                    central_state['confidence'] = round(prob, 2)
+
+                    if prob < THRESHOLD_ENTRADA or decisao not in ['COMPRAR', 'VENDER', 'BUY', 'SELL']:
+                        time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
+                        continue
+
+                    money_flow = _build_money_flow_metrics(signals, t, decisao)
+                    edge = _get_symbol_trade_edge(sym, decisao)
+                    score = (
+                        prob
+                        + float(intel_ctx.get('intelligence_score', 0) or 0) * 0.25
+                        + float(intel_ctx.get('timing_score', 0) or 0) * 0.10
+                        + min(20.0, float(t.get('quoteVolume', 0) or 0) / 1_000_000)
+                        + (money_flow['money_flow_score'] * 0.25)
+                        + edge['edge_score']
+                    )
+                    oportunidades.append({
+                        'symbol': sym,
+                        'clean_symbol': clean_sym,
+                        'score': score,
+                        'probabilidade': prob,
+                        'signals': signals,
+                        'res': res,
+                        'intel_ctx': intel_ctx,
+                        'money_flow_score': money_flow['money_flow_score'],
+                        'whale_score': intel_ctx.get('whale_score', 0),
+                        'timing_score': intel_ctx.get('timing_score', 0),
+                    })
+                except Exception as scan_err:
+                    print(f"   ⚠️ [RADAR] Erro em {sym}: {scan_err}", flush=True)
+
                 time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
+
+            oportunidades_ordenadas = sorted(oportunidades, key=lambda x: x['score'], reverse=True)
+            central_state['opportunities'] = [
+                {
+                    'symbol': o['clean_symbol'],
+                    'score': round(float(o['score']), 2),
+                    'probabilidade': round(float(o['probabilidade']), 2),
+                    'decisao': str(o['res'].get('decisao', 'WAIT')).upper(),
+                    'motivo': str(o['res'].get('motivo', ''))[:200],
+                    'regime': o['intel_ctx'].get('market_regime'),
+                    'whale_score': o.get('whale_score', 0),
+                    'timing_score': o.get('timing_score', 0),
+                    'global_trend': o['intel_ctx'].get('global_trend'),
+                }
+                for o in oportunidades_ordenadas[:5]
+            ]
+
+            if oportunidades_ordenadas:
+                melhor = oportunidades_ordenadas[0]
+                sym = melhor['symbol']
+                signals = melhor['signals']
+                res = melhor['res']
+                decisao = str(res.get('decisao', 'WAIT')).upper()
+                intel_ctx = melhor['intel_ctx']
+                print(
+                    f"🎯 [MELHOR OPORTUNIDADE] {melhor['clean_symbol']} | "
+                    f"Score={melhor['score']:.1f} | Baleias={intel_ctx.get('whale_score')} | "
+                    f"Timing={intel_ctx.get('timing_score')} | Regime={intel_ctx.get('market_regime')}",
+                    flush=True,
+                )
+                broadcast_ordem_global(
+                    sym,
+                    'buy' if decisao in ('BUY', 'COMPRAR') else 'sell',
+                    float(signals['price']),
+                    res,
+                )
+                time.sleep(COOLDOWN_INSTITUCIONAL_SECS)
         except Exception: pass
         time.sleep(15)
 

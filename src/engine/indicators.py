@@ -146,6 +146,21 @@ class IndicatorEngine:
         elif trend == "BAIXA" and recent_return_pct < 0 and float(last['volume_ratio']) >= 1.3:
             money_flow_side = "SELL"
 
+        try:
+            from src.intelligence.regime_detector import detect_market_regime
+            regime = detect_market_regime(self.df, {
+                'trend': trend,
+                'distance_from_sma_pct': distance_from_sma_pct,
+                'range_expansion': range_expansion,
+            })
+        except Exception:
+            regime = {
+                'market_regime': 'UNKNOWN',
+                'is_lateral': trend == 'NEUTRO',
+                'adx': 0.0,
+                'choppiness': 50.0,
+            }
+
         return {
             'trend': trend,
             'price': float(current_price),
@@ -162,6 +177,11 @@ class IndicatorEngine:
             'range_expansion': float(range_expansion),
             'distance_from_sma_pct': float(distance_from_sma_pct),
             'money_flow_side': money_flow_side,
+            'market_regime': regime.get('market_regime', 'UNKNOWN'),
+            'is_lateral': bool(regime.get('is_lateral', False)),
+            'adx': float(regime.get('adx', 0) or 0),
+            'choppiness': float(regime.get('choppiness', 50) or 50),
+            'regime_label': str(regime.get('regime_label', '')),
         }
 
     def get_smart_money_zones(self):
