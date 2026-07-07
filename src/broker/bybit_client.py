@@ -5,6 +5,12 @@ import threading
 import json
 import re
 from decimal import Decimal
+from src.risk.position_sizing import (
+    calculate_position_qty,
+    calculate_tp_sl_prices,
+    load_entry_after_stop_pct,
+    load_entry_pct,
+)
 
 # Força UTF-8 no stdout sem reempacotar o stream (evita fechar stdout no Windows)
 if sys.platform == 'win32':
@@ -309,26 +315,108 @@ class BybitClient:
         normalized = str(side or '').strip().lower()
         return 'Buy' if normalized == 'buy' else 'Sell'
 
-    def calculate_dynamic_order_qty(self, symbol: str, balance=None):
-        """Calcula a quantidade de uma ordem baseada nos limites estritos da corretora."""
+    def calculate_dynamic_order_qty(self, symbol: str, balance=None, leverage=None, after_stop: bool = False):
+        """Calcula quantidade com percentual da banca (padrão 5%), não mínimo da moeda."""
         current_price = self.get_last_price(symbol)
         if current_price <= 0:
             raise ValueError(f"Não foi possível obter preço atual para {symbol}")
 
-        if balance is None or balance <= 0:
-            return self.order_calculator.calculate_minimum_order_qty(
-                self.exchange, symbol, current_price
-            )
-        else:
-            return self.order_calculator.calculate_order_qty_from_balance(
-                self.exchange, symbol, current_price, balance, risk_multiplier=1.0
+        balance_val = float(balance or self.get_balance() or 0)
+        if balance_val <= 0:
+            raise ValueError("Saldo indisponível para cálculo percentual da banca")
+
+        lev = float(leverage or getattr(self, 'default_leverage', 10) or 10)
+        margin, qty = calculate_position_qty(
+            balance_val, current_price, lev, after_stop=after_stop,
+        )
+        metadata = {
+            'min_amount': 0.0,
+            'min_cost': 0.0,
+            'calculated_cost': round(qty * current_price, 2),
+            'margin_usdt': margin,
+            'entry_pct': load_entry_after_stop_pct() if after_stop else load_entry_pct(),
+            'leverage': lev,
+            'exchange': 'bybit',
+        }
+        return qty, metadata
+
+    def _get_market_limits(self, symbol):
+        """Retorna (min_amount, min_cost) do mercado."""
+        try:
+            self.exchange.load_markets()
+            market = self.exchange.market(symbol)
+            limits = market.get('limits', {})
+            min_amount = limits.get('amount', {}).get('min')
+            if min_amount is None or str(min_amount).lower() == 'none' or min_amount <= 0:
+                min_amount = 0.001
+            min_cost = limits.get('cost', {}).get('min')
+            if min_cost is None or str(min_cost).lower() == 'none' or min_cost <= 0:
+                min_cost = 6.0
+            return float(min_amount), float(min_cost)
+        except Exception as market_err:
+            print(f"⚠️ [BYBIT MARKET] Erro ao carregar limites: {market_err}, usando defaults", flush=True)
+            return 0.001, 6.0
+
+    def validate_pct_sizing_qty(self, symbol, qty, strict=True):
+        """
+        Valida qty calculada por % da banca.
+        strict=True: aborta se abaixo do mínimo da exchange (não aumenta para o mínimo).
+        Retorna (qty_normalizada, ok, motivo).
+        """
+        try:
+            qty_decimal = Decimal(str(float(qty)))
+        except (TypeError, ValueError):
+            return 0.0, False, f"Quantidade inválida: {qty}"
+
+        if qty_decimal <= 0:
+            return 0.0, False, f"Quantidade deve ser positiva: {qty}"
+
+        current_price = self.get_last_price(symbol)
+        if current_price <= 0:
+            return 0.0, False, f"Preço indisponível para {symbol}"
+
+        min_amount, min_cost = self._get_market_limits(symbol)
+        min_qty_for_notional = Decimal(str(min_cost)) / Decimal(str(current_price))
+        required_min_qty = max(Decimal(str(min_amount)), min_qty_for_notional)
+
+        if strict and qty_decimal < required_min_qty:
+            notional = float(qty_decimal) * current_price
+            return (
+                float(qty_decimal),
+                False,
+                (
+                    f"5% da banca (${notional:.2f} nocional) abaixo do mínimo da exchange "
+                    f"(${min_cost:.2f}). Aumente o saldo ou o percentual — não usamos mínimo da moeda."
+                ),
             )
 
-    def _normalize_order_qty(self, symbol, qty):
+        final_qty = float(self.exchange.amount_to_precision(symbol, float(qty_decimal)))
+        final_notional = final_qty * current_price
+        if strict and final_notional < min_cost:
+            return (
+                final_qty,
+                False,
+                f"Nocional ${final_notional:.2f} abaixo do mínimo ${min_cost:.2f} após precisão",
+            )
+
+        print(
+            f"   ✅ [BYBIT ORDER VALIDA] qty={final_qty} (notional=${final_notional:.2f}, "
+            f"mínimo exchange=${min_cost:.2f})",
+            flush=True,
+        )
+        return final_qty, True, "OK"
+
+    def _normalize_order_qty(self, symbol, qty, strict_pct_sizing=False):
         """
-        Normaliza quantidade para precisão aceita pela corretora, evitando Qty invalid.
-        🔧 CORREÇÃO DEFINITIVA V2: Conversão Decimal via String + amount_to_precision nativo.
+        Normaliza quantidade para precisão aceita pela corretora.
+        strict_pct_sizing=True: não aumenta qty para o mínimo da exchange (modo 5% banca).
         """
+        if strict_pct_sizing:
+            final_qty, ok, reason = self.validate_pct_sizing_qty(symbol, qty, strict=True)
+            if not ok:
+                raise ValueError(reason)
+            return str(final_qty)
+
         try:
             # Conversão segura de float para Decimal usando string
             qty_decimal = Decimal(str(float(qty)))
@@ -570,7 +658,7 @@ class BybitClient:
             print(f"   ⚠️ Não foi possível buscar os metadados da ordem {order_id}: {e}", flush=True)
             return None
 
-    def execute_market_order(self, symbol, side, qty, raise_on_error=False):
+    def execute_market_order(self, symbol, side, qty, raise_on_error=False, strict_pct_sizing=False):
         """Executa ordem a mercado para entrada instantânea na Bybit V5."""
         try:
             if not self.authenticated:
@@ -579,7 +667,7 @@ class BybitClient:
                     raise RuntimeError('Cliente sem credenciais válidas na exchange.')
                 return None
 
-            normalized_qty = self._normalize_order_qty(symbol, qty)
+            normalized_qty = self._normalize_order_qty(symbol, qty, strict_pct_sizing=strict_pct_sizing)
             ccxt_qty = float(normalized_qty)
 
             print(f"🔥 [ORDEM SNIPER BYBIT] {side.upper()} {normalized_qty} em {symbol}", flush=True)
@@ -676,29 +764,20 @@ class BybitClient:
         except Exception as e:
             return False, str(e).split('\n')[0][:200]
 
-    def set_tp_sl_sniper(self, symbol, side, entry_price, position_qty):
+    def set_tp_sl_sniper(self, symbol, side, entry_price, position_qty, leverage=None):
         """
-        🎯 PROTOCOLO 100/50 - SETAGEM AUTOMÁTICA DE TP/SL COM HEDGE MODE
-        Take Profit: +10% de movimento (+100% de lucro sobre margem com alavancagem 10x)
-        Stop Loss: -50% de perda sobre o valor da entrada (Proteção Institucional)
+        TP/SL proporcionais à margem com alavancagem:
+        - TP: +100% da margem
+        - SL: -50% da margem
         """
         try:
             if not self.authenticated:
                 print(f"❌ [TP/SL] Não autenticado. Proteção de capital ABORTADA.")
                 return False
 
-            # Lógica para Hedge Mode: Identifica o positionIdx da posição que já está aberta
-            # Se a ordem inicial foi de COMPRA (Buy), o stop do TP/SL fica no index 1 (Long)
-            # Se a ordem inicial foi de VENDA (Sell), o stop do TP/SL fica no index 2 (Short)
             pos_idx = 1 if side.lower() == 'buy' else 2
-
-            # Cálculo estrito dos alvos de preço com base na direção
-            if side.lower() == 'buy':
-                tp_price = entry_price * 1.10  # +10% movimento
-                sl_price = entry_price * 0.50  # -50% do valor de entrada (Stop Loss de 50%)
-            else:
-                tp_price = entry_price * 0.90  # -10% movimento (lucra na queda)
-                sl_price = entry_price * 1.50  # +50% do valor de entrada (Stop Loss de 50%)
+            lev = float(leverage or getattr(self, 'default_leverage', 20) or 20)
+            tp_price, sl_price = calculate_tp_sl_prices(entry_price, side, lev)
 
             # Formatação de precisão da Bybit para evitar rejeição por casas decimais
             price_to_precision = getattr(self.exchange, 'price_to_precision', None)
@@ -710,9 +789,9 @@ class BybitClient:
                     print(f"⚠️ [TP/SL] Falha na formatação de casas decimais: {precision_error}")
 
             print(f"🛡️  [PROTEÇÃO SNIPER GATILHADA] Ativo: {symbol}")
-            print(f"   📍 Entrada: ${entry_price:.4f} | positionIdx: {pos_idx}")
-            print(f"   ✅ Target TP (+100%): ${tp_price:.4f}")
-            print(f"   ❌ Target SL (-50%): ${sl_price:.4f}")
+            print(f"   📍 Entrada: ${entry_price:.4f} | Alavancagem: {lev}x | positionIdx: {pos_idx}")
+            print(f"   ✅ Target TP (+100% margem): ${tp_price:.4f}")
+            print(f"   ❌ Target SL (-50% margem): ${sl_price:.4f}")
 
             # 🔧 AJUSTE CRÍTICO HEDGE MODE: Injeta category e positionIdx nos parâmetros da ordem
             params = {

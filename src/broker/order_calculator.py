@@ -8,8 +8,9 @@ Sistema de cálculo de ordens que respeita os limites ESTRITOS da corretora:
   - market["limits"]["amount"]["min"] → Lote mínimo de contratos
   - market["limits"]["cost"]["min"] → Nocional mínimo em USDT
 
-REMOVE completamente o modelo de "5% da banca" ou percentuais fixos.
-CALCULA a quantidade exata para atingir o valor mínimo aceito pela exchange.
+REMOVE o modelo antigo de "apenas mínimo da exchange".
+CALCULA a quantidade com percentual da banca (padrão 5%).
+Se 5% da banca for menor que o mínimo da exchange, a ordem é abortada (não forçada ao mínimo).
 """
 
 from decimal import Decimal, ROUND_UP, InvalidOperation
@@ -169,58 +170,55 @@ class OrderCalculator:
         current_price: float,
         balance: float,
         risk_multiplier: float = 1.0,
+        leverage: float = 10.0,
+        entry_pct: float | None = None,
     ) -> Tuple[float, dict]:
         """
-        Calcula quantidade de ordem considerando o saldo disponível.
+        Calcula quantidade com percentual da banca (padrão 5%).
 
-        Se o saldo permitir, usa um múltiplo do valor mínimo.
-        Caso contrário, usa apenas o valor mínimo absoluto.
-
-        Args:
-            exchange_instance: Instância do CCXT exchange
-            symbol: Par de negociação
-            current_price: Preço atual do ativo
-            balance: Saldo disponível em USDT
-            risk_multiplier: Multiplicador de risco (ex: 1.5x, 2x o mínimo)
-
-        Returns:
-            Tuple (quantidade_final, metadata)
+        Se o nocional de 5% ficar abaixo do mínimo da exchange, retorna qty=0
+        (não aumenta para o mínimo da moeda).
         """
-        # Primeiro calcula a quantidade mínima absoluta
-        min_qty, metadata = self.calculate_minimum_order_qty(
+        from src.risk.position_sizing import calculate_position_qty, load_entry_pct
+
+        pct = entry_pct if entry_pct is not None else load_entry_pct()
+        margin, qty = calculate_position_qty(balance, current_price, leverage, after_stop=False)
+        # Recalcula com pct explícito se diferente do padrão
+        if entry_pct is not None:
+            margin = round(balance * pct, 2)
+            qty = (margin * leverage) / current_price if current_price > 0 else 0.0
+
+        min_qty, min_metadata = self.calculate_minimum_order_qty(
             exchange_instance, symbol, current_price
         )
+        min_cost = min_metadata['min_cost']
+        calculated_cost = qty * current_price
 
-        min_cost = metadata['calculated_cost']
+        metadata = {
+            **min_metadata,
+            'calculated_cost': round(calculated_cost, 2),
+            'margin_usdt': margin,
+            'entry_pct': pct,
+            'risk_multiplier': risk_multiplier,
+        }
 
-        # Verifica se o saldo permite usar um múltiplo do mínimo
-        if balance > (min_cost * risk_multiplier):
-            # Calcula quantidade baseada no multiplicador
-            target_cost = min_cost * risk_multiplier
-            multiplied_qty = target_cost / current_price
+        if calculated_cost < min_cost:
+            print(
+                f"   🚫 [ORDER CALC] {pct*100:.1f}% da banca (${calculated_cost:.2f}) "
+                f"abaixo do mínimo ${min_cost:.2f} — ordem não será forçada ao mínimo."
+            )
+            metadata['below_minimum'] = True
+            return 0.0, metadata
 
-            # Aplica precisão CCXT
-            try:
-                if hasattr(exchange_instance, 'amount_to_precision'):
-                    multiplied_qty = float(exchange_instance.amount_to_precision(symbol, multiplied_qty))
-            except Exception:
-                pass
+        try:
+            if hasattr(exchange_instance, 'amount_to_precision'):
+                qty = float(exchange_instance.amount_to_precision(symbol, qty))
+        except Exception:
+            pass
 
-            final_cost = multiplied_qty * current_price
-            metadata['calculated_cost'] = round(final_cost, 2)
-            metadata['risk_multiplier'] = risk_multiplier
-
-            print(f"   💰 [ORDER CALC] Saldo permite {risk_multiplier}x do mínimo:")
-            print(f"      • qty: {multiplied_qty}")
-            print(f"      • notional: ${final_cost:.2f} USDT")
-
-            return multiplied_qty, metadata
-        else:
-            # Saldo insuficiente para multiplicador, usa apenas o mínimo
-            print(f"   ⚠️ [ORDER CALC] Saldo (${balance:.2f}) insuficiente para {risk_multiplier}x mínimo")
-            print(f"      Usando quantidade mínima absoluta: {min_qty}")
-            metadata['risk_multiplier'] = 1.0
-            return min_qty, metadata
+        metadata['calculated_cost'] = round(qty * current_price, 2)
+        print(f"   💰 [ORDER CALC] {pct*100:.1f}% da banca: qty={qty}, notional=${metadata['calculated_cost']:.2f}")
+        return qty, metadata
 
 
 def sanitize_numeric_string(value: str) -> str:

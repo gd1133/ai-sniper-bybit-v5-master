@@ -125,12 +125,30 @@ def _handle_invalid_api_key_10003_for_client(client, source_label='bybit'):
     )
 
 # 🔧 CONFIGURAÇÃO DE GERENCIAMENTO DE RISCO MOTOR SNIPER V60.7
-# Altere estes valores conforme necessário para diferentes estratégias de trading
+# Entrada = percentual da banca (NÃO o mínimo da moeda na exchange)
+from src.risk.position_sizing import (
+    calculate_order_margin as _shared_calculate_order_margin,
+    calculate_position_qty as _shared_calculate_position_qty,
+    calculate_tp_sl_prices,
+    financial_targets_from_margin,
+    format_entry_pct,
+    load_entry_after_stop_pct,
+    load_entry_pct,
+)
+
 ALAVANCAGEM = 20  # Alavancagem fixa (pode ser alterado para 30 ou 50 no futuro)
 MARGEM_INPUT = 5.0  # fallback legado quando capital não estiver disponível
-LIMITE_PERDA_STOP = -2.50  # Stop loss financeiro: -50% da margem de entrada ($5.0)
-PERCENTUAL_ENTRADA_BANCA = 0.05  # Entrada padrão: 5% do capital
-PERCENTUAL_ENTRADA_POS_STOP = 0.03  # Após STOP_LOSS: 3% do capital
+PERCENTUAL_ENTRADA_BANCA = load_entry_pct()  # padrão 5% — override via RISK_PER_TRADE_PCT
+PERCENTUAL_ENTRADA_POS_STOP = load_entry_after_stop_pct()  # padrão 3% após STOP_LOSS
+WEBHOOK_ORDER_MARGIN_PCT = PERCENTUAL_ENTRADA_BANCA  # compatibilidade com testes/API
+
+
+def _format_risk_per_trade_pct() -> str:
+    return format_entry_pct(PERCENTUAL_ENTRADA_BANCA)
+
+
+def _calculate_order_margin(balance: float, after_stop: bool = False) -> float:
+    return _shared_calculate_order_margin(balance, after_stop=after_stop)
 
 def _env_float(name: str, default: float) -> float:
     raw = os.getenv(name)
@@ -935,25 +953,44 @@ def _monitor_sl_tp_automatico():
         except Exception: pass
         time.sleep(10)
 
+def _resolve_position_margin(cliente, symbol, size, entry_price, leverage):
+    """Margem real da posição: banco → cálculo nocional/alavancagem → fallback 5% banca."""
+    client_id = int(cliente.get('id') or 0)
+    try:
+        for trade in db.get_open_trades(200):
+            if int(trade.get('client_id') or 0) != client_id:
+                continue
+            trade_pair = str(trade.get('pair') or '').upper().replace('/', '').replace(':USDT', '')
+            pos_symbol = str(symbol or '').upper().replace('/', '').replace(':USDT', '')
+            if trade_pair == pos_symbol:
+                stored = float(trade.get('margin') or 0)
+                if stored > 0:
+                    return stored
+    except Exception:
+        pass
+
+    entry_price = float(entry_price or 0)
+    size = float(size or 0)
+    leverage = max(float(leverage or ALAVANCAGEM or 1), 1.0)
+    if entry_price > 0 and size > 0:
+        return round((size * entry_price) / leverage, 2)
+
+    saldo = float(cliente.get('saldo_base') or 0)
+    return _calculate_order_margin(saldo) or float(MARGEM_INPUT or 5.0)
+
+
 def _monitor_financial_stop_loss():
     """
-    🎯 MONITOR FINANCEIRO V60.7 — REGRA BINÁRIA (ALVO FIXO NA PAREDE)
+    🎯 MONITOR FINANCEIRO — REGRA BINÁRIA PROPORCIONAL À MARGEM REAL
 
-    Monitora o unrealisedPnl em tempo real de todas as posições abertas.
-    Margem de entrada fixa: $5.00 USDT.
-
-    Regra estritamente binária:
-    - Take Profit (+100%): fecha quando unrealisedPnl >= +$5.00 USDT
-    - Stop Loss  ( -50%): fecha quando unrealisedPnl <= -$2.50 USDT
-    - Zona neutra (-$2.49 a +$4.99): NÃO FAZ NADA — deixa a operação rodar.
-
-    Não há trailing stop, breakeven, nem saída antecipada por tendência.
+    Alvos por posição (baseados na margem de entrada, não valor fixo $5):
+    - Take Profit (+100% da margem): fecha quando unrealisedPnl >= margem
+    - Stop Loss (-50% da margem): fecha quando unrealisedPnl <= -50% × margem
     """
-    time.sleep(5)  # Aguarda inicialização do sistema
-    ALVO_LUCRO = MARGEM_INPUT          # +$5.00 USDT  (100% da margem)
-    ALVO_PERDA = LIMITE_PERDA_STOP     # -$2.50 USDT  ( 50% da margem)
+    time.sleep(5)
     print(
-        f"🎯 [MONITOR FINANCEIRO] Iniciado — TP: +${ALVO_LUCRO:.2f} | SL: ${ALVO_PERDA:.2f} | Margem: ${MARGEM_INPUT:.2f}",
+        f"🎯 [MONITOR FINANCEIRO] Iniciado — TP/SL proporcionais à margem real "
+        f"(entrada padrão {_format_risk_per_trade_pct()} da banca)",
         flush=True
     )
 
@@ -998,18 +1035,22 @@ def _monitor_financial_stop_loss():
                                 if size <= 0:
                                     continue
 
-                                pnl_pct = (unrealised_pnl / MARGEM_INPUT) * 100 if MARGEM_INPUT > 0 else 0.0
+                                position_margin = _resolve_position_margin(
+                                    cliente, symbol, size, entry_price, leverage,
+                                )
+                                alvo_lucro, alvo_perda = financial_targets_from_margin(position_margin)
+                                pnl_pct = (unrealised_pnl / position_margin) * 100 if position_margin > 0 else 0.0
                                 print(
-                                    f"   📊 [MONITOR] {symbol} | Size: {size} | "
+                                    f"   📊 [MONITOR] {symbol} | Size: {size} | Margem: ${position_margin:.2f} | "
                                     f"unrealisedPnl: ${unrealised_pnl:.2f} | ROI: {pnl_pct:.1f}% | "
-                                    f"TP: +${ALVO_LUCRO:.2f} | SL: ${ALVO_PERDA:.2f}",
+                                    f"TP: +${alvo_lucro:.2f} | SL: ${alvo_perda:.2f}",
                                     flush=True
                                 )
 
                                 # ── REGRA BINÁRIA ──────────────────────────────────────
-                                if unrealised_pnl >= ALVO_LUCRO:
+                                if unrealised_pnl >= alvo_lucro:
                                     motivo_fechamento = "TAKE_PROFIT"
-                                elif unrealised_pnl <= ALVO_PERDA:
+                                elif unrealised_pnl <= alvo_perda:
                                     motivo_fechamento = "STOP_LOSS"
                                 else:
                                     # Zona neutra — não faz nada
@@ -1018,10 +1059,10 @@ def _monitor_financial_stop_loss():
 
                                 if motivo_fechamento == "TAKE_PROFIT":
                                     print(f"🏆 [TAKE PROFIT] {symbol} atingiu alvo de lucro!", flush=True)
-                                    print(f"   💰 unrealisedPnl: ${unrealised_pnl:.2f} >= Alvo: +${ALVO_LUCRO:.2f}", flush=True)
+                                    print(f"   💰 unrealisedPnl: ${unrealised_pnl:.2f} >= Alvo: +${alvo_lucro:.2f}", flush=True)
                                 else:
                                     print(f"🚨 [STOP LOSS] {symbol} atingiu limite de perda!", flush=True)
-                                    print(f"   💔 unrealisedPnl: ${unrealised_pnl:.2f} <= Limite: ${ALVO_PERDA:.2f}", flush=True)
+                                    print(f"   💔 unrealisedPnl: ${unrealised_pnl:.2f} <= Limite: ${alvo_perda:.2f}", flush=True)
 
                                 print(f"   🔒 Disparando fechamento forçado...", flush=True)
 
@@ -1569,11 +1610,22 @@ def _close_stale_open_trades(max_age_minutes=180):
         conn.commit(); conn.close()
     except Exception: pass
 
+def _client_had_last_stop_loss(client_id: int) -> bool:
+    if client_id <= 0:
+        return False
+    try:
+        last_closed = db.get_last_closed_trade(client_id)
+        last_notes = str((last_closed or {}).get('notes') or '').upper()
+        return 'STOP_LOSS' in last_notes
+    except Exception:
+        return False
+
+
 def _calculate_dynamic_order_quantity(broker, symbol, banca=None, client_context=None):
     """
-    Gestão de entrada por percentual de capital:
-    - Entrada padrão: 5%
-    - Após STOP_LOSS: 3%
+    Gestão de entrada por percentual de capital (NÃO mínimo da moeda):
+    - Entrada padrão: 5% da banca (RISK_PER_TRADE_PCT)
+    - Após STOP_LOSS: 3% da banca (ENTRY_AFTER_STOP_PCT)
     """
     try:
         leverage_value = float(ALAVANCAGEM or 1.0)
@@ -1584,49 +1636,49 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None, client_context
             saldo_atual = banca if banca and banca > 0 else 1000.0
         saldo_atual = float(saldo_atual)
 
-        # Prioriza saldo dinâmico da Bybit; banca manual é somente fallback.
         capital_ref = saldo_atual if saldo_atual > 0 else float(banca or 0.0)
         if capital_ref <= 0:
             capital_ref = float(MARGEM_INPUT or 5.0) / float(PERCENTUAL_ENTRADA_BANCA or 0.05)
 
-        margem_pct = float(PERCENTUAL_ENTRADA_BANCA)
         client_id = int((client_context or {}).get('id') or 0)
-        if client_id > 0:
-            try:
-                last_closed = db.get_last_closed_trade(client_id)
-                last_notes = str((last_closed or {}).get('notes') or '').upper()
-                if 'STOP_LOSS' in last_notes:
-                    margem_pct = float(PERCENTUAL_ENTRADA_POS_STOP)
-                    print(
-                        f"   🛡️ [CALC QTY] Último fechamento foi STOP_LOSS: entrada reduzida para {margem_pct*100:.1f}%",
-                        flush=True,
-                    )
-            except Exception:
-                pass
-
-        margem = max(0.0, capital_ref * margem_pct)
-        if margem <= 0:
-            margem = float(MARGEM_INPUT or 5.0)
+        after_stop = _client_had_last_stop_loss(client_id)
+        margem_pct = float(PERCENTUAL_ENTRADA_POS_STOP if after_stop else PERCENTUAL_ENTRADA_BANCA)
+        if after_stop:
+            print(
+                f"   🛡️ [CALC QTY] Último fechamento foi STOP_LOSS: entrada reduzida para {margem_pct*100:.1f}%",
+                flush=True,
+            )
 
         last_price = float(broker.get_last_price(symbol) or 0)
         if last_price <= 0:
             print(f"❌ [CALC QTY] Preço inválido para {symbol}", flush=True)
             return 0.0, 0.0, saldo_atual
 
-        qty = (margem * leverage_value) / last_price
+        margem, qty = _shared_calculate_position_qty(
+            capital_ref, last_price, leverage_value, after_stop=after_stop,
+        )
+        if margem <= 0:
+            margem = float(MARGEM_INPUT or 5.0)
+            qty = (margem * leverage_value) / last_price
 
         print(f"   💰 [CALC QTY] Saldo Atual (BYBIT V5): ${saldo_atual:.2f} USDT", flush=True)
         print(f"   💰 [CALC QTY] Capital de referência: ${capital_ref:.2f} USDT", flush=True)
-        print(f"   💰 [CALC QTY] Margem de entrada: ${margem:.2f} USDT ({margem_pct*100:.1f}%)", flush=True)
+        print(f"   💰 [CALC QTY] Margem de entrada: ${margem:.2f} USDT ({margem_pct*100:.1f}% da banca)", flush=True)
         print(f"   📊 [CALC QTY] Preço: ${last_price:.4f} | Alavancagem: {leverage_value}x", flush=True)
-        print(f"   🔢 [CALC QTY] Qty calculada: {qty:.6f}", flush=True)
+        print(f"   🔢 [CALC QTY] Qty calculada (5% banca, não mínimo moeda): {qty:.6f}", flush=True)
 
         try:
-            qty = float(broker.exchange.amount_to_precision(symbol, qty))
-            print(f"   ✅ [CALC QTY] Qty normalizada: {qty}", flush=True)
-        except Exception as precision_err:
-            print(f"   ⚠️ [CALC QTY] Erro na precisão, usando arredondamento simples: {precision_err}", flush=True)
-            qty = round(qty, 3)
+            qty, ok, reason = broker.validate_pct_sizing_qty(symbol, qty, strict=True)
+            if not ok:
+                print(f"   🚫 [CALC QTY] Ordem abortada: {reason}", flush=True)
+                return 0.0, 0.0, saldo_atual
+            print(f"   ✅ [CALC QTY] Qty validada: {qty}", flush=True)
+        except AttributeError:
+            try:
+                qty = float(broker.exchange.amount_to_precision(symbol, qty))
+            except Exception as precision_err:
+                print(f"   ⚠️ [CALC QTY] Erro na precisão: {precision_err}", flush=True)
+                qty = round(qty, 3)
 
         return round(margem, 2), qty, saldo_atual
     except Exception as calc_err:
@@ -1851,6 +1903,10 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                 )
 
                 if qty > 0 and _is_order_execution_enabled(None):
+                    print(
+                        f"🔮 Enviando Ordem Real: Cliente={c.get('nome')} | Margem={margem} | Par={symbol}",
+                        flush=True,
+                    )
                     # 🔧 CONFIGURAÇÃO AUTOMÁTICA DE ALAVANCAGEM (VARIÁVEL)
                     # Define alavancagem conforme ALAVANCAGEM global antes de enviar ordem
                     if broker.pybit_session:
@@ -1872,7 +1928,9 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                             # Ignora erros se moeda já estiver na alavancagem desejada
                             print(f"   ⚠️ [LEVERAGE] Erro ao configurar para {ALAVANCAGEM}x (pode já estar neste valor): {lev_err}", flush=True)
 
-                    order_result = broker.execute_market_order(symbol, side.lower(), qty, raise_on_error=True)
+                    order_result = broker.execute_market_order(
+                        symbol, side.lower(), qty, raise_on_error=True, strict_pct_sizing=True,
+                    )
                     if order_result:
                         order_id = order_result.get('id', order_result.get('orderId', 'N/A'))
                         side_label = 'COMPRAR' if side.lower() in ('buy', 'comprar') else 'VENDER'
@@ -1893,7 +1951,7 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                             margin=margem
                         )
 
-                        broker.set_tp_sl_sniper(symbol, side.lower(), entry_price, qty)
+                        broker.set_tp_sl_sniper(symbol, side.lower(), entry_price, qty, leverage=ALAVANCAGEM)
 
                         # 2. DEPURAÇÃO ATIVA + 3. HIGIENIZAÇÃO DE ENVIO
                         if client_tk and client_chat:

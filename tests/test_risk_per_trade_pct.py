@@ -20,15 +20,15 @@ if __name__ == '__main__':
             os.environ.pop('RISK_PER_TRADE_PCT', None)
             main_web = importlib.import_module('main_web')
 
-            if main_web._format_risk_per_trade_pct() != '15%':
-                print(f"❌ Percentual padrão deveria ser 15%: {main_web._format_risk_per_trade_pct()}")
+            if main_web._format_risk_per_trade_pct() != '5%':
+                print(f"❌ Percentual padrão deveria ser 5%: {main_web._format_risk_per_trade_pct()}")
                 raise SystemExit(1)
 
-            if round(main_web._calculate_order_margin(24.99), 2) != 3.75:
+            if round(main_web._calculate_order_margin(24.99), 2) != 1.25:
                 print(f"❌ Margem para saldo 24.99 inválida: {main_web._calculate_order_margin(24.99)}")
                 raise SystemExit(2)
 
-            if round(main_web._calculate_order_margin(28.02), 2) != 4.20:
+            if round(main_web._calculate_order_margin(28.02), 2) != 1.40:
                 print(f"❌ Margem para saldo 28.02 inválida: {main_web._calculate_order_margin(28.02)}")
                 raise SystemExit(3)
 
@@ -40,7 +40,7 @@ if __name__ == '__main__':
                 print(f"❌ Override por ambiente não aplicado: {main_web._calculate_order_margin(50)}")
                 raise SystemExit(4)
 
-            print('✅ RISK_PER_TRADE_PCT controla a margem por ordem com fallback de 15%')
+            print('✅ RISK_PER_TRADE_PCT controla a margem por ordem com fallback de 5%')
             raise SystemExit(0)
         finally:
             db.DB_PATH = original_db_path

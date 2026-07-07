@@ -8,8 +8,9 @@ Regras de Negócio:
   - API: pybit.unified_trading.HTTP com recv_window=10000
   - Timeframe de varredura: 30 minutos (30m) — exclusivo
   - Máximo de operações simultâneas: 1 (uma)
-  - 🆕 CÁLCULO DINÂMICO: Baseado em limites mínimos da exchange (sem percentual fixo)
-  - 🆕 COOLDOWN: 15s entre ciclos de varredura (anti-rate-limit)
+  - Entrada: 5% do saldo da banca (RISK_PER_TRADE_PCT, padrão 5%)
+  - Após STOP_LOSS: 3% do saldo (ENTRY_AFTER_STOP_PCT)
+  - COOLDOWN: 15s entre ciclos de varredura (anti-rate-limit)
   - Stop Loss: 50 % da entrada (≡ 5 % de preço com 10× alavancagem)
   - Take Profit: 100 % de lucro sobre a entrada (≡ 10 % de preço)
   - Alavancagem: 10× | Modo de Margem: Cross
@@ -30,13 +31,13 @@ from dotenv import load_dotenv
 # ─── Carrega variáveis de ambiente ────────────────────────────────────────────
 load_dotenv()
 
-DEFAULT_RISK_PER_TRADE_PCT = 15.0
+DEFAULT_RISK_PER_TRADE_PCT = 5.0
 
 
 def _load_risk_per_trade_pct() -> float:
-    """Lê o percentual de risco por ordem com fallback seguro."""
+    """Lê o percentual de risco por ordem com fallback seguro (padrão 5%)."""
     try:
-        return float(os.getenv('RISK_PER_TRADE_PCT', 15)) / 100
+        return float(os.getenv('RISK_PER_TRADE_PCT', 5)) / 100
     except (TypeError, ValueError):
         print(f"⚠️ [RISK MANAGEMENT] RISK_PER_TRADE_PCT inválido. Usando fallback de {DEFAULT_RISK_PER_TRADE_PCT:.0f}%.")
         return DEFAULT_RISK_PER_TRADE_PCT / 100
@@ -51,10 +52,10 @@ def _format_risk_per_trade_pct() -> str:
 
 
 def _log_risk_management_mode() -> None:
-    if math.isclose(RISK_PER_TRADE_PCT, 0.15, rel_tol=0, abs_tol=1e-9):
-        print("🔧 [RISK MANAGEMENT] Modo de entrada atualizado para: 15% do valor da banca real.")
+    if math.isclose(RISK_PER_TRADE_PCT, 0.05, rel_tol=0, abs_tol=1e-9):
+        print("🔧 [RISK MANAGEMENT] Modo de entrada: 5% do valor da banca real.")
     else:
-        print(f"🔧 [RISK MANAGEMENT] Modo de entrada atualizado para: {_format_risk_per_trade_pct()} do valor da banca real.")
+        print(f"🔧 [RISK MANAGEMENT] Modo de entrada: {_format_risk_per_trade_pct()} do valor da banca real.")
 
 # ─── Configurações Globais ─────────────────────────────────────────────────────
 
@@ -69,7 +70,7 @@ TIMEFRAME: str = "30m"
 
 # Parâmetros de risco
 ENTRY_PCT_DEFAULT: float = RISK_PER_TRADE_PCT
-ENTRY_PCT_AFTER_STOP: float = RISK_PER_TRADE_PCT  # Mantido para compatibilidade com o fluxo do RiskManager
+ENTRY_PCT_AFTER_STOP: float = load_entry_after_stop_pct()
 # Com 10× de alavancagem, 5 % de preço = 50 % de perda sobre margem (Stop Loss)
 # Com 10× de alavancagem, 10 % de preço = 100 % de lucro sobre margem (Take Profit)
 STOP_LOSS_PCT: float = 0.05    # 5 % de preço → 50 % da margem (entrada)
@@ -90,6 +91,7 @@ from src.engine.indicators import IndicatorEngine
 from src.ai_brain.validator import GroqValidator
 from src.ai_brain.learning import TradeLearner
 from src.ai_brain.local_ml_engine import LocalMLEngine
+from src.risk.position_sizing import calculate_position_qty, load_entry_after_stop_pct
 
 
 
@@ -99,8 +101,8 @@ class RiskManager:
     """
     Controla o percentual de entrada de forma dinâmica:
 
-      - Padrão  : 15 % do saldo (ENTRY_PCT_DEFAULT)
-      - Após SL : mantém o mesmo percentual configurado
+      - Padrão  : 5 % do saldo (ENTRY_PCT_DEFAULT)
+      - Após SL : 3 % do saldo (ENTRY_PCT_AFTER_STOP)
       - Após Gain: mantém o mesmo percentual configurado
 
     Uso:
@@ -277,54 +279,34 @@ def configure_leverage_and_margin(client: BybitClient, symbol: str) -> bool:
 
 def calculate_entry_qty(client: BybitClient, price: float, entry_pct: float) -> float:
     """
-    🆕 REFATORADO v2.0: Calcula quantidade usando limites dinâmicos da exchange.
+    Calcula quantidade com percentual da banca (padrão 5%), NÃO o mínimo da moeda.
 
-    REMOVIDO: Cálculo baseado em percentual fixo (5%, 15%, etc.) da banca.
-    IMPLEMENTADO: Cálculo baseado nos limites estritos da corretora.
-
-    Fluxo:
-      1. Consulta saldo USDT disponível
-      2. Busca dinamicamente market["limits"]["amount"]["min"] e market["limits"]["cost"]["min"]
-      3. Calcula quantidade EXATA para atingir nocional mínimo + margem de segurança
-      4. Aplica amount_to_precision do CCXT obrigatoriamente
-      5. Se saldo permitir, pode usar múltiplo do mínimo
-
-    Args:
-        client: Cliente Bybit inicializado
-        price: Preço atual do ativo (usado apenas para logging legacy)
-        entry_pct: Percentual de entrada (DEPRECADO - mantido apenas para compatibilidade)
-
-    Returns:
-        Quantidade calculada dinamicamente ou 0.0 se houver erro
+    qty = (saldo × entry_pct × alavancagem) / preço
     """
     balance = client.get_balance()
 
-    # Segurança: saldo nulo ou não positivo → aborta
     if balance is None or balance <= 0:
         print("🚫 [SEGURANÇA] Saldo USDT inválido ou zero. Operação ABORTADA.")
         return 0.0
 
-    # Usa a nova calculadora dinâmica de ordens
     try:
-        # O símbolo será obtido do contexto global SYMBOL
         symbol = SYMBOL
+        after_stop = entry_pct <= load_entry_after_stop_pct() + 1e-9 and entry_pct < RISK_PER_TRADE_PCT
 
-        print(f"💰 [RISCO DINÂMICO] Saldo={balance:.2f} USDT")
-        print(f"   🔄 Calculando quantidade baseada nos limites da corretora...")
+        print(f"💰 [RISCO] Saldo={balance:.2f} USDT | Entrada={entry_pct*100:.1f}% da banca")
+        margin, qty = calculate_position_qty(balance, price, LEVERAGE, after_stop=after_stop)
+        print(f"   💵 Margem: ${margin:.2f} | Qty bruta: {qty:.6f}")
 
-        # Calcula quantidade dinamicamente
-        qty, metadata = client.calculate_dynamic_order_qty(symbol, balance)
+        qty, ok, reason = client.validate_pct_sizing_qty(symbol, qty, strict=True)
+        if not ok:
+            print(f"🚫 [RISCO] {reason}")
+            return 0.0
 
-        print(f"   ✅ Quantidade calculada: {qty:.4f}")
-        print(f"   📊 Nocional: ${metadata['calculated_cost']:.2f} USDT")
-        print(f"   📏 Mínimo exchange: ${metadata['min_cost']:.2f} USDT")
-        print(f"   🛡️ Margem segurança: ${metadata['safety_margin']:.2f} USDT")
-
+        print(f"   ✅ Quantidade validada: {qty:.4f}")
         return qty
 
     except Exception as calc_err:
-        print(f"❌ [ERRO CÁLCULO] Falha ao calcular quantidade dinâmica: {calc_err}")
-        print(f"   Operação ABORTADA por segurança")
+        print(f"❌ [ERRO CÁLCULO] Falha ao calcular quantidade: {calc_err}")
         return 0.0
 
 
