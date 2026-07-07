@@ -764,22 +764,52 @@ class BybitClient:
         except Exception as e:
             return False, str(e).split('\n')[0][:200]
 
+    def _fetch_open_position_leverage(self, symbol, side):
+        """Lê alavancagem real da posição aberta na Bybit (evita SL/TP com leverage errado)."""
+        if not self.pybit_session:
+            return None
+        try:
+            v5_symbol = self._normalize_v5_symbol(symbol)
+            side_norm = str(side or '').strip().lower()
+            pos_idx = 1 if side_norm in ('buy', 'comprar', 'long') else 2
+            rsp = self.pybit_session.get_positions(category='linear', symbol=v5_symbol, settleCoin='USDT')
+            ok, _ = self._handle_v5_ret_code(rsp, 'get_positions')
+            if not ok:
+                return None
+            for pos in (rsp.get('result') or {}).get('list', []):
+                if float(pos.get('size') or 0) <= 0:
+                    continue
+                idx = int(pos.get('positionIdx') or 0)
+                if idx not in (0, pos_idx):
+                    continue
+                lev = float(pos.get('leverage') or 0)
+                if lev > 0:
+                    return lev
+        except Exception:
+            pass
+        return None
+
     def set_tp_sl_sniper(self, symbol, side, entry_price, position_qty, leverage=None):
         """
-        TP/SL proporcionais à margem com alavancagem:
+        TP/SL proporcionais à margem com alavancagem (Bybit V5 set_trading_stop):
         - TP: +100% da margem
         - SL: -50% da margem
         """
         try:
             if not self.authenticated:
-                print(f"❌ [TP/SL] Não autenticado. Proteção de capital ABORTADA.")
+                print("❌ [TP/SL] Não autenticado. Proteção de capital ABORTADA.")
+                return False
+            if not self.pybit_session:
+                print("❌ [TP/SL] Sessão pybit indisponível.")
                 return False
 
-            pos_idx = 1 if side.lower() == 'buy' else 2
-            lev = float(leverage or getattr(self, 'default_leverage', 20) or 20)
+            side_norm = str(side or '').strip().lower()
+            pos_idx = 1 if side_norm in ('buy', 'comprar', 'long') else 2
+            lev = self._fetch_open_position_leverage(symbol, side)
+            if not lev or lev <= 0:
+                lev = float(leverage or getattr(self, 'default_leverage', 20) or 20)
             tp_price, sl_price = calculate_tp_sl_prices(entry_price, side, lev)
 
-            # Formatação de precisão da Bybit para evitar rejeição por casas decimais
             price_to_precision = getattr(self.exchange, 'price_to_precision', None)
             if callable(price_to_precision):
                 try:
@@ -788,41 +818,41 @@ class BybitClient:
                 except Exception as precision_error:
                     print(f"⚠️ [TP/SL] Falha na formatação de casas decimais: {precision_error}")
 
-            print(f"🛡️  [PROTEÇÃO SNIPER GATILHADA] Ativo: {symbol}")
-            print(f"   📍 Entrada: ${entry_price:.4f} | Alavancagem: {lev}x | positionIdx: {pos_idx}")
-            print(f"   ✅ Target TP (+100% margem): ${tp_price:.4f}")
-            print(f"   ❌ Target SL (-50% margem): ${sl_price:.4f}")
+            v5_symbol = self._normalize_v5_symbol(symbol)
+            print(f"🛡️  [PROTEÇÃO SNIPER] {v5_symbol} | Entrada: ${entry_price:.8f} | {lev}x | idx={pos_idx}")
+            print(f"   ✅ TP (+100% margem): ${tp_price:.8f} | ❌ SL (-50% margem): ${sl_price:.8f}")
 
-            # 🔧 AJUSTE CRÍTICO HEDGE MODE: Injeta category e positionIdx nos parâmetros da ordem
-            params = {
-                'category': 'linear',
-                'positionIdx': pos_idx,  # <-- Campo essencial para sanar o erro 10001
-                'takeProfit': tp_price,
-                'stopLoss': sl_price
-            }
-
-            # Envia a ordem de amarração de alvos a mercado para a Bybit
-            self.exchange.create_order(
-                symbol=symbol,
-                type='market',
-                side=side,
-                amount=float(position_qty),
-                params=params
-            )
-
-            print(f"✅ [TP/SL APLICADO COM SUCESSO] Posição real blindada na corretora.", flush=True)
-            return True
+            for attempt in range(1, 4):
+                rsp = self.pybit_session.set_trading_stop(
+                    category='linear',
+                    symbol=v5_symbol,
+                    takeProfit=str(tp_price),
+                    stopLoss=str(sl_price),
+                    positionIdx=pos_idx,
+                    tpslMode='Full',
+                )
+                ok, err = self._handle_v5_ret_code(rsp, 'set_trading_stop')
+                if ok:
+                    print("✅ [TP/SL APLICADO] Alvos registrados na Bybit via set_trading_stop.", flush=True)
+                    return True
+                if attempt < 3 and ('position not exists' in err.lower() or '110017' in err):
+                    time.sleep(1.5)
+                    continue
+                print(f"⚠️ [TP/SL FALHOU] {err}", flush=True)
+                return False
+            return False
 
         except Exception as e:
-            print(f"⚠️  [TP/SL FALHOU] Erro na injeção de alvos Bybit: {e}", flush=True)
+            print(f"⚠️ [TP/SL FALHOU] Erro na injeção de alvos Bybit: {e}", flush=True)
             return False
 
     def close_position_with_sl(self, symbol, position_side):
-        """Encerra uma posição de derivativo em modo de urgência mapeando o positionIdx correto."""
+        """Encerra posição aberta na Bybit (pybit V5 primeiro, CCXT como fallback)."""
         try:
-            if not self.authenticated: return False
+            if not self.authenticated:
+                return False
 
-            print(f"🔒 [CLOSE POSITION] Disparando ordem de fechamento para {symbol}", flush=True)
+            print(f"🔒 [CLOSE POSITION] Disparando fechamento para {symbol}", flush=True)
 
             requested_side = str(position_side or '').strip().lower()
             if requested_side in ('buy', 'long', 'comprar'):
@@ -850,6 +880,46 @@ class BybitClient:
                 return {k for k in keys if k}
 
             requested_symbol_keys = _symbol_keys(symbol)
+            v5_symbol = self._normalize_v5_symbol(symbol)
+
+            # ── Caminho principal: pybit V5 ──────────────────────────────────
+            if self.pybit_session:
+                try:
+                    positions_response = self.pybit_session.get_positions(
+                        category='linear', symbol=v5_symbol, settleCoin='USDT',
+                    )
+                    ok, err = self._handle_v5_ret_code(positions_response, 'get_positions')
+                    if ok:
+                        for pos in (positions_response.get('result') or {}).get('list', []):
+                            size = float(pos.get('size') or 0)
+                            if size <= 0:
+                                continue
+                            pos_side = str(pos.get('side') or '').lower()
+                            pos_idx = int(pos.get('positionIdx') or (1 if pos_side == 'buy' else 2))
+                            bucket = 'long' if pos_side in ('buy', 'long') or pos_idx == 1 else 'short'
+                            if requested_bucket and bucket != requested_bucket:
+                                continue
+                            close_side = 'Sell' if bucket == 'long' else 'Buy'
+                            qty = self._normalize_order_qty(v5_symbol, size)
+                            rsp = self.pybit_session.place_order(
+                                category='linear',
+                                symbol=v5_symbol,
+                                side=close_side,
+                                orderType='Market',
+                                qty=str(qty),
+                                reduceOnly=True,
+                                positionIdx=pos_idx,
+                            )
+                            ok_order, err_order = self._handle_v5_ret_code(rsp, 'place_order')
+                            if ok_order:
+                                order_id = ((rsp.get('result') or {}).get('orderId') or 'N/A')
+                                print(f"✅ [CLOSE POSITION] Fechada via pybit. ID: {order_id}", flush=True)
+                                return True
+                            print(f"⚠️ [CLOSE POSITION] pybit place_order falhou: {err_order}", flush=True)
+                except Exception as pybit_err:
+                    print(f"⚠️ [CLOSE POSITION] pybit falhou, tentando CCXT: {pybit_err}", flush=True)
+
+            # ── Fallback: CCXT ─────────────────────────────────────────────────
             positions = self.exchange.fetch_positions(params={'category': 'linear'})
             target_position = None
             target_bucket = requested_bucket
@@ -888,7 +958,7 @@ class BybitClient:
                 break
 
             if not target_position:
-                print(f"⚠️ [CLOSE POSITION] Nenhuma posição aberta encontrada para fechar em {symbol}", flush=True)
+                print(f"⚠️ [CLOSE POSITION] Nenhuma posição aberta encontrada para {symbol}", flush=True)
                 return False
 
             close_side = 'sell' if target_bucket == 'long' else 'buy'
@@ -910,7 +980,7 @@ class BybitClient:
                 params=params
             )
 
-            print(f"✅ [CLOSE POSITION] Posição finalizada. ID: {order.get('id', 'N/A')}", flush=True)
+            print(f"✅ [CLOSE POSITION] Posição finalizada via CCXT. ID: {order.get('id', 'N/A')}", flush=True)
             return True
         except Exception as e:
             print(f"❌ [CLOSE POSITION] Erro crítico no fechamento de {symbol}: {e}", flush=True)

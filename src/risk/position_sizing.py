@@ -19,6 +19,8 @@ DEFAULT_ENTRY_PCT = 0.05   # 5% da banca
 DEFAULT_ENTRY_AFTER_STOP_PCT = 0.03  # 3% após stop loss
 DEFAULT_TP_MARGIN_RATIO = 1.0   # +100% sobre a margem
 DEFAULT_SL_MARGIN_RATIO = 0.5   # -50% sobre a margem
+DEFAULT_TP_ROI_PCT = 100.0      # +100% ROI sobre margem real da posição
+DEFAULT_SL_ROI_PCT = -50.0      # -50% ROI sobre margem real da posição
 
 
 def _env_float(name: str, default: float) -> float:
@@ -123,12 +125,76 @@ def calculate_tp_sl_prices(
     return entry * (1 - tp_move), entry * (1 + sl_move)
 
 
+def load_tp_roi_pct() -> float:
+    return _env_float('TP_ROI_PCT', DEFAULT_TP_ROI_PCT)
+
+
+def load_sl_roi_pct() -> float:
+    raw = _env_float('SL_ROI_PCT', abs(DEFAULT_SL_ROI_PCT))
+    return -abs(raw)
+
+
 def financial_targets_from_margin(margin: float) -> Tuple[float, float]:
     """Retorna (alvo_lucro_usdt, alvo_perda_usdt) para monitor financeiro."""
     margin = max(float(margin or 0), 0.0)
     if margin <= 0:
         margin = calculate_order_margin(100.0)  # fallback ~$5 em banca $100
     return margin * DEFAULT_TP_MARGIN_RATIO, -margin * DEFAULT_SL_MARGIN_RATIO
+
+
+def extract_exchange_position_margin(pos: dict) -> float:
+    """
+    Margem inicial real da posição (Bybit V5).
+    Prioriza positionIM da API — nunca subestimar com valor do banco local.
+    """
+    if not pos:
+        return 0.0
+    for key in ('positionIM', 'positionIm', 'initialMargin'):
+        val = float(pos.get(key) or 0)
+        if val > 0:
+            return round(val, 6)
+
+    pos_value = float(pos.get('positionValue') or 0)
+    leverage = max(float(pos.get('leverage') or 0), 1.0)
+    if pos_value > 0:
+        return round(pos_value / leverage, 6)
+
+    size = float(pos.get('size') or 0)
+    entry = float(pos.get('avgPrice') or pos.get('entryPrice') or 0)
+    if size > 0 and entry > 0:
+        return round((size * entry) / leverage, 6)
+    return 0.0
+
+
+def position_roi_pct(unrealised_pnl: float, margin: float) -> float:
+    """ROI % sobre a margem real (igual ao exibido na Bybit)."""
+    margin = max(float(margin or 0), 0.0)
+    if margin <= 0:
+        return 0.0
+    return (float(unrealised_pnl or 0) / margin) * 100.0
+
+
+def evaluate_position_exit(unrealised_pnl: float, margin: float) -> Tuple[str | None, float]:
+    """
+    Protocolo 100/50 sobre o valor da entrada (margem = 5% ou 3% da banca):
+      - Take Profit: lucro >= +100% da margem de entrada
+      - Stop Loss:   prejuízo <= -50% da margem de entrada
+    Retorna (motivo, roi_pct).
+    """
+    margin = max(float(margin or 0), 0.0)
+    roi = position_roi_pct(unrealised_pnl, margin)
+    if margin <= 0:
+        return None, roi
+
+    tp_usd = margin * DEFAULT_TP_MARGIN_RATIO
+    sl_usd = -margin * DEFAULT_SL_MARGIN_RATIO
+    pnl = float(unrealised_pnl or 0)
+
+    if pnl >= tp_usd:
+        return 'TAKE_PROFIT', roi
+    if pnl <= sl_usd:
+        return 'STOP_LOSS', roi
+    return None, roi
 
 
 def calcular_tamanho_posicao(

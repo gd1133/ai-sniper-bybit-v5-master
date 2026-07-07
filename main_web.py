@@ -131,10 +131,14 @@ from src.risk.position_sizing import (
     calculate_position_qty as _shared_calculate_position_qty,
     calcular_tamanho_posicao,
     calculate_tp_sl_prices,
+    evaluate_position_exit,
+    extract_exchange_position_margin,
     financial_targets_from_margin,
     format_entry_pct,
     load_entry_after_stop_pct,
     load_entry_pct,
+    load_sl_roi_pct,
+    load_tp_roi_pct,
 )
 
 ALAVANCAGEM = 20  # Alavancagem fixa (pode ser alterado para 30 ou 50 no futuro)
@@ -540,7 +544,6 @@ def start_runtime_services():
     with RUNTIME_START_LOCK:
         if RUNTIME_STARTED: return False
         threading.Thread(target=sniper_worker_loop, daemon=True).start()
-        threading.Thread(target=_monitor_sl_tp_automatico, daemon=True).start()
         threading.Thread(target=_monitor_financial_stop_loss, daemon=True).start()
         threading.Thread(target=_fetch_active_client_balances, kwargs={'force': True}, daemon=True).start()
         threading.Thread(target=_monitor_dashboard_positions, daemon=True).start()
@@ -552,6 +555,56 @@ def _limpar_simbolo(sym):
     return sym.split(':')[0] if ':' in sym else sym
 
 def _normalize_symbol_key(sym): return re.sub(r'[^A-Z0-9]', '', str(sym or '').upper())
+
+def _symbols_match(a, b):
+    return _normalize_symbol_key(_canonicalize_symbol(a) or a) == _normalize_symbol_key(_canonicalize_symbol(b) or b)
+
+def _close_open_trades_in_db(client_id, symbol, *, pnl_pct=0.0, profit=0.0, note_tag=''):
+    """Fecha trades abertos no banco usando chave de símbolo normalizada."""
+    try:
+        conn = db._connect()
+        cur = conn.cursor()
+        updated = 0
+        for trade in db.get_open_trades(200):
+            if int(trade.get('client_id') or 0) != int(client_id or 0):
+                continue
+            if not _symbols_match(trade.get('pair'), symbol):
+                continue
+            cur.execute(
+                "UPDATE trades SET status='closed', pnl_pct=?, profit=?, notes=COALESCE(notes,'') || ? WHERE id=?",
+                (round(float(pnl_pct), 2), round(float(profit), 2), note_tag, trade.get('id')),
+            )
+            updated += 1
+        conn.commit()
+        conn.close()
+        return updated
+    except Exception as err:
+        print(f"   ⚠️ [BANCO] Erro ao fechar trade {symbol}: {err}", flush=True)
+        return 0
+
+def _count_live_open_positions():
+    """Conta posições abertas na Bybit (fonte de verdade) para limitar novas entradas."""
+    count = 0
+    try:
+        for cliente in _get_registered_clients(active_only=True):
+            client_id = int(cliente.get('id') or 0)
+            if _is_training_fake_balance_client(cliente) or _is_client_temporarily_disabled(client_id):
+                continue
+            broker = _make_broker(cliente)
+            if not broker.pybit_session or not broker.authenticated:
+                continue
+            rsp = broker.pybit_session.get_positions(category='linear', settleCoin='USDT')
+            ok, _ = broker._handle_v5_ret_code(rsp, 'get_positions')
+            if not ok:
+                continue
+            for pos in (rsp.get('result') or {}).get('list', []):
+                if float(pos.get('size') or 0) > 0:
+                    count += 1
+        if count > 0:
+            return count
+    except Exception:
+        pass
+    return len(central_state.get('active_trades') or [])
 
 def _canonicalize_symbol(sym):
     raw = str(sym or '').strip().upper()
@@ -599,7 +652,7 @@ def _calculate_live_trade_metrics(entry_price, current_price, side):
     price_pct = -market_move if str(side).upper() in ('VENDER', 'SELL', 'SHORT') else market_move
 
     # Aplica alavancagem para obter PnL % sobre a margem (igual ao exibido na Bybit)
-    pnl_pct = price_pct * LEVERAGE
+    pnl_pct = price_pct * ALAVANCAGEM
 
     return {
         "current_price": round(current, 8),
@@ -939,59 +992,66 @@ def _calcular_pnl_trades():
     except Exception: pass
 
 def _monitor_sl_tp_automatico():
-    time.sleep(1)
-    while True:
-        try:
-            for t in db.get_open_trades(100):
-                live = _get_live_price_snapshot(t.get('pair'), _extract_entry_price(t), t.get('side'))
-                pnl_pct = live.get('pnl_pct', 0.0)
-                motivo = "SL_AUTO -50%" if pnl_pct <= -50.0 else "TP_AUTO +100%" if pnl_pct >= 100.0 else None
-                if motivo:
-                    conn = db._connect(); cur = conn.cursor()
-                    cur.execute("UPDATE trades SET status='closed', pnl_pct=?, notes=COALESCE(notes,'') || ? WHERE id=?", (round(pnl_pct, 4), f" | {motivo}", t.get('id')))
-                    conn.commit(); conn.close()
-                    _sync_active_trades_from_db()
-        except Exception: pass
-        time.sleep(10)
+    """
+    Desativado — o fechamento real é feito apenas por _monitor_financial_stop_loss,
+    que usa margem real (positionIM) da Bybit e ROI % para evitar saída antecipada.
+    """
+    return
 
-def _resolve_position_margin(cliente, symbol, size, entry_price, leverage):
-    """Margem real da posição: banco → cálculo nocional/alavancagem → fallback 5% banca."""
+def _resolve_entry_margin_for_exit(cliente, symbol, pos=None):
+    """
+    Margem de referência para TP/SL = valor da entrada (5% ou 3% da banca na hora da ordem).
+
+    Prioridade:
+      1. Soma das margens dos trades abertos no banco (protocolo 100/50 por entrada)
+      2. positionIM da Bybit (posição órfã / sem registro local)
+      3. 5% ou 3% do saldo atual (fallback)
+    """
     client_id = int(cliente.get('id') or 0)
+    total_margin = 0.0
     try:
         for trade in db.get_open_trades(200):
             if int(trade.get('client_id') or 0) != client_id:
                 continue
-            trade_pair = str(trade.get('pair') or '').upper().replace('/', '').replace(':USDT', '')
-            pos_symbol = str(symbol or '').upper().replace('/', '').replace(':USDT', '')
-            if trade_pair == pos_symbol:
-                stored = float(trade.get('margin') or 0)
-                if stored > 0:
-                    return stored
+            if not _symbols_match(trade.get('pair'), symbol):
+                continue
+            stored = float(trade.get('margin') or 0)
+            if stored > 0:
+                total_margin += stored
     except Exception:
         pass
 
-    entry_price = float(entry_price or 0)
-    size = float(size or 0)
-    leverage = max(float(leverage or ALAVANCAGEM or 1), 1.0)
-    if entry_price > 0 and size > 0:
-        return round((size * entry_price) / leverage, 2)
+    if total_margin > 0:
+        return round(total_margin, 6)
 
+    if pos:
+        exchange_margin = extract_exchange_position_margin(pos)
+        if exchange_margin > 0:
+            return exchange_margin
+
+    after_stop = _client_had_last_stop_loss(client_id)
     saldo = float(cliente.get('saldo_base') or 0)
-    return _calculate_order_margin(saldo) or float(MARGEM_INPUT or 5.0)
+    return _calculate_order_margin(saldo, after_stop=after_stop) or float(MARGEM_INPUT or 5.0)
+
+
+def _resolve_position_margin(cliente, symbol, size, entry_price, leverage, pos=None):
+    """Alias — usa margem de entrada (5%/3%) para o protocolo 100/50."""
+    return _resolve_entry_margin_for_exit(cliente, symbol, pos=pos)
 
 
 def _monitor_financial_stop_loss():
     """
-    🎯 MONITOR FINANCEIRO — REGRA BINÁRIA PROPORCIONAL À MARGEM REAL
+    🎯 MONITOR FINANCEIRO — Protocolo 100/50 sobre o valor da entrada.
 
-    Alvos por posição (baseados na margem de entrada, não valor fixo $5):
-    - Take Profit (+100% da margem): fecha quando unrealisedPnl >= margem
-    - Stop Loss (-50% da margem): fecha quando unrealisedPnl <= -50% × margem
+    Entrada: 5% da banca (3% se o último fechamento foi STOP_LOSS).
+    Saída por operação:
+      - Take Profit: +100% da margem de entrada
+      - Stop Loss:   -50% da margem de entrada
     """
     time.sleep(5)
     print(
-        f"🎯 [MONITOR FINANCEIRO] Iniciado — TP/SL proporcionais à margem real "
-        f"(entrada padrão {_format_risk_per_trade_pct()} da banca)",
+        f"🎯 [MONITOR FINANCEIRO] Protocolo 100/50 — entrada {format_entry_pct()} "
+        f"(após SL: {format_entry_pct(PERCENTUAL_ENTRADA_POS_STOP)})",
         flush=True
     )
 
@@ -1036,27 +1096,20 @@ def _monitor_financial_stop_loss():
                                 if size <= 0:
                                     continue
 
-                                position_margin = _resolve_position_margin(
-                                    cliente, symbol, size, entry_price, leverage,
+                                entry_margin = _resolve_entry_margin_for_exit(cliente, symbol, pos=pos)
+                                motivo_fechamento, roi_pct = evaluate_position_exit(
+                                    unrealised_pnl, entry_margin,
                                 )
-                                alvo_lucro, alvo_perda = financial_targets_from_margin(position_margin)
-                                pnl_pct = (unrealised_pnl / position_margin) * 100 if position_margin > 0 else 0.0
+                                alvo_lucro, alvo_perda = financial_targets_from_margin(entry_margin)
                                 print(
-                                    f"   📊 [MONITOR] {symbol} | Size: {size} | Margem: ${position_margin:.2f} | "
-                                    f"unrealisedPnl: ${unrealised_pnl:.2f} | ROI: {pnl_pct:.1f}% | "
-                                    f"TP: +${alvo_lucro:.2f} | SL: ${alvo_perda:.2f}",
+                                    f"   📊 [MONITOR] {symbol} | Margem entrada: ${entry_margin:.4f} | "
+                                    f"PnL: ${unrealised_pnl:.4f} | ROI: {roi_pct:.2f}% | "
+                                    f"TP +100%: +${alvo_lucro:.2f} | SL -50%: ${alvo_perda:.2f}",
                                     flush=True
                                 )
 
-                                # ── REGRA BINÁRIA ──────────────────────────────────────
-                                if unrealised_pnl >= alvo_lucro:
-                                    motivo_fechamento = "TAKE_PROFIT"
-                                elif unrealised_pnl <= alvo_perda:
-                                    motivo_fechamento = "STOP_LOSS"
-                                else:
-                                    # Zona neutra — não faz nada
+                                if not motivo_fechamento:
                                     continue
-                                # ───────────────────────────────────────────────────────
 
                                 if motivo_fechamento == "TAKE_PROFIT":
                                     print(f"🏆 [TAKE PROFIT] {symbol} atingiu alvo de lucro!", flush=True)
@@ -1074,27 +1127,23 @@ def _monitor_financial_stop_loss():
                                         print(f"   ✅ [{motivo_fechamento}] Posição {symbol} fechada com sucesso!", flush=True)
 
                                         try:
-                                            conn = db._connect()
-                                            cur = conn.cursor()
                                             profit = unrealised_pnl
                                             note_tag = (
                                                 f" | TAKE_PROFIT_AUTO unrealisedPnl=${unrealised_pnl:.2f}"
                                                 if motivo_fechamento == "TAKE_PROFIT"
                                                 else f" | STOP_LOSS_AUTO unrealisedPnl=${unrealised_pnl:.2f}"
                                             )
-                                            cur.execute(
-                                                "UPDATE trades SET status='closed', pnl_pct=?, profit=?, notes=COALESCE(notes,'') || ? WHERE pair=? AND client_id=? AND status='open'",
-                                                (
-                                                    round(pnl_pct, 2),
-                                                    round(profit, 2),
-                                                    note_tag,
-                                                    symbol,
-                                                    cliente.get('id')
-                                                )
+                                            updated = _close_open_trades_in_db(
+                                                cliente.get('id'),
+                                                symbol,
+                                                pnl_pct=roi_pct,
+                                                profit=profit,
+                                                note_tag=note_tag,
                                             )
-                                            conn.commit()
-                                            conn.close()
-                                            print(f"   💾 [BANCO] Trade atualizado — P&L: ${profit:.2f}", flush=True)
+                                            if updated:
+                                                print(f"   💾 [BANCO] {updated} trade(s) atualizado(s) — P&L: ${profit:.2f}", flush=True)
+                                            else:
+                                                print(f"   ⚠️ [BANCO] Nenhum trade aberto encontrado para {symbol}", flush=True)
                                         except Exception as db_err:
                                             print(f"   ⚠️ [BANCO] Erro ao atualizar trade: {db_err}", flush=True)
 
@@ -1113,7 +1162,7 @@ def _monitor_financial_stop_loss():
                                                 gross_pnl=round(unrealised_pnl, 4),
                                                 market_context={
                                                     'unrealised_pnl': unrealised_pnl,
-                                                    'roi_pct': round(pnl_pct, 2),
+                                                    'roi_pct': round(roi_pct, 2),
                                                     'leverage': leverage,
                                                     'mark_price': mark_price,
                                                     'close_reason': motivo_fechamento,
@@ -1164,7 +1213,9 @@ def _sync_active_trades_from_db():
             if not raw_symbol: continue
 
             key = _normalize_symbol_key(raw_symbol)
-            margin = float(t.get('profit', 0) or 0)
+            margin = float(t.get('margin') or 0)
+            if margin <= 0:
+                margin = float(t.get('profit') or 0)
             entry_price = _extract_entry_price(t)
             if entry_price <= 0: continue
 
@@ -1192,6 +1243,12 @@ def _sync_active_trades_from_db():
             trade_group['client_count'] += 1
             trade_group['trade_count'] += 1
 
+        if not grouped:
+            if central_state.get('active_trades'):
+                return
+            central_state['active_trades'] = []
+            return
+
         central_state['active_trades'] = sorted(grouped.values(), key=lambda x: x.get('latest_trade_id', 0), reverse=True)
 
         for trade in central_state['active_trades']:
@@ -1201,7 +1258,57 @@ def _sync_active_trades_from_db():
             pnl_pct = float(trade.get('pnl_pct', 0) or 0)
             trade['open_pnl_value'] = round((entry_margin * pnl_pct) / 100, 2) if entry_margin else 0.0
     except Exception:
-        central_state['active_trades'] = []
+        if not central_state.get('active_trades'):
+            central_state['active_trades'] = []
+
+def _ensure_exchange_position_in_db(cliente, pos, broker, raw_pos=None):
+    """Cria registro no banco para posição aberta na Bybit sem trade correspondente."""
+    try:
+        client_id = int(cliente.get('id') or 0)
+        raw_symbol = pos.get('symbol', '')
+        symbol = _canonicalize_symbol(raw_symbol)
+        if not symbol or client_id <= 0:
+            return
+
+        for trade in db.get_open_trades(200):
+            if int(trade.get('client_id') or 0) != client_id:
+                continue
+            if _symbols_match(trade.get('pair'), symbol):
+                return
+
+        entry_price = float(pos.get('entry_price') or 0)
+        size = float(pos.get('size') or 0)
+        leverage = float(pos.get('leverage') or ALAVANCAGEM or 1)
+        margin_source = raw_pos or pos
+        margin = extract_exchange_position_margin(margin_source)
+        if margin <= 0 and entry_price > 0 and size > 0:
+            margin = round((size * entry_price) / max(leverage, 1), 6)
+        if margin <= 0:
+            after_stop = _client_had_last_stop_loss(client_id)
+            margin = _calculate_order_margin(float(cliente.get('saldo_base') or 0), after_stop=after_stop)
+        side_label = pos.get('side') or 'VENDER'
+
+        db.record_trade(
+            client_id=client_id,
+            pair=symbol,
+            side=side_label,
+            pnl_pct=0,
+            profit=0.0,
+            closed_at=time.strftime("%d/%m %H:%M"),
+            notes='ORPHAN_SYNC Bybit',
+            status='open',
+            entry_price=entry_price,
+            exit_price=0.0,
+            quantity=size,
+            margin=margin,
+        )
+        print(f"   📥 [SYNC] Posição órfã registrada no banco: {symbol} ({side_label})", flush=True)
+
+        api_side = 'buy' if str(side_label).upper() in ('COMPRAR', 'BUY', 'LONG') else 'sell'
+        if entry_price > 0:
+            broker.set_tp_sl_sniper(symbol, api_side, entry_price, size, leverage=leverage)
+    except Exception as sync_err:
+        print(f"   ⚠️ [SYNC] Erro ao registrar posição órfã: {sync_err}", flush=True)
 
 def _monitor_dashboard_positions():
     """
@@ -1388,8 +1495,12 @@ def _monitor_dashboard_positions():
                                     'size': size,
                                     'entry_price': entry_price,
                                     'unrealised_pnl': unrealised_pnl,
-                                    'leverage': leverage
+                                    'leverage': leverage,
+                                    'positionIM': pos.get('positionIM'),
+                                    'positionValue': pos.get('positionValue'),
                                 })
+
+                                _ensure_exchange_position_in_db(cliente, all_positions[-1], broker, raw_pos=pos)
 
                                 print(f"   📊 [DASHBOARD] {symbol}: {side_normalized} | Size: {size} | Entry: ${entry_price:.4f} | PnL: ${unrealised_pnl:.2f}", flush=True)
 
@@ -1539,12 +1650,16 @@ def _monitor_dashboard_positions():
                             'unrealised_pnl': 0.0,
                             'size': 0.0,
                             'leverage': pos['leverage'],
+                            'positionIM': 0.0,
+                            'positionValue': 0.0,
                             'client_count': 0
                         }
 
                     grouped_positions[key]['unrealised_pnl'] += pos['unrealised_pnl']
                     grouped_positions[key]['size'] += pos['size']
                     grouped_positions[key]['client_count'] += 1
+                    grouped_positions[key]['positionIM'] += float(pos.get('positionIM') or 0)
+                    grouped_positions[key]['positionValue'] += float(pos.get('positionValue') or 0)
 
                 # Atualiza os trades ativos com preços em tempo real
                 active_trades_list = []
@@ -1561,10 +1676,12 @@ def _monitor_dashboard_positions():
                             pos_data['side']
                         )
 
-                        # Calcula margem total usada (notional value / leverage)
+                        # Calcula margem real (positionIM da Bybit quando disponível)
                         leverage = grouped_positions[key].get('leverage', ALAVANCAGEM)
-                        notional_value = pos_data['size'] * pos_data['entry_price']
-                        margin_used = notional_value / leverage if leverage > 0 else notional_value
+                        margin_used = extract_exchange_position_margin(pos_data)
+                        if margin_used <= 0:
+                            notional_value = pos_data['size'] * pos_data['entry_price']
+                            margin_used = notional_value / leverage if leverage > 0 else notional_value
 
                         active_trades_list.append({
                             'symbol': pos_data['symbol'],
@@ -1612,12 +1729,18 @@ def _close_stale_open_trades(max_age_minutes=180):
     except Exception: pass
 
 def _client_had_last_stop_loss(client_id: int) -> bool:
+    """Próxima entrada usa 3% se o último fechamento deste cliente foi stop loss."""
     if client_id <= 0:
         return False
     try:
         last_closed = db.get_last_closed_trade(client_id)
+        if not last_closed:
+            return False
         last_notes = str((last_closed or {}).get('notes') or '').upper()
-        return 'STOP_LOSS' in last_notes
+        if 'STOP_LOSS' in last_notes:
+            return True
+        pnl_pct = float((last_closed or {}).get('pnl_pct') or 0)
+        return pnl_pct <= load_sl_roi_pct()
     except Exception:
         return False
 
@@ -1723,9 +1846,8 @@ def sniper_worker_loop():
             _repair_open_trades()
             _calcular_pnl_trades()
             _refresh_real_balance_state()
-            _sync_active_trades_from_db()
 
-            if len(central_state['active_trades']) >= MAX_MOEDAS_ATIVAS:
+            if _count_live_open_positions() >= MAX_MOEDAS_ATIVAS:
                 time.sleep(15)
                 continue
 
@@ -2031,14 +2153,19 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                         side_label = 'COMPRAR' if side.lower() in ('buy', 'comprar') else 'VENDER'
 
                         # 🔥 CORREÇÃO 2: Armazena margem, quantidade e saldo para cálculo posterior de P&L
+                        entry_pct_label = (
+                            f"{(margem / saldo_atualizado * 100):.1f}%"
+                            if saldo_atualizado and saldo_atualizado > 0
+                            else format_entry_pct()
+                        )
                         db.record_trade(
                             client_id=c.get('id', 1), 
                             pair=symbol, 
                             side=side_label, 
                             pnl_pct=0,
-                            profit=0.0,  # Será calculado ao fechar
+                            profit=0.0,
                             closed_at=time.strftime("%d/%m %H:%M"),
-                            notes=f"AUTO SNIPER | ID: {order_id}", 
+                            notes=f"AUTO SNIPER | MI={entry_pct_label} | ID: {order_id}", 
                             status="open", 
                             entry_price=entry_price,
                             exit_price=0.0,
