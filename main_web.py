@@ -583,8 +583,8 @@ def _close_open_trades_in_db(client_id, symbol, *, pnl_pct=0.0, profit=0.0, note
         return 0
 
 def _count_live_open_positions():
-    """Conta posições abertas na Bybit (fonte de verdade) para limitar novas entradas."""
-    count = 0
+    """Conta símbolos únicos com posição aberta na Bybit (fonte de verdade)."""
+    symbols = set()
     try:
         for cliente in _get_registered_clients(active_only=True):
             client_id = int(cliente.get('id') or 0)
@@ -599,12 +599,83 @@ def _count_live_open_positions():
                 continue
             for pos in (rsp.get('result') or {}).get('list', []):
                 if float(pos.get('size') or 0) > 0:
-                    count += 1
-        if count > 0:
-            return count
+                    symbols.add(_normalize_symbol_key(pos.get('symbol')))
+        if symbols:
+            return len(symbols)
     except Exception:
         pass
     return len(central_state.get('active_trades') or [])
+
+def _build_exchange_trade_card(pos_data, key=None):
+    """Monta card de posição para o dashboard (com fallback se preço live falhar)."""
+    leverage = float(pos_data.get('leverage') or ALAVANCAGEM or 1)
+    margin_used = extract_exchange_position_margin(pos_data)
+    if margin_used <= 0:
+        notional_value = float(pos_data.get('size') or 0) * float(pos_data.get('entry_price') or 0)
+        margin_used = notional_value / leverage if leverage > 0 else notional_value
+
+    unrealised = float(pos_data.get('unrealised_pnl') or 0)
+    roi_pct = (unrealised / margin_used * 100) if margin_used > 0 else 0.0
+
+    try:
+        pub_broker = _get_public_price_broker()
+        current_price = pub_broker.get_last_price(pos_data['raw_symbol'])
+        live_metrics = _calculate_live_trade_metrics(
+            pos_data['entry_price'], current_price, pos_data['side'],
+        )
+        pnl_pct = live_metrics['pnl_pct']
+        open_pnl_value = round(unrealised, 2)
+    except Exception:
+        live_metrics = _calculate_live_trade_metrics(
+            pos_data['entry_price'], float(pos_data.get('entry_price') or 0), pos_data['side'],
+        )
+        pnl_pct = roi_pct
+        open_pnl_value = round(unrealised, 2)
+
+    return {
+        'id': key or _normalize_symbol_key(pos_data.get('raw_symbol') or pos_data.get('symbol')),
+        'symbol': pos_data['symbol'],
+        'raw_symbol': pos_data['raw_symbol'],
+        'side': pos_data['side'],
+        'entry_price': pos_data['entry_price'],
+        'current_price': live_metrics['current_price'],
+        'price_change_pct': live_metrics['price_change_pct'],
+        'pnl_pct': pnl_pct,
+        'trend': live_metrics['trend'],
+        'is_favorable': live_metrics['is_favorable'],
+        'open_pnl_value': open_pnl_value,
+        'entry': round(margin_used, 2),
+        'size': pos_data.get('size'),
+        'client_count': pos_data.get('client_count', 1),
+    }
+
+def _refresh_active_trades_for_status():
+    """
+    Atualiza cards para /api/status sem apagar posições já sincronizadas da Bybit.
+    """
+    existing = list(central_state.get('active_trades') or [])
+    if existing:
+        refreshed = []
+        for trade in existing:
+            try:
+                live = _get_live_price_snapshot(
+                    trade.get('raw_symbol') or trade.get('symbol'),
+                    trade.get('entry_price'),
+                    trade.get('side'),
+                )
+                updated = dict(trade)
+                updated.update(live)
+                entry_margin = float(updated.get('entry') or 0)
+                pnl_pct = float(updated.get('pnl_pct') or 0)
+                if entry_margin and 'open_pnl_value' not in updated:
+                    updated['open_pnl_value'] = round((entry_margin * pnl_pct) / 100, 2)
+                refreshed.append(updated)
+            except Exception:
+                refreshed.append(trade)
+        central_state['active_trades'] = refreshed
+        return
+
+    _sync_active_trades_from_db()
 
 def _canonicalize_symbol(sym):
     raw = str(sym or '').strip().upper()
@@ -989,7 +1060,8 @@ def _calcular_pnl_trades():
         central_state['winning_trades'] = w
         central_state['losing_trades'] = l
         central_state['win_rate'] = round((w / total) * 100, 2)
-    except Exception: pass
+    except Exception as err:
+        print(f"⚠️ Erro ao calcular mapa de histórico de P&L: {err}", flush=True)
 
 def _monitor_sl_tp_automatico():
     """
@@ -1247,6 +1319,9 @@ def _sync_active_trades_from_db():
             if central_state.get('active_trades'):
                 return
             central_state['active_trades'] = []
+            return
+
+        if central_state.get('active_trades') and len(central_state['active_trades']) > len(grouped):
             return
 
         central_state['active_trades'] = sorted(grouped.values(), key=lambda x: x.get('latest_trade_id', 0), reverse=True)
@@ -1665,48 +1740,33 @@ def _monitor_dashboard_positions():
                 active_trades_list = []
                 for key, pos_data in grouped_positions.items():
                     try:
-                        # Busca preço atual para calcular PnL%
-                        pub_broker = _get_public_price_broker()
-                        current_price = pub_broker.get_last_price(pos_data['raw_symbol'])
-
-                        # Calcula métricas em tempo real
-                        live_metrics = _calculate_live_trade_metrics(
-                            pos_data['entry_price'],
-                            current_price,
-                            pos_data['side']
-                        )
-
-                        # Calcula margem real (positionIM da Bybit quando disponível)
-                        leverage = grouped_positions[key].get('leverage', ALAVANCAGEM)
-                        margin_used = extract_exchange_position_margin(pos_data)
-                        if margin_used <= 0:
-                            notional_value = pos_data['size'] * pos_data['entry_price']
-                            margin_used = notional_value / leverage if leverage > 0 else notional_value
-
-                        active_trades_list.append({
-                            'symbol': pos_data['symbol'],
-                            'raw_symbol': pos_data['raw_symbol'],
-                            'side': pos_data['side'],
-                            'entry_price': pos_data['entry_price'],
-                            'current_price': live_metrics['current_price'],
-                            'price_change_pct': live_metrics['price_change_pct'],
-                            'pnl_pct': live_metrics['pnl_pct'],
-                            'trend': live_metrics['trend'],
-                            'is_favorable': live_metrics['is_favorable'],
-                            'open_pnl_value': round(pos_data['unrealised_pnl'], 2),
-                            'entry': round(margin_used, 2),
-                            'size': pos_data['size'],
-                            'client_count': pos_data['client_count']
-                        })
+                        active_trades_list.append(_build_exchange_trade_card(pos_data, key=key))
                     except Exception as calc_err:
-                        print(f"   ⚠️ [DASHBOARD] Erro ao calcular métricas para {pos_data['symbol']}: {calc_err}", flush=True)
-                        continue
+                        print(f"   ⚠️ [DASHBOARD] Erro ao calcular métricas para {pos_data.get('symbol')}: {calc_err}", flush=True)
+                        try:
+                            active_trades_list.append(_build_exchange_trade_card(pos_data, key=key))
+                        except Exception:
+                            active_trades_list.append({
+                                'id': key,
+                                'symbol': pos_data.get('symbol'),
+                                'raw_symbol': pos_data.get('raw_symbol'),
+                                'side': pos_data.get('side'),
+                                'entry_price': pos_data.get('entry_price'),
+                                'current_price': pos_data.get('entry_price'),
+                                'pnl_pct': 0.0,
+                                'open_pnl_value': round(float(pos_data.get('unrealised_pnl') or 0), 2),
+                                'entry': round(float(pos_data.get('positionIM') or 0), 2),
+                                'client_count': pos_data.get('client_count', 1),
+                            })
 
                 central_state['active_trades'] = active_trades_list
+                central_state['exchange_positions_count'] = len(all_positions)
+                _status_cache.clear()
 
             else:
-                central_state['status'] = f"✅ ONLINE | Saldo: ${total_wallet_balance:.2f} USDT | Sem posições abertas"
-                central_state['active_trades'] = []
+                if not central_state.get('active_trades'):
+                    central_state['status'] = f"✅ ONLINE | Saldo: ${total_wallet_balance:.2f} USDT | Sem posições abertas"
+                    central_state['active_trades'] = []
 
             print(f"🔄 [DASHBOARD] Estado atualizado: Saldo=${total_wallet_balance:.2f} | Posições={len(all_positions)}", flush=True)
 
@@ -1848,6 +1908,10 @@ def sniper_worker_loop():
             _refresh_real_balance_state()
 
             if _count_live_open_positions() >= MAX_MOEDAS_ATIVAS:
+                central_state['status'] = (
+                    f"📊 Monitorando {len(central_state.get('active_trades') or []) or _count_live_open_positions()} "
+                    f"posição(ões) — limite {MAX_MOEDAS_ATIVAS}"
+                )
                 time.sleep(15)
                 continue
 
@@ -2266,13 +2330,34 @@ def add_cliente():
 @app.route('/api/status', methods=['GET'])
 def get_status():
     try:
-        _repair_open_trades()
-        _refresh_real_balance_state()
-        _sync_active_trades_from_db()
+        cached = _status_cache.get()
+        if cached:
+            return jsonify(cached), 200
+
+        try:
+            _repair_open_trades()
+        except Exception as repair_err:
+            print(f"⚠️ [STATUS] Erro ao reparar trades abertos: {repair_err}", flush=True)
+
+        _calcular_pnl_trades()
+
+        if client_balance_cache.is_expired():
+            _refresh_real_balance_state()
+
+        _refresh_active_trades_for_status()
         _refresh_last_sniper_signal()
-        central_state['trades'] = db.get_recent_trades(20)
-        return jsonify(_build_api_status_payload()), 200
-    except Exception:
+
+        try:
+            central_state['trades'] = db.get_recent_trades(20)
+        except Exception as trades_err:
+            print(f"⚠️ [STATUS] Erro ao ler trades recentes: {trades_err}", flush=True)
+            central_state['trades'] = central_state.get('trades') or []
+
+        payload = _build_api_status_payload()
+        _status_cache.set(payload)
+        return jsonify(payload), 200
+    except Exception as status_err:
+        print(f"⚠️ [STATUS] Erro geral: {status_err}", flush=True)
         return jsonify(_build_api_status_payload()), 200
 
 @app.route('/api/dashboard/balance', methods=['GET'])

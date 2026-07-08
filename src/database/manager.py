@@ -8,26 +8,31 @@ def _get_db_path():
     """
     Determine writable database path with fallbacks (always returns ABSOLUTE path):
     1. SQLITE_DB_PATH environment variable (converted to absolute)
-    2. ./database.db (repository root, converted to absolute)
-    3. /tmp/ai-sniper/database.db (absolute path as fallback)
+    2. Render/Linux: /tmp/ai-sniper/database.db (evita disk I/O em FS efêmero)
+    3. ./database.db (repository root, converted to absolute)
+    4. /tmp/ai-sniper/database.db (absolute path as fallback)
     """
     env_path = os.getenv('SQLITE_DB_PATH')
     if env_path:
-        # Corrige caminhos do Docker/Railway se estiver rodando localmente (Windows)
         if "/app/data/" in env_path and os.name == 'nt':
             repo_path = os.path.abspath(os.path.join(os.getcwd(), 'database.db'))
             print(f"📂 [DATABASE] Detectado caminho Docker em Windows. Usando local: {repo_path}")
             return repo_path
-            
-        # Convert to absolute path if relative
         abs_env_path = os.path.abspath(env_path)
         print(f"📂 [DATABASE] Usando SQLITE_DB_PATH: {abs_env_path}")
         return abs_env_path
 
-    # Try repository root (convert to absolute)
+    if os.getenv('RENDER') or (os.name != 'nt' and not os.access(os.getcwd(), os.W_OK)):
+        render_tmp = '/tmp/ai-sniper/database.db'
+        try:
+            os.makedirs(os.path.dirname(render_tmp), exist_ok=True)
+            print(f"📂 [DATABASE] Usando caminho Render/tmp: {render_tmp}")
+            return render_tmp
+        except (OSError, IOError):
+            pass
+
     repo_path = os.path.abspath(os.path.join(os.getcwd(), 'database.db'))
     try:
-        # Test if we can write to this location
         test_dir = os.path.dirname(repo_path)
         if os.access(test_dir, os.W_OK):
             print(f"📂 [DATABASE] Usando caminho do repositório: {repo_path}")
@@ -35,8 +40,11 @@ def _get_db_path():
     except (OSError, IOError):
         pass
 
-    # Fallback to /tmp (absolute path)
     fallback_path = '/tmp/ai-sniper/database.db'
+    try:
+        os.makedirs(os.path.dirname(fallback_path), exist_ok=True)
+    except (OSError, IOError):
+        pass
     print(f"📂 [DATABASE] Usando caminho de fallback: {fallback_path}")
     return fallback_path
 
@@ -81,13 +89,25 @@ def normalize_balance_source(value: Any) -> str:
 
 
 def _connect():
-    """Conecta ao banco com timeout de 5s para evitar travamentos"""
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=5.0)
-    conn.row_factory = sqlite3.Row
-    # Habilita WAL mode para evitar travamentos
-    conn.execute('PRAGMA journal_mode=WAL')
-    conn.execute('PRAGMA synchronous=NORMAL')
-    return conn
+    """Conecta ao banco com timeout e retry (evita travamento disk I/O no Render)."""
+    import time as _time
+    last_err = None
+    for attempt in range(4):
+        try:
+            conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=15.0)
+            conn.row_factory = sqlite3.Row
+            conn.execute('PRAGMA journal_mode=WAL')
+            conn.execute('PRAGMA synchronous=NORMAL')
+            conn.execute('PRAGMA busy_timeout=10000')
+            return conn
+        except sqlite3.OperationalError as err:
+            last_err = err
+            msg = str(err).lower()
+            if 'disk i/o' in msg or 'locked' in msg or 'unable to open' in msg:
+                _time.sleep(0.35 * (attempt + 1))
+                continue
+            raise
+    raise last_err
 
 
 def _ensure_column(cur, table: str, column: str, definition: str):
