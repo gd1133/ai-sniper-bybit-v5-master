@@ -2047,6 +2047,21 @@ def sniper_worker_loop():
                         continue
 
                     side_exec = 'sell' if decisao in ('SELL', 'VENDER') else 'buy'
+                    trend_now = str(signals.get('trend', 'NEUTRO')).upper()
+                    if side_exec == 'sell' and trend_now != 'BAIXA':
+                        print(f"   🚫 [TENDÊNCIA] {clean_sym}: VENDA bloqueada — tendência={trend_now}", flush=True)
+                        time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
+                        continue
+                    if side_exec == 'buy' and trend_now != 'ALTA':
+                        print(f"   🚫 [TENDÊNCIA] {clean_sym}: COMPRA bloqueada — tendência={trend_now}", flush=True)
+                        time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
+                        continue
+
+                    if not intel_ctx.get('whale_aligned'):
+                        print(f"   🚫 [BALEIAS] {clean_sym}: fluxo institucional não alinhado", flush=True)
+                        time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
+                        continue
+
                     timing_ok, timing_reasons = confirmar_timing_entrada(side_exec, df, signals)
                     if not timing_ok:
                         print(

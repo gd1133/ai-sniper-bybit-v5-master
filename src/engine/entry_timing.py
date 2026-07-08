@@ -1,15 +1,9 @@
 """
-Confirmação de timing de entrada — evita sinais falsos em repiques.
+Confirmação de timing de entrada — tendência + repique + velas institucionais.
 
-Short (tendência de baixa + correção para cima):
-  - RSI subiu > 65 e cruzou de volta abaixo de 60
-  - Preço fechou abaixo da EMA 9 OU cruzamento descendente EMA9/EMA21
-  - Vela anterior de baixa (rejeição do topo)
-
-Long (tendência de alta + correção para baixo) — espelhado:
-  - RSI caiu < 35 e cruzou de volta acima de 40
-  - Preço fechou acima da EMA 9 OU cruzamento ascendente EMA9/EMA21
-  - Vela anterior de alta
+Regra de ouro: NUNCA vender em tendência de alta nem comprar em tendência de baixa.
+Short só após repique em tendência BAIXA com vela de rejeição.
+Long só após repique em tendência ALTA com vela de rejeição.
 """
 
 from __future__ import annotations
@@ -17,6 +11,8 @@ from __future__ import annotations
 from typing import Tuple
 
 import pandas as pd
+
+from src.engine.candle_patterns import institutional_candle_confirmation
 
 
 RSI_SHORT_OVERBOUGHT = 65.0
@@ -41,6 +37,29 @@ def _ensure_ema_columns(df: pd.DataFrame) -> pd.DataFrame:
     return work
 
 
+def _trend_must_align(side: str, signals: dict) -> Tuple[bool, list[str]]:
+    """Bloqueio duro: lado da ordem deve seguir tendência macro + SuperTrend."""
+    side_norm = str(side or '').strip().lower()
+    trend = str(signals.get('trend', 'NEUTRO')).upper()
+    st = int(signals.get('supertrend_signal', 0) or 0)
+
+    if side_norm in ('buy', 'long', 'comprar'):
+        if trend != 'ALTA':
+            return False, [f'Tendência {trend} — COMPRA bloqueada (exige ALTA)']
+        if st != 1:
+            return False, ['SuperTrend não confirma ALTA']
+        return True, ['Tendência ALTA + SuperTrend alinhados para COMPRA']
+
+    if side_norm in ('sell', 'short', 'vender'):
+        if trend != 'BAIXA':
+            return False, [f'Tendência {trend} — VENDA bloqueada (exige BAIXA)']
+        if st != -1:
+            return False, ['SuperTrend não confirma BAIXA']
+        return True, ['Tendência BAIXA + SuperTrend alinhados para VENDA']
+
+    return False, [f'Side inválido: {side}']
+
+
 def _confirm_short_repique(df: pd.DataFrame) -> Tuple[bool, list[str]]:
     reasons = []
     if len(df) < REPIQUE_LOOKBACK + 2:
@@ -54,16 +73,14 @@ def _confirm_short_repique(df: pd.DataFrame) -> Tuple[bool, list[str]]:
 
     had_overbought = bool((recent_rsi > RSI_SHORT_OVERBOUGHT).any())
     crossed_below_60 = prev_rsi >= RSI_SHORT_CROSS_LEVEL and current_rsi < RSI_SHORT_CROSS_LEVEL
-    rsi_ok = had_overbought and crossed_below_60
-    if rsi_ok:
-        reasons.append(
-            f'RSI repique confirmado (máx>{RSI_SHORT_OVERBOUGHT:.0f}, cruzou <{RSI_SHORT_CROSS_LEVEL:.0f})'
-        )
-    else:
+    if not (had_overbought and crossed_below_60):
         return False, [
-            f'RSI aguardando: overbought={had_overbought}, cruzamento_abaixo_60={crossed_below_60} '
-            f'(atual={current_rsi:.1f})'
+            f'RSI aguardando repique: overbought={had_overbought}, '
+            f'cruzou_abaixo_60={crossed_below_60} (atual={current_rsi:.1f})'
         ]
+    reasons.append(
+        f'RSI repique (máx>{RSI_SHORT_OVERBOUGHT:.0f}, cruzou <{RSI_SHORT_CROSS_LEVEL:.0f})'
+    )
 
     close = float(work['close'].iloc[-1])
     ema9 = float(work['ema_9'].iloc[-1])
@@ -71,21 +88,14 @@ def _confirm_short_repique(df: pd.DataFrame) -> Tuple[bool, list[str]]:
     ema9_prev = float(work['ema_9'].iloc[-2])
     ema21_prev = float(work['ema_21'].iloc[-2])
     bearish_cross = ema9_prev >= ema21_prev and ema9 < ema21
-    ema_ok = close < ema9 or bearish_cross
-    if ema_ok:
-        if bearish_cross:
-            reasons.append('EMA9 cruzou abaixo da EMA21')
-        else:
-            reasons.append('Fechamento abaixo da EMA9 após repique')
-    else:
-        return False, [f'EMA: preço={close:.4f} ainda acima da EMA9={ema9:.4f}']
+    if not (close < ema9 or bearish_cross):
+        return False, [f'Preço {close:.4f} ainda acima da EMA9={ema9:.4f}']
+    reasons.append('EMA9 cruzou abaixo EMA21' if bearish_cross else 'Fechamento abaixo EMA9')
 
     prev = work.iloc[-2]
-    bearish_candle = float(prev['close']) < float(prev['open'])
-    if bearish_candle:
-        reasons.append('Vela anterior de baixa (rejeição do topo)')
-    else:
-        return False, ['Vela anterior não confirma rejeição (não é vela de baixa)']
+    if float(prev['close']) >= float(prev['open']):
+        return False, ['Vela anterior não é de baixa (sem rejeição do topo)']
+    reasons.append('Vela anterior de baixa — rejeição institucional')
 
     return True, reasons
 
@@ -103,16 +113,14 @@ def _confirm_long_repique(df: pd.DataFrame) -> Tuple[bool, list[str]]:
 
     had_oversold = bool((recent_rsi < RSI_LONG_OVERSOLD).any())
     crossed_above_40 = prev_rsi <= RSI_LONG_CROSS_LEVEL and current_rsi > RSI_LONG_CROSS_LEVEL
-    rsi_ok = had_oversold and crossed_above_40
-    if rsi_ok:
-        reasons.append(
-            f'RSI repique confirmado (mín<{RSI_LONG_OVERSOLD:.0f}, cruzou >{RSI_LONG_CROSS_LEVEL:.0f})'
-        )
-    else:
+    if not (had_oversold and crossed_above_40):
         return False, [
-            f'RSI aguardando: oversold={had_oversold}, cruzamento_acima_40={crossed_above_40} '
-            f'(atual={current_rsi:.1f})'
+            f'RSI aguardando repique: oversold={had_oversold}, '
+            f'cruzou_acima_40={crossed_above_40} (atual={current_rsi:.1f})'
         ]
+    reasons.append(
+        f'RSI repique (mín<{RSI_LONG_OVERSOLD:.0f}, cruzou >{RSI_LONG_CROSS_LEVEL:.0f})'
+    )
 
     close = float(work['close'].iloc[-1])
     ema9 = float(work['ema_9'].iloc[-1])
@@ -120,42 +128,48 @@ def _confirm_long_repique(df: pd.DataFrame) -> Tuple[bool, list[str]]:
     ema9_prev = float(work['ema_9'].iloc[-2])
     ema21_prev = float(work['ema_21'].iloc[-2])
     bullish_cross = ema9_prev <= ema21_prev and ema9 > ema21
-    ema_ok = close > ema9 or bullish_cross
-    if ema_ok:
-        if bullish_cross:
-            reasons.append('EMA9 cruzou acima da EMA21')
-        else:
-            reasons.append('Fechamento acima da EMA9 após repique')
-    else:
-        return False, [f'EMA: preço={close:.4f} ainda abaixo da EMA9={ema9:.4f}']
+    if not (close > ema9 or bullish_cross):
+        return False, [f'Preço {close:.4f} ainda abaixo da EMA9={ema9:.4f}']
+    reasons.append('EMA9 cruzou acima EMA21' if bullish_cross else 'Fechamento acima EMA9')
 
     prev = work.iloc[-2]
-    bullish_candle = float(prev['close']) > float(prev['open'])
-    if bullish_candle:
-        reasons.append('Vela anterior de alta (rejeição do fundo)')
-    else:
-        return False, ['Vela anterior não confirma rejeição (não é vela de alta)']
+    if float(prev['close']) <= float(prev['open']):
+        return False, ['Vela anterior não é de alta (sem rejeição do fundo)']
+    reasons.append('Vela anterior de alta — rejeição institucional')
 
     return True, reasons
 
 
 def confirmar_timing_entrada(side: str, df: pd.DataFrame, signals: dict | None = None) -> Tuple[bool, list[str]]:
     """
-    Valida fim de repique antes de disparar ordem.
-    Retorna (aprovado, motivos).
+    Validação completa antes de disparar ordem:
+      1. Tendência macro + SuperTrend
+      2. Leitura avançada de velas / fluxo institucional
+      3. Fim de repique (RSI + EMA + vela anterior)
     """
     signals = signals or {}
     side_norm = str(side or '').strip().lower()
-    trend = str(signals.get('trend', 'NEUTRO')).upper()
+    all_reasons: list[str] = []
+
+    ok_trend, trend_reasons = _trend_must_align(side, signals)
+    if not ok_trend:
+        return False, trend_reasons
+    all_reasons.extend(trend_reasons)
+
+    ok_candles, candle_reasons = institutional_candle_confirmation(side, df, signals)
+    if not ok_candles:
+        return False, candle_reasons
+    all_reasons.extend(candle_reasons)
 
     if side_norm in ('sell', 'short', 'vender'):
-        if trend != 'BAIXA':
-            return True, ['Short em tendência não-baixista — filtro de repique não exigido']
-        return _confirm_short_repique(df)
+        ok_repique, repique_reasons = _confirm_short_repique(df)
+    elif side_norm in ('buy', 'long', 'comprar'):
+        ok_repique, repique_reasons = _confirm_long_repique(df)
+    else:
+        return False, [f'Side inválido: {side}']
 
-    if side_norm in ('buy', 'long', 'comprar'):
-        if trend != 'ALTA':
-            return True, ['Long em tendência não-altista — filtro de repique não exigido']
-        return _confirm_long_repique(df)
+    if not ok_repique:
+        return False, repique_reasons
+    all_reasons.extend(repique_reasons)
 
-    return False, [f'Side inválido: {side}']
+    return True, all_reasons

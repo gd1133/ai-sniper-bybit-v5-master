@@ -59,8 +59,18 @@ class MarketIntelligence:
 
         whale_score = float(whale.get('whale_score', 0) or 0)
         volume_ratio = float(signals.get('volume_ratio', 0) or 0)
-        if not whale.get('whale_aligned') and whale_score < 20 and volume_ratio < 1.2:
-            veto_reasons.append('Sem confirmação de fluxo institucional (baleias)')
+        if not whale.get('whale_aligned'):
+            veto_reasons.append('Fluxo de baleias NÃO alinhado com a tendência')
+        elif whale_score < 25 and volume_ratio < 1.3:
+            veto_reasons.append('Sem confirmação de fluxo institucional (baleias/volume)')
+
+        trend = str(signals.get('trend', 'NEUTRO')).upper()
+        body_ratio = float(signals.get('candle_body_ratio', 0) or 0)
+        recent_ret = float(signals.get('recent_return_pct', 0) or 0)
+        if trend == 'ALTA' and recent_ret < -0.5 and body_ratio >= 50:
+            veto_reasons.append('Vela de venda forte contra tendência de alta')
+        if trend == 'BAIXA' and recent_ret > 0.5 and body_ratio >= 50:
+            veto_reasons.append('Vela de compra forte contra tendência de baixa')
 
         # Timing: prefere entrada perto da golden zone (fib 0.618)
         fib_dist = float(signals.get('fib_distance_pct', 100) or 100)
@@ -85,7 +95,7 @@ class MarketIntelligence:
             timing_score * 0.15
         )
 
-        allow_entry = len(veto_reasons) == 0 and intelligence_score >= 45
+        allow_entry = len(veto_reasons) == 0 and intelligence_score >= 55
 
         return {
             'intelligence_score': round(intelligence_score, 2),

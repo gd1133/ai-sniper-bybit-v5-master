@@ -123,13 +123,26 @@ class IndicatorEngine:
         current_price = last['close']
         sma = last['sma_200']
         
-        # Determina Tendência pela SMA 200
+        # Tendência macro (SMA200)
         if current_price > sma * 1.01:
             trend = "ALTA"
         elif current_price < sma * 0.99:
             trend = "BAIXA"
         else:
             trend = "NEUTRO"
+
+        # Tendência de curto prazo (EMA9/21)
+        ema9 = float(last['ema_9']) if 'ema_9' in last else current_price
+        ema21 = float(last['ema_21']) if 'ema_21' in last else current_price
+        short_trend = 'ALTA' if ema9 > ema21 and current_price > ema9 else (
+            'BAIXA' if ema9 < ema21 and current_price < ema9 else 'NEUTRO'
+        )
+
+        # Conflito macro vs curto prazo → NEUTRO (não opera contra repique)
+        if trend == 'BAIXA' and short_trend == 'ALTA':
+            trend = 'NEUTRO'
+        elif trend == 'ALTA' and short_trend == 'BAIXA':
+            trend = 'NEUTRO'
         
         # Volume Trend
         vol_trend = "ALTO" if last['volume_ratio'] >= 1.5 else "BAIXO"
@@ -188,6 +201,7 @@ class IndicatorEngine:
             'regime_label': str(regime.get('regime_label', '')),
             'ema_9': float(last['ema_9']) if 'ema_9' in last else 0.0,
             'ema_21': float(last['ema_21']) if 'ema_21' in last else 0.0,
+            'short_trend': short_trend,
         }
 
     def get_smart_money_zones(self):

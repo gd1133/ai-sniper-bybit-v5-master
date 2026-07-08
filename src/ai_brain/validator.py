@@ -48,8 +48,12 @@ class DataAnalystAgent:
             reasons.append('RSI em exaustão extrema - risco de reversão')
 
         action = 'WAIT'
-        if score >= 60:
-            action = 'BUY' if trend == 'ALTA' else 'SELL'
+        trend = tech_data.get('trend', 'NEUTRO')
+        st = int(tech_data.get('supertrend_signal', 0) or 0)
+        if score >= 60 and trend == 'ALTA' and st == 1:
+            action = 'BUY'
+        elif score >= 60 and trend == 'BAIXA' and st == -1:
+            action = 'SELL'
 
         return min(100, score), action, ' | '.join(reasons)
 
@@ -79,9 +83,12 @@ class IntelligenceAgent:
             reasons.append(f'Timing institucional favorável ({timing:.0f}/100)')
 
         trend = tech_data.get('trend', 'NEUTRO')
+        st = int(tech_data.get('supertrend_signal', 0) or 0)
         action = 'WAIT'
-        if score >= 55 and trend in ('ALTA', 'BAIXA'):
-            action = 'BUY' if trend == 'ALTA' else 'SELL'
+        if score >= 55 and trend == 'ALTA' and st == 1 and ctx.get('whale_aligned'):
+            action = 'BUY'
+        elif score >= 55 and trend == 'BAIXA' and st == -1 and ctx.get('whale_aligned'):
+            action = 'SELL'
 
         return max(0, min(100, score)), action, ' | '.join(reasons)
 
@@ -115,8 +122,8 @@ class LearningAgent:
         reasons = []
 
         if not history:
-            reasons.append('Ativo novo - operar com cautela')
-            return score, ('BUY' if tech_data.get('trend') == 'ALTA' else 'SELL'), reasons[0]
+            reasons.append('Ativo novo - aguardar confirmação institucional')
+            return 50, 'WAIT', reasons[0]
 
         wins = sum(1 for pnl in history if pnl > 0)
         losses = sum(1 for pnl in history if pnl < 0)
@@ -137,8 +144,12 @@ class LearningAgent:
             reasons.append('Sequência de vitórias')
 
         action = 'WAIT'
-        if score >= 60:
-            action = 'BUY' if tech_data.get('trend') == 'ALTA' else 'SELL'
+        trend = tech_data.get('trend', 'NEUTRO')
+        st = int(tech_data.get('supertrend_signal', 0) or 0)
+        if score >= 60 and trend == 'ALTA' and st == 1:
+            action = 'BUY'
+        elif score >= 60 and trend == 'BAIXA' and st == -1:
+            action = 'SELL'
 
         return max(0, min(100, score)), action, ' | '.join(reasons)
 
@@ -199,15 +210,20 @@ class GroqValidator:
         )
 
         final_action = 'WAIT'
+        trend = tech_data.get('trend', 'NEUTRO')
+        st = int(tech_data.get('supertrend_signal', 0) or 0)
         actions = [action_analyst, action_intel, action_learner]
         buy_votes = sum(1 for a in actions if a == 'BUY')
         sell_votes = sum(1 for a in actions if a == 'SELL')
-        if buy_votes >= 2 and probability >= 60:
+
+        if buy_votes >= 2 and probability >= 60 and trend == 'ALTA' and st == 1:
             final_action = 'BUY'
-        elif sell_votes >= 2 and probability >= 60:
+        elif sell_votes >= 2 and probability >= 60 and trend == 'BAIXA' and st == -1:
             final_action = 'SELL'
-        elif probability >= 75:
-            final_action = action_analyst
+        elif probability >= 78 and trend == 'ALTA' and st == 1 and action_analyst == 'BUY':
+            final_action = 'BUY'
+        elif probability >= 78 and trend == 'BAIXA' and st == -1 and action_analyst == 'SELL':
+            final_action = 'SELL'
 
         result = {
             'probabilidade': probability,
