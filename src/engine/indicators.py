@@ -138,11 +138,8 @@ class IndicatorEngine:
             'BAIXA' if ema9 < ema21 and current_price < ema9 else 'NEUTRO'
         )
 
-        # Conflito macro vs curto prazo → NEUTRO (não opera contra repique)
-        if trend == 'BAIXA' and short_trend == 'ALTA':
-            trend = 'NEUTRO'
-        elif trend == 'ALTA' and short_trend == 'BAIXA':
-            trend = 'NEUTRO'
+        # Mantém tendência MACRO (ALTA/BAIXA) mesmo em repique de curto prazo.
+        # O timing de entrada (entry_timing) decide o momento; não matar o candidato aqui.
         
         # Volume Trend
         vol_trend = "ALTO" if last['volume_ratio'] >= 1.5 else "BAIXO"
@@ -157,10 +154,12 @@ class IndicatorEngine:
         range_expansion = float(candle_range / (float(last['atr']) + 1e-9))
         distance_from_sma_pct = (abs(current_price - sma) / sma * 100) if sma else 0
 
+        # Fluxo agressivo: volume 1.15x + retorno OU SuperTrend alinhado à tendência
         money_flow_side = "WAIT"
-        if trend == "ALTA" and recent_return_pct > 0 and float(last['volume_ratio']) >= 1.3:
+        vol_ratio = float(last['volume_ratio'])
+        if trend == "ALTA" and vol_ratio >= 1.15 and (recent_return_pct > 0 or st_signal == 1):
             money_flow_side = "BUY"
-        elif trend == "BAIXA" and recent_return_pct < 0 and float(last['volume_ratio']) >= 1.3:
+        elif trend == "BAIXA" and vol_ratio >= 1.15 and (recent_return_pct < 0 or st_signal == -1):
             money_flow_side = "SELL"
 
         try:

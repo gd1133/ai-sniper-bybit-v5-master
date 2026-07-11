@@ -59,17 +59,21 @@ class MarketIntelligence:
 
         whale_score = float(whale.get('whale_score', 0) or 0)
         volume_ratio = float(signals.get('volume_ratio', 0) or 0)
+        # Modo agressivo: desalinhamento de baleias PENALIZA o score (não veta duro).
+        # Continua favorecendo fluxo alinhado, mas não trava o radar de tendências.
+        whale_penalty = 0.0
         if not whale.get('whale_aligned'):
-            veto_reasons.append('Fluxo de baleias NÃO alinhado com a tendência')
-        elif whale_score < 25 and volume_ratio < 1.3:
-            veto_reasons.append('Sem confirmação de fluxo institucional (baleias/volume)')
+            whale_penalty = 12.0
+        elif whale_score < 20 and volume_ratio < 1.15:
+            whale_penalty = 8.0
 
         trend = str(signals.get('trend', 'NEUTRO')).upper()
         body_ratio = float(signals.get('candle_body_ratio', 0) or 0)
         recent_ret = float(signals.get('recent_return_pct', 0) or 0)
-        if trend == 'ALTA' and recent_ret < -0.5 and body_ratio >= 50:
+        # Só bloqueia velas CONTRÁRIAS muito fortes (evita matar pullbacks normais)
+        if trend == 'ALTA' and recent_ret < -0.8 and body_ratio >= 60:
             veto_reasons.append('Vela de venda forte contra tendência de alta')
-        if trend == 'BAIXA' and recent_ret > 0.5 and body_ratio >= 50:
+        if trend == 'BAIXA' and recent_ret > 0.8 and body_ratio >= 60:
             veto_reasons.append('Vela de compra forte contra tendência de baixa')
 
         # Timing: prefere entrada perto da golden zone (fib 0.618)
@@ -93,9 +97,9 @@ class MarketIntelligence:
             float(whale.get('whale_score', 0) or 0) * 0.35 +
             float(news.get('sentiment_score', 50) or 50) * 0.20 +
             timing_score * 0.15
-        )
+        ) - whale_penalty
 
-        allow_entry = len(veto_reasons) == 0 and intelligence_score >= 55
+        allow_entry = len(veto_reasons) == 0 and intelligence_score >= 50
 
         return {
             'intelligence_score': round(intelligence_score, 2),

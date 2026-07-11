@@ -85,9 +85,10 @@ class IntelligenceAgent:
         trend = tech_data.get('trend', 'NEUTRO')
         st = int(tech_data.get('supertrend_signal', 0) or 0)
         action = 'WAIT'
-        if score >= 55 and trend == 'ALTA' and st == 1 and ctx.get('whale_aligned'):
+        # Baleias alinhadas aumentam o score acima; não são mais requisito duro de ação
+        if score >= 50 and trend == 'ALTA' and st == 1:
             action = 'BUY'
-        elif score >= 55 and trend == 'BAIXA' and st == -1 and ctx.get('whale_aligned'):
+        elif score >= 50 and trend == 'BAIXA' and st == -1:
             action = 'SELL'
 
         return max(0, min(100, score)), action, ' | '.join(reasons)

@@ -438,17 +438,49 @@ APP_MODE = 'real'
 ALLOW_ORDER_EXECUTION = ENV_CONFIG.allow_order_execution
 ALLOW_REAL_TRADING = ENV_CONFIG.allow_real_trading
 USE_TESTNET = ENV_CONFIG.use_testnet
-RISK_MODE = 'conservative'
-MAX_MOEDAS_ATIVAS = 1
+RISK_MODE = 'aggressive'
+MAX_MOEDAS_ATIVAS = 5
 LEVERAGE = 10  # Alavancagem padrão (deve coincidir com main.py)
 
-# Constantes do Sniper Worker
-SCAN_TOP_COINS = 50
-THRESHOLD_ENTRADA = 70.0
+# Constantes do Sniper Worker (ajustadas pelo modo de risco)
+SCAN_TOP_COINS = 80
+THRESHOLD_ENTRADA = 58.0
 COOLDOWN_INSTITUCIONAL_SECS = 5
-SCAN_INTER_SYMBOL_DELAY_SECS = 0.5
+SCAN_INTER_SYMBOL_DELAY_SECS = 0.35
 SNIPER_SIGNAL_LOCK = threading.Lock()
-SNIPER_SIGNAL_RESERVATIONS = set()            
+SNIPER_SIGNAL_RESERVATIONS = set()
+
+def _apply_risk_mode_scan_params():
+    """Ajusta radar/entradas conforme modo conservador vs agressivo. TP/SL 100/50 intacto."""
+    global SCAN_TOP_COINS, THRESHOLD_ENTRADA, MAX_MOEDAS_ATIVAS, SCAN_INTER_SYMBOL_DELAY_SECS
+    if RISK_MODE == 'aggressive':
+        MAX_MOEDAS_ATIVAS = 5
+        SCAN_TOP_COINS = 80
+        THRESHOLD_ENTRADA = 58.0
+        SCAN_INTER_SYMBOL_DELAY_SECS = 0.35
+    else:
+        MAX_MOEDAS_ATIVAS = 1
+        SCAN_TOP_COINS = 40
+        THRESHOLD_ENTRADA = 70.0
+        SCAN_INTER_SYMBOL_DELAY_SECS = 0.5
+    central_state['risk_mode'] = RISK_MODE
+    central_state['max_moedas_ativas'] = MAX_MOEDAS_ATIVAS
+    central_state['scan_top_coins'] = SCAN_TOP_COINS
+    central_state['threshold_entrada'] = THRESHOLD_ENTRADA
+
+def _ticker_trend_scan_score(ticker):
+    """Prioriza moedas com volume + movimento forte (alta ou queda)."""
+    vol = _coerce_float((ticker or {}).get('quoteVolume'), (ticker or {}).get('baseVolume'), default=0.0)
+    pct = abs(_coerce_float(
+        (ticker or {}).get('percentage'),
+        (ticker or {}).get('change'),
+        (ticker or {}).get('info', {}).get('price24hPcnt') if isinstance((ticker or {}).get('info'), dict) else None,
+        default=0.0,
+    ))
+    # Bybit price24hPcnt às vezes vem como fração (0.15 = 15%)
+    if 0 < pct < 1.5:
+        pct = pct * 100.0
+    return vol * (1.0 + min(pct, 40.0) / 8.0)            
 
 # ==============================================================================
 # 🧪 MODO DE TESTE RÁPIDO (TEMPORÁRIO)
@@ -527,9 +559,7 @@ if db is not None:
     _saved_risk_mode = db.get_config('RISK_MODE')
     if _saved_risk_mode in ('conservative', 'aggressive'):
         RISK_MODE = _saved_risk_mode
-        MAX_MOEDAS_ATIVAS = 1 if RISK_MODE == 'conservative' else 5
-        central_state['risk_mode'] = RISK_MODE
-        central_state['max_moedas_ativas'] = MAX_MOEDAS_ATIVAS
+    _apply_risk_mode_scan_params()
     _saved_leverage = db.get_config('LEVERAGE')
     if _saved_leverage:
         try:
@@ -843,11 +873,11 @@ def _refresh_radar_live_from_public_tickers():
         if not sym or 'USDT' not in sym:
             continue
         radar_candidates.append(t)
-    top_coins = sorted(
-        radar_candidates,
-        key=lambda x: _coerce_float((x or {}).get('quoteVolume'), (x or {}).get('baseVolume'), default=0.0),
-        reverse=True,
-    )[:SCAN_TOP_COINS]
+    # Agressivo: volume + variação 24h (alta e queda). Conservador: só volume.
+    score_fn = _ticker_trend_scan_score if RISK_MODE == 'aggressive' else (
+        lambda x: _coerce_float((x or {}).get('quoteVolume'), (x or {}).get('baseVolume'), default=0.0)
+    )
+    top_coins = sorted(radar_candidates, key=score_fn, reverse=True)[:SCAN_TOP_COINS]
     if top_coins:
         central_state['symbol'] = _limpar_simbolo((top_coins[0] or {}).get('symbol'))
     else:
@@ -2036,7 +2066,7 @@ def sniper_worker_loop():
                     signals = IndicatorEngine(df).get_signals()
                     if signals.get('is_lateral') or signals['trend'] == 'NEUTRO':
                         continue
-                    if validator.local_signal(signals) < 25:
+                    if validator.local_signal(signals) < 20:
                         continue
 
                     intel_ctx = market_intel.evaluate(sym, df, signals, t)
@@ -2071,10 +2101,12 @@ def sniper_worker_loop():
                         time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
                         continue
 
+                    # Baleias: bônus no score (abaixo), não mais hard-block
                     if not intel_ctx.get('whale_aligned'):
-                        print(f"   🚫 [BALEIAS] {clean_sym}: fluxo institucional não alinhado", flush=True)
-                        time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
-                        continue
+                        print(
+                            f"   ⚡ [BALEIAS] {clean_sym}: fluxo parcial — seguindo tendência {trend_now} (modo agressivo)",
+                            flush=True,
+                        )
 
                     timing_ok, timing_reasons = confirmar_timing_entrada(side_exec, df, signals)
                     if not timing_ok:
@@ -2625,15 +2657,33 @@ def api_manual_close_trade():
 
 @app.route('/api/config/risk-mode', methods=['GET', 'POST'])
 def handle_risk_mode():
-    global RISK_MODE, MAX_MOEDAS_ATIVAS
-    if request.method == 'GET': return jsonify({"risk_mode": RISK_MODE, "max_moedas_ativas": MAX_MOEDAS_ATIVAS})
+    global RISK_MODE, MAX_MOEDAS_ATIVAS, SCAN_TOP_COINS, THRESHOLD_ENTRADA
+    if request.method == 'GET':
+        return jsonify({
+            "risk_mode": RISK_MODE,
+            "max_moedas_ativas": MAX_MOEDAS_ATIVAS,
+            "scan_top_coins": SCAN_TOP_COINS,
+            "threshold_entrada": THRESHOLD_ENTRADA,
+        })
     data = request.json or {}
-    mode = str(data.get('mode', 'conservative')).strip().lower()
+    mode = str(data.get('mode', 'aggressive')).strip().lower()
+    if mode not in ('conservative', 'aggressive'):
+        return jsonify({"error": "mode deve ser 'conservative' ou 'aggressive'"}), 400
     RISK_MODE = mode
-    MAX_MOEDAS_ATIVAS = 1 if mode == 'conservative' else 5
-    central_state['risk_mode'] = RISK_MODE; central_state['max_moedas_ativas'] = MAX_MOEDAS_ATIVAS
+    _apply_risk_mode_scan_params()
     db.set_config('RISK_MODE', RISK_MODE)
-    return jsonify({"success": True, "risk_mode": RISK_MODE, "max_moedas_ativas": MAX_MOEDAS_ATIVAS})
+    print(
+        f"⚙️ [RISK MODE] {RISK_MODE.upper()} — máx {MAX_MOEDAS_ATIVAS} moeda(s) | "
+        f"scan={SCAN_TOP_COINS} | threshold={THRESHOLD_ENTRADA}",
+        flush=True,
+    )
+    return jsonify({
+        "success": True,
+        "risk_mode": RISK_MODE,
+        "max_moedas_ativas": MAX_MOEDAS_ATIVAS,
+        "scan_top_coins": SCAN_TOP_COINS,
+        "threshold_entrada": THRESHOLD_ENTRADA,
+    })
 
 
 @app.route('/api/market-intelligence', methods=['GET'])
