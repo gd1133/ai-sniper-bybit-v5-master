@@ -52,6 +52,24 @@ def detect_bearish_engulfing(df: pd.DataFrame) -> bool:
     return float(curr['close']) < float(prev['open']) and float(curr['open']) >= float(prev['close'])
 
 
+def detect_strong_up_candle(row, atr: float = 0.0, volume_ratio: float = 1.0) -> bool:
+    """Vela forte de subida — delega para chart_structure."""
+    try:
+        from src.engine.chart_structure import detect_strong_bullish_candle
+        return detect_strong_bullish_candle(row, atr=atr, volume_ratio=volume_ratio)
+    except Exception:
+        return is_bullish_candle(row) and _body_pct(row) >= 55
+
+
+def detect_strong_down_candle(row, atr: float = 0.0, volume_ratio: float = 1.0) -> bool:
+    """Vela forte de descida — delega para chart_structure."""
+    try:
+        from src.engine.chart_structure import detect_strong_bearish_candle
+        return detect_strong_bearish_candle(row, atr=atr, volume_ratio=volume_ratio)
+    except Exception:
+        return is_bearish_candle(row) and _body_pct(row) >= 55
+
+
 def institutional_candle_confirmation(
     side: str,
     df: pd.DataFrame,
@@ -59,6 +77,7 @@ def institutional_candle_confirmation(
 ) -> Tuple[bool, list[str]]:
     """
     Confirma que velas, momentum e fluxo institucional concordam com o lado da entrada.
+    INCREMENTO: se houver vela forte + pivô na direção, acelera a confirmação.
   """
     signals = signals or {}
     side_norm = str(side or '').strip().lower()
@@ -75,6 +94,8 @@ def institutional_candle_confirmation(
     recent_ret = float(signals.get('recent_return_pct', 0) or 0)
     body_last = _body_pct(last)
     bulls, bears = _momentum_bars(df, 3)
+    atr = float(signals.get('atr', 0) or 0)
+    vol_ratio = float(signals.get('volume_ratio', 1) or 1)
 
     if side_norm in ('buy', 'long', 'comprar'):
         if trend == 'BAIXA':
@@ -91,6 +112,11 @@ def institutional_candle_confirmation(
             return False, [f'BLOQUEIO: momentum recente negativo ({recent_ret:.2f}%)']
         if money_flow == 'SELL':
             return False, ['BLOQUEIO: fluxo institucional apontando VENDA']
+        # Atalho assertivo: vela forte de subida + pivô/estrutura
+        if detect_strong_up_candle(last, atr, vol_ratio) or detect_strong_up_candle(prev, atr, vol_ratio):
+            if signals.get('bounce_from_pivot_low') or signals.get('near_pivot_support') or signals.get('structure_bias') == 'ALTA':
+                reasons.append('Vela FORTE de SUBIDA + pivô/estrutura — confirmação acelerada')
+                return True, reasons
         if not is_bullish_candle(last) and not is_bullish_candle(prev):
             return False, ['Aguardando vela de confirmação de compra']
         reasons.append('Velas e momentum confirmam COMPRA institucional')
@@ -111,6 +137,10 @@ def institutional_candle_confirmation(
             return False, [f'BLOQUEIO: momentum recente positivo ({recent_ret:.2f}%)']
         if money_flow == 'BUY':
             return False, ['BLOQUEIO: fluxo institucional apontando COMPRA']
+        if detect_strong_down_candle(last, atr, vol_ratio) or detect_strong_down_candle(prev, atr, vol_ratio):
+            if signals.get('rejection_from_pivot_high') or signals.get('near_pivot_resistance') or signals.get('structure_bias') == 'BAIXA':
+                reasons.append('Vela FORTE de DESCIDA + pivô/estrutura — confirmação acelerada')
+                return True, reasons
         if not is_bearish_candle(last) and not is_bearish_candle(prev):
             return False, ['Aguardando vela de confirmação de venda']
         reasons.append('Velas e momentum confirmam VENDA institucional')
