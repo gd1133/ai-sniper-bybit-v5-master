@@ -87,6 +87,15 @@ class IndicatorEngine:
         # EMA 9 / EMA 21 — timing de entrada (fim de repique)
         self.df['ema_9'] = self.df['close'].ewm(span=9, adjust=False).mean()
         self.df['ema_21'] = self.df['close'].ewm(span=21, adjust=False).mean()
+        # EMA 50 — tendência intermediária (leitura de gráfico)
+        self.df['ema_50'] = self.df['close'].ewm(span=50, adjust=False).mean()
+
+        # MACD (12, 26, 9) — confirmação de momentum de tendência
+        ema_fast = self.df['close'].ewm(span=12, adjust=False).mean()
+        ema_slow = self.df['close'].ewm(span=26, adjust=False).mean()
+        self.df['macd'] = ema_fast - ema_slow
+        self.df['macd_signal'] = self.df['macd'].ewm(span=9, adjust=False).mean()
+        self.df['macd_hist'] = self.df['macd'] - self.df['macd_signal']
 
     def get_signals(self):
         """
@@ -177,6 +186,33 @@ class IndicatorEngine:
                 'choppiness': 50.0,
             }
 
+        # Camada incremental: pivôs + velas fortes + estrutura (não substitui o restante)
+        try:
+            from src.engine.chart_structure import analyze_chart_structure
+            chart = analyze_chart_structure(self.df, {
+                'trend': trend,
+                'volume_ratio': float(last['volume_ratio']),
+                'money_flow_side': money_flow_side,
+            })
+        except Exception:
+            chart = {
+                'pivot_high': 0.0,
+                'pivot_low': 0.0,
+                'near_pivot_support': False,
+                'near_pivot_resistance': False,
+                'bounce_from_pivot_low': False,
+                'rejection_from_pivot_high': False,
+                'strong_bullish_candle': False,
+                'strong_bearish_candle': False,
+                'structure_bias': 'NEUTRO',
+                'chart_entry_score': 0.0,
+                'chart_reasons': [],
+            }
+
+        ema50 = float(last['ema_50']) if 'ema_50' in last else float(ema21)
+        macd_hist = float(last['macd_hist']) if 'macd_hist' in last else 0.0
+        macd_trend = 'ALTA' if macd_hist > 0 else ('BAIXA' if macd_hist < 0 else 'NEUTRO')
+
         return {
             'trend': trend,
             'price': float(current_price),
@@ -200,7 +236,21 @@ class IndicatorEngine:
             'regime_label': str(regime.get('regime_label', '')),
             'ema_9': float(last['ema_9']) if 'ema_9' in last else 0.0,
             'ema_21': float(last['ema_21']) if 'ema_21' in last else 0.0,
+            'ema_50': ema50,
             'short_trend': short_trend,
+            'macd_hist': macd_hist,
+            'macd_trend': macd_trend,
+            'pivot_high': float(chart.get('pivot_high') or 0),
+            'pivot_low': float(chart.get('pivot_low') or 0),
+            'near_pivot_support': bool(chart.get('near_pivot_support')),
+            'near_pivot_resistance': bool(chart.get('near_pivot_resistance')),
+            'bounce_from_pivot_low': bool(chart.get('bounce_from_pivot_low')),
+            'rejection_from_pivot_high': bool(chart.get('rejection_from_pivot_high')),
+            'strong_bullish_candle': bool(chart.get('strong_bullish_candle')),
+            'strong_bearish_candle': bool(chart.get('strong_bearish_candle')),
+            'structure_bias': str(chart.get('structure_bias') or 'NEUTRO'),
+            'chart_entry_score': float(chart.get('chart_entry_score') or 0),
+            'chart_reasons': list(chart.get('chart_reasons') or []),
         }
 
     def get_smart_money_zones(self):

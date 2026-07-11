@@ -143,9 +143,10 @@ def _confirm_long_repique(df: pd.DataFrame) -> Tuple[bool, list[str]]:
 def confirmar_timing_entrada(side: str, df: pd.DataFrame, signals: dict | None = None) -> Tuple[bool, list[str]]:
     """
     Validação completa antes de disparar ordem:
-      1. Tendência macro + SuperTrend
+      1. Tendência macro + SuperTrend  (obrigatório)
       2. Leitura avançada de velas / fluxo institucional
-      3. Fim de repique (RSI + EMA + vela anterior)
+      3. Fim de repique clássico (RSI + EMA + vela anterior)  — LÓGICA ANTIGA
+      4. OU entrada ASSERTIVA: pivô + vela forte (alta/descida) sem contra-baleias
     """
     signals = signals or {}
     side_norm = str(side or '').strip().lower()
@@ -158,6 +159,17 @@ def confirmar_timing_entrada(side: str, df: pd.DataFrame, signals: dict | None =
 
     ok_candles, candle_reasons = institutional_candle_confirmation(side, df, signals)
     if not ok_candles:
+        # Mesmo se velas institucionais clássicas falharem, tenta caminho assertivo
+        # (pivô + vela forte) — ainda respeita tendência e não opera contra baleias.
+        try:
+            from src.engine.chart_structure import assertive_structure_entry
+            ok_assert, assert_reasons = assertive_structure_entry(side, df, signals)
+        except Exception as exc:
+            ok_assert, assert_reasons = False, [f'Assertivo indisponível: {exc}']
+        if ok_assert:
+            all_reasons.extend(assert_reasons)
+            all_reasons.append('Caminho ASSERTIVO (pivô + vela forte) — lógica clássica parcial')
+            return True, all_reasons
         return False, candle_reasons
     all_reasons.extend(candle_reasons)
 
@@ -168,8 +180,24 @@ def confirmar_timing_entrada(side: str, df: pd.DataFrame, signals: dict | None =
     else:
         return False, [f'Side inválido: {side}']
 
-    if not ok_repique:
-        return False, repique_reasons
-    all_reasons.extend(repique_reasons)
+    if ok_repique:
+        all_reasons.extend(repique_reasons)
+        return True, all_reasons
 
-    return True, all_reasons
+    # Repique clássico ainda não fechou — não perde a oportunidade se a estrutura
+    # do gráfico (pivô + vela forte) confirmar, sem ir contra as baleias.
+    try:
+        from src.engine.chart_structure import assertive_structure_entry
+        ok_assert, assert_reasons = assertive_structure_entry(side, df, signals)
+    except Exception as exc:
+        ok_assert, assert_reasons = False, [f'Assertivo indisponível: {exc}']
+
+    if ok_assert:
+        all_reasons.extend(assert_reasons)
+        all_reasons.append(
+            f'Repique clássico pendente ({"; ".join(repique_reasons[:1])}) — '
+            'entrada por estrutura de gráfico'
+        )
+        return True, all_reasons
+
+    return False, repique_reasons + assert_reasons

@@ -91,6 +91,15 @@ class MarketIntelligence:
         if whale.get('whale_aligned'):
             timing_score = min(100.0, timing_score + 15)
 
+        # Bônus incremental: pivô + vela forte (leitura de gráfico)
+        chart_score = float(signals.get('chart_entry_score', 0) or 0)
+        if chart_score >= 40:
+            timing_score = min(100.0, timing_score + min(20.0, chart_score * 0.25))
+        if signals.get('strong_bullish_candle') or signals.get('strong_bearish_candle'):
+            timing_score = min(100.0, timing_score + 8)
+        if signals.get('bounce_from_pivot_low') or signals.get('rejection_from_pivot_high'):
+            timing_score = min(100.0, timing_score + 10)
+
         # Score composto de inteligência
         intelligence_score = (
             (100 - float(regime.get('lateral_score', 50) or 50)) * 0.30 +
@@ -99,7 +108,11 @@ class MarketIntelligence:
             timing_score * 0.15
         ) - whale_penalty
 
-        allow_entry = len(veto_reasons) == 0 and intelligence_score >= 50
+        # Seguir baleias: alinhado dá bônus extra (oportunidade assertiva ainda passa sem alinhamento total)
+        if whale.get('whale_aligned'):
+            intelligence_score = min(100.0, intelligence_score + 8)
+
+        allow_entry = len(veto_reasons) == 0 and intelligence_score >= 48
 
         return {
             'intelligence_score': round(intelligence_score, 2),

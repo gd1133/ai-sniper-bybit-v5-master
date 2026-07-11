@@ -2108,7 +2108,9 @@ def sniper_worker_loop():
                             flush=True,
                         )
 
-                    timing_ok, timing_reasons = confirmar_timing_entrada(side_exec, df, signals)
+                    signals_timing = dict(signals)
+                    signals_timing['whale_aligned'] = bool(intel_ctx.get('whale_aligned'))
+                    timing_ok, timing_reasons = confirmar_timing_entrada(side_exec, df, signals_timing)
                     if not timing_ok:
                         print(
                             f"   ⏳ [TIMING] {clean_sym} aguardando fim de repique: "
@@ -2121,6 +2123,11 @@ def sniper_worker_loop():
 
                     money_flow = _build_money_flow_metrics(signals, t, decisao)
                     edge = _get_symbol_trade_edge(sym, decisao)
+                    chart_bonus = float(signals.get('chart_entry_score', 0) or 0) * 0.20
+                    if signals.get('strong_bullish_candle') or signals.get('strong_bearish_candle'):
+                        chart_bonus += 8.0
+                    if intel_ctx.get('whale_aligned'):
+                        chart_bonus += 10.0  # prioriza oportunidades com baleias alinhadas
                     score = (
                         prob
                         + float(intel_ctx.get('intelligence_score', 0) or 0) * 0.25
@@ -2128,6 +2135,7 @@ def sniper_worker_loop():
                         + min(20.0, float(t.get('quoteVolume', 0) or 0) / 1_000_000)
                         + (money_flow['money_flow_score'] * 0.25)
                         + edge['edge_score']
+                        + chart_bonus
                     )
                     oportunidades.append({
                         'symbol': sym,
