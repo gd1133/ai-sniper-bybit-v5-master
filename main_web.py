@@ -649,20 +649,35 @@ def _build_exchange_trade_card(pos_data, key=None):
 
     try:
         pub_broker = _get_public_price_broker()
-        current_price = float(pub_broker.get_last_price(pos_data['raw_symbol']) or 0)
+        raw_sym = pos_data.get('raw_symbol') or pos_data.get('symbol')
+        current_price = float(pub_broker.get_last_price(raw_sym) or 0)
+        if current_price <= 0:
+            # Tenta formato CCXT linear (BTC/USDT:USDT)
+            alt = _canonicalize_symbol(raw_sym)
+            if alt and alt != raw_sym:
+                current_price = float(pub_broker.get_last_price(alt) or 0)
         if current_price <= 0:
             current_price = float(pos_data.get('mark_price') or 0)
         live_metrics = _calculate_live_trade_metrics(
             pos_data['entry_price'], current_price, pos_data['side'],
         )
-        pnl_pct = live_metrics['pnl_pct']
-        open_pnl_value = round(unrealised, 2)
+        # Prefere ROI real da Bybit (unrealisedPnl / margem) quando disponível
+        if margin_used > 0 and unrealised != 0:
+            pnl_pct = roi_pct
+            open_pnl_value = round(unrealised, 2)
+        else:
+            pnl_pct = live_metrics['pnl_pct']
+            open_pnl_value = round(unrealised, 2) if unrealised else round(
+                (margin_used * live_metrics['pnl_pct']) / 100, 2
+            )
+        if current_price > 0:
+            live_metrics['current_price'] = current_price
     except Exception:
         fallback_price = float(pos_data.get('mark_price') or pos_data.get('entry_price') or 0)
         live_metrics = _calculate_live_trade_metrics(
             pos_data['entry_price'], fallback_price, pos_data['side'],
         )
-        pnl_pct = roi_pct
+        pnl_pct = roi_pct if margin_used > 0 else live_metrics['pnl_pct']
         open_pnl_value = round(unrealised, 2)
 
     return {
@@ -1472,6 +1487,7 @@ def _monitor_dashboard_positions():
 
             total_wallet_balance = 0.0
             all_positions = []
+            positions_fetched_ok = False
 
             for cliente in clientes:
                 try:
@@ -1546,20 +1562,21 @@ def _monitor_dashboard_positions():
                                         f"   💰 [DASHBOARD] {cliente.get('nome')}: saldo disponível UNIFIED ${float(usdt_available):.2f} USDT",
                                         flush=True,
                                     )
-                                    continue
-                                for coin in coin_list:
-                                    if coin.get('coin') == 'USDT':
-                                        wallet_balance = float(
-                                            coin.get('availableBalance')
-                                            or coin.get('availableToWithdraw')
-                                            or coin.get('walletBalance')
-                                            or coin.get('equity')
-                                            or 0
-                                        )
-                                        total_wallet_balance += wallet_balance
-                                        client_balance_added = True
-                                        print(f"   💰 [DASHBOARD] {cliente.get('nome')}: ${wallet_balance:.2f} USDT", flush=True)
-                                        break
+                                    # NÃO usar continue aqui — precisa buscar posições abertas abaixo
+                                elif coin_list:
+                                    for coin in coin_list:
+                                        if coin.get('coin') == 'USDT':
+                                            wallet_balance = float(
+                                                coin.get('availableBalance')
+                                                or coin.get('availableToWithdraw')
+                                                or coin.get('walletBalance')
+                                                or coin.get('equity')
+                                                or 0
+                                            )
+                                            total_wallet_balance += wallet_balance
+                                            client_balance_added = True
+                                            print(f"   💰 [DASHBOARD] {cliente.get('nome')}: ${wallet_balance:.2f} USDT", flush=True)
+                                            break
                         else:
                             print(f"   ⚠️ [DASHBOARD] Erro ao buscar saldo de {cliente.get('nome')}: {err}", flush=True)
                             code = _extract_bybit_ret_code_from_error(err)
@@ -1586,6 +1603,7 @@ def _monitor_dashboard_positions():
                                 )
 
                     # 2️⃣ BUSCA POSIÇÕES ABERTAS COM PARÂMETROS CORRETOS
+                    client_positions_ok = False
                     try:
                         # CORREÇÃO CRÍTICA: Usa category='linear' e settleCoin='USDT'
                         positions_response = broker.pybit_session.get_positions(
@@ -1598,6 +1616,8 @@ def _monitor_dashboard_positions():
                             print(f"   ⚠️ [DASHBOARD] Erro ao buscar posições de {cliente.get('nome')}: {err}", flush=True)
                             continue
 
+                        client_positions_ok = True
+                        positions_fetched_ok = True
                         positions_list = (positions_response.get('result') or {}).get('list', [])
 
                         for pos in positions_list:
@@ -1635,7 +1655,11 @@ def _monitor_dashboard_positions():
 
                                 _ensure_exchange_position_in_db(cliente, all_positions[-1], broker, raw_pos=pos)
 
-                                print(f"   📊 [DASHBOARD] {symbol}: {side_normalized} | Size: {size} | Entry: ${entry_price:.4f} | PnL: ${unrealised_pnl:.2f}", flush=True)
+                                print(
+                                    f"   📊 [DASHBOARD] {symbol}: {side_normalized} | Size: {size} | "
+                                    f"Entry: ${entry_price:.4f} | Mark: ${mark_price:.4f} | PnL: ${unrealised_pnl:.2f}",
+                                    flush=True,
+                                )
 
                             except Exception as pos_parse_err:
                                 print(f"   ⚠️ [DASHBOARD] Erro ao processar posição: {pos_parse_err}", flush=True)
@@ -1645,13 +1669,27 @@ def _monitor_dashboard_positions():
                         print(f"   ⚠️ [DASHBOARD] Erro ao buscar posições: {fetch_pos_err}", flush=True)
                         continue
 
+                    if client_positions_ok:
+                        print(
+                            f"   ✅ [DASHBOARD] {cliente.get('nome')}: sync Bybit OK "
+                            f"({sum(1 for p in all_positions if p.get('client_id') == cliente.get('id'))} posição(ões))",
+                            flush=True,
+                        )
+
                 except Exception as client_err:
                     print(f"   ⚠️ [DASHBOARD] Erro ao processar cliente {cliente.get('nome', 'Unknown')}: {client_err}", flush=True)
                     continue
 
             # 🔄 SINCRONIZAÇÃO REVERSA: DETECTAR E LIMPAR POSIÇÕES ENCERRADAS NA BYBIT
-            # Verifica se posições marcadas como 'open' no banco foram fechadas na corretora
+            # Só roda se a API Bybit respondeu posições neste ciclo (evita fechar tudo por falha de sync)
             try:
+                if not positions_fetched_ok:
+                    print(
+                        "   ⏸️ [SYNC REVERSA] Pulada — get_positions não confirmou neste ciclo",
+                        flush=True,
+                    )
+                    raise RuntimeError('skip_reverse_sync')
+
                 # Normaliza símbolos antes de comparar (ex: 'TON/USDT:USDT' -> 'TONUSDT')
                 def normalize_pair(pair_str):
                     """
@@ -1758,9 +1796,12 @@ def _monitor_dashboard_positions():
                     print(f"   ✅ [SYNC REVERSA] {stale_trades_count} posição(ões) sincronizada(s) como encerrada(s)", flush=True)
 
             except Exception as sync_err:
-                print(f"   ⚠️ [SYNC REVERSA] Erro durante sincronização reversa: {sync_err}", flush=True)
-                import traceback
-                traceback.print_exc()
+                if str(sync_err) == 'skip_reverse_sync':
+                    pass
+                else:
+                    print(f"   ⚠️ [SYNC REVERSA] Erro durante sincronização reversa: {sync_err}", flush=True)
+                    import traceback
+                    traceback.print_exc()
 
             # 3️⃣ ATUALIZA O ESTADO CENTRAL DO DASHBOARD
             central_state['balance'] = round(total_wallet_balance, 2)
@@ -1797,39 +1838,46 @@ def _monitor_dashboard_positions():
                     if float(pos.get('mark_price') or 0) > 0:
                         grouped_positions[key]['mark_price'] = float(pos.get('mark_price') or 0)
 
-                # Atualiza os trades ativos com preços em tempo real
+                # Atualiza os trades ativos com preços em tempo real (markPrice Bybit como fallback)
                 active_trades_list = []
                 for key, pos_data in grouped_positions.items():
                     try:
                         active_trades_list.append(_build_exchange_trade_card(pos_data, key=key))
                     except Exception as calc_err:
                         print(f"   ⚠️ [DASHBOARD] Erro ao calcular métricas para {pos_data.get('symbol')}: {calc_err}", flush=True)
-                        try:
-                            active_trades_list.append(_build_exchange_trade_card(pos_data, key=key))
-                        except Exception:
-                            active_trades_list.append({
-                                'id': key,
-                                'symbol': pos_data.get('symbol'),
-                                'raw_symbol': pos_data.get('raw_symbol'),
-                                'side': pos_data.get('side'),
-                                'entry_price': pos_data.get('entry_price'),
-                                'current_price': pos_data.get('entry_price'),
-                                'pnl_pct': 0.0,
-                                'open_pnl_value': round(float(pos_data.get('unrealised_pnl') or 0), 2),
-                                'entry': round(float(pos_data.get('positionIM') or 0), 2),
-                                'client_count': pos_data.get('client_count', 1),
-                            })
+                        mark = float(pos_data.get('mark_price') or pos_data.get('entry_price') or 0)
+                        active_trades_list.append({
+                            'id': key,
+                            'symbol': pos_data.get('symbol'),
+                            'raw_symbol': pos_data.get('raw_symbol'),
+                            'side': pos_data.get('side'),
+                            'entry_price': pos_data.get('entry_price'),
+                            'current_price': mark,
+                            'pnl_pct': 0.0,
+                            'open_pnl_value': round(float(pos_data.get('unrealised_pnl') or 0), 2),
+                            'entry': round(float(pos_data.get('positionIM') or 0), 2),
+                            'client_count': pos_data.get('client_count', 1),
+                        })
 
                 central_state['active_trades'] = active_trades_list
                 central_state['exchange_positions_count'] = len(all_positions)
                 _status_cache.clear()
 
+            elif positions_fetched_ok:
+                # Bybit confirmou zero posições — limpa o painel
+                central_state['status'] = f"✅ ONLINE | Saldo: ${total_wallet_balance:.2f} USDT | Sem posições abertas"
+                central_state['active_trades'] = []
+                central_state['exchange_positions_count'] = 0
+                _status_cache.clear()
             else:
                 if not central_state.get('active_trades'):
-                    central_state['status'] = f"✅ ONLINE | Saldo: ${total_wallet_balance:.2f} USDT | Sem posições abertas"
-                    central_state['active_trades'] = []
+                    central_state['status'] = f"✅ ONLINE | Saldo: ${total_wallet_balance:.2f} USDT | Aguardando sync Bybit..."
 
-            print(f"🔄 [DASHBOARD] Estado atualizado: Saldo=${total_wallet_balance:.2f} | Posições={len(all_positions)}", flush=True)
+            print(
+                f"🔄 [DASHBOARD] Estado atualizado: Saldo=${total_wallet_balance:.2f} | "
+                f"Posições={len(all_positions)} | fetch_ok={positions_fetched_ok}",
+                flush=True,
+            )
 
         except Exception as general_err:
             print(f"❌ [DASHBOARD MONITOR] Erro geral: {general_err}", flush=True)

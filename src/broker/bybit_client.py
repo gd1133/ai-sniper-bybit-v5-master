@@ -662,27 +662,62 @@ class BybitClient:
         self._public_market_exchange = exchange
         return exchange
 
+    def _ticker_symbol_candidates(self, symbol):
+        """Gera formatos Bybit/CCXT (BTCUSDT, BTC/USDT:USDT, BTC/USDT)."""
+        raw = str(symbol or '').strip()
+        if not raw:
+            return []
+        candidates = [raw]
+        compact = raw.replace('/', '').replace(':', '').replace('-', '').upper()
+        if compact.endswith('USDT') and len(compact) > 4:
+            base = compact[:-4]
+            candidates.extend([f"{base}/USDT:USDT", f"{base}/USDT", compact])
+        # unique preserve order
+        seen = set()
+        out = []
+        for c in candidates:
+            if c and c not in seen:
+                seen.add(c)
+                out.append(c)
+        return out
+
     def _fetch_public_last_price(self, symbol):
         """Preço via endpoint público mainnet, sem autenticação."""
         exchange = self._ensure_public_market_exchange()
         self._apply_rate_limit('get_last_price_public')
-        ticker = exchange.fetch_ticker(symbol, params={'category': 'linear'})
-        return float(ticker.get('last') or 0)
+        last_err = None
+        for sym in self._ticker_symbol_candidates(symbol):
+            try:
+                ticker = exchange.fetch_ticker(sym, params={'category': 'linear'})
+                price = float(ticker.get('last') or 0)
+                if price > 0:
+                    return price
+            except Exception as err:
+                last_err = err
+                continue
+        if last_err:
+            raise last_err
+        return 0.0
 
     def get_last_price(self, symbol):
         """Preço em tempo real do ativo (com fallback público se a sessão autenticada falhar)."""
         if symbol in self.cache_ticker and self._is_cache_valid(self.cache_ticker[symbol], self.cache_ttl_ticker):
             return self.cache_ticker[symbol][0]
 
-        try:
-            self._apply_rate_limit('get_last_price')
-            ticker = self.exchange.fetch_ticker(symbol, params={'category': 'linear'})
-            price = float(ticker['last'])
-            if price > 0:
-                self.cache_ticker[symbol] = (price, time.time())
-                return price
-        except Exception as e:
-            print(f"[ERRO BROKER] Preço para {symbol} falhou: {e}", flush=True)
+        last_err = None
+        for sym in self._ticker_symbol_candidates(symbol):
+            try:
+                self._apply_rate_limit('get_last_price')
+                ticker = self.exchange.fetch_ticker(sym, params={'category': 'linear'})
+                price = float(ticker['last'])
+                if price > 0:
+                    self.cache_ticker[symbol] = (price, time.time())
+                    return price
+            except Exception as e:
+                last_err = e
+                continue
+        if last_err:
+            print(f"[ERRO BROKER] Preço para {symbol} falhou: {last_err}", flush=True)
 
         # Chaves inválidas / endpoint errado (ex.: 10003) não podem zerar o dashboard.
         try:
