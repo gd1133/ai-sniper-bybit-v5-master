@@ -619,15 +619,18 @@ def _build_exchange_trade_card(pos_data, key=None):
 
     try:
         pub_broker = _get_public_price_broker()
-        current_price = pub_broker.get_last_price(pos_data['raw_symbol'])
+        current_price = float(pub_broker.get_last_price(pos_data['raw_symbol']) or 0)
+        if current_price <= 0:
+            current_price = float(pos_data.get('mark_price') or 0)
         live_metrics = _calculate_live_trade_metrics(
             pos_data['entry_price'], current_price, pos_data['side'],
         )
         pnl_pct = live_metrics['pnl_pct']
         open_pnl_value = round(unrealised, 2)
     except Exception:
+        fallback_price = float(pos_data.get('mark_price') or pos_data.get('entry_price') or 0)
         live_metrics = _calculate_live_trade_metrics(
-            pos_data['entry_price'], float(pos_data.get('entry_price') or 0), pos_data['side'],
+            pos_data['entry_price'], fallback_price, pos_data['side'],
         )
         pnl_pct = roi_pct
         open_pnl_value = round(unrealised, 2)
@@ -784,30 +787,25 @@ _public_price_broker_lock = threading.Lock()
 _public_radar_broker_lock = threading.Lock()
 
 def _get_public_price_broker():
+    """
+    Broker de preços do dashboard: SEMPRE mainnet público, sem API keys.
+    Chaves do investidor + USE_TESTNET causavam retCode 10003 e preço $0 / AGUARDANDO PREÇO.
+    """
     global BybitClient, public_price_broker
-    if public_price_broker is not None: return public_price_broker
+    if public_price_broker is not None:
+        return public_price_broker
     with _public_price_broker_lock:
-        if public_price_broker is not None: return public_price_broker
+        if public_price_broker is not None:
+            return public_price_broker
         if BybitClient is None:
             from src.broker.bybit_client import BybitClient as _BybitClient
             BybitClient = _BybitClient
-        _, bybit_api_key, bybit_api_secret = _get_active_investor_bybit_credentials()
-        if not bybit_api_key or not bybit_api_secret:
-            from src.broker.bybit_client import _get_ccxt as _get_ccxt_cached
-            class CCXTPublicPriceFallback:
-                def __init__(self):
-                    self._ccxt_exchange = _get_ccxt_cached().bybit()
-                def get_last_price(self, symbol):
-                    try: return float(self._ccxt_exchange.fetch_ticker(symbol)['last'])
-                    except Exception: return 0.0
-                def fetch_ohlcv(self, symbol, timeframe='15m'):
-                    try:
-                        from src.broker.bybit_client import _get_pd as _get_pd_cached
-                        pd = _get_pd_cached()
-                        return pd.DataFrame(self._ccxt_exchange.fetch_ohlcv(symbol, timeframe, limit=200), columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-                    except Exception: return None
-            return CCXTPublicPriceFallback()
-        public_price_broker = BybitClient(bybit_api_key, bybit_api_secret, testnet=ENV_CONFIG.use_testnet)
+        public_price_broker = BybitClient(
+            api_key='',
+            api_secret='',
+            testnet=False,
+            allow_env_credentials=False,
+        )
     return public_price_broker
 
 def _get_public_radar_broker_mainnet():
@@ -824,9 +822,37 @@ def _get_public_radar_broker_mainnet():
         if BybitClient is None:
             from src.broker.bybit_client import BybitClient as _BybitClient
             BybitClient = _BybitClient
-        # Passa placeholders "truthy" para impedir fallback para chaves do .env.
-        public_radar_broker = BybitClient(" ", " ", testnet=False)
+        public_radar_broker = BybitClient(
+            api_key='',
+            api_secret='',
+            testnet=False,
+            allow_env_credentials=False,
+        )
     return public_radar_broker
+
+def _refresh_radar_live_from_public_tickers():
+    """Atualiza RADAR LIVE mesmo com posições abertas (não depende de chaves)."""
+    try:
+        radar_broker = _get_public_radar_broker_mainnet()
+        tickers = radar_broker.exchange.fetch_tickers(params={'category': 'linear'}) or {}
+    except Exception:
+        return
+    radar_candidates = []
+    for t in (tickers.values() if isinstance(tickers, dict) else []):
+        sym = str((t or {}).get('symbol') or '').strip()
+        if not sym or 'USDT' not in sym:
+            continue
+        radar_candidates.append(t)
+    top_coins = sorted(
+        radar_candidates,
+        key=lambda x: _coerce_float((x or {}).get('quoteVolume'), (x or {}).get('baseVolume'), default=0.0),
+        reverse=True,
+    )[:SCAN_TOP_COINS]
+    if top_coins:
+        central_state['symbol'] = _limpar_simbolo((top_coins[0] or {}).get('symbol'))
+    else:
+        central_state['symbol'] = '---'
+    return top_coins
 
 def _ensure_broker_class(exchange='bybit'):
     exchange = str(exchange or 'bybit').strip().lower()
@@ -1553,6 +1579,7 @@ def _monitor_dashboard_positions():
                                 entry_price = float(pos.get('avgPrice') or 0)
                                 unrealised_pnl = float(pos.get('unrealisedPnl') or 0)
                                 leverage = float(pos.get('leverage') or ALAVANCAGEM)
+                                mark_price = float(pos.get('markPrice') or pos.get('lastPrice') or entry_price or 0)
 
                                 # Pula se não houver posição aberta
                                 if size <= 0:
@@ -1569,6 +1596,7 @@ def _monitor_dashboard_positions():
                                     'side': side_normalized,
                                     'size': size,
                                     'entry_price': entry_price,
+                                    'mark_price': mark_price,
                                     'unrealised_pnl': unrealised_pnl,
                                     'leverage': leverage,
                                     'positionIM': pos.get('positionIM'),
@@ -1722,6 +1750,7 @@ def _monitor_dashboard_positions():
                             'raw_symbol': symbol,
                             'side': pos['side'],
                             'entry_price': pos['entry_price'],
+                            'mark_price': float(pos.get('mark_price') or 0),
                             'unrealised_pnl': 0.0,
                             'size': 0.0,
                             'leverage': pos['leverage'],
@@ -1735,6 +1764,8 @@ def _monitor_dashboard_positions():
                     grouped_positions[key]['client_count'] += 1
                     grouped_positions[key]['positionIM'] += float(pos.get('positionIM') or 0)
                     grouped_positions[key]['positionValue'] += float(pos.get('positionValue') or 0)
+                    if float(pos.get('mark_price') or 0) > 0:
+                        grouped_positions[key]['mark_price'] = float(pos.get('mark_price') or 0)
 
                 # Atualiza os trades ativos com preços em tempo real
                 active_trades_list = []
@@ -1912,11 +1943,14 @@ def sniper_worker_loop():
                     f"📊 Monitorando {len(central_state.get('active_trades') or []) or _count_live_open_positions()} "
                     f"posição(ões) — limite {MAX_MOEDAS_ATIVAS}"
                 )
+                # Mantém RADAR LIVE atualizado mesmo sem abrir novas entradas
+                _refresh_radar_live_from_public_tickers()
                 time.sleep(15)
                 continue
 
             _, key, sec = _get_active_investor_bybit_credentials()
             if not key or not sec:
+                _refresh_radar_live_from_public_tickers()
                 time.sleep(10)
                 continue
 
@@ -1938,25 +1972,7 @@ def sniper_worker_loop():
             # RADAR/ANÁLISE: usa sempre Mainnet (dados reais), mesmo quando USE_TESTNET=True
             # para execução de ordens (Testnet).
             radar_broker = _get_public_radar_broker_mainnet()
-            try:
-                tickers = radar_broker.exchange.fetch_tickers(params={'category': 'linear'}) or {}
-            except Exception:
-                tickers = {}
-
-            radar_candidates = []
-            for t in (tickers.values() if isinstance(tickers, dict) else []):
-                sym = str((t or {}).get('symbol') or '').strip()
-                if not sym:
-                    continue
-                if 'USDT' not in sym:
-                    continue
-                radar_candidates.append(t)
-
-            top_coins = sorted(
-                radar_candidates,
-                key=lambda x: _coerce_float((x or {}).get('quoteVolume'), (x or {}).get('baseVolume'), default=0.0),
-                reverse=True,
-            )[:SCAN_TOP_COINS]
+            top_coins = _refresh_radar_live_from_public_tickers() or []
 
             validator = GroqValidator()
             market_intel = get_market_intelligence()
@@ -1966,11 +1982,9 @@ def sniper_worker_loop():
             positions_empty = len(central_state.get('active_trades') or []) == 0
             force_testnet_bypass = bool(USE_TESTNET and positions_empty)
             if top_coins:
-                central_state['symbol'] = _limpar_simbolo((top_coins[0] or {}).get('symbol'))
                 if not central_state.get('last_sniper_signal'):
                     central_state['confidence'] = 0
             else:
-                central_state['symbol'] = '---'
                 if not central_state.get('last_sniper_signal'):
                     central_state['confidence'] = 0
 

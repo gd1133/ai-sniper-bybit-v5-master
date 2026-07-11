@@ -78,14 +78,18 @@ class BybitClient:
     Versão 1.8.6: Correção estrita de tipos Decimal/Float + Tratamento nativo CCXT + Protocolo 100/50.
     Blindagem contra bloqueios de API e vazamento de memória.
     """
-    def __init__(self, api_key=None, api_secret=None, testnet=None, base_url=None):
+    def __init__(self, api_key=None, api_secret=None, testnet=None, base_url=None, allow_env_credentials=True):
         # LAZY LOADING: Evita importação circular puxando apenas no escopo local
         from src.config import get_bybit_base_url, get_bybit_credentials, resolve_use_testnet
         from src.broker.order_calculator import OrderCalculator
 
         ccxt = _get_ccxt()
 
-        env_api_key, env_api_secret = get_bybit_credentials()
+        # allow_env_credentials=False: market data público sem herdar BYBIT_API_* do .env
+        if allow_env_credentials:
+            env_api_key, env_api_secret = get_bybit_credentials()
+        else:
+            env_api_key, env_api_secret = '', ''
 
         # SANITIZAÇÃO: Remove espaços, quebras de linha e caracteres invisíveis
         api_key = str(api_key or env_api_key or '').strip().replace('\n', '').replace('\r', '')
@@ -155,6 +159,7 @@ class BybitClient:
         self.last_request_time = {}
         self.adaptive_delay = 0.5
         self.rate_limit_block_until = 0
+        self._public_market_exchange = None
 
     def _configure_exchange_endpoint(self):
         """Aplica e valida o endpoint exato exigido pelo ambiente configurado."""
@@ -630,8 +635,42 @@ class BybitClient:
 
             return self.cache_ohlcv[cache_key][0] if cache_key in self.cache_ohlcv else None
 
+    def _ensure_public_market_exchange(self):
+        """CCXT Bybit mainnet sem API keys — tickers públicos (evita retCode 10003)."""
+        if self._public_market_exchange is not None:
+            return self._public_market_exchange
+
+        from src.config import get_bybit_base_url
+
+        ccxt = _get_ccxt()
+        endpoint = get_bybit_base_url(False)
+        exchange = ccxt.bybit({
+            'enableRateLimit': True,
+            'timeout': 15000,
+            'options': {
+                'defaultType': 'swap',
+                'defaultSubType': 'linear',
+                'adjustForTimeDifference': True,
+            },
+        })
+        api_urls = exchange.urls.get('api')
+        if isinstance(api_urls, dict):
+            for key in list(api_urls.keys()):
+                api_urls[key] = endpoint
+        else:
+            exchange.urls['api'] = endpoint
+        self._public_market_exchange = exchange
+        return exchange
+
+    def _fetch_public_last_price(self, symbol):
+        """Preço via endpoint público mainnet, sem autenticação."""
+        exchange = self._ensure_public_market_exchange()
+        self._apply_rate_limit('get_last_price_public')
+        ticker = exchange.fetch_ticker(symbol, params={'category': 'linear'})
+        return float(ticker.get('last') or 0)
+
     def get_last_price(self, symbol):
-        """Preço em tempo real do ativo."""
+        """Preço em tempo real do ativo (com fallback público se a sessão autenticada falhar)."""
         if symbol in self.cache_ticker and self._is_cache_valid(self.cache_ticker[symbol], self.cache_ttl_ticker):
             return self.cache_ticker[symbol][0]
 
@@ -639,11 +678,23 @@ class BybitClient:
             self._apply_rate_limit('get_last_price')
             ticker = self.exchange.fetch_ticker(symbol, params={'category': 'linear'})
             price = float(ticker['last'])
-            self.cache_ticker[symbol] = (price, time.time())
-            return price
+            if price > 0:
+                self.cache_ticker[symbol] = (price, time.time())
+                return price
         except Exception as e:
             print(f"[ERRO BROKER] Preço para {symbol} falhou: {e}", flush=True)
-            return self.cache_ticker[symbol][0] if symbol in self.cache_ticker else 0.0
+
+        # Chaves inválidas / endpoint errado (ex.: 10003) não podem zerar o dashboard.
+        try:
+            price = self._fetch_public_last_price(symbol)
+            if price > 0:
+                self.cache_ticker[symbol] = (price, time.time())
+                print(f"[BROKER] Preço público mainnet {symbol}: {price}", flush=True)
+                return price
+        except Exception as public_err:
+            print(f"[ERRO BROKER] Preço público para {symbol} falhou: {public_err}", flush=True)
+
+        return self.cache_ticker[symbol][0] if symbol in self.cache_ticker else 0.0
 
     def fetch_order_details(self, symbol, order_id):
         """Busca a ficha descritiva completa de uma boleta de mercado executada."""
