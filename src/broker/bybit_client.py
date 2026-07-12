@@ -72,6 +72,76 @@ def _get_pybit_http():
     return _pybit_http_class
 
 
+def inicializar_exchange_bybit(api_key=None, api_secret=None, e_testnet=False, e_demo=False, base_url=None):
+    """
+    Cria a instância CCXT Bybit com endpoint correto para Mainnet, Testnet ou Demo.
+
+    - Mainnet: https://api.bybit.com (sem sandbox)
+    - Testnet: https://api-testnet.bybit.com + set_sandbox_mode(True)
+    - Demo Trading: https://api-demo.bybit.com (URLs forçadas; sandbox CCXT = testnet, não demo)
+    """
+    from src.config import get_bybit_base_url
+
+    ccxt = _get_ccxt()
+    e_testnet = bool(e_testnet)
+    e_demo = bool(e_demo)
+
+    exchange_params = {
+        'enableRateLimit': True,
+        'rateLimit': 100,
+        'timeout': 15000,
+        'options': {
+            'defaultType': 'swap',
+            'defaultSubType': 'linear',
+            'adjustForTimeDifference': True,
+            'recvWindow': 20000,
+        },
+    }
+    key = str(api_key or '').strip()
+    secret = str(api_secret or '').strip()
+    if key and secret:
+        exchange_params['apiKey'] = key
+        exchange_params['secret'] = secret
+
+    exchange = ccxt.bybit(exchange_params)
+
+    normalized_base = str(base_url or '').strip()
+    if normalized_base:
+        endpoint = normalized_base
+        e_demo = e_demo or ('api-demo.bybit.com' in endpoint)
+        e_testnet = e_testnet or ('api-testnet.bybit.com' in endpoint)
+    elif e_demo:
+        endpoint = 'https://api-demo.bybit.com'
+    elif e_testnet:
+        endpoint = get_bybit_base_url(True)
+    else:
+        endpoint = get_bybit_base_url(False)
+
+    # SE FOR CHAVE TESTNET, ATIVA O SANDBOX ANTES DE QUALQUER REQUISIÇÃO
+    # (CCXT sandbox = Testnet clássica; Demo Trading usa URL própria sem sandbox)
+    if e_testnet and not e_demo:
+        exchange.set_sandbox_mode(True)
+    elif not e_testnet and not e_demo:
+        try:
+            exchange.set_sandbox_mode(False)
+        except Exception:
+            pass
+
+    api_urls = exchange.urls.get('api')
+    if isinstance(api_urls, dict):
+        for url_key in list(api_urls.keys()):
+            api_urls[url_key] = endpoint
+    else:
+        exchange.urls['api'] = endpoint
+
+    print(
+        f"🔧 [CCXT BYBIT] sandbox_testnet={bool(e_testnet and not e_demo)} "
+        f"demo={e_demo} endpoint={endpoint}",
+        flush=True,
+    )
+    return exchange, endpoint, e_testnet, e_demo
+
+
 class BybitClient:
     """
     IA 1: Responsável pela comunicação com a Bybit.
@@ -80,10 +150,8 @@ class BybitClient:
     """
     def __init__(self, api_key=None, api_secret=None, testnet=None, base_url=None, allow_env_credentials=True):
         # LAZY LOADING: Evita importação circular puxando apenas no escopo local
-        from src.config import get_bybit_base_url, get_bybit_credentials, resolve_use_testnet
+        from src.config import get_bybit_credentials, resolve_use_testnet
         from src.broker.order_calculator import OrderCalculator
-
-        ccxt = _get_ccxt()
 
         # allow_env_credentials=False: market data público sem herdar BYBIT_API_* do .env
         if allow_env_credentials:
@@ -97,36 +165,25 @@ class BybitClient:
 
         normalized_base_url = str(base_url or '').strip()
         if normalized_base_url:
-            self.active_endpoint = normalized_base_url
-            self.is_demo = 'api-demo.bybit.com' in normalized_base_url
-            self.testnet = 'api-testnet.bybit.com' in normalized_base_url
+            e_demo = 'api-demo.bybit.com' in normalized_base_url
+            e_testnet = 'api-testnet.bybit.com' in normalized_base_url
         else:
-            self.testnet = resolve_use_testnet(testnet)
-            self.is_demo = False
-            self.active_endpoint = get_bybit_base_url(self.testnet)
-        self.use_sandbox = bool(self.testnet or self.is_demo)
-        self.pybit_session = None
-
-        cfg = {
-            'enableRateLimit': True,
-            'rateLimit': 100,  # Delay mínimo tolerável entre requisições
-            'timeout': 15000,   # Timeout HTTP de 15s para evitar travamento da thread
-            'options': {
-                'defaultType': 'swap',  # Foco absoluto em contratos perpétuos
-                'defaultSubType': 'linear',
-                'adjustForTimeDifference': True,
-                'recvWindow': 20000,  # Janela ampla para tolerar latência do servidor em nuvem
-            }
-        }
+            e_demo = False
+            e_testnet = resolve_use_testnet(testnet)
 
         # Inicializa a calculadora de ordens dinâmica
         self.order_calculator = OrderCalculator(exchange_name='bybit')
-        if api_key and api_secret:
-            cfg['apiKey'] = api_key
-            cfg['secret'] = api_secret
-
-        self.exchange = ccxt.bybit(cfg)
-        self._configure_exchange_endpoint()
+        self.exchange, self.active_endpoint, resolved_testnet, resolved_demo = inicializar_exchange_bybit(
+            api_key=api_key,
+            api_secret=api_secret,
+            e_testnet=e_testnet,
+            e_demo=e_demo,
+            base_url=normalized_base_url or None,
+        )
+        self.testnet = bool(resolved_testnet and not resolved_demo)
+        self.is_demo = bool(resolved_demo)
+        self.use_sandbox = bool(self.testnet or self.is_demo)
+        self.pybit_session = None
 
         # SINCRONIZAÇÃO DE TEMPO: Executa na inicialização para mitigar drift de timestamp
         if api_key and api_secret:
@@ -162,17 +219,15 @@ class BybitClient:
         self._public_market_exchange = None
 
     def _configure_exchange_endpoint(self):
-        """Aplica e valida o endpoint exato exigido pelo ambiente configurado."""
-        if self.use_sandbox:
+        """Reaplica sandbox/endpoint (compatível com testes legados)."""
+        if self.testnet and not self.is_demo:
             self.exchange.set_sandbox_mode(True)
-
         api_urls = self.exchange.urls.get('api')
         if isinstance(api_urls, dict):
             for key in list(api_urls.keys()):
                 api_urls[key] = self.active_endpoint
         else:
             self.exchange.urls['api'] = self.active_endpoint
-
         self._validate_exchange_endpoint()
 
     def _validate_exchange_endpoint(self):
@@ -201,8 +256,11 @@ class BybitClient:
                 api_secret=api_secret,
                 recv_window=20000,
             )
-            if not self.is_demo and not self.testnet:
+            # Sempre fixa o endpoint resolvido (mainnet / testnet / demo)
+            try:
                 self.pybit_session.endpoint = self.active_endpoint
+            except Exception:
+                pass
             print(
                 f"🔌 [PYBIT V5] módulo={self.pybit_sdk_module} testnet={self.testnet} demo={self.is_demo} "
                 f"endpoint={self.pybit_session.endpoint} recv_window=20000ms",

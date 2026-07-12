@@ -914,11 +914,37 @@ def _ensure_broker_class(exchange='bybit'):
     return BybitClient
 
 def _make_broker(client):
+    """
+    Cria broker Bybit/Binance respeitando o ambiente do investidor:
+    mainnet (real) | testnet | demo — sem forçar Mainnet em chaves de teste.
+    """
     exchange = str(client.get('exchange') or 'bybit').strip().lower()
     endpoint_mode = _get_client_endpoint_mode(client)
+    account_mode = str(client.get('account_mode') or '').strip().lower()
+    wants_test = (
+        account_mode in ('testnet', 'demo')
+        or _coerce_bool(client.get('is_testnet'), default=False)
+        or endpoint_mode in ('testnet', 'demo')
+    )
+    wants_real = account_mode == 'real' and not _coerce_bool(client.get('is_testnet'), default=False)
+
+    # Alinha endpoint com a flag do investidor (evita ERRO_API mainnet com chave testnet/demo)
+    if wants_test and endpoint_mode == 'mainnet':
+        endpoint_mode = 'demo' if account_mode == 'demo' else 'testnet'
+    if wants_real and endpoint_mode in ('testnet', 'demo') and not str(client.get('bybit_endpoint_mode') or '').strip():
+        endpoint_mode = 'mainnet'
+    if account_mode == 'demo':
+        endpoint_mode = 'demo'
+
+    # testnet=True no BybitClient ativa sandbox CCXT; demo usa base_url api-demo
     use_testnet = endpoint_mode == 'testnet'
     endpoint_url = _endpoint_url_for_mode(endpoint_mode)
     broker_cls = _ensure_broker_class(exchange)
+    print(
+        f"🏦 [MAKE BROKER] exchange={exchange} account={account_mode or '-'} "
+        f"endpoint_mode={endpoint_mode} testnet_flag={use_testnet} url={endpoint_url}",
+        flush=True,
+    )
     return _get_broker_manager().get_broker(client, broker_cls, use_testnet, endpoint_url=endpoint_url)
 
 def _get_registered_clients(active_only=False):
@@ -2766,13 +2792,22 @@ def api_market_intelligence():
 def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=None, client_id=None, existing_client=None):
     payload = dict(client_payload or {})
     final_is_testnet = _coerce_bool(payload.get('is_testnet', is_testnet), default=USE_TESTNET)
+    requested_mode = str(payload.get('account_mode') or payload.get('bybit_endpoint_mode') or '').strip().lower()
     if final_is_testnet:
-        payload['account_mode'] = 'testnet'
+        if requested_mode == 'demo':
+            payload['account_mode'] = 'demo'
+            payload['bybit_endpoint_mode'] = 'demo'
+        else:
+            payload['account_mode'] = 'testnet'
+            payload['bybit_endpoint_mode'] = str(payload.get('bybit_endpoint_mode') or 'testnet')
+            if payload['bybit_endpoint_mode'] not in ('testnet', 'demo'):
+                payload['bybit_endpoint_mode'] = 'testnet'
         payload['is_testnet'] = True
         payload['balance_source'] = 'broker_real_balance'
     else:
         payload['account_mode'] = 'real'
         payload['is_testnet'] = False
+        payload['bybit_endpoint_mode'] = 'mainnet'
     payload['balance_source'] = _normalize_balance_source(payload.get('balance_source'))
     payload['exchange'] = str(payload.get('exchange') or 'bybit').strip().lower()
     if client_id is not None: payload['id'] = client_id
@@ -2813,6 +2848,11 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
                 'is_testnet': final_is_testnet,
             }
 
+        print(
+            f"🔐 [VALIDAR] nome={payload.get('nome')} is_testnet={final_is_testnet} "
+            f"endpoint={payload.get('bybit_endpoint_mode')} account={payload.get('account_mode')}",
+            flush=True,
+        )
         broker, balance = _try_validate(payload)
         if balance is None or not getattr(broker, 'authenticated', False):
             raw_msg = str(getattr(broker, 'last_auth_error_message', '') or '').strip()
