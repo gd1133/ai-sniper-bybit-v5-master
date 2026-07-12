@@ -1184,8 +1184,9 @@ const App = () => {
                     bybit_secret: addFormFields.bybit_secret,
                     tg_token: addFormFields.tg_token,
                     chat_id: addFormFields.chat_id,
-                    account_mode: 'real',
+                    account_mode: formIsTestnet ? 'testnet' : 'real',
                     is_testnet: formIsTestnet,
+                    bybit_endpoint_mode: formIsTestnet ? 'testnet' : 'mainnet',
                     exchange: formExchange,
                     balance_source: 'broker_real_balance',
                   };
@@ -1266,8 +1267,12 @@ const App = () => {
                       </div>
                       <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest ml-1">
                         {formExchange === 'binance'
-                          ? 'Use suas chaves da Binance Futures (USDM) REAIS.'
-                          : 'Use suas chaves da Bybit Perpetual REAIS.'}
+                          ? (formIsTestnet
+                            ? 'Use chaves da Binance Futures Testnet.'
+                            : 'Use suas chaves da Binance Futures (USDM) REAIS.')
+                          : (formIsTestnet
+                            ? 'Use chaves de testnet.bybit.com OU Demo Trading (bybit.com → Demo → API).'
+                            : 'Use suas chaves da Bybit Perpetual REAIS (Mainnet).')}
                       </p>
                    </div>
                   <div className="space-y-2 md:col-span-2">

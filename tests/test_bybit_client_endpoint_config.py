@@ -75,8 +75,27 @@ if __name__ == '__main__':
         if prod_client.pybit_session.endpoint != 'https://api.bybit.com':
             print(f"❌ Endpoint pybit produção incorreto: {prod_client.pybit_session.endpoint}")
             raise SystemExit(7)
+        if prod_client.exchange.sandbox_enabled:
+            print("❌ Sandbox NÃO deveria estar ativo em mainnet")
+            raise SystemExit(10)
 
-        print('✅ Endpoint Bybit segue USE_TESTNET sem redundância')
+        demo_client = bybit_client.BybitClient(
+            'key', 'secret', testnet=False, base_url='https://api-demo.bybit.com'
+        )
+        if demo_client.active_endpoint != 'https://api-demo.bybit.com':
+            print(f"❌ Endpoint demo incorreto: {demo_client.active_endpoint}")
+            raise SystemExit(11)
+        if not demo_client.is_demo:
+            print("❌ is_demo deveria ser True para api-demo")
+            raise SystemExit(12)
+        if demo_client.testnet:
+            print("❌ testnet deveria ser False no modo demo (sandbox CCXT é só testnet)")
+            raise SystemExit(13)
+        if demo_client.exchange.sandbox_enabled:
+            print("❌ Sandbox CCXT não deve ser True no Demo Trading")
+            raise SystemExit(14)
+
+        print('✅ Endpoint Bybit segue Mainnet/Testnet/Demo com sandbox dinâmico')
         raise SystemExit(0)
     finally:
         bybit_client._ccxt_instance = original_ccxt
