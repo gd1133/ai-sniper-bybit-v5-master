@@ -2884,68 +2884,52 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
         )
         is_demo_unsupported = 'RETCODE=10032' in err_upper or '"RETCODE":10032' in err_upper
 
-        if is_invalid_key and payload.get('exchange') == 'bybit':
-            # Modo Teste/Demos: tentar DEMO (api-demo) antes de inverter para mainnet.
-            if final_is_testnet:
-                demo_payload = dict(payload)
-                demo_payload['bybit_endpoint_mode'] = 'demo'
-                demo_payload['is_testnet'] = True
+        if is_invalid_key and payload.get('exchange') == 'bybit' and final_is_testnet:
+            # Ordem: tenta o outro ambiente de teste (demo ↔ testnet) antes de qualquer mainnet.
+            current_endpoint = str(payload.get('bybit_endpoint_mode') or 'demo').strip().lower()
+            alternate_endpoints = []
+            if current_endpoint == 'demo':
+                alternate_endpoints = ['testnet']
+            elif current_endpoint == 'testnet':
+                alternate_endpoints = ['demo']
+            else:
+                alternate_endpoints = ['demo', 'testnet']
+
+            for alt_mode in alternate_endpoints:
+                alt_payload = dict(payload)
+                alt_payload['bybit_endpoint_mode'] = alt_mode
+                alt_payload['account_mode'] = 'demo' if alt_mode == 'demo' else 'testnet'
+                alt_payload['is_testnet'] = True
                 try:
-                    print(f"🔄 [AUTH FALLBACK] Tentando ambiente DEMO para {payload.get('nome') or client_id}", flush=True)
-                    demo_broker, demo_balance = _try_validate(demo_payload)
-                    if demo_balance is not None and getattr(demo_broker, 'authenticated', False):
-                        payload['bybit_endpoint_mode'] = 'demo'
-                        payload['account_mode'] = 'demo'
+                    print(
+                        f"🔄 [AUTH FALLBACK] Tentando ambiente {alt_mode.upper()} "
+                        f"para {payload.get('nome') or client_id}",
+                        flush=True,
+                    )
+                    alt_broker, alt_balance = _try_validate(alt_payload)
+                    if alt_balance is not None and getattr(alt_broker, 'authenticated', False):
+                        payload['bybit_endpoint_mode'] = alt_mode
+                        payload['account_mode'] = alt_payload['account_mode']
                         payload['is_testnet'] = True
-                        payload['saldo_base'] = round(float(demo_balance), 2)
+                        payload['saldo_base'] = round(float(alt_balance), 2)
                         payload['status'] = 'ativo'
                         record, _, local_synced = _save_client_everywhere(payload)
                         _get_broker_manager().invalidate_client((record or {}).get('id') or client_id)
-                        _set_client_endpoint_mode((record or {}).get('id') or client_id, 'demo')
+                        _set_client_endpoint_mode((record or {}).get('id') or client_id, alt_mode)
+                        endpoint_label = 'DEMO (api-demo.bybit.com)' if alt_mode == 'demo' else 'TESTNET (api-testnet.bybit.com)'
                         return {
                             'valid': True,
-                            'msg': 'Chave validada no ambiente DEMO da Bybit (api-demo.bybit.com).',
+                            'msg': f'Chave validada no ambiente {endpoint_label}.',
                             'record': record,
                             'synced_to_local': local_synced,
                             'balance': payload['saldo_base'],
-                            'account_mode': 'demo',
+                            'account_mode': payload['account_mode'],
                             'exchange': payload['exchange'],
                             'balance_source': payload.get('balance_source'),
                             'is_testnet': True,
                         }
                 except Exception:
-                    pass
-
-            flipped_is_testnet = not bool(final_is_testnet)
-            probe_payload = dict(payload)
-            probe_payload['is_testnet'] = flipped_is_testnet
-            probe_payload.pop('bybit_endpoint_mode', None)
-            try:
-                env_label = 'TESTNET' if flipped_is_testnet else 'MAINNET'
-                print(f"🔄 [AUTH FALLBACK] Tentando {env_label} para {payload.get('nome') or client_id}", flush=True)
-                probe_broker, probe_balance = _try_validate(probe_payload)
-                if probe_balance is not None and getattr(probe_broker, 'authenticated', False):
-                    payload['is_testnet'] = flipped_is_testnet
-                    payload['account_mode'] = 'testnet' if flipped_is_testnet else 'real'
-                    payload['saldo_base'] = round(float(probe_balance), 2)
-                    payload['status'] = 'ativo'
-                    record, _, local_synced = _save_client_everywhere(payload)
-                    _get_broker_manager().invalidate_client((record or {}).get('id') or client_id)
-                    endpoint_mode = 'testnet' if flipped_is_testnet else 'mainnet'
-                    _set_client_endpoint_mode((record or {}).get('id') or client_id, endpoint_mode)
-                    return {
-                        'valid': True,
-                        'msg': f'Chave validada no ambiente {env_label}. Ambiente ajustado automaticamente.',
-                        'record': record,
-                        'synced_to_local': local_synced,
-                        'balance': payload['saldo_base'],
-                        'account_mode': 'testnet' if flipped_is_testnet else 'real',
-                        'exchange': payload['exchange'],
-                        'balance_source': payload.get('balance_source'),
-                        'is_testnet': flipped_is_testnet,
-                    }
-            except Exception:
-                pass
+                    continue
 
         payload['status'] = 'erro_api'
         payload['saldo_base'] = round(float((existing_client or {}).get('saldo_base') or 0.0), 2)
