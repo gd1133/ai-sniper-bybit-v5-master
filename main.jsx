@@ -600,13 +600,31 @@ const App = () => {
   const [investidoresLoading, setInvestidoresLoading] = useState(true);
   const currentOperationMode = normalizeOperationMode(data.operation_mode);
   const currentOperationMeta = OPERATION_MODE_META[currentOperationMode] || OPERATION_MODE_META.real;
-  const formExchange = 'bybit';
   const formExchangeLabel = 'Bybit';
   const formIsTestnet = normalizeIsTestnet(addFormFields.is_testnet);
-  const formBalanceLabel = `Saldo sincronizado (${formIsTestnet ? 'Testnet' : 'Mainnet'})`;
+  const formAccountMode = normalizeAccountMode(
+    addFormFields.account_mode,
+    addFormFields.is_testnet,
+    addFormFields.bybit_endpoint_mode,
+  );
+  const formIsDemoAccount = formAccountMode === 'demo' || (formIsTestnet && formAccountMode !== 'real');
+  const formBalanceLabel = `Saldo sincronizado (${formIsTestnet ? (formAccountMode === 'demo' ? 'Demo' : 'Testnet') : 'Mainnet'})`;
   const formBalancePlaceholder = formIsTestnet
-    ? 'Será lido da Bybit Testnet/Demo'
+    ? (formAccountMode === 'demo' ? 'Será lido da Bybit Demo Trading' : 'Será lido da Bybit Testnet')
     : 'Será lido da Bybit Mainnet';
+
+  const setInvestorEnvironment = (mode) => {
+    // mode: 'real' | 'demo' | 'testnet'
+    const normalized = mode === 'real' ? 'real' : (mode === 'testnet' ? 'testnet' : 'demo');
+    setAddFormFields((prev) => ({
+      ...prev,
+      account_mode: normalized,
+      is_testnet: normalized !== 'real',
+      bybit_endpoint_mode: normalized === 'real' ? 'mainnet' : (normalized === 'demo' ? 'demo' : 'testnet'),
+      balance_source: 'broker_real_balance',
+      exchange: 'bybit',
+    }));
+  };
 
   // Métricas live derivadas dos trades abertos (atualiza cards do topo em tempo real)
   const activeTrades = data.active_trades || [];
@@ -1184,13 +1202,21 @@ const App = () => {
                     bybit_secret: addFormFields.bybit_secret,
                     tg_token: addFormFields.tg_token,
                     chat_id: addFormFields.chat_id,
-                    account_mode: formIsTestnet ? 'testnet' : 'real',
+                    account_mode: formIsTestnet ? (formAccountMode === 'testnet' ? 'testnet' : 'demo') : 'real',
                     is_testnet: formIsTestnet,
-                    bybit_endpoint_mode: formIsTestnet ? 'testnet' : 'mainnet',
+                    bybit_endpoint_mode: formIsTestnet
+                      ? (formAccountMode === 'testnet' ? 'testnet' : 'demo')
+                      : 'mainnet',
                     exchange: 'bybit',
                     balance_source: 'broker_real_balance',
                   };
-                console.log('🔵 [FRONTEND] Iniciando salvamento do cliente:', { nome: payload.nome, exchange: 'bybit', api_base: API_BASE });
+                console.log('🔵 [FRONTEND] Salvando investidor:', {
+                  nome: payload.nome,
+                  account_mode: payload.account_mode,
+                  is_testnet: payload.is_testnet,
+                  bybit_endpoint_mode: payload.bybit_endpoint_mode,
+                  api_base: API_BASE,
+                });
                 try {
                   // Se id definido, atualiza; caso contrário cria novo
                   if (addFormFields.id) {
@@ -1261,15 +1287,25 @@ const App = () => {
                   <div className="space-y-2 md:col-span-2">
                      <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">Modo da Conta</label>
                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                       <div className="px-4 py-3 rounded-2xl border bg-green-500/15 border-green-500/40 text-green-300 text-sm font-black uppercase italic text-center">
-                         💼 Conta Real (Fixo)
-                       </div>
-                       <div className="px-4 py-3 rounded-2xl border bg-purple-500/15 border-purple-500/40 text-purple-200 text-sm font-black uppercase italic text-center">
-                         🧪 Conta Demos (Fixo)
-                       </div>
+                       <button
+                         type="button"
+                         onClick={() => setInvestorEnvironment('real')}
+                         className={`px-4 py-3 rounded-2xl border text-sm font-black uppercase italic transition-all ${!formIsTestnet ? 'bg-green-500/15 border-green-500/40 text-green-300' : 'bg-black border-white/10 text-zinc-500 hover:text-white'}`}
+                       >
+                         💼 Conta Real
+                       </button>
+                       <button
+                         type="button"
+                         onClick={() => setInvestorEnvironment('demo')}
+                         className={`px-4 py-3 rounded-2xl border text-sm font-black uppercase italic transition-all ${formIsTestnet ? 'bg-purple-500/15 border-purple-500/40 text-purple-200' : 'bg-black border-white/10 text-zinc-500 hover:text-white'}`}
+                       >
+                         🧪 Conta Demos
+                       </button>
                       </div>
                       <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest ml-1">
-                       O saldo é sincronizado automaticamente da Bybit (Mainnet/Testnet/Demo) — sem entrada manual.
+                       {formIsTestnet
+                         ? 'Conta Demos ativa — saldo via Bybit Testnet/Demo (api-testnet ou api-demo).'
+                         : 'Conta Real ativa — saldo via Bybit Mainnet (api.bybit.com).'}
                       </p>
                    </div>
                   <div className="space-y-2 md:col-span-2">
@@ -1277,14 +1313,14 @@ const App = () => {
                       <div className="grid grid-cols-2 gap-3">
                          <button
                            type="button"
-                           onClick={() => handleFieldChange('is_testnet', false)}
+                           onClick={() => setInvestorEnvironment('real')}
                            className={`px-4 py-3 rounded-2xl border text-sm font-black uppercase italic transition-all ${!formIsTestnet ? 'bg-green-500/15 border-green-500/40 text-green-300' : 'bg-black border-white/10 text-zinc-500 hover:text-white'}`}
                          >
                            💰 Real
                          </button>
                          <button
                            type="button"
-                           onClick={() => handleFieldChange('is_testnet', true)}
+                           onClick={() => setInvestorEnvironment('demo')}
                            className={`px-4 py-3 rounded-2xl border text-sm font-black uppercase italic transition-all ${formIsTestnet ? 'bg-purple-500/15 border-purple-500/40 text-purple-200' : 'bg-black border-white/10 text-zinc-500 hover:text-white'}`}
                          >
                           🧪 Teste / Demos
