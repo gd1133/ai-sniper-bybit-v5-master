@@ -600,13 +600,13 @@ const App = () => {
   const [investidoresLoading, setInvestidoresLoading] = useState(true);
   const currentOperationMode = normalizeOperationMode(data.operation_mode);
   const currentOperationMeta = OPERATION_MODE_META[currentOperationMode] || OPERATION_MODE_META.real;
-  const formExchange = String(addFormFields.exchange || 'bybit').toLowerCase();
-  const formExchangeLabel = formExchange === 'binance' ? 'Binance' : 'Bybit';
+  const formExchange = 'bybit';
+  const formExchangeLabel = 'Bybit';
   const formIsTestnet = normalizeIsTestnet(addFormFields.is_testnet);
   const formBalanceLabel = `Saldo sincronizado (${formIsTestnet ? 'Testnet' : 'Mainnet'})`;
   const formBalancePlaceholder = formIsTestnet
-    ? `Será lido da ${formExchangeLabel} Testnet`
-    : `Será lido da ${formExchangeLabel} Mainnet`;
+    ? 'Será lido da Bybit Testnet/Demo'
+    : 'Será lido da Bybit Mainnet';
 
   // Métricas live derivadas dos trades abertos (atualiza cards do topo em tempo real)
   const activeTrades = data.active_trades || [];
@@ -1048,7 +1048,7 @@ const App = () => {
                      <span className="text-[10px] font-black text-zinc-200 uppercase tracking-widest">Certificação Tactical</span>
                   </div>
                   <p className="text-[9px] text-zinc-500 font-bold uppercase leading-relaxed italic">
-                      TRIPLO CÉREBRO COM RIGOR DE {evidence.threshold || 60}% • ATÉ {evidence.max_positions || 5} ENTRADAS SIMULTÂNEAS, SEM REPETIR MOEDA • TP 100% DA ENTRADA • SL 50% DA ENTRADA • BYBIT + BINANCE.
+                      TRIPLO CÉREBRO COM RIGOR DE {evidence.threshold || 60}% • ATÉ {evidence.max_positions || 5} ENTRADAS SIMULTÂNEAS, SEM REPETIR MOEDA • TP 100% DA ENTRADA • SL 50% DA ENTRADA • BYBIT.
                   </p>
                </div>
             </div>
@@ -1119,8 +1119,8 @@ const App = () => {
                               API inválida
                             </span>
                           ) : null}
-                          <span className={`px-3 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest ${String(inv.exchange || 'bybit').toLowerCase() === 'binance' ? 'bg-orange-500/10 border-orange-500/30 text-orange-300' : 'bg-yellow-500/10 border-yellow-500/30 text-yellow-300'}`}>
-                            {String(inv.exchange || 'BYBIT').toUpperCase()}
+                          <span className="px-3 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest bg-yellow-500/10 border-yellow-500/30 text-yellow-300">
+                            BYBIT
                           </span>
                         </div>
                       </td>
@@ -1158,7 +1158,7 @@ const App = () => {
                   </div>
                   <div>
                     <h3 className="text-lg font-black italic uppercase tracking-tighter">Vincular Investidor</h3>
-                    <p className="text-[9px] text-zinc-500 font-bold uppercase tracking-widest">Setup de Chaves • Bybit & Binance</p>
+                    <p className="text-[9px] text-zinc-500 font-bold uppercase tracking-widest">Setup de Chaves • Bybit</p>
                   </div>
                </div>
                <div className="flex items-center gap-3">
@@ -1187,10 +1187,10 @@ const App = () => {
                     account_mode: formIsTestnet ? 'testnet' : 'real',
                     is_testnet: formIsTestnet,
                     bybit_endpoint_mode: formIsTestnet ? 'testnet' : 'mainnet',
-                    exchange: formExchange,
+                    exchange: 'bybit',
                     balance_source: 'broker_real_balance',
                   };
-                console.log('🔵 [FRONTEND] Iniciando salvamento do cliente:', { nome: payload.nome, exchange: payload.exchange, api_base: API_BASE });
+                console.log('🔵 [FRONTEND] Iniciando salvamento do cliente:', { nome: payload.nome, exchange: 'bybit', api_base: API_BASE });
                 try {
                   // Se id definido, atualiza; caso contrário cria novo
                   if (addFormFields.id) {
@@ -1249,30 +1249,13 @@ const App = () => {
                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div className="space-y-2 md:col-span-2">
                      <label className="text-[9px] font-black text-zinc-600 uppercase tracking-widest ml-1 italic">Corretora</label>
-                      <div className="grid grid-cols-2 gap-3">
-                         <button
-                           type="button"
-                           onClick={() => handleFieldChange('exchange', 'bybit')}
-                           className={`px-4 py-3 rounded-2xl border text-sm font-black uppercase italic transition-all ${formExchange === 'bybit' ? 'bg-yellow-500/15 border-yellow-500/40 text-yellow-300' : 'bg-black border-white/10 text-zinc-500 hover:text-white'}`}
-                         >
-                           🟡 Bybit
-                         </button>
-                         <button
-                           type="button"
-                           onClick={() => handleFieldChange('exchange', 'binance')}
-                           className={`px-4 py-3 rounded-2xl border text-sm font-black uppercase italic transition-all ${formExchange === 'binance' ? 'bg-orange-500/15 border-orange-500/40 text-orange-300' : 'bg-black border-white/10 text-zinc-500 hover:text-white'}`}
-                         >
-                           🟠 Binance
-                         </button>
+                      <div className="px-4 py-3 rounded-2xl border bg-yellow-500/15 border-yellow-500/40 text-yellow-300 text-sm font-black uppercase italic text-center">
+                        🟡 Bybit (única corretora)
                       </div>
                       <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest ml-1">
-                        {formExchange === 'binance'
-                          ? (formIsTestnet
-                            ? 'Use chaves da Binance Futures Testnet.'
-                            : 'Use suas chaves da Binance Futures (USDM) REAIS.')
-                          : (formIsTestnet
-                            ? 'Use chaves de testnet.bybit.com OU Demo Trading (bybit.com → Demo → API).'
-                            : 'Use suas chaves da Bybit Perpetual REAIS (Mainnet).')}
+                        {formIsTestnet
+                          ? 'Use chaves de testnet.bybit.com OU Demo Trading (bybit.com → Demo → API).'
+                          : 'Use suas chaves da Bybit Perpetual REAIS (Mainnet).'}
                       </p>
                    </div>
                   <div className="space-y-2 md:col-span-2">
@@ -1549,7 +1532,7 @@ const App = () => {
           </div>
           <div className="flex items-center gap-3 text-[10px] font-black text-zinc-500 uppercase tracking-widest italic">
              <ShieldCheck size={14} className="text-zinc-600"/>
-             Protocolo 100/50 — Bybit + Binance
+             Protocolo 100/50 — Bybit
            </div>
          </div>
          <p className="text-[9px] font-black text-zinc-700 uppercase tracking-[0.5em] italic">Motor Sniper v60.7 &copy; 2026</p>
