@@ -900,13 +900,7 @@ def _refresh_radar_live_from_public_tickers():
     return top_coins
 
 def _ensure_broker_class(exchange='bybit'):
-    exchange = str(exchange or 'bybit').strip().lower()
-    if exchange == 'binance':
-        global _BinanceClient
-        if '_BinanceClient' not in globals() or _BinanceClient is None:
-            from src.broker.binance_client import BinanceClient as _BC
-            globals()['_BinanceClient'] = _BC
-        return globals()['_BinanceClient']
+    """Robô opera apenas Bybit — Binance removida do fluxo de investidores."""
     global BybitClient
     if BybitClient is None:
         from src.broker.bybit_client import BybitClient as _BybitClient
@@ -915,10 +909,10 @@ def _ensure_broker_class(exchange='bybit'):
 
 def _make_broker(client):
     """
-    Cria broker Bybit/Binance respeitando o ambiente do investidor:
+    Cria broker Bybit respeitando o ambiente do investidor:
     mainnet (real) | testnet | demo — sem forçar Mainnet em chaves de teste.
     """
-    exchange = str(client.get('exchange') or 'bybit').strip().lower()
+    exchange = 'bybit'
     endpoint_mode = _get_client_endpoint_mode(client)
     account_mode = str(client.get('account_mode') or '').strip().lower()
     wants_test = (
@@ -941,11 +935,11 @@ def _make_broker(client):
     endpoint_url = _endpoint_url_for_mode(endpoint_mode)
     broker_cls = _ensure_broker_class(exchange)
     print(
-        f"🏦 [MAKE BROKER] exchange={exchange} account={account_mode or '-'} "
+        f"🏦 [MAKE BROKER] exchange=bybit account={account_mode or '-'} "
         f"endpoint_mode={endpoint_mode} testnet_flag={use_testnet} url={endpoint_url}",
         flush=True,
     )
-    return _get_broker_manager().get_broker(client, broker_cls, use_testnet, endpoint_url=endpoint_url)
+    return _get_broker_manager().get_broker({**client, 'exchange': 'bybit'}, broker_cls, use_testnet, endpoint_url=endpoint_url)
 
 def _get_registered_clients(active_only=False):
     try: return [{**dict(c), "storage_source": "local"} for c in (db.get_active_clients() if active_only else db.get_all_clients())]
@@ -1006,7 +1000,6 @@ def _fetch_active_client_balances(force=False):
     items, total = [], 0.0
     try:
         _ensure_broker_class('bybit')
-        _ensure_broker_class('binance')
         for client in _get_registered_clients(active_only=True):
             balance = None
             error = None
@@ -2446,7 +2439,7 @@ def get_investidores():
                 "auth_disabled": _is_client_temporarily_disabled(client_id),
                 "auth_disabled_reason": _get_client_disable_reason(client_id),
                 "storage_source": "local",
-                "exchange": str(r.get('exchange') or 'bybit').lower(),
+                "exchange": "bybit",
             })
         return jsonify(payload), 200
     except Exception: return jsonify([]), 200
@@ -2455,6 +2448,7 @@ def get_investidores():
 def add_cliente():
     data = request.json or {}
     try:
+        data['exchange'] = 'bybit'
         requested_is_testnet = _resolve_request_is_testnet(data, default=USE_TESTNET)
         data['is_testnet'] = requested_is_testnet
         validation = validar_e_salvar_cliente(data.get('bybit_key'), data.get('bybit_secret'), requested_is_testnet, client_payload=data)
@@ -2518,6 +2512,7 @@ def api_cliente_manage(client_id):
             return jsonify(c) if c else (jsonify({"error": "Não encontrado"}), 404)
         elif request.method == 'PUT':
             data = request.json or {}
+            data['exchange'] = 'bybit'
             requested_is_testnet = _resolve_request_is_testnet(data, default=USE_TESTNET)
             data['is_testnet'] = requested_is_testnet
             v = validar_e_salvar_cliente(data.get('bybit_key'), data.get('bybit_secret'), requested_is_testnet, client_payload=data, client_id=client_id, existing_client=_get_registered_client_by_id(client_id))
@@ -2809,7 +2804,7 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
         payload['is_testnet'] = False
         payload['bybit_endpoint_mode'] = 'mainnet'
     payload['balance_source'] = _normalize_balance_source(payload.get('balance_source'))
-    payload['exchange'] = str(payload.get('exchange') or 'bybit').strip().lower()
+    payload['exchange'] = 'bybit'  # Robô exclusivo Bybit — Binance removida
     if client_id is not None: payload['id'] = client_id
     if api_key: payload['bybit_key'] = api_key
     if api_secret: payload['bybit_secret'] = api_secret
