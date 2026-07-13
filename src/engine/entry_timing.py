@@ -166,6 +166,14 @@ def confirmar_timing_entrada(side: str, df: pd.DataFrame, signals: dict | None =
             ok_assert, assert_reasons = assertive_structure_entry(side, df, signals)
         except Exception as exc:
             ok_assert, assert_reasons = False, [f'Assertivo indisponível: {exc}']
+        # Heat / vela contrária: não libera assertivo
+        heat_bias = str((signals or {}).get('heat_bias', 'NEUTRAL')).upper()
+        if side_norm in ('sell', 'short', 'vender') and heat_bias == 'BULL':
+            ok_assert = False
+            assert_reasons = list(assert_reasons) + ['Assertivo bloqueado: heat BULL vs VENDA']
+        if side_norm in ('buy', 'long', 'comprar') and heat_bias == 'BEAR':
+            ok_assert = False
+            assert_reasons = list(assert_reasons) + ['Assertivo bloqueado: heat BEAR vs COMPRA']
         if ok_assert:
             all_reasons.extend(assert_reasons)
             all_reasons.append('Caminho ASSERTIVO (pivô + vela forte) — lógica clássica parcial')
