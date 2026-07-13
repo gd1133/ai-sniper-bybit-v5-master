@@ -165,6 +165,8 @@ class MarketIntelligence:
             'ai_source': news.get('source'),
             'news': news,
             'news_block_trade': bool(news.get('block_trade')) and not ai_assistants_unavailable,
+            'headlines': list(news.get('headlines') or []),
+            'web_news_bias': news.get('web_news_bias', 'NEUTRAL'),
             'summary': self._build_summary(regime, whale, news, timing_score, allow_entry),
         }
 

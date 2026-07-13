@@ -112,7 +112,8 @@ def detect_market_regime(df: pd.DataFrame, signals: dict | None = None) -> dict:
         lateral_score += 10
 
     lateral_score = min(100.0, lateral_score)
-    is_lateral = lateral_score >= 50
+    # Mais rigoroso: lateral a partir de 45 (antes 50) — só entra com direção clara
+    is_lateral = lateral_score >= 45 or (adx < 18 and trend == 'NEUTRO')
 
     if is_lateral:
         regime = 'RANGE'

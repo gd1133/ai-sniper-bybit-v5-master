@@ -91,7 +91,12 @@ from src.engine.indicators import IndicatorEngine
 from src.ai_brain.validator import GroqValidator
 from src.ai_brain.learning import TradeLearner
 from src.ai_brain.local_ml_engine import LocalMLEngine
-from src.risk.position_sizing import calculate_position_qty, load_entry_after_stop_pct, calcular_tamanho_posicao
+from src.risk.position_sizing import (
+    calculate_position_qty,
+    calculate_tp_sl_prices,
+    load_entry_after_stop_pct,
+    calcular_tamanho_posicao,
+)
 from src.intelligence.market_intelligence import get_market_intelligence
 from src.engine.entry_timing import confirmar_timing_entrada
 
@@ -435,21 +440,21 @@ def place_order_with_protection(
     """
     Executa a ordem a mercado e imediatamente define TP/SL via pybit V5.
 
-    TP/SL Sniper:
-      - Take Profit: +10 % sobre o preço de entrada (= +100 % de margem com 10× alavancagem)
-      - Stop Loss:    -5 % sobre o preço de entrada (=  -50 % de margem com 10× alavancagem)
+    TP/SL Sniper (sobre a MARGEM de entrada, independente da alavancagem):
+      - Take Profit: +100 % de lucro sobre o valor da entrada
+      - Stop Loss:   -50 % sobre o valor da entrada
     """
     v5_symbol = client._normalize_v5_symbol(symbol)
     v5_side = "Buy" if side.upper() == "BUY" else "Sell"
-    close_side = "Sell" if v5_side == "Buy" else "Buy"
 
-    tp_price = round(price * (1 + TAKE_PROFIT_PCT), 2) if v5_side == "Buy" else round(price * (1 - TAKE_PROFIT_PCT), 2)
-    sl_price = round(price * (1 - STOP_LOSS_PCT), 2) if v5_side == "Buy" else round(price * (1 + STOP_LOSS_PCT), 2)
+    tp_price, sl_price = calculate_tp_sl_prices(price, side, float(LEVERAGE))
+    tp_price = round(float(tp_price), 8)
+    sl_price = round(float(sl_price), 8)
 
     print(f"\n🚀 [PONTO ZERO] {v5_symbol} | {v5_side} | Qty={qty}")
     print(f"   📍 Entrada : ${price:.4f}")
-    print(f"   🎯 TP       : ${tp_price:.4f}  (+{TAKE_PROFIT_PCT*100:.0f}% preço = +100% margem)")
-    print(f"   🛡️  SL       : ${sl_price:.4f}  (-{STOP_LOSS_PCT*100:.0f}% preço = -50% margem)")
+    print(f"   🎯 TP       : ${tp_price:.4f}  (+100% lucro sobre a margem de entrada)")
+    print(f"   🛡️  SL       : ${sl_price:.4f}  (-50% da margem de entrada)")
     print(f"   🧠 Motivo   : {consensus.get('motivo', '')[:120]}")
 
     if client.pybit_session is None:
@@ -768,10 +773,21 @@ def run_sniper(symbol: str = SYMBOL):
                 continue
 
             intel_ctx = get_market_intelligence().evaluate(symbol, df, tech_data, {})
+            tech_data = dict(tech_data)
+            tech_data['sentiment_score'] = intel_ctx.get('sentiment_score')
+            tech_data['global_trend'] = intel_ctx.get('global_trend')
+            tech_data['news_risk'] = intel_ctx.get('news_risk')
             if not intel_ctx.get('allow_entry'):
-                hard = intel_ctx.get('hard_veto_reasons') or intel_ctx.get('veto_reasons', [])
+                hard = list(intel_ctx.get('hard_veto_reasons') or intel_ctx.get('veto_reasons', []))
+                lateral_hard = any('LATERAL' in str(h).upper() for h in hard)
+                if lateral_hard or (hard and not (
+                    intel_ctx.get('ai_assistants_unavailable') or intel_ctx.get('soft_ai_veto_only')
+                )):
+                    print(f"🔒 [IA INSTITUCIONAL] Entrada bloqueada: {' | '.join(hard)}")
+                    time.sleep(SCAN_INTERVAL)
+                    continue
                 if intel_ctx.get('ai_assistants_unavailable') or intel_ctx.get('autonomous_mode'):
-                    # Não trava o ativo: Cérebro 3 assume com matemática local + histórico
+                    # Soft/API: Cérebro 3 assume — nunca bypass de lateral
                     intel_ctx = dict(intel_ctx)
                     intel_ctx['allow_entry'] = True
                     intel_ctx['autonomous_mode'] = True

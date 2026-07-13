@@ -213,7 +213,7 @@ class IndicatorEngine:
         macd_hist = float(last['macd_hist']) if 'macd_hist' in last else 0.0
         macd_trend = 'ALTA' if macd_hist > 0 else ('BAIXA' if macd_hist < 0 else 'NEUTRO')
 
-        return {
+        signals_out = {
             'trend': trend,
             'price': float(current_price),
             'sma_200': float(sma),
@@ -252,6 +252,19 @@ class IndicatorEngine:
             'chart_entry_score': float(chart.get('chart_entry_score') or 0),
             'chart_reasons': list(chart.get('chart_reasons') or []),
         }
+        try:
+            from src.engine.market_heat import compute_candle_heat
+            heat = compute_candle_heat(signals_out, self.df)
+            signals_out.update(heat)
+        except Exception:
+            signals_out.update({
+                'heat_score': 50.0,
+                'heat_bias': 'NEUTRAL',
+                'heat_label': 'Heat indisponível',
+                'heat_reasons': [],
+                'entry_heat_ok': False,
+            })
+        return signals_out
 
     def get_smart_money_zones(self):
         """

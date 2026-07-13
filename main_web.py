@@ -2292,10 +2292,29 @@ def sniper_worker_loop():
                         continue
 
                     intel_ctx = market_intel.evaluate(sym, df, signals, t)
+                    # Injeta notícias/heat nos sinais para o Cérebro 3
+                    signals = dict(signals)
+                    signals['sentiment_score'] = intel_ctx.get('sentiment_score')
+                    signals['global_trend'] = intel_ctx.get('global_trend')
+                    signals['news_risk'] = intel_ctx.get('news_risk')
+                    signals['web_news_bias'] = (intel_ctx.get('news') or {}).get('web_news_bias')
+                    if intel_ctx.get('headlines') or (intel_ctx.get('news') or {}).get('headlines'):
+                        intel_ctx = dict(intel_ctx)
+                        intel_ctx['headlines'] = intel_ctx.get('headlines') or (intel_ctx.get('news') or {}).get('headlines')
+
                     if not intel_ctx.get('allow_entry'):
-                        hard = intel_ctx.get('hard_veto_reasons') or intel_ctx.get('veto_reasons', [])
-                        # Soft/API down → NÃO bloqueia o ativo; Cérebro 3 assume
-                        if intel_ctx.get('ai_assistants_unavailable') or intel_ctx.get('autonomous_mode'):
+                        hard = list(intel_ctx.get('hard_veto_reasons') or [])
+                        soft = list(intel_ctx.get('soft_veto_reasons') or [])
+                        # Veto duro (lateral / vela contrária) NUNCA é bypass — só soft/news/API
+                        lateral_hard = any('LATERAL' in str(h).upper() for h in hard) or bool(signals.get('is_lateral'))
+                        if lateral_hard or (hard and not intel_ctx.get('soft_ai_veto_only')):
+                            print(
+                                f"   🚫 [IA] {clean_sym} bloqueado (veto duro): "
+                                f"{' | '.join(hard or intel_ctx.get('veto_reasons', []))}",
+                                flush=True,
+                            )
+                            continue
+                        if intel_ctx.get('ai_assistants_unavailable') or intel_ctx.get('autonomous_mode') or soft:
                             intel_ctx = dict(intel_ctx)
                             intel_ctx['allow_entry'] = True
                             intel_ctx['autonomous_mode'] = True
@@ -2303,7 +2322,7 @@ def sniper_worker_loop():
                         else:
                             print(
                                 f"   🚫 [IA] {clean_sym} bloqueado: "
-                                f"{' | '.join(hard)}",
+                                f"{' | '.join(intel_ctx.get('veto_reasons', []))}",
                                 flush=True,
                             )
                             continue
