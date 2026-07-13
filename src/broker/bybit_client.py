@@ -728,7 +728,24 @@ class BybitClient:
             self.ohlcv_failures[cache_key] = 0
             return df
         except Exception as e:
+            err_s = str(e)
+            is_10006 = '10006' in err_s or 'Too many visits' in err_s or 'Rate Limit' in err_s
+            # #region agent log
+            try:
+                from src.debug_agent_log import agent_dbg
+                agent_dbg('C', 'bybit_client.py:fetch_ohlcv', 'ohlcv_failed', {
+                    'symbol': str(symbol)[:40],
+                    'timeframe': str(timeframe),
+                    'is_10006': is_10006,
+                    'err_prefix': err_s[:140],
+                })
+            except Exception:
+                pass
+            # #endregion
             print(f"[ERRO BROKER] Dados {symbol} falharam: {e}", flush=True)
+            if is_10006:
+                # Backoff curto para não martelar o rate limit no restante do radar
+                time.sleep(2.0)
             fail_count = self.ohlcv_failures.get(cache_key, 0) + 1
             self.ohlcv_failures[cache_key] = fail_count
 

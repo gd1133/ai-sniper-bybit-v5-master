@@ -194,6 +194,17 @@ class Cerebro2BookVolume:
         ctx = intelligence_context or {}
         # Se a camada cloud/news já sinalizou indisponibilidade, propaga relatório padrão
         if ctx.get('ai_assistants_unavailable'):
+            # #region agent log
+            try:
+                from src.debug_agent_log import agent_dbg
+                agent_dbg('E', 'validator.py:Cerebro2.generate_report', 'c2_forced_unavailable', {
+                    'symbol': str(symbol)[:40],
+                    'ai_assistants_unavailable': True,
+                    'autonomous_mode': bool(ctx.get('autonomous_mode')),
+                })
+            except Exception:
+                pass
+            # #endregion
             return {
                 'brain': 2,
                 'role': 'Livro e Volume',
@@ -267,6 +278,19 @@ class Cerebro3Sovereign:
             if clean.upper().endswith('USDT') and len(clean) > 4:
                 clean = clean[:-4]
             clean = clean or symbol
+            # #region agent log
+            try:
+                from src.debug_agent_log import agent_dbg
+                agent_dbg('E', 'validator.py:Cerebro3.decide', 'maestro_autonomous', {
+                    'symbol': str(symbol)[:40],
+                    'c1_available': bool(report_c1.get('available', True)),
+                    'c2_available': bool(report_c2.get('available', True)),
+                    'c1_report_prefix': str(report_c1.get('report', ''))[:60],
+                    'c2_report_prefix': str(report_c2.get('report', ''))[:60],
+                })
+            except Exception:
+                pass
+            # #endregion
             print(
                 "⚠️ [MAESTRO] Cérebro 1/2 limitados por requisição. "
                 "Ativando Modo Autônomo do Cérebro 3.",

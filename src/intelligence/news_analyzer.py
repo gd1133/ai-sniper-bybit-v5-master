@@ -19,6 +19,8 @@ except Exception:
 
 _CACHE: dict[str, tuple[float, dict]] = {}
 _CACHE_TTL_SECS = 300
+_GROQ_COOLDOWN_UNTIL = 0.0  # instrumentation / future cooldown gate
+_GROQ_FAIL_STREAK = 0
 
 
 def _env_bool(name: str, default: bool = True) -> bool:
@@ -79,7 +81,24 @@ def _fetch_coingecko_sentiment(coin_id: str) -> dict:
 
 
 def _ai_analyze_with_groq(symbol: str, tech_summary: str, groq_key: str) -> dict | None:
+    global _GROQ_FAIL_STREAK, _GROQ_COOLDOWN_UNTIL
     if not groq_key or Groq is None:
+        return None
+    now = time.time()
+    # #region agent log
+    try:
+        from src.debug_agent_log import agent_dbg
+        agent_dbg('B', 'news_analyzer.py:_ai_analyze_with_groq', 'groq_call_attempt', {
+            'symbol': str(symbol)[:40],
+            'cooldown_until': _GROQ_COOLDOWN_UNTIL,
+            'in_cooldown': now < _GROQ_COOLDOWN_UNTIL,
+            'fail_streak': _GROQ_FAIL_STREAK,
+        })
+    except Exception:
+        pass
+    # #endregion
+    # Cooldown global pós-429: não martela TPD em cada moeda do radar
+    if now < _GROQ_COOLDOWN_UNTIL:
         return None
     try:
         client = Groq(api_key=groq_key)
@@ -105,8 +124,36 @@ Responda APENAS em JSON válido:
         )
         text = (rsp.choices[0].message.content or '').strip()
         text = re.sub(r'^```json\s*|\s*```$', '', text, flags=re.IGNORECASE).strip()
+        _GROQ_FAIL_STREAK = 0
         return json.loads(text)
     except Exception as exc:
+        err = str(exc)
+        is_429 = '429' in err or 'rate_limit' in err.lower()
+        _GROQ_FAIL_STREAK += 1
+        if is_429:
+            # ~3 min default; tenta extrair "try again in XmYs" se existir
+            wait_secs = 180.0
+            m = re.search(r'try again in\s+(\d+)m([\d.]+)s', err, flags=re.IGNORECASE)
+            if m:
+                wait_secs = int(m.group(1)) * 60 + float(m.group(2))
+            else:
+                m2 = re.search(r'try again in\s+([\d.]+)s', err, flags=re.IGNORECASE)
+                if m2:
+                    wait_secs = float(m2.group(1))
+            _GROQ_COOLDOWN_UNTIL = time.time() + max(60.0, wait_secs)
+        # #region agent log
+        try:
+            from src.debug_agent_log import agent_dbg
+            agent_dbg('A', 'news_analyzer.py:_ai_analyze_with_groq', 'groq_call_failed', {
+                'symbol': str(symbol)[:40],
+                'is_429': is_429,
+                'fail_streak': _GROQ_FAIL_STREAK,
+                'cooldown_until': _GROQ_COOLDOWN_UNTIL,
+                'err_prefix': err[:120],
+            })
+        except Exception:
+            pass
+        # #endregion
         print(f'⚠️ [NEWS AI] Groq indisponível: {exc}', flush=True)
         return None
 
@@ -323,10 +370,29 @@ def analyze_news_sentiment(
             source = 'gemini+web'
 
     if cloud_attempted and ai_result is None:
-        # Groq/Gemini em 429/timeout: NÃO bloqueia o ativo — Cérebro 3 assume
-        ai_unavailable = True
-        source = 'web_local' if headlines else 'ai_unavailable'
-        reasons.append('Dados indisponíveis devido a limites de API da IA')
+        # Cloud (Groq/Gemini) caiu — NÃO derruba Cérebro 1/2.
+        # Mantém manchetes web + CoinGecko; só marca degradação cloud.
+        cloud_degraded = True
+        source = 'web_local' if headlines else 'local_sentiment'
+        reasons.append('Cloud news (Groq/Gemini) em limite — usando manchetes/local')
+        # ai_unavailable=False: evita cascade Maestro falso
+        ai_unavailable = False
+        # #region agent log
+        try:
+            from src.debug_agent_log import agent_dbg
+            agent_dbg('A', 'news_analyzer.py:analyze_news_sentiment', 'set_ai_unavailable', {
+                'symbol': str(symbol)[:40],
+                'has_headlines': bool(headlines),
+                'source': source,
+                'fail_streak': _GROQ_FAIL_STREAK,
+                'ai_unavailable': False,
+                'cloud_degraded': True,
+            })
+        except Exception:
+            pass
+        # #endregion
+    else:
+        cloud_degraded = False
 
     if ai_result:
         ai_score = float(ai_result.get('sentiment_score', 50) or 50)
@@ -363,6 +429,7 @@ def analyze_news_sentiment(
         'reason': ' | '.join(reasons) if reasons else 'Sem catalisadores de notícia relevantes',
         'source': source,
         'ai_unavailable': ai_unavailable,
+        'cloud_ai_degraded': cloud_degraded,
         'headlines': headlines[:6],
         'web_news_bias': web_bias,
     }

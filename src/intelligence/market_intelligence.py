@@ -49,7 +49,21 @@ class MarketIntelligence:
         block_lateral = _env_bool('BLOCK_LATERAL_MARKETS', True)
         hard_veto_reasons = []
         soft_veto_reasons = []
-        ai_assistants_unavailable = bool(news.get('ai_unavailable')) or str(news.get('source', '')) == 'ai_unavailable'
+        ai_assistants_unavailable = False
+        # Cloud news degradado NÃO derruba Cérebro 1/2 — só informativo
+        cloud_news_degraded = bool(news.get('cloud_ai_degraded') or news.get('ai_unavailable'))
+        if cloud_news_degraded:
+            # #region agent log
+            try:
+                from src.debug_agent_log import agent_dbg
+                agent_dbg('A', 'market_intelligence.py:evaluate', 'cloud_news_degraded_soft', {
+                    'symbol': str(symbol)[:40],
+                    'ai_assistants_unavailable': False,
+                    'source': news.get('source'),
+                })
+            except Exception:
+                pass
+            # #endregion
 
         if block_lateral and regime.get('is_lateral'):
             hard_veto_reasons.append(
@@ -131,10 +145,10 @@ class MarketIntelligence:
             autonomous_mode = True
         else:
             allow_entry = len(veto_reasons) == 0 and intelligence_score >= 48
-            # Soft veto de notícias não congela o scanner — Cérebro 3 decide
+            # Soft veto de notícias: libera allow_entry sem forçar Maestro/C2 down
             if soft_ai_veto_only:
                 allow_entry = True
-                autonomous_mode = True
+                autonomous_mode = False
             else:
                 autonomous_mode = False
 
@@ -147,6 +161,7 @@ class MarketIntelligence:
             'soft_veto_reasons': soft_veto_reasons,
             'soft_ai_veto_only': soft_ai_veto_only,
             'ai_assistants_unavailable': ai_assistants_unavailable,
+            'cloud_news_degraded': cloud_news_degraded,
             'autonomous_mode': autonomous_mode or ai_assistants_unavailable,
             'market_regime': regime.get('market_regime'),
             'regime_label': regime.get('regime_label'),
