@@ -134,6 +134,8 @@ class MarketIntelligence:
             'is_trending': news.get('is_trending'),
             'news_reason': news.get('reason'),
             'ai_source': news.get('source'),
+            'news': news,
+            'news_block_trade': bool(news.get('block_trade')),
             'summary': self._build_summary(regime, whale, news, timing_score, allow_entry),
         }
 

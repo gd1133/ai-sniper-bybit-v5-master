@@ -2188,6 +2188,43 @@ def sniper_worker_loop():
                         continue
                     print(f"   ✅ [TIMING] {clean_sym}: {' | '.join(timing_reasons)}", flush=True)
 
+                    # Confluência Absoluta — Concordância Total (5 filtros). Um falso = aborta.
+                    try:
+                        from src.engine.confluence_absoluta import (
+                            absolute_confluence_enabled,
+                            avaliar_confluencia_absoluta,
+                        )
+                        if absolute_confluence_enabled():
+                            df_macro = None
+                            try:
+                                df_macro = radar_broker.fetch_ohlcv(sym, timeframe='1h')
+                            except Exception:
+                                df_macro = None
+                            confluence = avaliar_confluencia_absoluta(
+                                side=side_exec,
+                                df=df,
+                                signals=signals,
+                                intel_ctx=intel_ctx,
+                                df_macro=df_macro,
+                                fetch_order_book_fn=lambda s=sym: radar_broker.fetch_order_book(s, limit=20),
+                            )
+                            if not confluence.get('aprovado'):
+                                print(
+                                    f"   ❌ [SINAL REJEITADO] {clean_sym}: Falha na Confluência Total. "
+                                    f"Fatores não se alinharam: {confluence.get('failed')}",
+                                    flush=True,
+                                )
+                                time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
+                                continue
+                            print(f"   ✅ [CONFLUÊNCIA ABSOLUTA] {clean_sym}: Concordância Total OK", flush=True)
+                    except Exception as conf_err:
+                        print(
+                            f"   ❌ [SINAL REJEITADO] {clean_sym}: erro na Confluência Absoluta ({conf_err})",
+                            flush=True,
+                        )
+                        time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
+                        continue
+
                     money_flow = _build_money_flow_metrics(signals, t, decisao)
                     edge = _get_symbol_trade_edge(sym, decisao)
                     chart_bonus = float(signals.get('chart_entry_score', 0) or 0) * 0.20

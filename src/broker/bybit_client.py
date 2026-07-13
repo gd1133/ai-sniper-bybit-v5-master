@@ -693,6 +693,55 @@ class BybitClient:
 
             return self.cache_ohlcv[cache_key][0] if cache_key in self.cache_ohlcv else None
 
+    def fetch_order_book(self, symbol, limit=20):
+        """
+        Profundidade do livro Bybit (CCXT). Usado pelo Filtro 3 da Confluência Absoluta.
+        Retorna dict {bids: [[price, qty], ...], asks: [[price, qty], ...]} ou None.
+        """
+        try:
+            self._apply_rate_limit('fetch_order_book')
+            market = self._ensure_public_market_exchange()
+            # Preferência: endpoint público mainnet para L2 (evita 10003 em chaves demo)
+            exchange = market if market is not None else self.exchange
+            book = exchange.fetch_order_book(symbol, limit=int(limit or 20), params={'category': 'linear'})
+            if not isinstance(book, dict):
+                return None
+            return {
+                'bids': list(book.get('bids') or [])[: int(limit or 20)],
+                'asks': list(book.get('asks') or [])[: int(limit or 20)],
+                'timestamp': book.get('timestamp'),
+                'symbol': symbol,
+            }
+        except Exception as e:
+            print(f"[ERRO BROKER] Order book {symbol} falhou: {e}", flush=True)
+            try:
+                self._apply_rate_limit('fetch_order_book_fallback')
+                book = self.exchange.fetch_order_book(symbol, limit=int(limit or 20), params={'category': 'linear'})
+                return {
+                    'bids': list(book.get('bids') or [])[: int(limit or 20)],
+                    'asks': list(book.get('asks') or [])[: int(limit or 20)],
+                    'timestamp': book.get('timestamp'),
+                    'symbol': symbol,
+                }
+            except Exception as e2:
+                print(f"[ERRO BROKER] Order book fallback {symbol}: {e2}", flush=True)
+                return None
+
+    def get_order_book_imbalance(self, symbol, limit=20):
+        """Soma qty das N primeiras linhas bids vs asks (ratio compradores/vendedores)."""
+        book = self.fetch_order_book(symbol, limit=limit)
+        if not book:
+            return None
+        bid_vol = sum(float(level[1]) for level in (book.get('bids') or []) if level and len(level) >= 2)
+        ask_vol = sum(float(level[1]) for level in (book.get('asks') or []) if level and len(level) >= 2)
+        return {
+            'bid_vol': bid_vol,
+            'ask_vol': ask_vol,
+            'bid_ask_ratio': (bid_vol / ask_vol) if ask_vol > 0 else 0.0,
+            'ask_bid_ratio': (ask_vol / bid_vol) if bid_vol > 0 else 0.0,
+            'order_book': book,
+        }
+
     def _ensure_public_market_exchange(self):
         """CCXT Bybit mainnet sem API keys — tickers públicos (evita retCode 10003)."""
         if self._public_market_exchange is not None:
