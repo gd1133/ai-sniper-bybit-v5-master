@@ -327,6 +327,7 @@ def check_five_confluences(tech_data: dict, consensus: dict) -> tuple[bool, list
       5. SuperTrend confirmando a direção
 
     Retorna (aprovado: bool, detalhes: list[str]).
+    Legacy Triplo Cérebro — mantido; a Confluência Absoluta é o gate rigoroso adicional.
     """
     checks = consensus.get("local_checks", {})
     trend = tech_data.get("trend", "NEUTRO")
@@ -360,6 +361,32 @@ def check_five_confluences(tech_data: dict, consensus: dict) -> tuple[bool, list
         print(line)
 
     return all_ok, failed
+
+
+def check_absolute_confluence(client, symbol: str, side: str, df, tech_data: dict, intel_ctx: dict) -> tuple[bool, list[str]]:
+    """Gate Concordância Total — aborta se qualquer filtro falhar."""
+    from src.engine.confluence_absoluta import (
+        absolute_confluence_enabled,
+        avaliar_confluencia_absoluta,
+    )
+    if not absolute_confluence_enabled():
+        return True, []
+
+    df_macro = None
+    try:
+        df_macro = client.fetch_ohlcv(symbol, timeframe='1h')
+    except Exception:
+        df_macro = None
+
+    result = avaliar_confluencia_absoluta(
+        side=side,
+        df=df,
+        signals=tech_data,
+        intel_ctx=intel_ctx or {},
+        df_macro=df_macro,
+        fetch_order_book_fn=lambda: client.fetch_order_book(symbol, limit=20),
+    )
+    return bool(result.get('aprovado')), list(result.get('failed') or [])
 
 
 # ─── Colocação de Ordem com TP/SL ─────────────────────────────────────────────
@@ -744,6 +771,16 @@ def run_sniper(symbol: str = SYMBOL):
                 time.sleep(SCAN_INTERVAL)
                 continue
 
+            # ── ETAPA 7b: Confluência Absoluta (Concordância Total) ──────────
+            side = "BUY" if decisao in ("COMPRAR", "BUY") else "SELL"
+            abs_ok, abs_failed = check_absolute_confluence(
+                client, symbol, side, df, tech_data, intel_ctx,
+            )
+            if not abs_ok:
+                print(f"🔒 [CONFLUÊNCIA ABSOLUTA] Abortado: {abs_failed}")
+                time.sleep(SCAN_INTERVAL)
+                continue
+
             # ── ETAPA 8: Autorização de Execução ─────────────────────────────
             if not client.authenticated:
                 print("⚠️  Modo leitura: ordem NÃO executada (sem credenciais válidas).")
@@ -751,8 +788,6 @@ def run_sniper(symbol: str = SYMBOL):
                 continue
 
             # ── ETAPA 9: Cálculo de Tamanho da Entrada (Risco Dinâmico) ──────
-            side = "BUY" if decisao in ("COMPRAR", "BUY") else "SELL"
-
             timing_ok, timing_reasons = confirmar_timing_entrada(side.lower(), df, tech_data)
             if not timing_ok:
                 print(f"⏳ [TIMING] Aguardando fim de repique: {' | '.join(timing_reasons)}")
