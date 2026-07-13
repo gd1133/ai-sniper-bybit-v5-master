@@ -234,11 +234,13 @@ def assertive_structure_entry(
     if side_norm in ('buy', 'long', 'comprar'):
         if not chart.get('strong_bullish_candle'):
             return False, ['Assertivo: falta vela forte de SUBIDA']
+        # Não compra se a última estrutura também marca vela forte de descida dominante
+        if chart.get('strong_bearish_candle') and not chart.get('bounce_from_pivot_low'):
+            return False, ['Assertivo: vela forte de DESCIDA conflita com COMPRA']
         structure_ok = (
             chart.get('bounce_from_pivot_low')
             or chart.get('near_pivot_support')
             or chart.get('structure_bias') == 'ALTA'
-            or float(chart.get('chart_entry_score') or 0) >= 40
         )
         if not structure_ok:
             return False, ['Assertivo: sem pivô/estrutura de alta']
@@ -250,11 +252,13 @@ def assertive_structure_entry(
     if side_norm in ('sell', 'short', 'vender'):
         if not chart.get('strong_bearish_candle'):
             return False, ['Assertivo: falta vela forte de DESCIDA']
+        # Bloqueia short se há vela forte de SUBIDA (caso BLUR nos logs)
+        if chart.get('strong_bullish_candle'):
+            return False, ['Assertivo: vela forte de SUBIDA conflita com VENDA — aguardar']
         structure_ok = (
             chart.get('rejection_from_pivot_high')
             or chart.get('near_pivot_resistance')
             or chart.get('structure_bias') == 'BAIXA'
-            or float(chart.get('chart_entry_score') or 0) >= 40
         )
         if not structure_ok:
             return False, ['Assertivo: sem pivô/estrutura de baixa']

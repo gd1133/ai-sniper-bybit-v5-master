@@ -261,11 +261,12 @@ class Cerebro3Sovereign:
             clean = (
                 str(symbol or '')
                 .replace('/USDT:USDT', '')
-                .replace('/USDT', '')
                 .replace(':USDT', '')
-                .replace('USDT', '')
-                or symbol
+                .replace('/USDT', '')
             )
+            if clean.upper().endswith('USDT') and len(clean) > 4:
+                clean = clean[:-4]
+            clean = clean or symbol
             print(
                 "⚠️ [MAESTRO] Cérebro 1/2 limitados por requisição. "
                 "Ativando Modo Autônomo do Cérebro 3.",

@@ -483,13 +483,14 @@ def _ticker_trend_scan_score(ticker):
     return vol * (1.0 + min(pct, 40.0) / 8.0)            
 
 # ==============================================================================
-# 🧪 MODO DE TESTE RÁPIDO (TEMPORÁRIO)
+# 🧪 MODO DE TESTE RÁPIDO (DEBUG EXPLÍCITO)
 # ==============================================================================
-# Quando True:
-#  - Mantém o "bypass" de teste sempre habilitado (debug).
-# Por padrão (False), o bypass só é aplicado quando:
-#  - USE_TESTNET=True e não há posições abertas (positions == 0).
-FORCAR_SINAL_TESTE = False
+# FORCAR_SINAL_TESTE=True só dispara ordem de debug se ALLOW_REAL_TRADING=False.
+# NUNCA auto-dispara só porque USE_TESTNET=true (isso entrava em BTC aleatório
+# sem analisar o radar — bug de produção).
+FORCAR_SINAL_TESTE = str(os.getenv('FORCAR_SINAL_TESTE', 'false')).strip().lower() in {
+    '1', 'true', 'yes', 'on',
+}
 _FORCED_SIGNAL_FIRED = False
 
 central_state = {
@@ -2230,9 +2231,8 @@ def sniper_worker_loop():
             market_intel = get_market_intelligence()
             oportunidades = []
 
-            # Alimenta o card RADAR LIVE imediatamente com a primeira moeda do radar.
+            # Alimenta o card RADAR LIVE — varre TODAS as moedas do top (sem atalho BTC).
             positions_empty = len(central_state.get('active_trades') or []) == 0
-            force_testnet_bypass = bool(USE_TESTNET and positions_empty)
             if top_coins:
                 if not central_state.get('last_sniper_signal'):
                     central_state['confidence'] = 0
@@ -2240,12 +2240,25 @@ def sniper_worker_loop():
                 if not central_state.get('last_sniper_signal'):
                     central_state['confidence'] = 0
 
-            # BYPASS (MECANISMO DE DEBUG):
-            # Em Testnet, sem posições abertas, não espera "sinal institucional perfeito".
-            # Força 1 ordem imediata na Testnet para validar TP(+100%)/SL(-50%) e o pipeline de execução.
-            if USE_TESTNET and top_coins and (not _FORCED_SIGNAL_FIRED) and (FORCAR_SINAL_TESTE or force_testnet_bypass):
+            # BYPASS DE DEBUG: somente explícito + SEM trading real.
+            # Antes: USE_TESTNET + sem posição → ordem aleatória na 1ª moeda (BTC)
+            # sem IA/confluência — causava VENDA/COMPRA imediata ao colar a API.
+            debug_force_ok = (
+                bool(FORCAR_SINAL_TESTE)
+                and (not ALLOW_REAL_TRADING)
+                and bool(USE_TESTNET)
+                and positions_empty
+                and (not _FORCED_SIGNAL_FIRED)
+                and bool(top_coins)
+            )
+            if debug_force_ok:
                 t = top_coins[0]
                 sym = (t or {}).get('symbol')
+                print(
+                    f"⚠️ [DEBUG BYPASS] FORCAR_SINAL_TESTE ativo (sem trading real) — "
+                    f"1 ordem de teste em {sym}. Desligue em produção.",
+                    flush=True,
+                )
                 if sym:
                     side = 'buy' if int(time.time()) % 2 == 0 else 'sell'
                     decisao = 'COMPRAR' if side == 'buy' else 'VENDER'
@@ -2269,12 +2282,26 @@ def sniper_worker_loop():
                         res = {
                             "probabilidade": 98,
                             "decisao": decisao,
-                            "motivo": "TESTNET BYPASS: ordem de debug (ignora filtros SMC/Volume/IA) para validar execução/TP/SL",
+                            "motivo": "TESTNET BYPASS: ordem de debug (ignora filtros) — só com FORCAR_SINAL_TESTE",
                         }
                         broadcast_ordem_global(sym, side, entry_price, res)
                         _FORCED_SIGNAL_FIRED = True
                         time.sleep(COOLDOWN_INSTITUCIONAL_SECS)
                         continue
+            elif USE_TESTNET and ALLOW_REAL_TRADING and positions_empty and (not _FORCED_SIGNAL_FIRED):
+                # Aviso uma vez por ciclo inicial: config perigosa
+                print(
+                    "🛡️ [SEGURANÇA] USE_TESTNET=true com ALLOW_REAL_TRADING=true — "
+                    "bypass de ordem forçada DESATIVADO. Radar analisa todas as moedas.",
+                    flush=True,
+                )
+                _FORCED_SIGNAL_FIRED = True  # só para não spammar o log
+
+            print(
+                f"🔍 [RADAR] Analisando {len(top_coins)} moedas do top volume "
+                f"(não só BTC)…",
+                flush=True,
+            )
 
             for t in top_coins:
                 sym = t['symbol']
