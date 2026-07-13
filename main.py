@@ -737,13 +737,21 @@ def run_sniper(symbol: str = SYMBOL):
 
             intel_ctx = get_market_intelligence().evaluate(symbol, df, tech_data, {})
             if not intel_ctx.get('allow_entry'):
-                print(f"🔒 [IA INSTITUCIONAL] Entrada bloqueada: {' | '.join(intel_ctx.get('veto_reasons', []))}")
-                time.sleep(SCAN_INTERVAL)
-                continue
+                hard = intel_ctx.get('hard_veto_reasons') or intel_ctx.get('veto_reasons', [])
+                if intel_ctx.get('ai_assistants_unavailable') or intel_ctx.get('autonomous_mode'):
+                    # Não trava o ativo: Cérebro 3 assume com matemática local + histórico
+                    intel_ctx = dict(intel_ctx)
+                    intel_ctx['allow_entry'] = True
+                    intel_ctx['autonomous_mode'] = True
+                    intel_ctx['ai_assistants_unavailable'] = True
+                else:
+                    print(f"🔒 [IA INSTITUCIONAL] Entrada bloqueada: {' | '.join(hard)}")
+                    time.sleep(SCAN_INTERVAL)
+                    continue
 
             print(f"🐋 [BALEIAS] Score={intel_ctx.get('whale_score')} | Timing={intel_ctx.get('timing_score')} | {intel_ctx.get('summary', '')}")
 
-            # ── ETAPA 5: Consenso local autonomo ──────────────────────────────
+            # ── ETAPA 5: Consenso local autonomo (Cérebro 3 soberano) ─────────
             consensus = validator.consensus_predict(tech_data, symbol, intelligence_context=intel_ctx)
             confidence = consensus.get("probabilidade", 0)
             decisao = consensus.get("decisao", "SCANNER")

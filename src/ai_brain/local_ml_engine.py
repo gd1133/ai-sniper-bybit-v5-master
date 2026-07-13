@@ -62,7 +62,7 @@ class LocalMLEngine:
             score += 30
         
         # SuperTrend (Confirmação de tendência) - 25 pontos
-        supertrend = tech_data.get('supertrend', 1)
+        supertrend = tech_data.get('supertrend_signal', tech_data.get('supertrend', 1))
         if (trend == "ALTA" and supertrend == 1) or (trend == "BAIXA" and supertrend == -1):
             score += 25
         
@@ -91,7 +91,7 @@ class LocalMLEngine:
             (direction: str, reason: str)
         """
         trend = str(tech_data.get('trend', '---')).upper()
-        supertrend = tech_data.get('supertrend', 1)
+        supertrend = tech_data.get('supertrend_signal', tech_data.get('supertrend', 1))
         rsi = float(tech_data.get('rsi', 50) or 50)
         
         # Lógica: Seguir tendência macro com confirmação de SuperTrend
