@@ -379,7 +379,13 @@ class BybitClient:
         return 'Buy' if normalized == 'buy' else 'Sell'
 
     def calculate_dynamic_order_qty(self, symbol: str, balance=None, leverage=None, after_stop: bool = False):
-        """Calcula quantidade com percentual da banca (padrão 5%), não mínimo da moeda."""
+        """Calcula quantidade com percentual da banca + filtro de viabilidade (7.5%)."""
+        from src.risk.entry_viability import (
+            evaluate_entry_viability,
+            extract_bybit_lot_filters,
+            print_entry_viability_log,
+        )
+
         current_price = self.get_last_price(symbol)
         if current_price <= 0:
             raise ValueError(f"Não foi possível obter preço atual para {symbol}")
@@ -389,17 +395,58 @@ class BybitClient:
             raise ValueError("Saldo indisponível para cálculo percentual da banca")
 
         lev = float(leverage or getattr(self, 'default_leverage', 10) or 10)
-        margin, qty = calculate_position_qty(
-            balance_val, current_price, lev, after_stop=after_stop,
+        target = load_entry_after_stop_pct() if after_stop else load_entry_pct()
+
+        market = {}
+        try:
+            self.exchange.load_markets()
+            market = self.exchange.market(symbol) or {}
+        except Exception:
+            market = {}
+        lot = extract_bybit_lot_filters(market)
+        min_amt, min_cost = self._get_market_limits(symbol)
+        lot['min_order_qty'] = max(float(lot.get('min_order_qty') or 0), float(min_amt or 0))
+        lot['min_cost'] = max(float(lot.get('min_cost') or 0), float(min_cost or 0))
+
+        report = evaluate_entry_viability(
+            bank_balance=balance_val,
+            current_price=current_price,
+            leverage=lev,
+            min_order_qty=float(lot.get('min_order_qty') or 0.001),
+            qty_step=float(lot.get('qty_step') or lot.get('min_order_qty') or 0.001),
+            target_pct=target,
+            symbol=str(symbol),
+            min_cost=float(lot.get('min_cost') or 0),
         )
+        print_entry_viability_log(report)
+
+        if not report.get('aprovado'):
+            metadata = {
+                'min_amount': float(lot.get('min_order_qty') or 0),
+                'min_cost': float(lot.get('min_cost') or 0),
+                'calculated_cost': 0.0,
+                'margin_usdt': 0.0,
+                'entry_pct': target,
+                'leverage': lev,
+                'exchange': 'bybit',
+                'aprovado': False,
+                'viability': report,
+            }
+            return 0.0, metadata
+
+        qty = float(report.get('final_qty') or 0)
+        margin = float(report.get('final_margin') or 0)
         metadata = {
-            'min_amount': 0.0,
-            'min_cost': 0.0,
-            'calculated_cost': round(qty * current_price, 2),
+            'min_amount': float(lot.get('min_order_qty') or 0),
+            'min_cost': float(lot.get('min_cost') or 0),
+            'calculated_cost': round(float(report.get('final_notional') or 0), 2),
             'margin_usdt': margin,
-            'entry_pct': load_entry_after_stop_pct() if after_stop else load_entry_pct(),
+            'entry_pct': target,
             'leverage': lev,
             'exchange': 'bybit',
+            'aprovado': True,
+            'final_pct': report.get('final_pct'),
+            'viability': report,
         }
         return qty, metadata
 

@@ -519,6 +519,8 @@ central_state = {
     "ai_tribunal": None,
     "max_moedas_ativas": MAX_MOEDAS_ATIVAS,
     "risk_mode": RISK_MODE,
+    "entry_sizing": None,
+    "proxima_entrada": None,
 }
 
 def _is_rate_limit_error(err: Exception) -> bool:
@@ -1160,6 +1162,25 @@ def _build_api_status_payload():
     payload['posicoes'] = active_trades
     payload['radar'] = payload.get('symbol') or '---'
     payload['confianca_ia'] = _coerce_float(payload.get('confidence'), default=0.0)
+    # Card da próxima entrada (~5% da banca) com filtro de viabilidade
+    entry_sizing = payload.get('entry_sizing') or payload.get('proxima_entrada')
+    if not isinstance(entry_sizing, dict):
+        # Preview estático com saldo atual × alvo 5% (até haver cálculo real)
+        target = float(PERCENTUAL_ENTRADA_BANCA or 0.05)
+        preview_margin = round(balance * target, 4) if balance > 0 else 0.0
+        entry_sizing = {
+            'symbol': payload.get('symbol') or '---',
+            'saldo_atual': balance,
+            'target_pct': round(target * 100, 2),
+            'max_tolerance_pct': 7.5,
+            'margem_proxima_entrada': preview_margin,
+            'pct_proxima_entrada': round(target * 100, 2) if balance > 0 else 0.0,
+            'decisao': 'AGUARDANDO',
+            'aprovado': None,
+            'motivo': 'Aguardando próximo cálculo de lote',
+        }
+    payload['entry_sizing'] = entry_sizing
+    payload['proxima_entrada'] = entry_sizing
     return payload
 
 def _refresh_real_balance_state(force=False):
@@ -2003,7 +2024,16 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None, client_context
     """
     Gestão de entrada por percentual de capital (perpétuos Bybit):
       MI = Saldo × 5%  |  Valor = MI × L  |  Qty = Valor / Preço
+
+    Antes de enviar: valida Step Size / minOrderQty vs Max_Tolerance_Pct (7.5%).
     """
+    from src.risk.entry_viability import (
+        build_frontend_entry_card,
+        evaluate_entry_viability,
+        extract_bybit_lot_filters,
+        print_entry_viability_log,
+    )
+
     try:
         leverage_value = float(ALAVANCAGEM or 1.0)
 
@@ -2031,17 +2061,49 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None, client_context
             print(f"❌ [CALC QTY] Preço inválido para {symbol}", flush=True)
             return 0.0, 0.0, saldo_atual
 
-        sizing = calcular_tamanho_posicao(
-            capital_ref, leverage_value, last_price, pct_banca=margem_pct,
+        # Limites Bybit (minOrderQty / qtyStep)
+        market = {}
+        try:
+            broker.exchange.load_markets()
+            market = broker.exchange.market(symbol) or {}
+        except Exception:
+            market = {}
+        lot = extract_bybit_lot_filters(market)
+        if hasattr(broker, '_get_market_limits'):
+            try:
+                min_amt, min_cost = broker._get_market_limits(symbol)
+                lot['min_order_qty'] = max(float(lot.get('min_order_qty') or 0), float(min_amt or 0))
+                lot['min_cost'] = max(float(lot.get('min_cost') or 0), float(min_cost or 0))
+            except Exception:
+                pass
+
+        report = evaluate_entry_viability(
+            bank_balance=capital_ref,
+            current_price=last_price,
+            leverage=leverage_value,
+            min_order_qty=float(lot.get('min_order_qty') or 0.001),
+            qty_step=float(lot.get('qty_step') or lot.get('min_order_qty') or 0.001),
+            target_pct=margem_pct,
+            symbol=str(symbol),
+            min_cost=float(lot.get('min_cost') or 0),
         )
-        margem = float(sizing['margem_inicial'])
-        qty = float(sizing['quantidade'])
+        print_entry_viability_log(report)
+        try:
+            central_state['entry_sizing'] = build_frontend_entry_card(report)
+            central_state['proxima_entrada'] = central_state['entry_sizing']
+        except Exception:
+            pass
+
+        if not report.get('aprovado'):
+            print(f"   🚫 [CALC QTY] Ordem abortada por viabilidade de banca/Step Size.", flush=True)
+            return 0.0, 0.0, saldo_atual
+
+        margem = float(report.get('final_margin') or 0)
+        qty = float(report.get('final_qty') or 0)
 
         print(f"   💰 [CALC QTY] Saldo UNIFIED (atualizado): ${saldo_atual:.2f} USDT", flush=True)
-        print(f"   💰 [CALC QTY] MI = Saldo × {margem_pct*100:.1f}% = ${margem:.2f} USDT", flush=True)
-        print(f"   📊 [CALC QTY] Valor posição = MI × {leverage_value}x = ${sizing['valor_posicao_usdt']:.2f}", flush=True)
-        print(f"   📊 [CALC QTY] Preço: ${last_price:.4f}", flush=True)
-        print(f"   🔢 [CALC QTY] Qty = Valor/Preço = {qty:.6f}", flush=True)
+        print(f"   💰 [CALC QTY] MI ≈ {report.get('final_pct')}% = ${margem:.4f} USDT (alvo {margem_pct*100:.1f}%)", flush=True)
+        print(f"   📊 [CALC QTY] Preço: ${last_price:.4f} | L={leverage_value}x | Qty={qty}", flush=True)
 
         try:
             qty, ok, reason = broker.validate_pct_sizing_qty(symbol, qty, strict=True)
@@ -2055,6 +2117,24 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None, client_context
             except Exception as precision_err:
                 print(f"   ⚠️ [CALC QTY] Erro na precisão: {precision_err}", flush=True)
                 qty = round(qty, 3)
+
+        # Recalcula margem real pós-precisão
+        if last_price > 0 and leverage_value > 0 and qty > 0:
+            margem = round((qty * last_price) / leverage_value, 4)
+            try:
+                card = build_frontend_entry_card({
+                    **report,
+                    'final_qty': qty,
+                    'final_margin': margem,
+                    'final_pct': (margem / capital_ref) * 100 if capital_ref else 0,
+                    'final_notional': qty * last_price,
+                    'aprovado': True,
+                    'decisao': 'APROVADO',
+                })
+                central_state['entry_sizing'] = card
+                central_state['proxima_entrada'] = card
+            except Exception:
+                pass
 
         return round(margem, 2), qty, saldo_atual
     except Exception as calc_err:

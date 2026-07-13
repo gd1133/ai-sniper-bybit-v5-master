@@ -283,7 +283,15 @@ def calculate_entry_qty(client: BybitClient, price: float, entry_pct: float) -> 
     """
     Calcula quantidade com fórmula obrigatória de perpétuos:
       MI = Saldo × 5%  |  Qty = (MI × L) / Preço
+
+    Aplica filtro de viabilidade (Max_Tolerance_Pct = 7.5%) vs minOrderQty Bybit.
     """
+    from src.risk.entry_viability import (
+        evaluate_entry_viability,
+        extract_bybit_lot_filters,
+        print_entry_viability_log,
+    )
+
     balance = client.get_balance()
 
     if balance is None or balance <= 0:
@@ -292,15 +300,39 @@ def calculate_entry_qty(client: BybitClient, price: float, entry_pct: float) -> 
 
     try:
         symbol = SYMBOL
-        after_stop = entry_pct <= load_entry_after_stop_pct() + 1e-9 and entry_pct < RISK_PER_TRADE_PCT
         pct = entry_pct
 
         print(f"💰 [RISCO] Saldo UNIFIED={balance:.2f} USDT | Entrada={pct*100:.1f}% da banca")
-        sizing = calcular_tamanho_posicao(balance, LEVERAGE, price, pct_banca=pct)
-        margin = float(sizing['margem_inicial'])
-        qty = float(sizing['quantidade'])
-        print(f"   💵 MI=${margin:.2f} | Valor=${sizing['valor_posicao_usdt']:.2f} | Qty bruta: {qty:.6f}")
 
+        market = {}
+        try:
+            client.exchange.load_markets()
+            market = client.exchange.market(symbol) or {}
+        except Exception:
+            market = {}
+        lot = extract_bybit_lot_filters(market)
+        try:
+            min_amt, min_cost = client._get_market_limits(symbol)
+            lot['min_order_qty'] = max(float(lot.get('min_order_qty') or 0), float(min_amt or 0))
+            lot['min_cost'] = max(float(lot.get('min_cost') or 0), float(min_cost or 0))
+        except Exception:
+            pass
+
+        report = evaluate_entry_viability(
+            bank_balance=float(balance),
+            current_price=float(price),
+            leverage=float(LEVERAGE),
+            min_order_qty=float(lot.get('min_order_qty') or 0.001),
+            qty_step=float(lot.get('qty_step') or lot.get('min_order_qty') or 0.001),
+            target_pct=pct,
+            symbol=str(symbol),
+            min_cost=float(lot.get('min_cost') or 0),
+        )
+        print_entry_viability_log(report)
+        if not report.get('aprovado'):
+            return 0.0
+
+        qty = float(report.get('final_qty') or 0)
         qty, ok, reason = client.validate_pct_sizing_qty(symbol, qty, strict=True)
         if not ok:
             print(f"🚫 [RISCO] {reason}")

@@ -952,6 +952,72 @@ const App = () => {
               />
             </div>
 
+            {/* 📐 PRÓXIMA ENTRADA ≈ 5% DA BANCA */}
+            {(() => {
+              const entry = data.proxima_entrada || data.entry_sizing || {};
+              const margem = Number(entry.margem_proxima_entrada ?? 0);
+              const pct = Number(entry.pct_proxima_entrada ?? entry.target_pct ?? 5);
+              const alvo = Number(entry.target_pct ?? 5);
+              const teto = Number(entry.max_tolerance_pct ?? 7.5);
+              const aprovado = entry.aprovado;
+              const decisao = String(entry.decisao || 'AGUARDANDO');
+              const border =
+                aprovado === true
+                  ? 'border-green-500/30'
+                  : aprovado === false
+                    ? 'border-red-500/30'
+                    : 'border-amber-500/20';
+              return (
+                <div className={`bg-[#0d0e12] rounded-[2.5rem] border ${border} p-8 shadow-xl`}>
+                  <div className="flex flex-wrap items-start justify-between gap-4 mb-6">
+                    <div>
+                      <p className="text-[10px] font-black text-zinc-500 uppercase tracking-[0.3em] italic">
+                        Próxima Entrada · ~{alvo}% da Banca
+                      </p>
+                      <h3 className="text-3xl font-black italic tracking-tighter text-white mt-2">
+                        ${Number.isFinite(margem) ? margem.toLocaleString('pt-PT', { maximumFractionDigits: 2 }) : '0,00'}
+                        <span className="text-lg text-zinc-500 font-bold ml-2">USDT</span>
+                      </h3>
+                      <p className="text-[11px] text-zinc-400 mt-2 font-bold">
+                        Soma da margem alvo ≈ {Number.isFinite(pct) ? pct.toFixed(2) : '—'}% do saldo
+                        {' '}· teto Step Size {teto}%
+                      </p>
+                    </div>
+                    <div className={`px-4 py-2 rounded-2xl border text-[10px] font-black uppercase tracking-widest ${
+                      aprovado === true
+                        ? 'bg-green-500/10 border-green-500/40 text-green-400'
+                        : aprovado === false
+                          ? 'bg-red-500/10 border-red-500/40 text-red-400'
+                          : 'bg-amber-500/10 border-amber-500/30 text-amber-300'
+                    }`}>
+                      {decisao}
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-[11px]">
+                    <div className="bg-black/30 rounded-2xl p-4 border border-white/5">
+                      <div className="text-zinc-600 font-black uppercase tracking-widest text-[9px]">Saldo</div>
+                      <div className="font-mono text-white mt-1">${Number(entry.saldo_atual ?? syncedBalance).toLocaleString('pt-PT', { maximumFractionDigits: 2 })}</div>
+                    </div>
+                    <div className="bg-black/30 rounded-2xl p-4 border border-white/5">
+                      <div className="text-zinc-600 font-black uppercase tracking-widest text-[9px]">Contrato Mín.</div>
+                      <div className="font-mono text-white mt-1">{entry.contrato_minimo ?? '—'}</div>
+                    </div>
+                    <div className="bg-black/30 rounded-2xl p-4 border border-white/5">
+                      <div className="text-zinc-600 font-black uppercase tracking-widest text-[9px]">Margem Mín.</div>
+                      <div className="font-mono text-white mt-1">${Number(entry.margem_minima ?? 0).toLocaleString('pt-PT', { maximumFractionDigits: 4 })}</div>
+                    </div>
+                    <div className="bg-black/30 rounded-2xl p-4 border border-white/5">
+                      <div className="text-zinc-600 font-black uppercase tracking-widest text-[9px]">Impacto Mín.</div>
+                      <div className="font-mono text-white mt-1">{Number(entry.impacto_min_pct ?? 0).toFixed(2)}%</div>
+                    </div>
+                  </div>
+                  {entry.motivo ? (
+                    <p className="text-[10px] text-zinc-500 mt-4 font-medium leading-relaxed">{entry.motivo}</p>
+                  ) : null}
+                </div>
+              );
+            })()}
+
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
               <div className="lg:col-span-2 bg-[#0d0e12] rounded-[2.5rem] border border-white/5 p-10">
                 <div className="flex justify-between items-center mb-8">
