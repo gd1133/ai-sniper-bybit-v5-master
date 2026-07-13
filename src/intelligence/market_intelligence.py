@@ -47,15 +47,18 @@ class MarketIntelligence:
         news = analyze_news_sentiment(symbol, signals, regime, whale)
 
         block_lateral = _env_bool('BLOCK_LATERAL_MARKETS', True)
-        veto_reasons = []
+        hard_veto_reasons = []
+        soft_veto_reasons = []
+        ai_assistants_unavailable = bool(news.get('ai_unavailable')) or str(news.get('source', '')) == 'ai_unavailable'
 
         if block_lateral and regime.get('is_lateral'):
-            veto_reasons.append(
+            hard_veto_reasons.append(
                 f"Mercado LATERAL (ADX={regime.get('adx')}, Choppiness={regime.get('choppiness')})"
             )
 
-        if news.get('block_trade'):
-            veto_reasons.append(f"Notícias/sentimento bloqueiam: {news.get('reason', '')[:120]}")
+        # Bloqueio soft de notícias: NÃO trava o robô se Groq/Gemini estiverem indisponíveis
+        if news.get('block_trade') and not ai_assistants_unavailable:
+            soft_veto_reasons.append(f"Notícias/sentimento bloqueiam: {news.get('reason', '')[:120]}")
 
         whale_score = float(whale.get('whale_score', 0) or 0)
         volume_ratio = float(signals.get('volume_ratio', 0) or 0)
@@ -72,9 +75,13 @@ class MarketIntelligence:
         recent_ret = float(signals.get('recent_return_pct', 0) or 0)
         # Só bloqueia velas CONTRÁRIAS muito fortes (evita matar pullbacks normais)
         if trend == 'ALTA' and recent_ret < -0.8 and body_ratio >= 60:
-            veto_reasons.append('Vela de venda forte contra tendência de alta')
+            hard_veto_reasons.append('Vela de venda forte contra tendência de alta')
         if trend == 'BAIXA' and recent_ret > 0.8 and body_ratio >= 60:
-            veto_reasons.append('Vela de compra forte contra tendência de baixa')
+            hard_veto_reasons.append('Vela de compra forte contra tendência de baixa')
+
+        veto_reasons = list(hard_veto_reasons)
+        if soft_veto_reasons and not ai_assistants_unavailable:
+            veto_reasons.extend(soft_veto_reasons)
 
         # Timing: prefere entrada perto da golden zone (fib 0.618)
         fib_dist = float(signals.get('fib_distance_pct', 100) or 100)
@@ -112,13 +119,35 @@ class MarketIntelligence:
         if whale.get('whale_aligned'):
             intelligence_score = min(100.0, intelligence_score + 8)
 
-        allow_entry = len(veto_reasons) == 0 and intelligence_score >= 48
+        soft_ai_veto_only = (
+            len(hard_veto_reasons) == 0
+            and len(soft_veto_reasons) > 0
+            and not ai_assistants_unavailable
+        )
+
+        # Com IAs auxiliares indisponíveis: só vetos duros (lateral/vela contrária) bloqueiam
+        if ai_assistants_unavailable:
+            allow_entry = len(hard_veto_reasons) == 0
+            autonomous_mode = True
+        else:
+            allow_entry = len(veto_reasons) == 0 and intelligence_score >= 48
+            # Soft veto de notícias não congela o scanner — Cérebro 3 decide
+            if soft_ai_veto_only:
+                allow_entry = True
+                autonomous_mode = True
+            else:
+                autonomous_mode = False
 
         return {
             'intelligence_score': round(intelligence_score, 2),
             'timing_score': round(timing_score, 2),
             'allow_entry': allow_entry,
             'veto_reasons': veto_reasons,
+            'hard_veto_reasons': hard_veto_reasons,
+            'soft_veto_reasons': soft_veto_reasons,
+            'soft_ai_veto_only': soft_ai_veto_only,
+            'ai_assistants_unavailable': ai_assistants_unavailable,
+            'autonomous_mode': autonomous_mode or ai_assistants_unavailable,
             'market_regime': regime.get('market_regime'),
             'regime_label': regime.get('regime_label'),
             'is_lateral': regime.get('is_lateral'),
@@ -135,7 +164,7 @@ class MarketIntelligence:
             'news_reason': news.get('reason'),
             'ai_source': news.get('source'),
             'news': news,
-            'news_block_trade': bool(news.get('block_trade')),
+            'news_block_trade': bool(news.get('block_trade')) and not ai_assistants_unavailable,
             'summary': self._build_summary(regime, whale, news, timing_score, allow_entry),
         }
 
@@ -145,6 +174,11 @@ class MarketIntelligence:
             'timing_score': 70.0,
             'allow_entry': True,
             'veto_reasons': [],
+            'hard_veto_reasons': [],
+            'soft_veto_reasons': [],
+            'soft_ai_veto_only': False,
+            'ai_assistants_unavailable': False,
+            'autonomous_mode': False,
             'market_regime': 'TREND',
             'is_lateral': False,
             'summary': 'Inteligência de mercado desativada',

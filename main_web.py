@@ -2213,12 +2213,20 @@ def sniper_worker_loop():
 
                     intel_ctx = market_intel.evaluate(sym, df, signals, t)
                     if not intel_ctx.get('allow_entry'):
-                        print(
-                            f"   🚫 [IA] {clean_sym} bloqueado: "
-                            f"{' | '.join(intel_ctx.get('veto_reasons', []))}",
-                            flush=True,
-                        )
-                        continue
+                        hard = intel_ctx.get('hard_veto_reasons') or intel_ctx.get('veto_reasons', [])
+                        # Soft/API down → NÃO bloqueia o ativo; Cérebro 3 assume
+                        if intel_ctx.get('ai_assistants_unavailable') or intel_ctx.get('autonomous_mode'):
+                            intel_ctx = dict(intel_ctx)
+                            intel_ctx['allow_entry'] = True
+                            intel_ctx['autonomous_mode'] = True
+                            intel_ctx['ai_assistants_unavailable'] = True
+                        else:
+                            print(
+                                f"   🚫 [IA] {clean_sym} bloqueado: "
+                                f"{' | '.join(hard)}",
+                                flush=True,
+                            )
+                            continue
 
                     res = validator.consensus_predict(
                         signals, sym, force_local_only=True, intelligence_context=intel_ctx,

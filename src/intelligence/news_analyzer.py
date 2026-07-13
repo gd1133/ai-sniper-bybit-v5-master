@@ -214,15 +214,27 @@ def analyze_news_sentiment(
 
     ai_result = None
     source = 'coingecko'
+    ai_unavailable = False
+    cloud_attempted = False
     groq_key = os.getenv('GROQ_API_KEY', '').strip()
     gemini_key = os.getenv('GEMINI_API_KEY', '').strip()
 
     if groq_key:
+        cloud_attempted = True
         ai_result = _ai_analyze_with_groq(symbol, tech_summary, groq_key)
-        source = 'groq'
+        if ai_result is not None:
+            source = 'groq'
     if ai_result is None and gemini_key:
+        cloud_attempted = True
         ai_result = _ai_analyze_with_gemini(symbol, tech_summary, gemini_key)
-        source = 'gemini'
+        if ai_result is not None:
+            source = 'gemini'
+
+    if cloud_attempted and ai_result is None:
+        # Groq/Gemini em 429/timeout: NÃO bloqueia o ativo — Cérebro 3 assume
+        ai_unavailable = True
+        source = 'ai_unavailable'
+        reasons.append('Dados indisponíveis devido a limites de API da IA')
 
     if ai_result:
         ai_score = float(ai_result.get('sentiment_score', 50) or 50)
@@ -237,12 +249,16 @@ def analyze_news_sentiment(
             reasons.append(f'IA: {ai_reason}')
 
     trend = str(signals.get('trend', 'NEUTRO')).upper()
-    if global_trend == 'BEARISH' and trend == 'ALTA':
-        score -= 10
-        news_risk = 'HIGH'
-    elif global_trend == 'BULLISH' and trend == 'BAIXA':
-        score -= 10
-        news_risk = 'HIGH'
+    if not ai_unavailable:
+        if global_trend == 'BEARISH' and trend == 'ALTA':
+            score -= 10
+            news_risk = 'HIGH'
+        elif global_trend == 'BULLISH' and trend == 'BAIXA':
+            score -= 10
+            news_risk = 'HIGH'
+    else:
+        # Sem IAs auxiliares: não aplica bloqueio soft de sentimento
+        block_trade = False
 
     result = {
         'sentiment_score': round(max(0.0, min(100.0, score)), 2),
@@ -253,6 +269,7 @@ def analyze_news_sentiment(
         'is_trending': is_trending,
         'reason': ' | '.join(reasons) if reasons else 'Sem catalisadores de notícia relevantes',
         'source': source,
+        'ai_unavailable': ai_unavailable,
     }
     _CACHE[cache_key] = (now, result)
     return result
