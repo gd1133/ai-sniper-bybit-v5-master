@@ -443,10 +443,10 @@ MAX_MOEDAS_ATIVAS = 5
 LEVERAGE = 10  # Alavancagem padrão (deve coincidir com main.py)
 
 # Constantes do Sniper Worker (ajustadas pelo modo de risco)
-SCAN_TOP_COINS = 80
+SCAN_TOP_COINS = 40
 THRESHOLD_ENTRADA = 58.0
 COOLDOWN_INSTITUCIONAL_SECS = 5
-SCAN_INTER_SYMBOL_DELAY_SECS = 0.35
+SCAN_INTER_SYMBOL_DELAY_SECS = 0.9
 SNIPER_SIGNAL_LOCK = threading.Lock()
 SNIPER_SIGNAL_RESERVATIONS = set()
 
@@ -455,14 +455,14 @@ def _apply_risk_mode_scan_params():
     global SCAN_TOP_COINS, THRESHOLD_ENTRADA, MAX_MOEDAS_ATIVAS, SCAN_INTER_SYMBOL_DELAY_SECS
     if RISK_MODE == 'aggressive':
         MAX_MOEDAS_ATIVAS = 5
-        SCAN_TOP_COINS = 80
+        SCAN_TOP_COINS = 40  # era 80 — estourava Bybit 10006
         THRESHOLD_ENTRADA = 58.0
-        SCAN_INTER_SYMBOL_DELAY_SECS = 0.35
+        SCAN_INTER_SYMBOL_DELAY_SECS = 0.9  # era 0.35
     else:
         MAX_MOEDAS_ATIVAS = 1
-        SCAN_TOP_COINS = 40
+        SCAN_TOP_COINS = 25
         THRESHOLD_ENTRADA = 70.0
-        SCAN_INTER_SYMBOL_DELAY_SECS = 0.5
+        SCAN_INTER_SYMBOL_DELAY_SECS = 1.0
     central_state['risk_mode'] = RISK_MODE
     central_state['max_moedas_ativas'] = MAX_MOEDAS_ATIVAS
     central_state['scan_top_coins'] = SCAN_TOP_COINS
@@ -2302,6 +2302,18 @@ def sniper_worker_loop():
                 f"(não só BTC)…",
                 flush=True,
             )
+            # #region agent log
+            try:
+                from src.debug_agent_log import agent_dbg
+                agent_dbg('C', 'main_web.py:sniper_worker_loop', 'radar_cycle_start', {
+                    'top_n': len(top_coins),
+                    'scan_top_coins': SCAN_TOP_COINS,
+                    'inter_delay': SCAN_INTER_SYMBOL_DELAY_SECS,
+                    'risk_mode': RISK_MODE,
+                })
+            except Exception:
+                pass
+            # #endregion
 
             for t in top_coins:
                 sym = t['symbol']
@@ -2341,11 +2353,12 @@ def sniper_worker_loop():
                                 flush=True,
                             )
                             continue
-                        if intel_ctx.get('ai_assistants_unavailable') or intel_ctx.get('autonomous_mode') or soft:
+                        if intel_ctx.get('soft_ai_veto_only') or soft:
+                            # Soft news: segue para consenso LOCAL (C1/C2/C3) — sem derrubar C2
                             intel_ctx = dict(intel_ctx)
                             intel_ctx['allow_entry'] = True
-                            intel_ctx['autonomous_mode'] = True
-                            intel_ctx['ai_assistants_unavailable'] = True
+                            intel_ctx['autonomous_mode'] = False
+                            intel_ctx['ai_assistants_unavailable'] = False
                         else:
                             print(
                                 f"   🚫 [IA] {clean_sym} bloqueado: "
