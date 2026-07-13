@@ -27,6 +27,123 @@ const getApiBase = () => {
 };
 
 const API_BASE = getApiBase();
+
+const AGENT_THEME = {
+  gemini: { accent: 'text-sky-300', border: 'border-sky-500/30', bg: 'bg-sky-500/10', chip: 'GEMINI' },
+  groq: { accent: 'text-orange-300', border: 'border-orange-500/30', bg: 'bg-orange-500/10', chip: 'GROQ' },
+  analyst: { accent: 'text-emerald-300', border: 'border-emerald-500/30', bg: 'bg-emerald-500/10', chip: 'DADOS' },
+  learner: { accent: 'text-violet-300', border: 'border-violet-500/30', bg: 'bg-violet-500/10', chip: 'MEMÓRIA' },
+  consensus: { accent: 'text-yellow-300', border: 'border-yellow-500/30', bg: 'bg-yellow-500/10', chip: 'VEREDITO' },
+};
+
+const CandleStudyChart = ({ study }) => {
+  const candles = Array.isArray(study?.candles) ? study.candles.slice(-40) : [];
+  if (!candles.length) {
+    return (
+      <div className="h-56 flex items-center justify-center rounded-[2rem] border border-dashed border-zinc-700 bg-black/20 text-zinc-500 text-xs font-bold uppercase tracking-widest italic">
+        Aguardando velas do estudo técnico...
+      </div>
+    );
+  }
+  const width = 640;
+  const height = 220;
+  const pad = 16;
+  const highs = candles.map((c) => Number(c.h));
+  const lows = candles.map((c) => Number(c.l));
+  const min = Math.min(...lows);
+  const max = Math.max(...highs);
+  const span = Math.max(max - min, 1e-9);
+  const slot = (width - pad * 2) / candles.length;
+  const yOf = (price) => pad + ((max - price) / span) * (height - pad * 2);
+  const entry = Number(study?.entry_price || 0);
+  const fib = Number(study?.fib_618 || 0);
+  const sma = Number(study?.sma_200 || 0);
+
+  return (
+    <div className="w-full overflow-hidden rounded-[2rem] border border-white/5 bg-black/30 p-4">
+      <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-56">
+        {sma > 0 && <line x1={pad} x2={width - pad} y1={yOf(sma)} y2={yOf(sma)} stroke="#64748b" strokeDasharray="4 4" strokeWidth="1" />}
+        {fib > 0 && <line x1={pad} x2={width - pad} y1={yOf(fib)} y2={yOf(fib)} stroke="#a78bfa" strokeDasharray="3 3" strokeWidth="1.2" />}
+        {entry > 0 && <line x1={pad} x2={width - pad} y1={yOf(entry)} y2={yOf(entry)} stroke="#22c55e" strokeWidth="1.5" />}
+        {candles.map((c, i) => {
+          const open = Number(c.o);
+          const close = Number(c.c);
+          const color = close >= open ? '#22c55e' : '#ef4444';
+          const x = pad + i * slot + slot * 0.5;
+          const bodyTop = yOf(Math.max(open, close));
+          const bodyBot = yOf(Math.min(open, close));
+          const bodyH = Math.max(bodyBot - bodyTop, 1.5);
+          return (
+            <g key={`c-${i}`}>
+              <line x1={x} x2={x} y1={yOf(Number(c.h))} y2={yOf(Number(c.l))} stroke={color} strokeWidth="1.2" />
+              <rect x={x - Math.max(slot * 0.28, 2)} y={bodyTop} width={Math.max(slot * 0.56, 3)} height={bodyH} fill={color} rx="1" />
+            </g>
+          );
+        })}
+      </svg>
+      <div className="mt-3 flex flex-wrap gap-3 text-[9px] font-black uppercase tracking-widest text-zinc-500">
+        <span className="text-green-400">Entrada</span>
+        <span className="text-violet-300">Fib 0.618</span>
+        <span className="text-slate-400">SMA 200</span>
+        <span>{candles.length} velas</span>
+      </div>
+    </div>
+  );
+};
+
+const AiAnalyzerCard = ({ agent }) => {
+  const theme = AGENT_THEME[agent?.id] || AGENT_THEME.analyst;
+  const assertiveness = Number(agent?.assertiveness || 0);
+  return (
+    <div className={`rounded-[2rem] border ${theme.border} ${theme.bg} p-6 flex flex-col gap-4 min-h-[240px]`}>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className={`text-[10px] font-black uppercase tracking-[0.35em] ${theme.accent}`}>{theme.chip}</div>
+          <h4 className="text-lg font-black italic mt-2">{agent?.label || 'Analista'}</h4>
+          <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest mt-1">{agent?.role || agent?.provider || 'IA'}</p>
+        </div>
+        <div className="text-right">
+          <div className="text-3xl font-black italic">{Number(agent?.score || 0).toFixed(0)}</div>
+          <div className="text-[9px] font-black text-zinc-500 uppercase tracking-widest">Score • Peso {agent?.weight || 0}%</div>
+        </div>
+      </div>
+      <p className="text-sm text-zinc-300 italic leading-relaxed flex-1">&ldquo;{agent?.motivo || 'Aguardando análise...'}&rdquo;</p>
+      <div className="space-y-2">
+        <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest">
+          <span className={theme.accent}>Ação {agent?.action || 'WAIT'}</span>
+          <span className="text-zinc-400">Assertividade {assertiveness.toFixed(0)}%</span>
+        </div>
+        <div className="h-2 rounded-full bg-black/40 overflow-hidden">
+          <div className="h-full bg-gradient-to-r from-emerald-500 to-lime-400" style={{ width: `${Math.max(4, Math.min(100, assertiveness))}%` }} />
+        </div>
+        {agent?.learning_notes ? (
+          <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-wide leading-relaxed">Aprendeu: {agent.learning_notes}</p>
+        ) : null}
+      </div>
+    </div>
+  );
+};
+
+const AiDialogueFeed = ({ dialogue }) => {
+  const items = Array.isArray(dialogue) ? dialogue : [];
+  if (!items.length) {
+    return <p className="text-sm text-zinc-500 italic">As IAs ainda não abriram o debate desta entrada.</p>;
+  }
+  return (
+    <div className="space-y-3 max-h-[420px] overflow-y-auto pr-2">
+      {items.map((msg, idx) => {
+        const theme = AGENT_THEME[msg.speaker] || AGENT_THEME.consensus;
+        return (
+          <div key={`dlg-${idx}`} className={`rounded-2xl border ${theme.border} bg-black/25 p-4`}>
+            <div className={`text-[9px] font-black uppercase tracking-[0.3em] mb-2 ${theme.accent}`}>{msg.label || msg.speaker}</div>
+            <p className="text-sm text-zinc-300 leading-relaxed">{msg.text}</p>
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
 // Sistema fixado em modo REAL apenas
 const OPERATION_MODE_META = {
   real: {
@@ -648,6 +765,23 @@ const App = () => {
   const currentBalanceLive = syncedBalance + unrealizedPnl;
   const latestSignal = data.last_sniper_signal;
   const evidence = data.evidence || {};
+  const tribunalAgents = Array.isArray(evidence.agents) && evidence.agents.length
+    ? evidence.agents
+    : Object.entries(evidence.brains || {}).map(([id, brain]) => ({
+        id,
+        label: brain.label || id,
+        score: brain.score || 0,
+        weight: brain.weight || 0,
+        action: brain.action || 'WAIT',
+        motivo: brain.motivo || '',
+        assertiveness: brain.assertiveness || evidence.assertiveness || 0,
+        provider: brain.provider || 'local',
+        role: brain.label || id,
+        learning_notes: brain.learning_notes || '',
+      }));
+  const candleStudy = evidence.candle_study || {};
+  const dialogue = evidence.dialogue || data.ai_tribunal?.dialogue || [];
+  const overallAssertiveness = Number(evidence.assertiveness || data.ai_tribunal?.assertiveness || data.win_rate || 0);
   const signalAlreadyListed = latestSignal && activeTrades.some((trade) => (
     String(trade?.symbol || '').toUpperCase() === String(latestSignal?.symbol || '').toUpperCase()
     && String(trade?.side || '').toUpperCase() === String(latestSignal?.side || '').toUpperCase()
@@ -675,7 +809,6 @@ const App = () => {
   const monitorSlots = [...monitorTrades, ...Array.from({ length: Math.max(0, 5 - monitorTrades.length) }, (_, idx) => ({ id: `empty-${idx}`, empty: true }))];
   const recentClosedTrades = (data.trades || []).filter((trade) => String(trade?.status || '').toLowerCase() === 'closed').slice(0, 5);
   const evidenceChecks = evidence.checks || [];
-  const evidenceBrains = evidence.brains || {};
   const statusHeadline = activeTrades.length > 0
     ? `${Math.min(activeTrades.length, 5)} SINAL${activeTrades.length > 1 ? 'S' : ''} ABERTO${activeTrades.length > 1 ? 'S' : ''}`
     : (data.opportunities?.length || 0) > 0
@@ -921,9 +1054,39 @@ const App = () => {
 
             <div className="bg-[#0d0e12] p-10 rounded-[3rem] border border-white/5">
                <h4 className="text-[10px] font-black text-zinc-600 uppercase tracking-[0.5em] mb-4 flex items-center gap-3">
-                  <Search size={14} /> Veredito Institucional (Cloud Mode)
+                  <Search size={14} /> Veredito Institucional (Tribunal Gemini + Groq)
                </h4>
-               <p className="text-2xl font-medium italic text-zinc-300">"{data.ia2_decision.motivo}"</p>
+               <p className="text-2xl font-medium italic text-zinc-300">"{data.ia2_decision?.motivo || 'Aguardando debate das IAs...'}"</p>
+               <div className="mt-6 flex flex-wrap gap-4 text-[10px] font-black uppercase tracking-widest text-zinc-500">
+                 <span className="text-green-400">Confiança {Number(data.ia2_decision?.probabilidade || data.confidence || 0).toFixed(0)}%</span>
+                 <span className="text-sky-300">Assertividade {overallAssertiveness.toFixed(0)}%</span>
+                 <span>{evidence.side || data.ia2_decision?.decisao || 'SCANNER'} • {evidence.symbol || data.symbol}</span>
+               </div>
+            </div>
+
+            <div className="bg-[#0d0e12] p-8 rounded-[3rem] border border-white/5">
+              <div className="flex items-center justify-between mb-6 gap-4 flex-wrap">
+                <h4 className="text-[10px] font-black text-zinc-600 uppercase tracking-[0.5em] flex items-center gap-3">
+                  <Activity size={14} /> Tribunal das 4 IAs — por que comprou/vendeu
+                </h4>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('evidence')}
+                  className="text-[10px] font-black uppercase tracking-widest text-green-400 hover:text-green-300"
+                >
+                  Ver estudo completo →
+                </button>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+                {(tribunalAgents.length ? tribunalAgents : [
+                  { id: 'gemini', label: 'Gemini Estratégico', score: 0, weight: 25, action: 'WAIT', motivo: 'Aguardando ciclo do radar...', assertiveness: 0 },
+                  { id: 'groq', label: 'Groq Tático', score: 0, weight: 25, action: 'WAIT', motivo: 'Aguardando ciclo do radar...', assertiveness: 0 },
+                  { id: 'analyst', label: 'Analista de Dados', score: 0, weight: 30, action: 'WAIT', motivo: 'Aguardando ciclo do radar...', assertiveness: 0 },
+                  { id: 'learner', label: 'Aprendizado Neural', score: 0, weight: 20, action: 'WAIT', motivo: 'Aguardando ciclo do radar...', assertiveness: 0, learning_notes: 'Sem histórico ainda' },
+                ]).slice(0, 4).map((agent) => (
+                  <AiAnalyzerCard key={agent.id || agent.label} agent={agent} />
+                ))}
+              </div>
             </div>
 
             <div className="bg-[#0d0e12] p-10 rounded-[3rem] border border-white/5">
@@ -967,108 +1130,125 @@ const App = () => {
           </div>
         )}
 
-        {/* ABA 2: EVIDÊNCIA (Igual ao seu print) */}
+        {/* ABA 2: EVIDÊNCIA — Tribunal + gráfico de velas + assertividade */}
         {activeTab === 'evidence' && (
-          <div className="animate-in fade-in duration-500 grid grid-cols-1 lg:grid-cols-4 gap-8">
-            <div className="lg:col-span-3 space-y-6">
-              <div className="bg-[#0d0e12] min-h-[550px] rounded-[3rem] border border-zinc-800 border-dashed p-10 flex flex-col">
-                 <div className="flex items-start justify-between gap-6">
-                   <div className="text-[10px] font-black text-zinc-600 uppercase tracking-[0.4em] italic">Raio-X Triplo Cérebro</div>
-                   <div className="px-4 py-2 rounded-full border border-green-500/20 bg-green-500/5 text-[10px] font-black text-green-500 uppercase tracking-widest">
-                     {evidence.side || 'SCANNER'} • {Number(evidence.confidence || 0).toFixed(0)}%
-                   </div>
-                 </div>
-
-                 <div className="flex-1 flex flex-col items-center justify-center text-center">
-                    <div className="w-20 h-20 bg-zinc-900 rounded-3xl flex items-center justify-center mb-6 border border-white/5">
-                       <FileSearch size={40} className="text-zinc-700" />
-                    </div>
-                    <h2 className="text-4xl font-black italic uppercase tracking-tighter mb-4">{evidence.symbol || data.symbol || '---'}</h2>
-                    <p className="text-zinc-500 text-sm font-bold uppercase tracking-widest text-center max-w-2xl leading-relaxed italic">
-                       {data.ia2_decision?.motivo || evidence.strategic_reason || 'O Framework Tactical gera evidências matemáticas baseadas na lógica de cloud.'}
-                    </p>
-                    <div className="mt-10 px-12 py-4 bg-green-500 text-black font-black rounded-2xl shadow-xl shadow-green-900/20 uppercase text-xs tracking-widest">
-                      Evidência Tática • Rigor {evidence.threshold || 60}%
-                    </div>
-                 </div>
-
-                 <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 mb-6">
-                   {Object.entries(evidenceBrains).map(([key, brain]) => (
-                     <div key={key} className="bg-black/20 p-6 rounded-[2rem] border border-white/5">
-                       <div className="text-[10px] font-black text-zinc-600 uppercase tracking-widest">{brain.label}</div>
-                       <div className="flex items-end justify-between mt-5">
-                         <div className="text-4xl font-black italic text-white">{brain.score ?? 0}</div>
-                         <div className="text-[10px] font-black text-green-500 uppercase tracking-widest">Peso {brain.weight}%</div>
-                       </div>
-                     </div>
-                   ))}
-                 </div>
-
-                 <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-                   <div className="bg-black/20 p-6 rounded-[2rem] border border-white/5">
-                     <div className="text-[10px] font-black text-zinc-600 uppercase tracking-widest mb-4">Entradas em aberto</div>
-                     <div className="space-y-3">
-                       {monitorTrades.length > 0 ? monitorTrades.map((trade) => (
-                         <div key={`evidence-open-${trade.id}`} className="flex items-center justify-between gap-4 p-4 rounded-2xl border border-white/5 bg-zinc-950/40">
-                           <div>
-                             <div className="text-sm font-black italic">{trade.symbol}</div>
-                             <div className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">{trade.side} • Entrada {formatDollar(trade.entry_price ?? trade.entry)}</div>
-                           </div>
-                           <div className="text-right">
-                             <div className={`text-sm font-black ${getTradeTone(trade) ? 'text-green-500' : 'text-red-500'}`}>{formatDollar(trade.current_price || trade.entry_price || trade.entry)}</div>
-                             <div className={`text-[10px] font-bold uppercase tracking-widest ${getTradeTone(trade) ? 'text-green-500' : 'text-red-500'}`}>{formatSignedPercent(trade.pnl_pct || trade.price_change_pct || 0)}</div>
-                           </div>
-                         </div>
-                       )) : <p className="text-sm text-zinc-500 italic">Sem entradas abertas no momento.</p>}
-                     </div>
-                   </div>
-
-                   <div className="bg-black/20 p-6 rounded-[2rem] border border-white/5">
-                     <div className="text-[10px] font-black text-zinc-600 uppercase tracking-widest mb-4">Lucro e perda recente</div>
-                     <div className="space-y-3">
-                       {recentClosedTrades.length > 0 ? recentClosedTrades.map((trade) => {
-                         const profit = Number(trade?.profit || 0);
-                         return (
-                           <div key={`evidence-closed-${trade.id}`} className="flex items-center justify-between gap-4 p-4 rounded-2xl border border-white/5 bg-zinc-950/40">
-                             <div>
-                               <div className="text-sm font-black italic">{String(trade?.pair || '---').split(':')[0]}</div>
-                               <div className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">{trade?.side || '---'} • {trade?.closed_at || 'Sem data'}</div>
-                             </div>
-                             <div className={`text-sm font-black ${profit >= 0 ? 'text-green-500' : 'text-red-500'}`}>{formatDollar(profit)}</div>
-                           </div>
-                         );
-                       }) : <p className="text-sm text-zinc-500 italic">Ainda não há fechamentos para exibir.</p>}
-                     </div>
-                   </div>
-                 </div>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="bg-[#0d0e12] p-8 rounded-[2.5rem] border border-white/5">
-                  <span className="text-[10px] font-black text-zinc-600 uppercase tracking-widest flex items-center gap-3 mb-4"><TrendingUp size={14} className="text-green-500" /> Logica Neural</span>
-                  <p className="text-xs text-zinc-400 italic leading-relaxed">{evidence.local_reason || 'Aguardando leitura do Motor Matemático.'}</p>
-                </div>
-                <div className="bg-[#0d0e12] p-8 rounded-[2.5rem] border border-white/5">
-                  <span className="text-[10px] font-black text-zinc-600 uppercase tracking-widest flex items-center gap-3 mb-4"><ShieldCheck size={14} className="text-blue-500" /> Critica de Risco</span>
-                  <p className="text-xs text-zinc-400 italic leading-relaxed">{evidence.tactical_reason || evidence.strategic_reason || 'Aguardando crítica do Radar Tático.'}</p>
-                </div>
-              </div>
-            </div>
-
-            <div className="space-y-4">
-              <h3 className="text-[10px] font-black text-zinc-600 uppercase tracking-[0.4em] mb-6 px-2 italic flex items-center gap-3"><Activity size={14} className="text-green-500" /> Confluências Tactical</h3>
-              {evidenceChecks.map((item) => (
-                <CheckItem key={item.label} label={`${item.label}${item.detail ? ` • ${item.detail}` : ''}`} active={Boolean(item.active)} />
-              ))}
-              
-               <div className="mt-12 bg-green-500/5 p-8 rounded-[3rem] border border-green-500/10">
-                  <div className="flex items-center gap-3 mb-4">
-                     <CheckCircle2 size={20} className="text-green-500" />
-                     <span className="text-[10px] font-black text-zinc-200 uppercase tracking-widest">Certificação Tactical</span>
-                  </div>
-                  <p className="text-[9px] text-zinc-500 font-bold uppercase leading-relaxed italic">
-                      TRIPLO CÉREBRO COM RIGOR DE {evidence.threshold || 60}% • ATÉ {evidence.max_positions || 5} ENTRADAS SIMULTÂNEAS, SEM REPETIR MOEDA • TP 100% DA ENTRADA • SL 50% DA ENTRADA • BYBIT.
+          <div className="animate-in fade-in duration-500 space-y-8">
+            <div className="bg-[#0d0e12] rounded-[3rem] border border-zinc-800 p-8 md:p-10">
+              <div className="flex flex-col md:flex-row md:items-start justify-between gap-6 mb-8">
+                <div>
+                  <div className="text-[10px] font-black text-zinc-600 uppercase tracking-[0.4em] italic">Raio-X do Tribunal de IAs</div>
+                  <h2 className="text-4xl font-black italic uppercase tracking-tighter mt-3">{evidence.symbol || data.symbol || '---'}</h2>
+                  <p className="text-zinc-500 text-sm font-bold uppercase tracking-widest mt-2 max-w-3xl leading-relaxed italic">
+                    {data.ia2_decision?.dialogue_preview || data.ia2_decision?.motivo || evidence.strategic_reason || 'O tribunal explica cada entrada com Gemini, Groq, Analista de Dados e Aprendizado Neural.'}
                   </p>
-               </div>
+                </div>
+                <div className="flex flex-col items-end gap-3">
+                  <div className="px-4 py-2 rounded-full border border-green-500/20 bg-green-500/5 text-[10px] font-black text-green-500 uppercase tracking-widest">
+                    {evidence.side || 'SCANNER'} • Confiança {Number(evidence.confidence || data.confidence || 0).toFixed(0)}%
+                  </div>
+                  <div className="px-4 py-2 rounded-full border border-sky-500/20 bg-sky-500/5 text-[10px] font-black text-sky-300 uppercase tracking-widest">
+                    Assertividade de vitória {overallAssertiveness.toFixed(0)}%
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 mb-8">
+                <div className="xl:col-span-2 space-y-4">
+                  <div className="text-[10px] font-black text-zinc-600 uppercase tracking-widest">Estúdio de Velas (lógica SMC / Volume / Fib)</div>
+                  <CandleStudyChart study={candleStudy} />
+                  <div className="flex flex-wrap gap-2">
+                    {(candleStudy.study_notes || []).map((note, idx) => (
+                      <span key={`note-${idx}`} className="px-3 py-2 rounded-full border border-white/10 bg-black/30 text-[10px] font-bold text-zinc-400 uppercase tracking-widest">
+                        {note}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+                <div className="space-y-4">
+                  <div className="text-[10px] font-black text-zinc-600 uppercase tracking-widest">Conversa das IAs</div>
+                  <AiDialogueFeed dialogue={dialogue} />
+                  <div className="rounded-[2rem] border border-violet-500/20 bg-violet-500/5 p-5">
+                    <div className="text-[10px] font-black text-violet-300 uppercase tracking-widest mb-2">Aprendizado com outras entradas</div>
+                    <p className="text-xs text-zinc-400 leading-relaxed">
+                      {evidence.learning_from_history?.summary || 'O cérebro ainda está coletando histórico para calibrar a assertividade.'}
+                    </p>
+                    <div className="mt-4 grid grid-cols-3 gap-3 text-center">
+                      <div>
+                        <div className="text-xl font-black italic text-white">{evidence.learning_from_history?.sample_size || 0}</div>
+                        <div className="text-[9px] font-black text-zinc-600 uppercase">Amostras</div>
+                      </div>
+                      <div>
+                        <div className="text-xl font-black italic text-green-400">{Number(evidence.learning_from_history?.win_rate || 0).toFixed(0)}%</div>
+                        <div className="text-[9px] font-black text-zinc-600 uppercase">Win rate</div>
+                      </div>
+                      <div>
+                        <div className="text-xl font-black italic text-sky-300">{overallAssertiveness.toFixed(0)}%</div>
+                        <div className="text-[9px] font-black text-zinc-600 uppercase">Assertividade</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mb-8">
+                {(tribunalAgents.length ? tribunalAgents : []).slice(0, 4).map((agent) => (
+                  <AiAnalyzerCard key={`ev-${agent.id}`} agent={agent} />
+                ))}
+              </div>
+
+              <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+                <div className="xl:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="bg-black/20 p-6 rounded-[2rem] border border-white/5">
+                    <div className="text-[10px] font-black text-zinc-600 uppercase tracking-widest mb-4">Entradas em aberto</div>
+                    <div className="space-y-3">
+                      {monitorTrades.length > 0 ? monitorTrades.map((trade) => (
+                        <div key={`evidence-open-${trade.id}`} className="flex items-center justify-between gap-4 p-4 rounded-2xl border border-white/5 bg-zinc-950/40">
+                          <div>
+                            <div className="text-sm font-black italic">{trade.symbol}</div>
+                            <div className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">{trade.side} • Entrada {formatDollar(trade.entry_price ?? trade.entry)}</div>
+                          </div>
+                          <div className="text-right">
+                            <div className={`text-sm font-black ${getTradeTone(trade) ? 'text-green-500' : 'text-red-500'}`}>{formatDollar(trade.current_price || trade.entry_price || trade.entry)}</div>
+                            <div className={`text-[10px] font-bold uppercase tracking-widest ${getTradeTone(trade) ? 'text-green-500' : 'text-red-500'}`}>{formatSignedPercent(trade.pnl_pct || trade.price_change_pct || 0)}</div>
+                          </div>
+                        </div>
+                      )) : <p className="text-sm text-zinc-500 italic">Sem entradas abertas no momento.</p>}
+                    </div>
+                  </div>
+                  <div className="bg-black/20 p-6 rounded-[2rem] border border-white/5">
+                    <div className="text-[10px] font-black text-zinc-600 uppercase tracking-widest mb-4">Lucro e perda recente</div>
+                    <div className="space-y-3">
+                      {recentClosedTrades.length > 0 ? recentClosedTrades.map((trade) => {
+                        const profit = Number(trade?.profit || 0);
+                        return (
+                          <div key={`evidence-closed-${trade.id}`} className="flex items-center justify-between gap-4 p-4 rounded-2xl border border-white/5 bg-zinc-950/40">
+                            <div>
+                              <div className="text-sm font-black italic">{String(trade?.pair || '---').split(':')[0]}</div>
+                              <div className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">{trade?.side || '---'} • {trade?.closed_at || 'Sem data'}</div>
+                            </div>
+                            <div className={`text-sm font-black ${profit >= 0 ? 'text-green-500' : 'text-red-500'}`}>{formatDollar(profit)}</div>
+                          </div>
+                        );
+                      }) : <p className="text-sm text-zinc-500 italic">Ainda não há fechamentos para exibir.</p>}
+                    </div>
+                  </div>
+                </div>
+                <div className="space-y-4">
+                  <h3 className="text-[10px] font-black text-zinc-600 uppercase tracking-[0.4em] px-2 italic flex items-center gap-3"><Activity size={14} className="text-green-500" /> Confluências Tactical</h3>
+                  {evidenceChecks.map((item) => (
+                    <CheckItem key={item.label} label={`${item.label}${item.detail ? ` • ${item.detail}` : ''}`} active={Boolean(item.active)} />
+                  ))}
+                  <div className="mt-4 bg-green-500/5 p-6 rounded-[2.5rem] border border-green-500/10">
+                    <div className="flex items-center gap-3 mb-3">
+                      <CheckCircle2 size={18} className="text-green-500" />
+                      <span className="text-[10px] font-black text-zinc-200 uppercase tracking-widest">Certificação Tactical</span>
+                    </div>
+                    <p className="text-[9px] text-zinc-500 font-bold uppercase leading-relaxed italic">
+                      TRIBUNAL GEMINI + GROQ + DADOS + MEMÓRIA • RIGOR {evidence.threshold || 60}% • ATÉ {evidence.max_positions || 5} ENTRADAS • TP 100% / SL 50% • BYBIT.
+                    </p>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         )}

@@ -185,6 +185,7 @@ class GroqValidator:
                 'probabilidade': 0,
                 'decisao': 'WAIT',
                 'motivo': 'Tendência neutra - bloqueio de scanner',
+                'agents': [],
             }
 
         if intelligence_context and not intelligence_context.get('allow_entry', True):
@@ -194,6 +195,7 @@ class GroqValidator:
                 'decisao': 'WAIT',
                 'motivo': f"IA institucional bloqueou: {' | '.join(vetos)}",
                 'intelligence': intelligence_context,
+                'agents': [],
             }
 
         score_local = self.local_signal(tech_data)
@@ -203,17 +205,39 @@ class GroqValidator:
         )
         score_learner, action_learner, motivo_learner = self.learner.get_signal(tech_data, symbol)
 
+        # Personas cloud: Gemini = visão estratégica (intel+local), Groq = tática (analyst+volume)
+        score_gemini = min(100.0, (score_intel * 0.65) + (score_local * 0.35))
+        score_groq = min(100.0, (score_analyst * 0.55) + (float(tech_data.get('volume_ratio', 1) or 1) * 12) + (score_local * 0.2))
+        action_gemini = action_intel if action_intel != 'WAIT' else (
+            'BUY' if trend == 'ALTA' and score_gemini >= 55 else (
+                'SELL' if trend == 'BAIXA' and score_gemini >= 55 else 'WAIT'
+            )
+        )
+        action_groq = action_analyst if action_analyst != 'WAIT' else (
+            'BUY' if trend == 'ALTA' and score_groq >= 55 else (
+                'SELL' if trend == 'BAIXA' and score_groq >= 55 else 'WAIT'
+            )
+        )
+        motivo_gemini = (
+            f"{motivo_intel} | Macro local={score_local:.0f} | "
+            f"Sentimento={(intelligence_context or {}).get('global_trend', 'NEUTRAL')}"
+        )
+        motivo_groq = (
+            f"{motivo_analyst} | Timing tático score={score_groq:.0f} | "
+            f"Volume×={float(tech_data.get('volume_ratio', 0) or 0):.2f}"
+        )
+
         probability = (
-            (score_local * 0.20) +
+            (score_gemini * 0.25) +
+            (score_groq * 0.25) +
             (score_analyst * 0.30) +
-            (score_intel * 0.30) +
             (score_learner * 0.20)
         )
 
         final_action = 'WAIT'
         trend = tech_data.get('trend', 'NEUTRO')
         st = int(tech_data.get('supertrend_signal', 0) or 0)
-        actions = [action_analyst, action_intel, action_learner]
+        actions = [action_gemini, action_groq, action_analyst, action_learner]
         buy_votes = sum(1 for a in actions if a == 'BUY')
         sell_votes = sum(1 for a in actions if a == 'SELL')
 
@@ -226,20 +250,65 @@ class GroqValidator:
         elif probability >= 78 and trend == 'BAIXA' and st == -1 and action_analyst == 'SELL':
             final_action = 'SELL'
 
+        agents = [
+            {
+                'id': 'gemini',
+                'label': 'Gemini Estratégico',
+                'score': round(float(score_gemini), 1),
+                'action': action_gemini,
+                'motivo': motivo_gemini,
+                'provider': 'local+intel',
+                'weight': 25,
+            },
+            {
+                'id': 'groq',
+                'label': 'Groq Tático',
+                'score': round(float(score_groq), 1),
+                'action': action_groq,
+                'motivo': motivo_groq,
+                'provider': 'local+analyst',
+                'weight': 25,
+            },
+            {
+                'id': 'analyst',
+                'label': 'Analista de Dados',
+                'score': round(float(score_analyst), 1),
+                'action': action_analyst,
+                'motivo': motivo_analyst,
+                'provider': 'local',
+                'weight': 30,
+            },
+            {
+                'id': 'learner',
+                'label': 'Aprendizado Neural',
+                'score': round(float(score_learner), 1),
+                'action': action_learner,
+                'motivo': motivo_learner,
+                'provider': 'neural_memory',
+                'weight': 20,
+                'learning_notes': motivo_learner,
+            },
+        ]
+
         result = {
             'probabilidade': probability,
             'decisao': final_action,
             'motivo': (
-                f'Analista: {motivo_analyst} | '
-                f'IA Mercado: {motivo_intel} | '
-                f'Aprendizado: {motivo_learner}'
+                f'Gemini: {motivo_gemini[:80]} | '
+                f'Groq: {motivo_groq[:80]} | '
+                f'Analista: {motivo_analyst[:80]} | '
+                f'Aprendizado: {motivo_learner[:80]}'
             ),
+            'agents': agents,
             'brains': {
-                'local': 'online',
+                'gemini': 'online',
+                'groq': 'online',
                 'analyst': 'online',
-                'intelligence': 'online',
                 'learner': 'online',
+                'local': 'online',
+                'intelligence': 'online',
             },
+            'votes': {'buy': buy_votes, 'sell': sell_votes},
         }
         if intelligence_context:
             result['intelligence'] = intelligence_context

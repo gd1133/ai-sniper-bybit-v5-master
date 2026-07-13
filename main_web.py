@@ -513,8 +513,10 @@ central_state = {
     "win_rate": 0.0,  
     "ia2_decision": {
         "motivo": "Varrendo mercado com IA institucional: regime, baleias, notícias e timing...",
-        "brains": {"local": "online", "analyst": "online", "intelligence": "online", "learner": "online"}
+        "brains": {"gemini": "online", "groq": "online", "analyst": "online", "learner": "online"}
     },
+    "evidence": None,
+    "ai_tribunal": None,
     "max_moedas_ativas": MAX_MOEDAS_ATIVAS,
     "risk_mode": RISK_MODE,
 }
@@ -813,6 +815,70 @@ def _sanitize_signal_payload(raw_data):
 def _build_last_sniper_signal(symbol, side, entry_price, confidence, reason):
     canonical_symbol = _canonicalize_symbol(symbol) or str(symbol or '').strip()
     return {"signal_id": f"{_limpar_simbolo(canonical_symbol)}|{side.upper()}|{entry_price}|{int(time.time())}", "symbol": _limpar_simbolo(canonical_symbol), "raw_symbol": canonical_symbol, "side": side.upper(), "entry_price": round(float(entry_price), 8), "confidence": round(float(confidence), 2), "reason": str(reason).strip(), "received_at": datetime.now().isoformat(timespec='seconds')}
+
+
+def _publish_ai_tribunal_evidence(symbol, side, tech_data, consensus, intel_ctx=None, df=None):
+    """
+    Publica os 4 cards do Tribunal (Gemini/Groq/Analista/Aprendizado) no /api/status
+    para o cliente ver por que o robô comprou/vendeu, o estudo das velas e a assertividade.
+    """
+    try:
+        from src.ai_brain.tribunal_panel import build_ai_tribunal_evidence
+        from src.ai_brain.learning import TradeLearner
+
+        learning_stats = {}
+        try:
+            learning_stats = TradeLearner().get_local_ml_stats(symbol=_limpar_simbolo(symbol)) or {}
+        except Exception:
+            learning_stats = {'total_trades': 0, 'wins': 0, 'win_rate': float(central_state.get('win_rate') or 0), 'total_pnl': 0, 'summary': 'Sem histórico local ainda'}
+
+        # Completa win rate global se o par não tem amostra
+        if int(learning_stats.get('total_trades') or 0) == 0 and central_state.get('win_rate'):
+            learning_stats = {
+                **learning_stats,
+                'win_rate': float(central_state.get('win_rate') or 0),
+                'summary': (
+                    f"Assertividade global do robô: {float(central_state.get('win_rate') or 0):.1f}% "
+                    f"({int(central_state.get('winning_trades') or 0)}W/"
+                    f"{int(central_state.get('losing_trades') or 0)}L)"
+                ),
+            }
+
+        evidence = build_ai_tribunal_evidence(
+            symbol=symbol,
+            side=side,
+            tech_data=tech_data or {},
+            consensus=consensus or {},
+            intelligence_context=intel_ctx or (consensus or {}).get('intelligence'),
+            df=df,
+            learning_stats=learning_stats,
+            threshold=float(THRESHOLD_ENTRADA),
+            max_positions=int(MAX_MOEDAS_ATIVAS),
+        )
+        central_state['evidence'] = evidence
+        central_state['ai_tribunal'] = {
+            'agents': evidence.get('agents'),
+            'dialogue': evidence.get('dialogue'),
+            'assertiveness': evidence.get('assertiveness'),
+            'symbol': evidence.get('symbol'),
+            'side': evidence.get('side'),
+        }
+        central_state['ia2_decision'] = {
+            'motivo': str((consensus or {}).get('motivo') or evidence.get('strategic_reason') or ''),
+            'decisao': evidence.get('side'),
+            'probabilidade': evidence.get('confidence'),
+            'assertiveness': evidence.get('assertiveness'),
+            'brains': evidence.get('brains') or {},
+            'dialogue_preview': (evidence.get('dialogue') or [{}])[-1].get('text', ''),
+        }
+        central_state['confidence'] = evidence.get('confidence', central_state.get('confidence', 0))
+        if evidence.get('symbol'):
+            central_state['symbol'] = evidence['symbol']
+        return evidence
+    except Exception as exc:
+        print(f'⚠️ [TRIBUNAL] Falha ao publicar evidência: {exc}', flush=True)
+        return None
+
 
 def _push_recent_sniper_signal(signal_data, max_items=10):
     if not signal_data: return
@@ -2011,6 +2077,15 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
         central_state['symbol'] = signal_snapshot.get('symbol', central_state.get('symbol', '---'))
         central_state['confidence'] = signal_snapshot.get('confidence', central_state.get('confidence', 0))
         _push_recent_sniper_signal(signal_snapshot)
+        # Mantém painel do tribunal alinhado ao sinal que vai a mercado
+        try:
+            tech = (res_ia or {}).get('tech_data') or {}
+            intel = (res_ia or {}).get('intelligence')
+            df_sig = (res_ia or {}).get('df')
+            if tech or (res_ia or {}).get('agents'):
+                _publish_ai_tribunal_evidence(symbol, side, tech, res_ia, intel_ctx=intel, df=df_sig)
+        except Exception:
+            pass
         
         threading.Thread(
             target=_process_client_orders_background,
@@ -2249,6 +2324,7 @@ def sniper_worker_loop():
                         'signals': signals,
                         'res': res,
                         'intel_ctx': intel_ctx,
+                        'df': df,
                         'money_flow_score': money_flow['money_flow_score'],
                         'whale_score': intel_ctx.get('whale_score', 0),
                         'timing_score': intel_ctx.get('timing_score', 0),
@@ -2270,6 +2346,7 @@ def sniper_worker_loop():
                     'whale_score': o.get('whale_score', 0),
                     'timing_score': o.get('timing_score', 0),
                     'global_trend': o['intel_ctx'].get('global_trend'),
+                    'assertiveness': round(float(o['probabilidade']) * 0.7 + float(o.get('whale_score') or 0) * 0.15 + float(o.get('timing_score') or 0) * 0.15, 1),
                 }
                 for o in oportunidades_ordenadas[:5]
             ]
@@ -2281,6 +2358,15 @@ def sniper_worker_loop():
                 res = melhor['res']
                 decisao = str(res.get('decisao', 'WAIT')).upper()
                 intel_ctx = melhor['intel_ctx']
+                side_best = 'buy' if decisao in ('BUY', 'COMPRAR') else 'sell'
+                _publish_ai_tribunal_evidence(
+                    sym,
+                    side_best,
+                    signals,
+                    {**res, 'tech_data': signals},
+                    intel_ctx=intel_ctx,
+                    df=melhor.get('df'),
+                )
                 print(
                     f"🎯 [MELHOR OPORTUNIDADE] {melhor['clean_symbol']} | "
                     f"Score={melhor['score']:.1f} | Baleias={intel_ctx.get('whale_score')} | "
@@ -2289,9 +2375,14 @@ def sniper_worker_loop():
                 )
                 broadcast_ordem_global(
                     sym,
-                    'buy' if decisao in ('BUY', 'COMPRAR') else 'sell',
+                    side_best,
                     float(signals['price']),
-                    res,
+                    {
+                        **res,
+                        'tech_data': signals,
+                        'intelligence': intel_ctx,
+                        'df': melhor.get('df'),
+                    },
                 )
                 time.sleep(COOLDOWN_INSTITUCIONAL_SECS)
         except Exception: pass
