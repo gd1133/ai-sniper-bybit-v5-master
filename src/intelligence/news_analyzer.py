@@ -8,6 +8,8 @@ import re
 import time
 from typing import Any
 
+import urllib.parse
+
 import requests
 
 try:
@@ -140,6 +142,76 @@ Retorne JSON: sentiment_score (0-100), global_trend (BULLISH/BEARISH/NEUTRAL), n
         return None
 
 
+def _fetch_web_headlines(coin: str, limit: int = 6) -> list[dict]:
+    """
+    Busca manchetes reais na web (Google News RSS) sobre a tendência da moeda.
+    Sem API key — falha silenciosa se offline.
+    """
+    headlines: list[dict] = []
+    queries = [
+        f'{coin} cryptocurrency OR crypto OR bitcoin OR USDT',
+        f'{coin} crypto price trend',
+    ]
+    for q in queries:
+        try:
+            url = (
+                'https://news.google.com/rss/search?'
+                f'q={urllib.parse.quote(q)}&hl=en-US&gl=US&ceid=US:en'
+            )
+            rsp = requests.get(url, timeout=8, headers={'User-Agent': 'Mozilla/5.0 SniperBot/1.0'})
+            if rsp.status_code != 200 or not rsp.text:
+                continue
+            # Parse RSS leve sem dependência externa
+            items = re.findall(
+                r'<item>\s*<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>',
+                rsp.text,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            for title in items:
+                clean = re.sub(r'<[^>]+>', '', title).strip()
+                clean = clean.replace('&amp;', '&').replace('&quot;', '"').replace('&#39;', "'")
+                if clean and clean.lower() not in {h['title'].lower() for h in headlines}:
+                    headlines.append({'title': clean[:180], 'source': 'google_news'})
+                if len(headlines) >= limit:
+                    return headlines
+        except Exception:
+            continue
+    return headlines
+
+
+def _score_headlines_bias(headlines: list[dict], coin: str) -> tuple[float, str, list[str]]:
+    """Heurística local de viés bullish/bearish nas manchetes (para Cérebro 3)."""
+    if not headlines:
+        return 0.0, 'NEUTRAL', []
+
+    bull_kw = (
+        'surge', 'soar', 'rally', 'bull', 'gain', 'pump', 'break', 'breakship',
+        'adoption', 'record', 'high', 'upgrade', 'listing', 'unlock demand',
+        'alta', 'sobe', 'valoriz', 'compra',
+    )
+    bear_kw = (
+        'crash', 'dump', 'plunge', 'bear', 'hack', 'ban', 'sec lawsuit', 'fraud',
+        'liquidation', 'collapse', 'down', 'selloff', 'risk', 'warning',
+        'queda', 'cai', 'desvaloriz', 'fraude', 'hacke',
+    )
+    bull = 0
+    bear = 0
+    notes = []
+    for h in headlines:
+        t = str(h.get('title', '')).lower()
+        if any(k in t for k in bull_kw):
+            bull += 1
+        if any(k in t for k in bear_kw):
+            bear += 1
+    delta = (bull - bear) * 8.0
+    if bull > bear:
+        notes.append(f'Web news {coin}: {bull} manchetes bullish vs {bear} bearish')
+        return delta, 'BULLISH', notes
+    if bear > bull:
+        notes.append(f'Web news {coin}: {bear} manchetes bearish vs {bull} bullish')
+        return delta, 'BEARISH', notes
+    notes.append(f'Web news {coin}: {len(headlines)} manchetes sem viés claro')
+    return 0.0, 'NEUTRAL', notes
 def analyze_news_sentiment(
     symbol: str,
     signals: dict,
@@ -147,7 +219,7 @@ def analyze_news_sentiment(
     whale: dict | None = None,
 ) -> dict[str, Any]:
     """
-    Combina trending global, sentimento CoinGecko e IA (Groq/Gemini).
+    Combina trending global, sentimento CoinGecko, manchetes web e IA (Groq/Gemini).
     """
     if not _env_bool('ENABLE_NEWS_AI', True):
         return {
@@ -159,6 +231,8 @@ def analyze_news_sentiment(
             'is_trending': False,
             'reason': 'Análise de notícias desativada',
             'source': 'disabled',
+            'headlines': [],
+            'web_news_bias': 'NEUTRAL',
         }
 
     coin = _symbol_to_coin_id(symbol)
@@ -170,6 +244,8 @@ def analyze_news_sentiment(
     trending = _fetch_coingecko_trending()
     is_trending = coin in trending
     cg_data = _fetch_coingecko_sentiment(coin)
+    headlines = _fetch_web_headlines(coin)
+    web_delta, web_bias, web_notes = _score_headlines_bias(headlines, coin)
 
     score = 50.0
     reasons = []
@@ -202,18 +278,34 @@ def analyze_news_sentiment(
         score += 10
         reasons.append(f'Top {rank} market cap — liquidez institucional')
 
+    # Manchetes web → Cérebro 3
+    score += web_delta
+    reasons.extend(web_notes)
+    if web_bias == 'BULLISH' and global_trend == 'NEUTRAL':
+        global_trend = 'BULLISH'
+    elif web_bias == 'BEARISH':
+        if global_trend == 'NEUTRAL':
+            global_trend = 'BEARISH'
+        news_risk = 'HIGH' if news_risk == 'LOW' else news_risk
+        if str(signals.get('trend', '')).upper() == 'ALTA' and web_delta <= -8:
+            block_trade = True
+            reasons.append('Conflito: tendência técnica de alta vs notícias web negativas')
+
+    headline_block = '\n'.join(f'- {h["title"]}' for h in headlines[:5]) or '- (sem manchetes)'
     tech_summary = (
         f"Symbol: {symbol}\n"
         f"Trend: {signals.get('trend')}\n"
         f"RSI: {signals.get('rsi')}\n"
         f"Volume ratio: {signals.get('volume_ratio')}\n"
+        f"Heat: {signals.get('heat_score')} bias={signals.get('heat_bias')}\n"
         f"Regime: {(regime or {}).get('market_regime')} lateral={((regime or {}).get('is_lateral'))}\n"
         f"Whale score: {(whale or {}).get('whale_score')} aligned={(whale or {}).get('whale_aligned')}\n"
-        f"Trending coins: {', '.join(trending[:5])}"
+        f"Trending coins: {', '.join(trending[:5])}\n"
+        f"Web headlines:\n{headline_block}"
     )
 
     ai_result = None
-    source = 'coingecko'
+    source = 'coingecko+web' if headlines else 'coingecko'
     ai_unavailable = False
     cloud_attempted = False
     groq_key = os.getenv('GROQ_API_KEY', '').strip()
@@ -223,17 +315,17 @@ def analyze_news_sentiment(
         cloud_attempted = True
         ai_result = _ai_analyze_with_groq(symbol, tech_summary, groq_key)
         if ai_result is not None:
-            source = 'groq'
+            source = 'groq+web'
     if ai_result is None and gemini_key:
         cloud_attempted = True
         ai_result = _ai_analyze_with_gemini(symbol, tech_summary, gemini_key)
         if ai_result is not None:
-            source = 'gemini'
+            source = 'gemini+web'
 
     if cloud_attempted and ai_result is None:
         # Groq/Gemini em 429/timeout: NÃO bloqueia o ativo — Cérebro 3 assume
         ai_unavailable = True
-        source = 'ai_unavailable'
+        source = 'web_local' if headlines else 'ai_unavailable'
         reasons.append('Dados indisponíveis devido a limites de API da IA')
 
     if ai_result:
@@ -257,8 +349,9 @@ def analyze_news_sentiment(
             score -= 10
             news_risk = 'HIGH'
     else:
-        # Sem IAs auxiliares: não aplica bloqueio soft de sentimento
-        block_trade = False
+        # Sem IAs cloud: mantém manchetes locais; não aplica block soft de sentimento cloud
+        if not headlines:
+            block_trade = False
 
     result = {
         'sentiment_score': round(max(0.0, min(100.0, score)), 2),
@@ -270,6 +363,8 @@ def analyze_news_sentiment(
         'reason': ' | '.join(reasons) if reasons else 'Sem catalisadores de notícia relevantes',
         'source': source,
         'ai_unavailable': ai_unavailable,
+        'headlines': headlines[:6],
+        'web_news_bias': web_bias,
     }
     _CACHE[cache_key] = (now, result)
     return result

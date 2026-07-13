@@ -229,7 +229,8 @@ class Cerebro3Sovereign:
         self.learner = learner
         self.local_ml = local_ml or LocalMLEngine()
 
-    def decide(self, tech_data, symbol, report_c1: dict, report_c2: dict) -> dict:
+    def decide(self, tech_data, symbol, report_c1: dict, report_c2: dict, intelligence_context=None) -> dict:
+        ctx = intelligence_context or {}
         assistants_down = (
             (not report_c1.get('available', True))
             or (not report_c2.get('available', True))
@@ -244,6 +245,17 @@ class Cerebro3Sovereign:
             learning_ctx = 'Histórico local indisponível'
 
         score_learner, action_learner, motivo_learner = self.learner.get_signal(tech_data, symbol)
+
+        # Injeta notícias/heat no tech_data para o Cérebro 3
+        enriched = dict(tech_data or {})
+        for key in ('sentiment_score', 'global_trend', 'news_risk', 'web_news_bias', 'is_trending'):
+            if key in ctx and key not in enriched:
+                enriched[key] = ctx.get(key)
+        headlines = ctx.get('headlines') or (ctx.get('news') or {}).get('headlines') or []
+        news_blurb = ''
+        if headlines:
+            titles = [str(h.get('title', ''))[:80] for h in headlines[:3] if isinstance(h, dict)]
+            news_blurb = ' | Web: ' + ' // '.join(titles)
 
         if assistants_down:
             clean = (
@@ -260,13 +272,12 @@ class Cerebro3Sovereign:
                 flush=True,
             )
 
-            # Plano B: dados matemáticos diretos + memória de wins/losses
+            # Plano B: matemática + histórico + notícias web + heat de velas
             allowed, reason_entry, confidence = self.local_ml.evaluate_entry_conditions(
-                symbol, tech_data,
+                symbol, enriched, intelligence_context=ctx,
             )
-            direction, reason_dir = self.local_ml.resolve_entry_direction(tech_data)
+            direction, reason_dir = self.local_ml.resolve_entry_direction(enriched, intelligence_context=ctx)
 
-            # Histórico de aprendizado reforça/penaliza a confiança soberana
             confidence = float(confidence)
             if 'positivo' in str(motivo_learner).lower() or 'vitórias' in str(motivo_learner).lower():
                 confidence = min(100.0, confidence + 5)
@@ -277,13 +288,14 @@ class Cerebro3Sovereign:
             if allowed and direction in ('BUY', 'SELL'):
                 final_action = direction
             elif confidence >= 80 and direction in ('BUY', 'SELL'):
-                # Ainda decide pela matemática local se confiança alta
                 final_action = direction
 
             print(
                 f"🚀 [CÉREBRO 3] Decisão tomada de forma independente para o ativo [{clean}].",
                 flush=True,
             )
+            if headlines:
+                print(f"   📰 [CÉREBRO 3] Notícias web analisadas: {len(headlines)} manchetes", flush=True)
 
             return {
                 'autonomous': True,
@@ -291,7 +303,7 @@ class Cerebro3Sovereign:
                 'decisao': final_action,
                 'motivo': (
                     f"Modo Autônomo Cérebro 3 | {reason_dir} | {reason_entry} | "
-                    f"Aprendizado: {motivo_learner} | {learning_ctx}"
+                    f"Aprendizado: {motivo_learner} | {learning_ctx}{news_blurb}"
                 ),
                 'score_learner': float(score_learner),
                 'action_learner': action_learner,
@@ -299,21 +311,30 @@ class Cerebro3Sovereign:
                 'learning_context': learning_ctx,
             }
 
-        # Modo normal: Cérebro 3 lidera com relatórios dos assistentes + histórico
+        # Modo normal: Cérebro 3 lidera com relatórios dos assistentes + histórico + news/heat
         local_score = 0
-        trend = str(tech_data.get('trend', 'NEUTRO')).upper()
-        st = int(tech_data.get('supertrend_signal', 0) or tech_data.get('supertrend', 0) or 0)
+        trend = str(enriched.get('trend', 'NEUTRO')).upper()
+        st = int(enriched.get('supertrend_signal', 0) or enriched.get('supertrend', 0) or 0)
         if trend in ('ALTA', 'BAIXA'):
+            local_score += 25
+        if float(enriched.get('fib_distance_pct', 100) or 100) < 1.5:
             local_score += 30
-        if float(tech_data.get('fib_distance_pct', 100) or 100) < 1.5:
-            local_score += 40
-        if float(tech_data.get('volume_ratio', 0) or 0) >= 1.5:
-            local_score += 30
-        local_score = min(100, local_score)
+        if float(enriched.get('volume_ratio', 0) or 0) >= 1.5:
+            local_score += 20
+        heat = float(enriched.get('heat_score', 0) or 0)
+        if heat >= 55:
+            local_score += 15
+        if str(ctx.get('global_trend', '')).upper() in ('BULLISH', 'BEARISH'):
+            gt = str(ctx.get('global_trend')).upper()
+            if (trend == 'ALTA' and gt == 'BULLISH') or (trend == 'BAIXA' and gt == 'BEARISH'):
+                local_score += 10
+            elif (trend == 'ALTA' and gt == 'BEARISH') or (trend == 'BAIXA' and gt == 'BULLISH'):
+                local_score -= 15
+        local_score = max(0, min(100, local_score))
 
         score_c1 = float(report_c1.get('score', 0) or 0)
         score_c2 = float(report_c2.get('score', 0) or 0)
-        probability = (score_c1 * 0.30) + (score_c2 * 0.25) + (score_learner * 0.20) + (local_score * 0.25)
+        probability = (score_c1 * 0.28) + (score_c2 * 0.22) + (score_learner * 0.20) + (local_score * 0.30)
 
         actions = [
             report_c1.get('action', 'WAIT'),
@@ -333,6 +354,13 @@ class Cerebro3Sovereign:
         elif probability >= 78 and trend == 'BAIXA' and st == -1 and report_c1.get('action') == 'SELL':
             final_action = 'SELL'
 
+        # Conflito notícias vs direção → não entra
+        gt = str(ctx.get('global_trend', '')).upper()
+        if final_action == 'BUY' and gt == 'BEARISH' and str(ctx.get('news_risk', '')).upper() == 'HIGH':
+            final_action = 'WAIT'
+        if final_action == 'SELL' and gt == 'BULLISH' and str(ctx.get('news_risk', '')).upper() == 'HIGH':
+            final_action = 'WAIT'
+
         return {
             'autonomous': False,
             'probabilidade': probability,
@@ -340,7 +368,8 @@ class Cerebro3Sovereign:
             'motivo': (
                 f"C1: {str(report_c1.get('report', ''))[:80]} | "
                 f"C2: {str(report_c2.get('report', ''))[:80]} | "
-                f"C3 Aprendizado: {motivo_learner[:80]} | {learning_ctx[:80]}"
+                f"C3 Aprendizado: {motivo_learner[:80]} | Heat={heat:.0f} | "
+                f"News={gt or 'N/A'}{news_blurb[:120]}"
             ),
             'score_learner': float(score_learner),
             'action_learner': action_learner,
@@ -437,7 +466,9 @@ class GroqValidator:
             report_c2 = _unavailable_report(2, 'Livro e Volume')
 
         # ── Cérebro 3 soberano ───────────────────────────────────────────────
-        decision = self.cerebro3.decide(tech_data, symbol, report_c1, report_c2)
+        decision = self.cerebro3.decide(
+            tech_data, symbol, report_c1, report_c2, intelligence_context=ctx,
+        )
 
         score_local = self.local_signal(tech_data)
         score_analyst = float(report_c1.get('score', 0) or 0)

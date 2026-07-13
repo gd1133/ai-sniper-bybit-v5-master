@@ -186,8 +186,10 @@ def evaluate_position_exit(unrealised_pnl: float, margin: float) -> Tuple[str | 
     if margin <= 0:
         return None, roi
 
-    tp_usd = margin * DEFAULT_TP_MARGIN_RATIO
-    sl_usd = -margin * DEFAULT_SL_MARGIN_RATIO
+    tp_ratio = abs(load_tp_roi_pct()) / 100.0  # 100 → 1.0
+    sl_ratio = abs(load_sl_roi_pct()) / 100.0  # 50 → 0.5
+    tp_usd = margin * tp_ratio
+    sl_usd = -margin * sl_ratio
     pnl = float(unrealised_pnl or 0)
 
     if pnl >= tp_usd:
