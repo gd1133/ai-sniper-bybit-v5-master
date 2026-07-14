@@ -349,8 +349,8 @@ class Cerebro3Sovereign:
         heat = float(enriched.get('heat_score', 0) or 0)
         if heat >= 55:
             local_score += 15
-        if str(ctx.get('global_trend', '')).upper() in ('BULLISH', 'BEARISH'):
-            gt = str(ctx.get('global_trend')).upper()
+        gt = str(ctx.get('global_trend', '') or 'NEUTRAL').upper()
+        if gt in ('BULLISH', 'BEARISH'):
             if (trend == 'ALTA' and gt == 'BULLISH') or (trend == 'BAIXA' and gt == 'BEARISH'):
                 local_score += 10
             elif (trend == 'ALTA' and gt == 'BEARISH') or (trend == 'BAIXA' and gt == 'BULLISH'):
