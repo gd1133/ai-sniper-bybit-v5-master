@@ -80,26 +80,43 @@ def _fetch_coingecko_sentiment(coin_id: str) -> dict:
         return {}
 
 
+def _neutral_degraded_payload(reason: str) -> dict:
+    """Sentimento neutro quando a IA cloud está em cooldown/degradada — nunca bloqueia."""
+    return {
+        'sentiment_score': 50,
+        'global_trend': 'NEUTRAL',
+        'news_risk': 'LOW',
+        'investor_mood': 'NEUTRAL',
+        'block_trade': False,
+        'reason': reason,
+        'ai_status': 'degradado',
+        '_degraded': True,
+    }
+
+
 def _ai_analyze_with_groq(symbol: str, tech_summary: str, groq_key: str) -> dict | None:
     global _GROQ_FAIL_STREAK, _GROQ_COOLDOWN_UNTIL
     if not groq_key or Groq is None:
         return None
     now = time.time()
+    in_cooldown = now < _GROQ_COOLDOWN_UNTIL
     # #region agent log
     try:
         from src.debug_agent_log import agent_dbg
         agent_dbg('B', 'news_analyzer.py:_ai_analyze_with_groq', 'groq_call_attempt', {
             'symbol': str(symbol)[:40],
             'cooldown_until': _GROQ_COOLDOWN_UNTIL,
-            'in_cooldown': now < _GROQ_COOLDOWN_UNTIL,
+            'in_cooldown': in_cooldown,
             'fail_streak': _GROQ_FAIL_STREAK,
         })
     except Exception:
         pass
     # #endregion
-    # Cooldown global pós-429: não martela TPD em cada moeda do radar
-    if now < _GROQ_COOLDOWN_UNTIL:
-        return None
+    # Cooldown: retorna NEUTRO (assistente degradado) — não erro/bloqueio
+    if in_cooldown:
+        return _neutral_degraded_payload(
+            f'Groq em cooldown — sentimento NEUTRO para {symbol} (assistente degradado)'
+        )
     try:
         client = Groq(api_key=groq_key)
         prompt = f"""Você é analista institucional de criptomoedas. Avalie {symbol} para trading de futuros.
@@ -355,27 +372,36 @@ def analyze_news_sentiment(
     source = 'coingecko+web' if headlines else 'coingecko'
     ai_unavailable = False
     cloud_attempted = False
+    cloud_degraded = False
+    ai_status = 'ok'
     groq_key = os.getenv('GROQ_API_KEY', '').strip()
     gemini_key = os.getenv('GEMINI_API_KEY', '').strip()
 
     if groq_key:
         cloud_attempted = True
         ai_result = _ai_analyze_with_groq(symbol, tech_summary, groq_key)
-        if ai_result is not None:
+        if ai_result is not None and not ai_result.get('_degraded'):
             source = 'groq+web'
-    if ai_result is None and gemini_key:
+        elif ai_result is not None and ai_result.get('_degraded'):
+            cloud_degraded = True
+            ai_status = 'degradado'
+            source = 'web_local' if headlines else 'local_sentiment'
+    if (ai_result is None or ai_result.get('_degraded')) and gemini_key:
         cloud_attempted = True
-        ai_result = _ai_analyze_with_gemini(symbol, tech_summary, gemini_key)
-        if ai_result is not None:
+        gemini_result = _ai_analyze_with_gemini(symbol, tech_summary, gemini_key)
+        if gemini_result is not None:
+            ai_result = gemini_result
+            cloud_degraded = False
+            ai_status = 'ok'
             source = 'gemini+web'
 
-    if cloud_attempted and ai_result is None:
-        # Cloud (Groq/Gemini) caiu — NÃO derruba Cérebro 1/2.
-        # Mantém manchetes web + CoinGecko; só marca degradação cloud.
+    if cloud_attempted and (ai_result is None or ai_result.get('_degraded')):
+        # Cloud (Groq/Gemini) em cooldown/falha — NEUTRO, NUNCA bloqueia.
+        # Cérebro 3 permanece soberano na decisão técnica.
         cloud_degraded = True
+        ai_status = 'degradado'
         source = 'web_local' if headlines else 'local_sentiment'
-        reasons.append('Cloud news (Groq/Gemini) em limite — usando manchetes/local')
-        # ai_unavailable=False: evita cascade Maestro falso
+        reasons.append('Cloud news (Groq/Gemini) indisponível — sentimento NEUTRO (assistente)')
         ai_unavailable = False
         # #region agent log
         try:
@@ -387,37 +413,46 @@ def analyze_news_sentiment(
                 'fail_streak': _GROQ_FAIL_STREAK,
                 'ai_unavailable': False,
                 'cloud_degraded': True,
+                'ai_status': 'degradado',
             })
         except Exception:
             pass
         # #endregion
-    else:
-        cloud_degraded = False
 
-    if ai_result:
+    if ai_result and not ai_result.get('_degraded') and not cloud_degraded:
         ai_score = float(ai_result.get('sentiment_score', 50) or 50)
         score = (score * 0.4) + (ai_score * 0.6)
         global_trend = str(ai_result.get('global_trend', global_trend)).upper()
         news_risk = str(ai_result.get('news_risk', news_risk)).upper()
         investor_mood = str(ai_result.get('investor_mood', investor_mood)).upper()
-        if ai_result.get('block_trade'):
-            block_trade = True
+        # Assistente: block_trade da IA cloud NUNCA vira veto de entrada
         ai_reason = str(ai_result.get('reason', '')).strip()
         if ai_reason:
             reasons.append(f'IA: {ai_reason}')
+        if ai_result.get('block_trade'):
+            reasons.append('IA sugeriu cautela (informativo — sem bloqueio)')
+
+    # Cooldown / degradação: força NEUTRO e libera trade
+    if cloud_degraded or ai_status == 'degradado' or (now < _GROQ_COOLDOWN_UNTIL and not gemini_key):
+        global_trend = 'NEUTRAL'
+        investor_mood = 'NEUTRAL'
+        news_risk = 'LOW'
+        score = 50.0
+        block_trade = False
+        ai_status = 'degradado'
+        cloud_degraded = True
 
     trend = str(signals.get('trend', 'NEUTRO')).upper()
-    if not ai_unavailable:
+    if not cloud_degraded and not ai_unavailable:
         if global_trend == 'BEARISH' and trend == 'ALTA':
             score -= 10
             news_risk = 'HIGH'
         elif global_trend == 'BULLISH' and trend == 'BAIXA':
             score -= 10
             news_risk = 'HIGH'
-    else:
-        # Sem IAs cloud: mantém manchetes locais; não aplica block soft de sentimento cloud
-        if not headlines:
-            block_trade = False
+
+    # Assistente de notícias: nunca bloqueia entradas — Cérebro 3 decide
+    block_trade = False
 
     result = {
         'sentiment_score': round(max(0.0, min(100.0, score)), 2),
@@ -430,8 +465,9 @@ def analyze_news_sentiment(
         'source': source,
         'ai_unavailable': ai_unavailable,
         'cloud_ai_degraded': cloud_degraded,
+        'ai_status': ai_status,
         'headlines': headlines[:6],
-        'web_news_bias': web_bias,
+        'web_news_bias': 'NEUTRAL' if cloud_degraded else web_bias,
     }
     _CACHE[cache_key] = (now, result)
     return result
