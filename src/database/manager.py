@@ -61,15 +61,7 @@ def is_truthy(value: Any) -> bool:
 
 
 def normalize_account_mode(value: Any) -> str:
-    raw = str(value or '').strip().lower()
-    if raw in ('demo', 'demos', 'demo_trading'):
-        return 'demo'
-    if raw in ('testnet', 'test', 'teste'):
-        return 'testnet'
-    if raw in ('real', 'mainnet', 'producao', 'produção', 'prod'):
-        return 'real'
-    if value is True or raw in ('1', 'true', 'yes', 'on'):
-        return 'testnet'
+    """Sistema 100% REAL — sempre conta real (sem testnet/demo/paper)."""
     return 'real'
 
 
@@ -78,13 +70,7 @@ def normalize_operation_mode(value: Any) -> str:
     return 'real'
 
 def normalize_balance_source(value: Any) -> str:
-    raw = str(value or '').strip().lower()
-    if not raw or raw in {'broker_testnet_balance', 'real', 'broker'}:
-        return 'broker_real_balance'
-    if raw in {'training_fake_balance', 'fake', 'training', 'teste', 'test'}:
-        return 'training_fake_balance'
-    if raw in VALID_BALANCE_SOURCES:
-        return raw
+    """Única fonte válida: saldo real do broker (Bybit/Binance)."""
     return 'broker_real_balance'
 
 
@@ -146,22 +132,12 @@ def init_db():
     _ensure_column(cur, 'clientes_sniper', 'account_mode', "TEXT DEFAULT 'real'")
     _ensure_column(cur, 'clientes_sniper', 'balance_source', "TEXT DEFAULT 'broker_real_balance'")
     _ensure_column(cur, 'clientes_sniper', 'exchange', "TEXT DEFAULT 'bybit'")
-    # Preenche account_mode vazio sem resetar is_testnet de clientes existentes.
+    # Sistema 100% REAL: força todos os clientes existentes para conta real.
     cur.execute("""
         UPDATE clientes_sniper
-        SET account_mode = CASE
-            WHEN COALESCE(is_testnet, 0) = 1 THEN 'testnet'
-            ELSE 'real'
-        END
-        WHERE account_mode IS NULL OR TRIM(account_mode) = ''
-    """)
-    cur.execute("""
-        UPDATE clientes_sniper
-        SET balance_source = CASE
-            WHEN COALESCE(account_mode, 'testnet') = 'testnet' THEN 'broker_testnet_balance'
-            ELSE 'broker_real_balance'
-        END
-        WHERE balance_source IS NULL OR TRIM(balance_source) = ''
+        SET is_testnet = 0,
+            account_mode = 'real',
+            balance_source = 'broker_real_balance'
     """)
 
     # Tabela de histórico de trades (para P&L tracking)
@@ -543,8 +519,8 @@ def set_config(key: str, value: str) -> bool:
 
 
 def is_test_mode_enabled() -> bool:
-    """Verifica se modo teste está ativo"""
-    return get_config('TEST_MODE', 'false').lower() == 'true'
+    """Sistema 100% REAL — modo teste removido."""
+    return False
 
 
 def get_operation_mode() -> str:
@@ -559,5 +535,6 @@ def set_operation_mode(mode: str) -> bool:
 
 
 def enable_test_mode() -> bool:
-    """Ativa modo teste"""
-    return set_config('TEST_MODE', 'true')
+    """Sistema 100% REAL — modo teste desativado permanentemente."""
+    set_config('TEST_MODE', 'false')
+    return False
