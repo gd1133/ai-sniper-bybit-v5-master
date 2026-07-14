@@ -79,7 +79,7 @@ LEVERAGE: int = 10             # 10× alavancagem
 MARGIN_MODE: str = "CROSSED"   # Cross Margin
 
 # Confiança mínima exigida pelo Tribunal dos 3 Cérebros
-MIN_CONFIDENCE: int = 60       # 60 % combinado
+MIN_CONFIDENCE: int = 48       # assertivo — antes 60%
 
 # Pausa entre ciclos de varredura (segundos)
 SCAN_INTERVAL: int = int(os.getenv("SCAN_INTERVAL", "30"))

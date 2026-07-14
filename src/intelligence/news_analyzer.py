@@ -285,7 +285,8 @@ def analyze_news_sentiment(
     """
     Combina trending global, sentimento CoinGecko, manchetes web e IA (Groq/Gemini).
     """
-    if not _env_bool('ENABLE_NEWS_AI', True):
+    # Desligado por padrão: notícias atrasam o radar e NÃO devem travar entradas.
+    if not _env_bool('ENABLE_NEWS_AI', False):
         return {
             'sentiment_score': 50.0,
             'global_trend': 'NEUTRAL',
@@ -293,8 +294,11 @@ def analyze_news_sentiment(
             'investor_mood': 'NEUTRAL',
             'block_trade': False,
             'is_trending': False,
-            'reason': 'Análise de notícias desativada',
+            'reason': 'Análise de notícias desativada — Cérebro 3 decide só com técnica',
             'source': 'disabled',
+            'ai_unavailable': False,
+            'cloud_ai_degraded': False,
+            'ai_status': 'disabled',
             'headlines': [],
             'web_news_bias': 'NEUTRAL',
         }
