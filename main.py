@@ -781,17 +781,31 @@ def run_sniper(symbol: str = SYMBOL):
                 hard = list(intel_ctx.get('hard_veto_reasons') or intel_ctx.get('veto_reasons', []))
                 lateral_hard = any('LATERAL' in str(h).upper() for h in hard)
                 if lateral_hard or (hard and not (
-                    intel_ctx.get('ai_assistants_unavailable') or intel_ctx.get('soft_ai_veto_only')
+                    intel_ctx.get('ai_assistants_unavailable')
+                    or intel_ctx.get('soft_ai_veto_only')
+                    or intel_ctx.get('cloud_news_degraded')
+                    or intel_ctx.get('autonomous_mode')
                 )):
                     print(f"🔒 [IA INSTITUCIONAL] Entrada bloqueada: {' | '.join(hard)}")
                     time.sleep(SCAN_INTERVAL)
                     continue
-                if intel_ctx.get('ai_assistants_unavailable') or intel_ctx.get('autonomous_mode'):
-                    # Soft/API: Cérebro 3 assume — nunca bypass de lateral
+                if (
+                    intel_ctx.get('ai_assistants_unavailable')
+                    or intel_ctx.get('autonomous_mode')
+                    or intel_ctx.get('cloud_news_degraded')
+                    or intel_ctx.get('soft_ai_veto_only')
+                ):
+                    # Soft/API/cooldown: Cérebro 3 assume — nunca bypass de lateral
+                    if intel_ctx.get('cloud_news_degraded'):
+                        print(
+                            f"⚠️ [ASSISTENTE IA] Notícias indisponíveis para {symbol}. "
+                            f"Passando comando para análise técnica do Cérebro 3."
+                        )
                     intel_ctx = dict(intel_ctx)
                     intel_ctx['allow_entry'] = True
                     intel_ctx['autonomous_mode'] = True
-                    intel_ctx['ai_assistants_unavailable'] = True
+                    intel_ctx['ai_assistants_unavailable'] = False
+                    intel_ctx['news_block_trade'] = False
                 else:
                     print(f"🔒 [IA INSTITUCIONAL] Entrada bloqueada: {' | '.join(hard)}")
                     time.sleep(SCAN_INTERVAL)

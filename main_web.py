@@ -2346,19 +2346,31 @@ def sniper_worker_loop():
                         soft = list(intel_ctx.get('soft_veto_reasons') or [])
                         # Veto duro (lateral / vela contrária) NUNCA é bypass — só soft/news/API
                         lateral_hard = any('LATERAL' in str(h).upper() for h in hard) or bool(signals.get('is_lateral'))
-                        if lateral_hard or (hard and not intel_ctx.get('soft_ai_veto_only')):
+                        if lateral_hard or (hard and not intel_ctx.get('soft_ai_veto_only') and not intel_ctx.get('cloud_news_degraded') and not intel_ctx.get('autonomous_mode')):
                             print(
                                 f"   🚫 [IA] {clean_sym} bloqueado (veto duro): "
                                 f"{' | '.join(hard or intel_ctx.get('veto_reasons', []))}",
                                 flush=True,
                             )
                             continue
-                        if intel_ctx.get('soft_ai_veto_only') or soft:
-                            # Soft news: segue para consenso LOCAL (C1/C2/C3) — sem derrubar C2
+                        if (
+                            intel_ctx.get('soft_ai_veto_only')
+                            or soft
+                            or intel_ctx.get('cloud_news_degraded')
+                            or intel_ctx.get('autonomous_mode')
+                        ):
+                            # Soft news / cloud degradado: Cérebro 3 assume — sem 🚫
+                            if intel_ctx.get('cloud_news_degraded'):
+                                print(
+                                    f"   ⚠️ [ASSISTENTE IA] Notícias indisponíveis para {clean_sym}. "
+                                    f"Passando comando para análise técnica do Cérebro 3.",
+                                    flush=True,
+                                )
                             intel_ctx = dict(intel_ctx)
                             intel_ctx['allow_entry'] = True
-                            intel_ctx['autonomous_mode'] = False
+                            intel_ctx['autonomous_mode'] = True
                             intel_ctx['ai_assistants_unavailable'] = False
+                            intel_ctx['news_block_trade'] = False
                         else:
                             print(
                                 f"   🚫 [IA] {clean_sym} bloqueado: "

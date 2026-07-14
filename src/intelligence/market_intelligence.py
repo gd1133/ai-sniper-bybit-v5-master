@@ -50,9 +50,19 @@ class MarketIntelligence:
         hard_veto_reasons = []
         soft_veto_reasons = []
         ai_assistants_unavailable = False
-        # Cloud news degradado NÃO derruba Cérebro 1/2 — só informativo
-        cloud_news_degraded = bool(news.get('cloud_ai_degraded') or news.get('ai_unavailable'))
+        # Cloud news degradado NÃO derruba Cérebro 1/2/3 — só assistente informativo
+        cloud_news_degraded = bool(
+            news.get('cloud_ai_degraded')
+            or news.get('ai_unavailable')
+            or str(news.get('ai_status', '')).lower() == 'degradado'
+        )
         if cloud_news_degraded:
+            coin = str(symbol or '').replace('/USDT:USDT', '').replace('/USDT', '').replace(':USDT', '')
+            print(
+                f'⚠️ [ASSISTENTE IA] Notícias indisponíveis para {coin}. '
+                f'Passando comando para análise técnica do Cérebro 3.',
+                flush=True,
+            )
             # #region agent log
             try:
                 from src.debug_agent_log import agent_dbg
@@ -60,6 +70,8 @@ class MarketIntelligence:
                     'symbol': str(symbol)[:40],
                     'ai_assistants_unavailable': False,
                     'source': news.get('source'),
+                    'ai_status': news.get('ai_status', 'degradado'),
+                    'block_trade': False,
                 })
             except Exception:
                 pass
@@ -70,9 +82,8 @@ class MarketIntelligence:
                 f"Mercado LATERAL (ADX={regime.get('adx')}, Choppiness={regime.get('choppiness')})"
             )
 
-        # Bloqueio soft de notícias: NÃO trava o robô se Groq/Gemini estiverem indisponíveis
-        if news.get('block_trade') and not ai_assistants_unavailable:
-            soft_veto_reasons.append(f"Notícias/sentimento bloqueiam: {news.get('reason', '')[:120]}")
+        # Assistente de notícias: NUNCA adiciona veto soft / nunca bloqueia entrada.
+        # (block_trade e cloud_news_degraded são apenas informativos.)
 
         whale_score = float(whale.get('whale_score', 0) or 0)
         volume_ratio = float(signals.get('volume_ratio', 0) or 0)
@@ -94,8 +105,6 @@ class MarketIntelligence:
             hard_veto_reasons.append('Vela de compra forte contra tendência de baixa')
 
         veto_reasons = list(hard_veto_reasons)
-        if soft_veto_reasons and not ai_assistants_unavailable:
-            veto_reasons.extend(soft_veto_reasons)
 
         # Timing: prefere entrada perto da golden zone (fib 0.618)
         fib_dist = float(signals.get('fib_distance_pct', 100) or 100)
@@ -121,11 +130,12 @@ class MarketIntelligence:
         if signals.get('bounce_from_pivot_low') or signals.get('rejection_from_pivot_high'):
             timing_score = min(100.0, timing_score + 10)
 
-        # Score composto de inteligência
+        # Score composto: com IA degradada/indisponível, sentimento neutro (50) para não penalizar
+        news_score = 50.0 if cloud_news_degraded else float(news.get('sentiment_score', 50) or 50)
         intelligence_score = (
             (100 - float(regime.get('lateral_score', 50) or 50)) * 0.30 +
             float(whale.get('whale_score', 0) or 0) * 0.35 +
-            float(news.get('sentiment_score', 50) or 50) * 0.20 +
+            news_score * 0.20 +
             timing_score * 0.15
         ) - whale_penalty
 
@@ -133,24 +143,17 @@ class MarketIntelligence:
         if whale.get('whale_aligned'):
             intelligence_score = min(100.0, intelligence_score + 8)
 
-        soft_ai_veto_only = (
-            len(hard_veto_reasons) == 0
-            and len(soft_veto_reasons) > 0
-            and not ai_assistants_unavailable
-        )
+        soft_ai_veto_only = False
 
-        # Com IAs auxiliares indisponíveis: só vetos duros (lateral/vela contrária) bloqueiam
-        if ai_assistants_unavailable:
+        # Decisão soberana do Cérebro 3: notícias degradadas/neutras NÃO bloqueiam.
+        # Só vetos duros (lateral / vela contrária) podem impedir allow_entry aqui.
+        if cloud_news_degraded:
             allow_entry = len(hard_veto_reasons) == 0
-            autonomous_mode = True
+            autonomous_mode = True  # Cérebro 3 assume análise técnica pura
         else:
-            allow_entry = len(veto_reasons) == 0 and intelligence_score >= 48
-            # Soft veto de notícias: libera allow_entry sem forçar Maestro/C2 down
-            if soft_ai_veto_only:
-                allow_entry = True
-                autonomous_mode = False
-            else:
-                autonomous_mode = False
+            # Sem soft-veto de notícias — score composto + vetos duros
+            allow_entry = len(hard_veto_reasons) == 0 and intelligence_score >= 48
+            autonomous_mode = False
 
         return {
             'intelligence_score': round(intelligence_score, 2),
@@ -171,17 +174,19 @@ class MarketIntelligence:
             'whale_score': whale.get('whale_score'),
             'whale_aligned': whale.get('whale_aligned'),
             'whale_reasons': whale.get('reasons', []),
-            'sentiment_score': news.get('sentiment_score'),
-            'global_trend': news.get('global_trend'),
+            'sentiment_score': 50.0 if cloud_news_degraded else news.get('sentiment_score'),
+            'global_trend': 'NEUTRAL' if cloud_news_degraded else news.get('global_trend'),
             'investor_mood': news.get('investor_mood'),
-            'news_risk': news.get('news_risk'),
+            'news_risk': 'LOW' if cloud_news_degraded else news.get('news_risk'),
             'is_trending': news.get('is_trending'),
             'news_reason': news.get('reason'),
             'ai_source': news.get('source'),
+            'ai_status': news.get('ai_status', 'degradado' if cloud_news_degraded else 'ok'),
             'news': news,
-            'news_block_trade': bool(news.get('block_trade')) and not ai_assistants_unavailable,
+            # Assistente nunca bloqueia — Cérebro 3 é soberano
+            'news_block_trade': False,
             'headlines': list(news.get('headlines') or []),
-            'web_news_bias': news.get('web_news_bias', 'NEUTRAL'),
+            'web_news_bias': 'NEUTRAL' if cloud_news_degraded else news.get('web_news_bias', 'NEUTRAL'),
             'summary': self._build_summary(regime, whale, news, timing_score, allow_entry),
         }
 

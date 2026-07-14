@@ -189,9 +189,12 @@ def filtro_noticias_sentimento(
         detail = f'sentimento={label} (Short exige Negativo/Neutro)'
 
     nested = news or intel_ctx.get('news') or {}
-    if nested.get('block_trade') or intel_ctx.get('news_block_trade'):
-        ok = False
-        detail += ' | block_trade ativo'
+    # Assistente de notícias nunca bloqueia via block_trade — Cérebro 3 é soberano.
+    # (Mantém classificação de sentimento apenas como filtro informativo Positivo/Neutro.)
+    if intel_ctx.get('cloud_news_degraded') or str(nested.get('ai_status', '')).lower() == 'degradado':
+        label = 'NEUTRO'
+        ok = True
+        detail = 'sentimento=NEUTRO (assistente IA degradado — Cérebro 3 soberano)'
 
     return {'ok': bool(ok), 'detail': detail, 'sentiment_label': label}
 
