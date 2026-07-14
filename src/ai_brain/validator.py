@@ -312,7 +312,7 @@ class Cerebro3Sovereign:
             final_action = 'WAIT'
             if allowed and direction in ('BUY', 'SELL'):
                 final_action = direction
-            elif confidence >= 80 and direction in ('BUY', 'SELL'):
+            elif confidence >= 55 and direction in ('BUY', 'SELL'):
                 final_action = direction
 
             print(
@@ -370,21 +370,16 @@ class Cerebro3Sovereign:
         sell_votes = sum(1 for a in actions if a == 'SELL')
 
         final_action = 'WAIT'
-        if buy_votes >= 2 and probability >= 60 and trend == 'ALTA' and st == 1:
+        if buy_votes >= 2 and probability >= 48 and trend == 'ALTA' and st == 1:
             final_action = 'BUY'
-        elif sell_votes >= 2 and probability >= 60 and trend == 'BAIXA' and st == -1:
+        elif sell_votes >= 2 and probability >= 48 and trend == 'BAIXA' and st == -1:
             final_action = 'SELL'
-        elif probability >= 78 and trend == 'ALTA' and st == 1 and report_c1.get('action') == 'BUY':
+        elif probability >= 62 and trend == 'ALTA' and st == 1 and report_c1.get('action') == 'BUY':
             final_action = 'BUY'
-        elif probability >= 78 and trend == 'BAIXA' and st == -1 and report_c1.get('action') == 'SELL':
+        elif probability >= 62 and trend == 'BAIXA' and st == -1 and report_c1.get('action') == 'SELL':
             final_action = 'SELL'
 
-        # Conflito notícias vs direção → não entra
-        gt = str(ctx.get('global_trend', '')).upper()
-        if final_action == 'BUY' and gt == 'BEARISH' and str(ctx.get('news_risk', '')).upper() == 'HIGH':
-            final_action = 'WAIT'
-        if final_action == 'SELL' and gt == 'BULLISH' and str(ctx.get('news_risk', '')).upper() == 'HIGH':
-            final_action = 'WAIT'
+        # Notícias NÃO bloqueiam direção no modo assertivo
 
         return {
             'autonomous': False,
@@ -565,18 +560,18 @@ class GroqValidator:
             buy_votes = sum(1 for a in actions if a == 'BUY')
             sell_votes = sum(1 for a in actions if a == 'SELL')
 
-            if buy_votes >= 2 and probability >= 60 and trend == 'ALTA' and st == 1:
+            if buy_votes >= 2 and probability >= 48 and trend == 'ALTA' and st == 1:
                 final_action = 'BUY'
-            elif sell_votes >= 2 and probability >= 60 and trend == 'BAIXA' and st == -1:
+            elif sell_votes >= 2 and probability >= 48 and trend == 'BAIXA' and st == -1:
                 final_action = 'SELL'
-            elif probability >= 78 and trend == 'ALTA' and st == 1 and action_analyst == 'BUY':
+            elif probability >= 62 and trend == 'ALTA' and st == 1 and action_analyst == 'BUY':
                 final_action = 'BUY'
-            elif probability >= 78 and trend == 'BAIXA' and st == -1 and action_analyst == 'SELL':
+            elif probability >= 62 and trend == 'BAIXA' and st == -1 and action_analyst == 'SELL':
                 final_action = 'SELL'
 
             # Cérebro 3 lidera: se o soberano divergiu com confiança alta, respeita
             sovereign_action = decision.get('decisao', 'WAIT')
-            if sovereign_action in ('BUY', 'SELL') and float(decision.get('probabilidade', 0) or 0) >= 70:
+            if sovereign_action in ('BUY', 'SELL') and float(decision.get('probabilidade', 0) or 0) >= 52:
                 final_action = sovereign_action
                 probability = max(probability, float(decision.get('probabilidade', 0) or 0))
 

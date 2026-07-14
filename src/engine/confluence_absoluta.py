@@ -25,7 +25,8 @@ def _env_bool(name: str, default: bool = True) -> bool:
 
 
 def absolute_confluence_enabled() -> bool:
-    return _env_bool('ENABLE_ABSOLUTE_CONFLUENCE', True)
+    # Default OFF: mode assertivo — confluência total atrasava demais as entradas
+    return _env_bool('ENABLE_ABSOLUTE_CONFLUENCE', False)
 
 
 def _normalize_side(side: str) -> str:
@@ -44,12 +45,12 @@ def filtro_volume_fluxo(df, signals: dict | None = None, side: str = 'BUY') -> d
     signals = signals or {}
     side_n = _normalize_side(side)
     vol_ratio = float(signals.get('volume_ratio', 0) or 0)
-    climax = vol_ratio >= 2.0
+    climax = vol_ratio >= 1.25
     if not climax and df is not None and len(df) >= 6:
         try:
             recent = float(df['vol'].iloc[-1])
             avg = float(df['vol'].iloc[-6:-1].mean())
-            climax = avg > 0 and (recent / avg) >= 2.0
+            climax = avg > 0 and (recent / avg) >= 1.25
         except Exception:
             pass
 
@@ -67,7 +68,7 @@ def filtro_volume_fluxo(df, signals: dict | None = None, side: str = 'BUY') -> d
     )
     institutional_vol = str(signals.get('volume_trend', '')).upper() == 'ALTO'
 
-    ok = bool(climax or sweep_ok or (institutional_vol and flow_aligned and vol_ratio >= 1.5))
+    ok = bool(climax or sweep_ok or vol_ratio >= 1.15 or (institutional_vol and flow_aligned))
     detail = (
         f"climax={climax} vol×={vol_ratio:.2f} sweep={sweep_ok} "
         f"flow={money_flow} institucional={institutional_vol}"
@@ -86,16 +87,16 @@ def filtro_order_book_imbalance(
     side: str,
     *,
     depth: int = 20,
-    min_imbalance_ratio: float = 1.60,
+    min_imbalance_ratio: float = 1.20,
 ) -> dict[str, Any]:
     """
     Filtro 3 — Desequilíbrio do livro (top N bids/asks).
-    Long:  soma(bids) >= 1.60 × soma(asks)  (+60% compradores)
-    Short: soma(asks) >= 1.60 × soma(bids)  (+60% vendedores)
+    Assertivo: exige ~+20% de lado a favor (antes era +60%).
     """
     side_n = _normalize_side(side)
     if not order_book:
-        return {'ok': False, 'detail': 'order book indisponível', 'bid_vol': 0.0, 'ask_vol': 0.0, 'ratio': 0.0}
+        # Sem livro: não mata a entrada no modo assertivo
+        return {'ok': True, 'detail': 'order book indisponível — bypass assertivo', 'bid_vol': 0.0, 'ask_vol': 0.0, 'ratio': 0.0}
 
     bids = order_book.get('bids') or []
     asks = order_book.get('asks') or []
@@ -141,8 +142,8 @@ def filtro_order_book_imbalance(
     }
 
 
-def filtro_adx_tendencia(df, min_adx: float = 22.0) -> dict[str, Any]:
-    """Filtro 4 — ADX 15m > 22 (anti-lateralização)."""
+def filtro_adx_tendencia(df, min_adx: float = 14.0) -> dict[str, Any]:
+    """Filtro 4 — ADX mínimo (assertivo: 14; antes 22)."""
     adx = float(calculate_adx(df) if df is not None else 0.0)
     ok = adx > float(min_adx)
     return {'ok': ok, 'detail': f'ADX={adx:.1f} (exige >{min_adx})', 'adx': adx}
@@ -175,28 +176,13 @@ def filtro_noticias_sentimento(
     intel_ctx: dict | None = None,
 ) -> dict[str, Any]:
     """
-    Filtro 5 — Long só com sentimento Positivo ou Neutro (nunca Negativo).
-    Short espelha: bloqueia sentimento Positivo forte (viés contrário).
+    Filtro 5 — DESATIVADO: notícias nunca bloqueiam entrada (modo assertivo).
     """
-    intel_ctx = intel_ctx or {}
-    side_n = _normalize_side(side)
-    label = classify_news_sentiment(news, intel_ctx)
-    if side_n == 'BUY':
-        ok = label in ('POSITIVO', 'NEUTRO')
-        detail = f'sentimento={label} (Long exige Positivo/Neutro)'
-    else:
-        ok = label in ('NEGATIVO', 'NEUTRO')
-        detail = f'sentimento={label} (Short exige Negativo/Neutro)'
-
-    nested = news or intel_ctx.get('news') or {}
-    # Assistente de notícias nunca bloqueia via block_trade — Cérebro 3 é soberano.
-    # (Mantém classificação de sentimento apenas como filtro informativo Positivo/Neutro.)
-    if intel_ctx.get('cloud_news_degraded') or str(nested.get('ai_status', '')).lower() == 'degradado':
-        label = 'NEUTRO'
-        ok = True
-        detail = 'sentimento=NEUTRO (assistente IA degradado — Cérebro 3 soberano)'
-
-    return {'ok': bool(ok), 'detail': detail, 'sentiment_label': label}
+    return {
+        'ok': True,
+        'detail': 'notícias desativadas — bypass assertivo (Cérebro 3 soberano)',
+        'sentiment_label': 'NEUTRO',
+    }
 
 
 def avaliar_confluencia_absoluta(
@@ -208,13 +194,11 @@ def avaliar_confluencia_absoluta(
     order_book: dict | None = None,
     df_macro=None,
     fetch_order_book_fn: Callable[[], dict | None] | None = None,
-    min_adx: float = 22.0,
-    imbalance_ratio: float = 1.60,
+    min_adx: float = 14.0,
+    imbalance_ratio: float = 1.20,
 ) -> dict[str, Any]:
     """
-    Checklist obrigatório de Concordância Total.
-
-    filtros_aprovados = all([smc, volume, livro, tendencia, noticias])
+    Checklist assertivo — exige maioria técnica (3/4), notícias sempre OK.
     """
     signals = signals or {}
     intel_ctx = intel_ctx or {}
@@ -239,7 +223,7 @@ def avaliar_confluencia_absoluta(
     filtro_volume = bool(volume['ok'])
     filtro_livro = bool(livro['ok'])
     filtro_tendencia = bool(tendencia['ok'])
-    filtro_noticias = bool(noticias['ok'])
+    filtro_noticias = True  # sempre bypass
 
     filtros = {
         'filtro_smc': filtro_smc,
@@ -256,13 +240,9 @@ def avaliar_confluencia_absoluta(
         'filtro_noticias': noticias['detail'],
     }
 
-    filtros_aprovados = all([
-        filtro_smc,
-        filtro_volume,
-        filtro_livro,
-        filtro_tendencia,
-        filtro_noticias,
-    ])
+    # Assertivo: 3 de 4 filtros técnicos bastam (notícias não contam)
+    technical_oks = [filtro_smc, filtro_volume, filtro_livro, filtro_tendencia]
+    filtros_aprovados = sum(1 for ok in technical_oks if ok) >= 3
 
     failed = [name for name, ok in filtros.items() if not ok]
 

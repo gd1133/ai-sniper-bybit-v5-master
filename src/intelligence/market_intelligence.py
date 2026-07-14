@@ -44,66 +44,36 @@ class MarketIntelligence:
 
         regime = detect_market_regime(df, signals)
         whale = analyze_whale_activity(signals, ticker, df)
+        # Notícias desligadas por padrão — sem HTTP/Groq no caminho crítico de entrada
         news = analyze_news_sentiment(symbol, signals, regime, whale)
 
-        block_lateral = _env_bool('BLOCK_LATERAL_MARKETS', True)
+        # Lateral: só bloqueia se explicitamente ligado (default OFF = mais assertivo)
+        block_lateral = _env_bool('BLOCK_LATERAL_MARKETS', False)
         hard_veto_reasons = []
         soft_veto_reasons = []
         ai_assistants_unavailable = False
-        # Cloud news degradado NÃO derruba Cérebro 1/2/3 — só assistente informativo
         cloud_news_degraded = bool(
             news.get('cloud_ai_degraded')
             or news.get('ai_unavailable')
-            or str(news.get('ai_status', '')).lower() == 'degradado'
+            or str(news.get('ai_status', '')).lower() in ('degradado', 'disabled')
+            or str(news.get('source', '')).lower() == 'disabled'
         )
-        if cloud_news_degraded:
-            coin = str(symbol or '').replace('/USDT:USDT', '').replace('/USDT', '').replace(':USDT', '')
-            print(
-                f'⚠️ [ASSISTENTE IA] Notícias indisponíveis para {coin}. '
-                f'Passando comando para análise técnica do Cérebro 3.',
-                flush=True,
-            )
-            # #region agent log
-            try:
-                from src.debug_agent_log import agent_dbg
-                agent_dbg('A', 'market_intelligence.py:evaluate', 'cloud_news_degraded_soft', {
-                    'symbol': str(symbol)[:40],
-                    'ai_assistants_unavailable': False,
-                    'source': news.get('source'),
-                    'ai_status': news.get('ai_status', 'degradado'),
-                    'block_trade': False,
-                })
-            except Exception:
-                pass
-            # #endregion
 
         if block_lateral and regime.get('is_lateral'):
             hard_veto_reasons.append(
                 f"Mercado LATERAL (ADX={regime.get('adx')}, Choppiness={regime.get('choppiness')})"
             )
 
-        # Assistente de notícias: NUNCA adiciona veto soft / nunca bloqueia entrada.
-        # (block_trade e cloud_news_degraded são apenas informativos.)
-
         whale_score = float(whale.get('whale_score', 0) or 0)
         volume_ratio = float(signals.get('volume_ratio', 0) or 0)
-        # Modo agressivo: desalinhamento de baleias PENALIZA o score (não veta duro).
-        # Continua favorecendo fluxo alinhado, mas não trava o radar de tendências.
+        # Assertivo: penalidade leve de baleias (não mata oportunidade)
         whale_penalty = 0.0
         if not whale.get('whale_aligned'):
-            whale_penalty = 12.0
+            whale_penalty = 4.0
         elif whale_score < 20 and volume_ratio < 1.15:
-            whale_penalty = 8.0
+            whale_penalty = 2.0
 
-        trend = str(signals.get('trend', 'NEUTRO')).upper()
-        body_ratio = float(signals.get('candle_body_ratio', 0) or 0)
-        recent_ret = float(signals.get('recent_return_pct', 0) or 0)
-        # Só bloqueia velas CONTRÁRIAS muito fortes (evita matar pullbacks normais)
-        if trend == 'ALTA' and recent_ret < -0.8 and body_ratio >= 60:
-            hard_veto_reasons.append('Vela de venda forte contra tendência de alta')
-        if trend == 'BAIXA' and recent_ret > 0.8 and body_ratio >= 60:
-            hard_veto_reasons.append('Vela de compra forte contra tendência de baixa')
-
+        # Velas contrárias: NÃO hard-veto no modo assertivo (só penalizam score via timing)
         veto_reasons = list(hard_veto_reasons)
 
         # Timing: prefere entrada perto da golden zone (fib 0.618)
@@ -130,30 +100,21 @@ class MarketIntelligence:
         if signals.get('bounce_from_pivot_low') or signals.get('rejection_from_pivot_high'):
             timing_score = min(100.0, timing_score + 10)
 
-        # Score composto: com IA degradada/indisponível, sentimento neutro (50) para não penalizar
-        news_score = 50.0 if cloud_news_degraded else float(news.get('sentiment_score', 50) or 50)
+        # Score SEM peso de notícias — só técnica (regime + baleias + timing)
         intelligence_score = (
-            (100 - float(regime.get('lateral_score', 50) or 50)) * 0.30 +
-            float(whale.get('whale_score', 0) or 0) * 0.35 +
-            news_score * 0.20 +
-            timing_score * 0.15
+            (100 - float(regime.get('lateral_score', 50) or 50)) * 0.35 +
+            float(whale.get('whale_score', 0) or 0) * 0.40 +
+            timing_score * 0.25
         ) - whale_penalty
 
-        # Seguir baleias: alinhado dá bônus extra (oportunidade assertiva ainda passa sem alinhamento total)
         if whale.get('whale_aligned'):
             intelligence_score = min(100.0, intelligence_score + 8)
 
         soft_ai_veto_only = False
 
-        # Decisão soberana do Cérebro 3: notícias degradadas/neutras NÃO bloqueiam.
-        # Só vetos duros (lateral / vela contrária) podem impedir allow_entry aqui.
-        if cloud_news_degraded:
-            allow_entry = len(hard_veto_reasons) == 0
-            autonomous_mode = True  # Cérebro 3 assume análise técnica pura
-        else:
-            # Sem soft-veto de notícias — score composto + vetos duros
-            allow_entry = len(hard_veto_reasons) == 0 and intelligence_score >= 48
-            autonomous_mode = False
+        # Assertivo: libera com score baixo; notícias nunca travam; Cérebro 3 soberano
+        allow_entry = len(hard_veto_reasons) == 0 and intelligence_score >= 32
+        autonomous_mode = True
 
         return {
             'intelligence_score': round(intelligence_score, 2),
@@ -174,19 +135,19 @@ class MarketIntelligence:
             'whale_score': whale.get('whale_score'),
             'whale_aligned': whale.get('whale_aligned'),
             'whale_reasons': whale.get('reasons', []),
-            'sentiment_score': 50.0 if cloud_news_degraded else news.get('sentiment_score'),
-            'global_trend': 'NEUTRAL' if cloud_news_degraded else news.get('global_trend'),
-            'investor_mood': news.get('investor_mood'),
-            'news_risk': 'LOW' if cloud_news_degraded else news.get('news_risk'),
-            'is_trending': news.get('is_trending'),
+            'sentiment_score': 50.0,
+            'global_trend': 'NEUTRAL',
+            'investor_mood': 'NEUTRAL',
+            'news_risk': 'LOW',
+            'is_trending': False,
             'news_reason': news.get('reason'),
             'ai_source': news.get('source'),
-            'ai_status': news.get('ai_status', 'degradado' if cloud_news_degraded else 'ok'),
+            'ai_status': news.get('ai_status', 'disabled'),
             'news': news,
             # Assistente nunca bloqueia — Cérebro 3 é soberano
             'news_block_trade': False,
-            'headlines': list(news.get('headlines') or []),
-            'web_news_bias': 'NEUTRAL' if cloud_news_degraded else news.get('web_news_bias', 'NEUTRAL'),
+            'headlines': [],
+            'web_news_bias': 'NEUTRAL',
             'summary': self._build_summary(regime, whale, news, timing_score, allow_entry),
         }
 

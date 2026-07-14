@@ -142,11 +142,9 @@ def _confirm_long_repique(df: pd.DataFrame) -> Tuple[bool, list[str]]:
 
 def confirmar_timing_entrada(side: str, df: pd.DataFrame, signals: dict | None = None) -> Tuple[bool, list[str]]:
     """
-    Validação completa antes de disparar ordem:
-      1. Tendência macro + SuperTrend  (obrigatório)
-      2. Leitura avançada de velas / fluxo institucional
-      3. Fim de repique clássico (RSI + EMA + vela anterior)  — LÓGICA ANTIGA
-      4. OU entrada ASSERTIVA: pivô + vela forte (alta/descida) sem contra-baleias
+    Validação assertiva antes de disparar ordem:
+      1. Tendência macro + SuperTrend (obrigatório)
+      2. Atalho assertivo: volume/heat/pivô OU velas institucionais OU repique
     """
     signals = signals or {}
     side_norm = str(side or '').strip().lower()
@@ -157,28 +155,30 @@ def confirmar_timing_entrada(side: str, df: pd.DataFrame, signals: dict | None =
         return False, trend_reasons
     all_reasons.extend(trend_reasons)
 
+    vol_ratio = float(signals.get('volume_ratio', 0) or 0)
+    heat = float(signals.get('heat_score', 0) or 0)
+    chart = float(signals.get('chart_entry_score', 0) or 0)
+    # Atalho assertivo: tendência alinhada + volume/momentum razoável
+    if vol_ratio >= 1.15 or heat >= 40 or chart >= 30:
+        all_reasons.append(
+            f'Atalho assertivo (vol×={vol_ratio:.2f} heat={heat:.0f} chart={chart:.0f})'
+        )
+        return True, all_reasons
+
     ok_candles, candle_reasons = institutional_candle_confirmation(side, df, signals)
     if not ok_candles:
-        # Mesmo se velas institucionais clássicas falharem, tenta caminho assertivo
-        # (pivô + vela forte) — ainda respeita tendência e não opera contra baleias.
         try:
             from src.engine.chart_structure import assertive_structure_entry
             ok_assert, assert_reasons = assertive_structure_entry(side, df, signals)
         except Exception as exc:
             ok_assert, assert_reasons = False, [f'Assertivo indisponível: {exc}']
-        # Heat / vela contrária: não libera assertivo
-        heat_bias = str((signals or {}).get('heat_bias', 'NEUTRAL')).upper()
-        if side_norm in ('sell', 'short', 'vender') and heat_bias == 'BULL':
-            ok_assert = False
-            assert_reasons = list(assert_reasons) + ['Assertivo bloqueado: heat BULL vs VENDA']
-        if side_norm in ('buy', 'long', 'comprar') and heat_bias == 'BEAR':
-            ok_assert = False
-            assert_reasons = list(assert_reasons) + ['Assertivo bloqueado: heat BEAR vs COMPRA']
         if ok_assert:
             all_reasons.extend(assert_reasons)
-            all_reasons.append('Caminho ASSERTIVO (pivô + vela forte) — lógica clássica parcial')
+            all_reasons.append('Caminho ASSERTIVO (pivô + vela forte)')
             return True, all_reasons
-        return False, candle_reasons
+        # Ainda assim: tendência + SuperTrend já alinhados — libera com aviso
+        all_reasons.append('Timing clássico parcial — liberado por tendência alinhada (modo assertivo)')
+        return True, all_reasons
     all_reasons.extend(candle_reasons)
 
     if side_norm in ('sell', 'short', 'vender'):
@@ -192,8 +192,6 @@ def confirmar_timing_entrada(side: str, df: pd.DataFrame, signals: dict | None =
         all_reasons.extend(repique_reasons)
         return True, all_reasons
 
-    # Repique clássico ainda não fechou — não perde a oportunidade se a estrutura
-    # do gráfico (pivô + vela forte) confirmar, sem ir contra as baleias.
     try:
         from src.engine.chart_structure import assertive_structure_entry
         ok_assert, assert_reasons = assertive_structure_entry(side, df, signals)
@@ -202,10 +200,11 @@ def confirmar_timing_entrada(side: str, df: pd.DataFrame, signals: dict | None =
 
     if ok_assert:
         all_reasons.extend(assert_reasons)
-        all_reasons.append(
-            f'Repique clássico pendente ({"; ".join(repique_reasons[:1])}) — '
-            'entrada por estrutura de gráfico'
-        )
+        all_reasons.append('entrada por estrutura de gráfico')
         return True, all_reasons
 
-    return False, repique_reasons + assert_reasons
+    # Modo assertivo: tendência + SuperTrend + velas ok já bastam (sem esperar RSI repique)
+    all_reasons.append(
+        f'Repique RSI pendente — liberado por tendência+velas (modo assertivo)'
+    )
+    return True, all_reasons

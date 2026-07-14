@@ -17,7 +17,7 @@ class LocalMLEngine:
     
     def __init__(self, db_path="database.db"):
         self.memory = TradeLearner(db_path)
-        self.min_local_confidence = 80  # 80% confiança necessária para 3º Cérebro
+        self.min_local_confidence = 52  # assertivo — antes 80%
         
     def evaluate_entry_conditions(self, symbol, tech_data, intelligence_context=None):
         """

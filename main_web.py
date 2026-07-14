@@ -444,9 +444,9 @@ LEVERAGE = 10  # Alavancagem padrão (deve coincidir com main.py)
 
 # Constantes do Sniper Worker (ajustadas pelo modo de risco)
 SCAN_TOP_COINS = 40
-THRESHOLD_ENTRADA = 58.0
+THRESHOLD_ENTRADA = 48.0
 COOLDOWN_INSTITUCIONAL_SECS = 5
-SCAN_INTER_SYMBOL_DELAY_SECS = 0.9
+SCAN_INTER_SYMBOL_DELAY_SECS = 0.35
 SNIPER_SIGNAL_LOCK = threading.Lock()
 SNIPER_SIGNAL_RESERVATIONS = set()
 
@@ -455,14 +455,14 @@ def _apply_risk_mode_scan_params():
     global SCAN_TOP_COINS, THRESHOLD_ENTRADA, MAX_MOEDAS_ATIVAS, SCAN_INTER_SYMBOL_DELAY_SECS
     if RISK_MODE == 'aggressive':
         MAX_MOEDAS_ATIVAS = 5
-        SCAN_TOP_COINS = 40  # era 80 — estourava Bybit 10006
-        THRESHOLD_ENTRADA = 58.0
-        SCAN_INTER_SYMBOL_DELAY_SECS = 0.9  # era 0.35
+        SCAN_TOP_COINS = 40
+        THRESHOLD_ENTRADA = 48.0  # assertivo — antes 58
+        SCAN_INTER_SYMBOL_DELAY_SECS = 0.35
     else:
         MAX_MOEDAS_ATIVAS = 1
         SCAN_TOP_COINS = 25
-        THRESHOLD_ENTRADA = 70.0
-        SCAN_INTER_SYMBOL_DELAY_SECS = 1.0
+        THRESHOLD_ENTRADA = 58.0
+        SCAN_INTER_SYMBOL_DELAY_SECS = 0.6
     central_state['risk_mode'] = RISK_MODE
     central_state['max_moedas_ativas'] = MAX_MOEDAS_ATIVAS
     central_state['scan_top_coins'] = SCAN_TOP_COINS
@@ -2327,7 +2327,7 @@ def sniper_worker_loop():
                     signals = IndicatorEngine(df).get_signals()
                     if signals.get('is_lateral') or signals['trend'] == 'NEUTRO':
                         continue
-                    if validator.local_signal(signals) < 20:
+                    if validator.local_signal(signals) < 12:
                         continue
 
                     intel_ctx = market_intel.evaluate(sym, df, signals, t)
