@@ -193,80 +193,37 @@ def _coerce_bool(value, default: bool = False) -> bool:
     return default
 
 def _resolve_request_is_testnet(data: dict, default: bool = False) -> bool:
-    """
-    Resolve ambiente de operação enviado pelo frontend.
-    Aceita bool/int/string em múltiplos campos para compatibilidade retroativa.
-    """
-    payload = data or {}
-
-    # Prioridade 1: campo explícito esperado pelo frontend atual.
-    if 'is_testnet' in payload:
-        return _coerce_bool(payload.get('is_testnet'), default=default)
-
-    # Prioridade 2: aliases comuns de ambiente.
-    for alias in ('environment', 'env', 'operation_env', 'ambiente', 'ambiente_operacao'):
-        if alias in payload:
-            raw = str(payload.get(alias) or '').strip().lower()
-            if raw in ('test', 'teste', 'testnet', 'simulacao', 'simulação', 'paper'):
-                return True
-            if raw in ('real', 'mainnet', 'producao', 'produção', 'prod'):
-                return False
-
-    # Prioridade 3: fallback por seleção antiga de "fonte de saldo".
-    balance_source = _normalize_balance_source(payload.get('balance_source'))
-    if balance_source == 'training_fake_balance':
-        return True
-
-    return default
+    """Sistema 100% REAL — nunca opera em testnet/demo/paper."""
+    return False
 
 def _is_training_fake_balance_enabled() -> bool:
-    # Default: desabilitado. Só ativa saldo fictício quando explicitamente configurado.
-    default_enabled = False
-    return _env_bool('ENABLE_TRAINING_FAKE_BALANCE', default_enabled)
+    # Saldo fictício removido — sistema 100% real.
+    return False
 
 def _get_training_fake_balance_usd() -> float | None:
-    if not _is_training_fake_balance_enabled():
-        return None
-    value = float(_env_float('TRAINING_FAKE_BALANCE_USD', 500.0))
-    return value if value > 0 else None
+    # Saldo fictício removido — sistema 100% real.
+    return None
 
-_VALID_BALANCE_SOURCES = {'broker_real_balance', 'training_fake_balance'}
+_VALID_BALANCE_SOURCES = {'broker_real_balance'}
 
 def _normalize_balance_source(value) -> str:
-    raw = str(value or '').strip().lower()
-    if not raw or raw in {'broker_testnet_balance', 'real', 'broker'}:
-        return 'broker_real_balance'
-    if raw in {'training_fake_balance', 'fake', 'training', 'teste', 'test'}:
-        return 'training_fake_balance'
-    return raw if raw in _VALID_BALANCE_SOURCES else 'broker_real_balance'
+    # Única fonte válida: saldo real lido do broker (Bybit/Binance).
+    return 'broker_real_balance'
 
 def _is_training_fake_balance_client(client) -> bool:
-    if _coerce_bool((client or {}).get('is_testnet'), default=False):
-        return False
-    return _normalize_balance_source((client or {}).get('balance_source')) == 'training_fake_balance'
+    # Nenhum cliente usa saldo fictício — sistema 100% real.
+    return False
 
 def _resolve_client_account_mode(client) -> str:
-    endpoint_mode = _get_client_endpoint_mode(client)
-    if endpoint_mode == 'demo':
-        return 'demo'
-    explicit = str((client or {}).get('account_mode') or '').strip().lower()
-    if explicit == 'demo':
-        return 'demo'
-    if explicit == 'testnet' or _coerce_bool((client or {}).get('is_testnet'), default=False):
-        return 'testnet'
+    # Sistema opera exclusivamente em conta REAL.
     return 'real'
 
 def _client_mode_label(account_mode: str) -> str:
-    normalized = str(account_mode or '').strip().lower()
-    if normalized == 'demo':
-        return 'DEMO'
-    if normalized == 'testnet':
-        return 'TESTNET'
     return 'REAL'
 
 def _get_forced_training_fake_balance_usd() -> float:
-    value = float(_env_float('TRAINING_FAKE_BALANCE_USD', 500.0))
-    return value if value > 0 else 500.0
+    # Saldo fictício removido — sistema 100% real.
+    return 0.0
 
 BYBIT_MAINNET_ENDPOINT = "https://api.bybit.com"
 BYBIT_TESTNET_ENDPOINT = "https://api-testnet.bybit.com"
@@ -284,6 +241,9 @@ def _endpoint_url_for_mode(mode: str) -> str:
     return BYBIT_TESTNET_ENDPOINT
 
 def _get_client_endpoint_mode(client, fallback_mode: str | None = None) -> str:
+    # Sistema 100% REAL — endpoint sempre Mainnet (sem testnet/demo).
+    return 'mainnet'
+    # (código legado abaixo mantido inerte para referência)
     explicit = str((client or {}).get('bybit_endpoint_mode') or '').strip().lower()
     if explicit in ('mainnet', 'testnet', 'demo'):
         return explicit
@@ -437,7 +397,7 @@ def _frontend_asset_exists(path):
 APP_MODE = 'real'
 ALLOW_ORDER_EXECUTION = ENV_CONFIG.allow_order_execution
 ALLOW_REAL_TRADING = ENV_CONFIG.allow_real_trading
-USE_TESTNET = ENV_CONFIG.use_testnet
+USE_TESTNET = False  # Sistema 100% REAL — testnet/demo/paper removidos
 RISK_MODE = 'aggressive'
 MAX_MOEDAS_ATIVAS = 5
 LEVERAGE = 10  # Alavancagem padrão (deve coincidir com main.py)
@@ -1072,95 +1032,85 @@ def _fetch_active_client_balances(force=False):
         for client in _get_registered_clients(active_only=True):
             balance = None
             error = None
-            is_fake_balance = False
             try:
                 client_id = int(client.get('id') or 0)
-                is_testnet_client = _coerce_bool(client.get('is_testnet'), default=USE_TESTNET)
-                if _is_training_fake_balance_client(client) and not is_testnet_client:
-                    balance = _get_forced_training_fake_balance_usd()
-                    is_fake_balance = True
-                elif _is_training_fake_balance_client(client) and is_testnet_client:
-                    print(
-                        f"   🔄 [BALANCE] Ignorando saldo fictício para {client.get('nome')} (TESTNET) e buscando saldo real da Bybit",
-                        flush=True,
-                    )
-                elif _is_client_temporarily_disabled(client_id):
+                if _is_client_temporarily_disabled(client_id):
                     error = _get_client_disable_reason(client_id) or 'Cliente temporariamente desativado por erro de autenticação'
-                    fake = _get_training_fake_balance_usd()
-                    if fake is not None:
-                        balance = fake
-                        is_fake_balance = True
                 else:
                     broker = _make_broker(client)
                     balance = broker.get_balance()
                     code = str(getattr(broker, 'last_auth_error_code', '') or '')
                     if code == '10003' and balance is None:
                         _handle_invalid_api_key_10003_for_client(client, source_label='fetch_balance')
-                        fake = _get_training_fake_balance_usd()
-                        if fake is not None:
-                            balance = fake
-                            is_fake_balance = True
                 if balance is not None:
                     balance = round(float(balance), 2)
                     total += balance
             except Exception as e: error = str(e)
-            endpoint_mode = _get_client_endpoint_mode(client)
-            account_mode = _resolve_client_account_mode({**client, 'bybit_endpoint_mode': endpoint_mode})
             items.append({
                 "id": client.get('id'), "nome": client.get('nome'), "saldo_real": balance,
                 "saldo_base": float(client.get('saldo_base', 0) or 0),
-                "is_testnet": account_mode in ('testnet', 'demo'),
-                "account_mode": account_mode,
-                "bybit_endpoint_mode": endpoint_mode,
+                "is_testnet": False,
+                "account_mode": "real",
+                "bybit_endpoint_mode": "mainnet",
                 "exchange": str(client.get('exchange') or 'bybit').lower(),
-                "status": client.get('status'), "error": error, "is_fake_balance": is_fake_balance,
+                "status": client.get('status'), "error": error, "is_fake_balance": False,
             })
     except Exception: pass
-    
+
     res = {"items": items, "total": round(total, 2)}
     client_balance_cache.set(res)
-    
-    # ⚡ CORE FIX: Força sincronização em tempo real do card para o React
+
+    # Soma apenas saldos REAIS lidos das corretoras
     valid_items = [item for item in items if item.get("saldo_real") is not None]
-    fake_items = [item for item in valid_items if item.get("is_fake_balance")]
-    real_items = [item for item in valid_items if not item.get("is_fake_balance")]
     central_state['real_client_balances'] = items
     if valid_items:
-        # Unificação obrigatória: o saldo total do dashboard sempre soma TODOS os investidores ativos
-        # (incluindo clientes com saldo fictício / training_fake_balance).
         central_state['balance'] = round(sum(float(i["saldo_real"]) for i in valid_items), 2)
     else:
         central_state['balance'] = 0.0
 
-    if real_items:
-        msg = f"💼 CONTA REAL: saldo sincronizado para {len(real_items)} investidores"
-        if fake_items:
-            msg += f" ( +{len(fake_items)} com saldo fictício TESTNET )"
-        central_state['status'] = msg
-    elif fake_items:
-        central_state['status'] = f"🧪 TESTNET: saldo fictício ativo para {len(fake_items)} investidores"
+    if valid_items:
+        central_state['status'] = f"💼 CONTA REAL: saldo sincronizado para {len(valid_items)} investidores"
     else:
         central_state['status'] = "💼 CONTA REAL: aguardando pareamento de chaves..."
-        
+
     return res
 
 def _build_api_status_payload():
     """
-    Garante estrutura estável de chaves no retorno do `/api/status`,
-    independente de modo REAL/TESTE, para não quebrar o frontend.
+    Payload do `/api/status` — 100% REAL.
+    Consolida apenas a soma das bancas reais ativas e as posições reais abertas
+    nas corretoras (Bybit/Binance).
     """
     payload = dict(central_state or {})
-    balance = round(_coerce_float(payload.get('balance'), default=0.0), 2)
+
+    # Soma somente saldos reais lidos das corretoras
+    real_client_balances = payload.get('real_client_balances')
+    if isinstance(real_client_balances, list) and real_client_balances:
+        balance = round(
+            sum(
+                float(c.get('saldo_real') or 0)
+                for c in real_client_balances
+                if c.get('saldo_real') is not None
+            ),
+            2,
+        )
+    else:
+        balance = round(_coerce_float(payload.get('balance'), default=0.0), 2)
 
     active_trades = payload.get('active_trades')
     if not isinstance(active_trades, list):
         active_trades = []
     payload['active_trades'] = active_trades
 
+    payload['mode'] = 'real'
+    payload['is_testnet'] = False
+    payload['test_mode'] = False
+    payload['balance'] = balance
     payload['saldo_real'] = balance
     payload['saldo'] = balance
     payload['saldo_atual'] = balance
     payload['posicoes'] = active_trades
+    payload['active_positions'] = active_trades
     payload['radar'] = payload.get('symbol') or '---'
     payload['confianca_ia'] = _coerce_float(payload.get('confidence'), default=0.0)
     # Card da próxima entrada (~5% da banca) com filtro de viabilidade
@@ -1599,49 +1549,19 @@ def _monitor_dashboard_positions():
             for cliente in clientes:
                 try:
                     client_id = int(cliente.get('id') or 0)
-                    is_testnet_client = _coerce_bool(cliente.get('is_testnet'), default=USE_TESTNET)
-                    if _is_training_fake_balance_client(cliente) and not is_testnet_client:
-                        fake = _get_forced_training_fake_balance_usd()
-                        total_wallet_balance += float(fake)
-                        print(
-                            f"   🧪 [DASHBOARD] Cliente {cliente.get('nome')} em modo TESTE — usando saldo fictício: ${float(fake):.2f} USDT",
-                            flush=True,
-                        )
-                        continue
-                    elif _is_training_fake_balance_client(cliente) and is_testnet_client:
-                        print(
-                            f"   🔄 [DASHBOARD] Cliente {cliente.get('nome')} TESTNET: ignorando saldo fictício e sincronizando via Bybit UNIFIED",
-                            flush=True,
-                        )
 
                     if _is_client_temporarily_disabled(client_id):
-                        fake = _get_training_fake_balance_usd()
-                        if fake is not None:
-                            total_wallet_balance += float(fake)
-                            print(
-                                f"   🧪 [DASHBOARD] Cliente {cliente.get('nome')} desativado por autenticação — usando saldo fictício: ${float(fake):.2f} USDT",
-                                flush=True,
-                            )
-                        else:
-                            print(
-                                f"   ⚠️ [DASHBOARD] Cliente {cliente.get('nome')} desativado por autenticação: {_get_client_disable_reason(client_id) or 'motivo indisponível'}",
-                                flush=True,
-                            )
+                        print(
+                            f"   ⚠️ [DASHBOARD] Cliente {cliente.get('nome')} desativado por autenticação: {_get_client_disable_reason(client_id) or 'motivo indisponível'}",
+                            flush=True,
+                        )
                         continue
 
                     broker = _make_broker(cliente)
 
                     # Verifica se tem sessão pybit ativa
                     if not broker.pybit_session or not broker.authenticated:
-                        fake = _get_training_fake_balance_usd()
-                        if fake is not None:
-                            total_wallet_balance += float(fake)
-                            print(
-                                f"   🧪 [DASHBOARD] Cliente {cliente.get('nome')} sem autenticação ativa — usando saldo fictício: ${float(fake):.2f} USDT",
-                                flush=True,
-                            )
-                        else:
-                            print(f"   ⚠️ [DASHBOARD] Cliente {cliente.get('nome')} sem autenticação ativa", flush=True)
+                        print(f"   ⚠️ [DASHBOARD] Cliente {cliente.get('nome')} sem autenticação ativa", flush=True)
                         continue
 
                     # 1️⃣ BUSCA SALDO DA CONTA COM PARÂMETROS CORRETOS
@@ -1689,25 +1609,11 @@ def _monitor_dashboard_positions():
                             code = _extract_bybit_ret_code_from_error(err)
                             if not client_balance_added and str(code or '') == '10003':
                                 _handle_invalid_api_key_10003_for_client(cliente, source_label='DASHBOARD:get_wallet_balance')
-                                fake = _get_training_fake_balance_usd()
-                                if fake is not None:
-                                    total_wallet_balance += float(fake)
-                                    print(
-                                        f"   🧪 [DASHBOARD] {cliente.get('nome')}: saldo fictício aplicado após erro 10003 (${float(fake):.2f} USDT)",
-                                        flush=True,
-                                    )
                     except Exception as wallet_err:
                         print(f"   ⚠️ [DASHBOARD] Exceção ao buscar saldo: {wallet_err}", flush=True)
                         code = _extract_bybit_ret_code_from_error(wallet_err)
                         if str(code or '') == '10003':
                             _handle_invalid_api_key_10003_for_client(cliente, source_label='DASHBOARD:get_wallet_balance:exception')
-                            fake = _get_training_fake_balance_usd()
-                            if fake is not None:
-                                total_wallet_balance += float(fake)
-                                print(
-                                    f"   🧪 [DASHBOARD] {cliente.get('nome')}: saldo fictício aplicado após exceção 10003 (${float(fake):.2f} USDT)",
-                                    flush=True,
-                                )
 
                     # 2️⃣ BUSCA POSIÇÕES ABERTAS COM PARÂMETROS CORRETOS
                     client_positions_ok = False
@@ -2706,9 +2612,6 @@ def get_investidores():
         for r in rows:
             client_id = int(r.get('id') or 0)
             bm = balance_map.get(r.get('id')) or {}
-            balance_source = _normalize_balance_source(r.get('balance_source'))
-            endpoint_mode = _get_client_endpoint_mode(r)
-            account_mode = _resolve_client_account_mode({**r, 'bybit_endpoint_mode': endpoint_mode})
             payload.append({
                 "id": r.get('id'),
                 "nome": r.get('nome'),
@@ -2716,12 +2619,12 @@ def get_investidores():
                 "saldo_real": bm.get('saldo_real'),
                 "saldo_configurado": r.get('saldo_base', 0),
                 "status": r.get('status'),
-                "mode": _client_mode_label(account_mode),
-                "account_mode": account_mode,
-                "bybit_endpoint_mode": endpoint_mode,
-                "is_testnet": account_mode in ('testnet', 'demo'),
-                "balance_source": balance_source,
-                "is_fake_balance": bool(bm.get('is_fake_balance')) or balance_source == 'training_fake_balance',
+                "mode": "REAL",
+                "account_mode": "real",
+                "bybit_endpoint_mode": "mainnet",
+                "is_testnet": False,
+                "balance_source": "broker_real_balance",
+                "is_fake_balance": False,
                 "error": bm.get('error'),
                 "auth_disabled": _is_client_temporarily_disabled(client_id),
                 "auth_disabled_reason": _get_client_disable_reason(client_id),
@@ -2811,19 +2714,14 @@ def api_cliente_manage(client_id):
 @app.route('/api/cliente/<int:client_id>/balance-source', methods=['POST'])
 def api_cliente_balance_source(client_id):
     try:
-        data = request.json or {}
-        balance_source = _normalize_balance_source(data.get('balance_source'))
         existing = _get_registered_client_by_id(client_id)
         if not existing:
             return jsonify({"success": False, "error": "Não encontrado"}), 404
 
-        if _coerce_bool(existing.get('is_testnet'), default=USE_TESTNET) and balance_source == 'training_fake_balance':
-            return jsonify({
-                "success": False,
-                "error": "Conta TESTNET usa saldo dinâmico da Bybit (UNIFIED). Saldo fictício manual foi bloqueado."
-            }), 400
-
-        existing['balance_source'] = balance_source
+        # Sistema 100% REAL — única fonte é o saldo real do broker.
+        existing['balance_source'] = 'broker_real_balance'
+        existing['is_testnet'] = False
+        existing['account_mode'] = 'real'
         ok = db.update_client(int(client_id), existing)
         client_balance_cache.clear()
         if ok:
@@ -3073,24 +2971,12 @@ def api_market_intelligence():
 
 def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=None, client_id=None, existing_client=None):
     payload = dict(client_payload or {})
-    final_is_testnet = _coerce_bool(payload.get('is_testnet', is_testnet), default=USE_TESTNET)
-    requested_mode = str(payload.get('account_mode') or payload.get('bybit_endpoint_mode') or '').strip().lower()
-    if final_is_testnet:
-        if requested_mode == 'demo':
-            payload['account_mode'] = 'demo'
-            payload['bybit_endpoint_mode'] = 'demo'
-        else:
-            payload['account_mode'] = 'testnet'
-            payload['bybit_endpoint_mode'] = str(payload.get('bybit_endpoint_mode') or 'testnet')
-            if payload['bybit_endpoint_mode'] not in ('testnet', 'demo'):
-                payload['bybit_endpoint_mode'] = 'testnet'
-        payload['is_testnet'] = True
-        payload['balance_source'] = 'broker_real_balance'
-    else:
-        payload['account_mode'] = 'real'
-        payload['is_testnet'] = False
-        payload['bybit_endpoint_mode'] = 'mainnet'
-    payload['balance_source'] = _normalize_balance_source(payload.get('balance_source'))
+    # Sistema 100% REAL — sempre conta real/mainnet, nunca testnet/demo/paper.
+    final_is_testnet = False
+    payload['account_mode'] = 'real'
+    payload['is_testnet'] = False
+    payload['bybit_endpoint_mode'] = 'mainnet'
+    payload['balance_source'] = 'broker_real_balance'
     payload['exchange'] = 'bybit'  # Robô exclusivo Bybit — Binance removida
     if client_id is not None: payload['id'] = client_id
     if api_key: payload['bybit_key'] = api_key
@@ -3113,23 +2999,6 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
         return broker, balance
 
     try:
-        if payload.get('balance_source') == 'training_fake_balance':
-            fake = float(payload.get('saldo_base') or 0) or _get_forced_training_fake_balance_usd()
-            payload['saldo_base'] = round(float(fake), 2)
-            payload['status'] = 'ativo'
-            record, _, local_synced = _save_client_everywhere(payload)
-            return {
-                'valid': True,
-                'msg': 'Modo teste de saldo fictício ativo',
-                'record': record,
-                'synced_to_local': local_synced,
-                'balance': payload['saldo_base'],
-                'account_mode': 'real',
-                'exchange': payload['exchange'],
-                'balance_source': payload.get('balance_source'),
-                'is_testnet': final_is_testnet,
-            }
-
         print(
             f"🔐 [VALIDAR] nome={payload.get('nome')} is_testnet={final_is_testnet} "
             f"endpoint={payload.get('bybit_endpoint_mode')} account={payload.get('account_mode')}",
