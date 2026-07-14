@@ -70,9 +70,18 @@ class MarketIntelligence:
                 f"Mercado LATERAL (ADX={regime.get('adx')}, Choppiness={regime.get('choppiness')})"
             )
 
-        # Bloqueio soft de notícias: NÃO trava o robô se Groq/Gemini estiverem indisponíveis
+        # FIX: Bloqueio soft de notícias reduzido a penalidade de score
+        # Só aplica veto duro se news_risk for HIGH E sentimento muito negativo
+        # Evita bloqueio excessivo por rate limits de Groq/Gemini
+        news_risk = str(news.get('news_risk', 'LOW')).upper()
+        sentiment_score = float(news.get('sentiment_score', 50) or 50)
         if news.get('block_trade') and not ai_assistants_unavailable:
-            soft_veto_reasons.append(f"Notícias/sentimento bloqueiam: {news.get('reason', '')[:120]}")
+            # Veto duro apenas em casos críticos: HIGH risk + very negative sentiment
+            if news_risk == 'HIGH' and sentiment_score < 30:
+                hard_veto_reasons.append(f"Notícias críticas bloqueiam (HIGH risk): {news.get('reason', '')[:120]}")
+            else:
+                # Caso contrário: apenas informativo, não bloqueia
+                soft_veto_reasons.append(f"⚠️ Notícia flagada (observação): {news.get('reason', '')[:120]}")
 
         whale_score = float(whale.get('whale_score', 0) or 0)
         volume_ratio = float(signals.get('volume_ratio', 0) or 0)
