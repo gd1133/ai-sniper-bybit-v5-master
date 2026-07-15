@@ -7,6 +7,7 @@ Ativa quando APIs Groq/Gemini falham com status 429 ou timeout.
 import json
 from datetime import datetime
 from src.ai_brain.learning import TradeLearner
+from src.ai_brain.adaptive_weights import AdaptiveStrategyWeights
 
 
 class LocalMLEngine:
@@ -15,8 +16,17 @@ class LocalMLEngine:
     quando as APIs de nuvem (Groq/Gemini) falham.
     """
     
-    def __init__(self, db_path="database.db"):
+    def __init__(self, db_path=None):
+        # Usa o mesmo banco do app quando db_path não é informado (consistência do aprendizado)
+        if db_path is None:
+            try:
+                from src.database.manager import DB_PATH
+                db_path = DB_PATH or "database.db"
+            except Exception:
+                db_path = "database.db"
         self.memory = TradeLearner(db_path)
+        # 🧠 Pesos das 5 estratégias ajustados automaticamente por aprendizado
+        self.weights = AdaptiveStrategyWeights(db_path)
         self.min_local_confidence = 52  # assertivo — antes 80%
         
     def evaluate_entry_conditions(self, symbol, tech_data, intelligence_context=None):
@@ -58,33 +68,81 @@ class LocalMLEngine:
         
         return True, f"✅ Entrada autorizada (Confiança: {confidence}%)", confidence
     
+    def _strategy_signals(self, tech_data):
+        """
+        Determina QUAIS das 5 estratégias estão ativas/alinhadas à direção do trade.
+        Retorna dict {estrategia: bool} usado tanto na pontuação quanto no aprendizado.
+
+        Estratégias: sma, supertrend, fibonacci, volume, support_resistance.
+        """
+        trend = str(tech_data.get('trend', '---')).upper()
+        supertrend = tech_data.get('supertrend_signal', tech_data.get('supertrend', 0))
+        fib_distance = float(tech_data.get('fib_distance_pct', 999) or 999)
+        volume_ratio = float(tech_data.get('volume_ratio', 0) or 0)
+        structure_bias = str(tech_data.get('structure_bias', 'NEUTRO')).upper()
+        chart_score = float(tech_data.get('chart_entry_score', 0) or 0)
+
+        # 1. SMA 200 — tendência macro definida (acima/abaixo da média)
+        sma_ok = trend in ("ALTA", "BAIXA")
+
+        # 2. SuperTrend (pivô) alinhado com a tendência
+        st_ok = (trend == "ALTA" and supertrend == 1) or (trend == "BAIXA" and supertrend == -1)
+
+        # 3. Fibonacci — dentro da Golden Zone (0.618)
+        fib_ok = 0 < fib_distance <= 1.5
+
+        # 4. Volume institucional
+        vol_ok = volume_ratio >= 1.3
+
+        # 5. Suporte/Resistência (pivôs de estrutura) alinhados à direção
+        if trend == "ALTA":
+            sr_ok = bool(
+                tech_data.get('near_pivot_support')
+                or tech_data.get('bounce_from_pivot_low')
+                or structure_bias in ('ALTA', 'BULLISH', 'COMPRA')
+            )
+        elif trend == "BAIXA":
+            sr_ok = bool(
+                tech_data.get('near_pivot_resistance')
+                or tech_data.get('rejection_from_pivot_high')
+                or structure_bias in ('BAIXA', 'BEARISH', 'VENDA')
+            )
+        else:
+            sr_ok = False
+        if not sr_ok and chart_score >= 40:
+            sr_ok = True
+
+        return {
+            'sma': bool(sma_ok),
+            'supertrend': bool(st_ok),
+            'fibonacci': bool(fib_ok),
+            'volume': bool(vol_ok),
+            'support_resistance': bool(sr_ok),
+        }
+
     def _calculate_local_confidence(self, tech_data, intelligence_context=None):
         """
-        Calcula confiança do 3º Cérebro: técnica + velas/heat + notícias.
+        Calcula confiança do 3º Cérebro com PESOS ADAPTATIVOS das 5 estratégias
+        (SMA, SuperTrend, Fibonacci, Volume, Suporte/Resistência) + velas/heat + notícias.
+
+        Os pesos das estratégias são ajustados automaticamente pelo aprendizado
+        (AdaptiveStrategyWeights). Quanto mais uma estratégia acerta, mais peso ela ganha.
         """
         ctx = intelligence_context or {}
-        score = 0
-        
-        # SMA 200 (Tendência Macro) - 25 pontos
         trend = str(tech_data.get('trend', '---')).upper()
-        if trend in ["ALTA", "BAIXA"]:
-            score += 25
-        
-        # SuperTrend (Confirmação de tendência) - 20 pontos
-        supertrend = tech_data.get('supertrend_signal', tech_data.get('supertrend', 1))
-        if (trend == "ALTA" and supertrend == 1) or (trend == "BAIXA" and supertrend == -1):
-            score += 20
-        
-        # Fibonacci 0.618 (Golden Zone) - 15 pontos
-        fib_distance = float(tech_data.get('fib_distance_pct', 999) or 999)
-        if 0 < fib_distance <= 1.5:
-            score += 15
-        
-        # Volume Institucional - 10 pontos
-        volume_ratio = float(tech_data.get('volume_ratio', 0) or 0)
-        if volume_ratio >= 1.5:
-            score += 10
-        
+        score = 0.0
+
+        # ── 5 ESTRATÉGIAS com pesos aprendidos ──
+        signals = self._strategy_signals(tech_data)
+        try:
+            weights = self.weights.get_weights()
+        except Exception:
+            from src.ai_brain.adaptive_weights import BASE_WEIGHTS
+            weights = dict(BASE_WEIGHTS)
+        for name, active in signals.items():
+            if active:
+                score += float(weights.get(name, 0) or 0)
+
         # RSI (Filtro de Exaustão) - 8 pontos
         rsi = float(tech_data.get('rsi', 50) or 50)
         if 20 < rsi < 80:
@@ -96,11 +154,8 @@ class LocalMLEngine:
             score += 12
         elif heat >= 55:
             score += 8
-        chart_score = float(tech_data.get('chart_entry_score', 0) or 0)
-        if chart_score >= 40:
-            score += 5
 
-        # Notícias web / sentimento - até 10 pontos
+        # Notícias web / sentimento - até 10 pontos (assistente, nunca bloqueia)
         sentiment = float(ctx.get('sentiment_score', tech_data.get('sentiment_score', 50)) or 50)
         global_trend = str(ctx.get('global_trend', tech_data.get('global_trend', 'NEUTRAL'))).upper()
         if trend == 'ALTA' and global_trend == 'BULLISH':
@@ -114,8 +169,8 @@ class LocalMLEngine:
             or (trend == 'BAIXA' and global_trend == 'BULLISH')
         ):
             score -= 15
-        
-        return min(100, max(0, score))
+
+        return min(100, max(0, int(round(score))))
     
     def resolve_entry_direction(self, tech_data, intelligence_context=None):
         """
@@ -162,6 +217,7 @@ class LocalMLEngine:
         """
         Registra decisão local para aprendizado futuro.
         """
+        strategy_signals = self._strategy_signals(tech_data)
         indicators_dict = {
             'trend': tech_data.get('trend', '---'),
             'sma_200': float(tech_data.get('sma_200', 0) or 0),
@@ -169,8 +225,9 @@ class LocalMLEngine:
             'rsi': float(tech_data.get('rsi', 50) or 50),
             'fib_618': float(tech_data.get('fib_618', 0) or 0),
             'volume_ratio': float(tech_data.get('volume_ratio', 0) or 0),
+            'strategy_signals': strategy_signals,
         }
-        
+
         self.memory.record_local_entry(
             symbol=symbol,
             side=side,
@@ -179,16 +236,34 @@ class LocalMLEngine:
             entry_qty=entry_qty,
             entry_margin=entry_margin
         )
-        
+
+        # Registra as estratégias ativas para o aprendizado de pesos no fechamento
+        try:
+            self.weights.log_entry(symbol, strategy_signals)
+        except Exception as e:
+            print(f"⚠️ [PESOS IA] log_entry falhou: {e}", flush=True)
+
         print(f"🧠 [3º CÉREBRO] Decisão registrada: {symbol} {side} @ {entry_price}")
     
     def close_local_trade(self, symbol, exit_price, pnl_pct):
-        """Finaliza trade local com resultado para aprendizado."""
+        """Finaliza trade local e ajusta os pesos das estratégias pelo resultado."""
         self.memory.finalize_local_trade(
             symbol=symbol,
             exit_price=exit_price,
             pnl_pct=pnl_pct
         )
+        try:
+            self.weights.record_outcome(symbol, pnl_pct)
+        except Exception as e:
+            print(f"⚠️ [PESOS IA] record_outcome falhou: {e}", flush=True)
+
+    def get_strategy_weights_report(self):
+        """Relatório dos pesos aprendidos das 5 estratégias (para dashboard/API)."""
+        try:
+            return self.weights.get_report()
+        except Exception as e:
+            print(f"⚠️ [PESOS IA] get_report falhou: {e}", flush=True)
+            return []
     
     def get_learning_context(self, symbol):
         """Retorna contexto de aprendizado para o símbolo."""

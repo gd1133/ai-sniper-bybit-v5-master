@@ -50,6 +50,8 @@ Componentes principais (arquivos):
 | Timing | `src/engine/entry_timing.py` | Confirmação de timing (tendência, pullback, momentum) |
 | Indicadores | `src/engine/indicators.py` | Cálculo de indicadores técnicos |
 | Cérebro 3 | `src/ai_brain/local_ml_engine.py` | Motor de ML local (decisão soberana / contingência) |
+| Aprendizado | `src/ai_brain/adaptive_weights.py` | Pesos das 5 estratégias auto-ajustados por resultado real |
+| Memória | `src/ai_brain/learning.py` | Histórico de trades, win-rate, bloqueio por padrão de perda |
 | Validador | `src/ai_brain/validator.py` | Consolida votos e define ação final (BUY/SELL/HOLD) |
 | Inteligência | `src/intelligence/market_intelligence.py` | Regime de mercado + whales + notícias (score) |
 | Notícias | `src/intelligence/news_analyzer.py` | Sentimento de notícias (**assistente, nunca bloqueia**) |
@@ -97,6 +99,39 @@ O robô abre operação apenas com **confluência** de dados de alta probabilida
   Em caso de falha/limite de requisição das IAs auxiliares (Groq/Gemini), o Cérebro 3 assume
   **autonomamente** usando indicadores matemáticos puramente locais (`local_ml_engine.py`),
   garantindo que o robô **não trave**.
+
+### 3.1 Estratégias com pesos auto-ajustados por aprendizado ⭐
+
+O Cérebro 3 pontua a entrada com **5 estratégias clássicas**, e o **peso de cada uma é
+ajustado automaticamente** conforme o histórico de acertos (arquivo
+`src/ai_brain/adaptive_weights.py`, tabela SQLite `strategy_weights`):
+
+| # | Estratégia | Sinal "ativo" (alinhado à direção) | Peso base |
+|---|---|---|---|
+| 1 | **SMA** (tendência macro) | preço acima/abaixo da SMA200 (trend ALTA/BAIXA) | 22 |
+| 2 | **SuperTrend** (pivô) | SuperTrend alinhado à tendência (ALTA=+1 / BAIXA=−1) | 18 |
+| 3 | **Fibonacci** (Golden Zone) | distância do 0.618 ≤ 1.5% | 13 |
+| 4 | **Volume** (institucional) | `volume_ratio` ≥ 1.3 | 10 |
+| 5 | **Suporte/Resistência** (pivôs) | perto de suporte/repique (ALTA) ou resistência/rejeição (BAIXA) | 12 |
+
+**Como o aprendizado funciona:**
+
+1. **Na entrada** (`_adaptive_log_entry` no radar): grava quais das 5 estratégias estavam
+   ativas naquele sinal (tabela `strategy_signal_log`).
+2. **No fechamento** (`_adaptive_record_outcome` no monitor TP/SL): credita **win** (PnL > 0) ou
+   **loss** para cada estratégia que estava ativa na entrada e recalcula seu peso.
+3. **Peso final** = `peso_base × multiplicador`, onde o multiplicador vem do *win-rate* suavizado
+   (Laplace) da estratégia:
+   * `peso = base × mult`, com `mult ∈ [0.60, 1.40]`.
+   * `win-rate 50% → mult 1.0` · `100% → 1.4` · `0% → 0.6`.
+   * Só ajusta após **≥ 10 amostras** (`MIN_SAMPLES`); antes disso usa o peso base
+     (comportamento idêntico ao atual — sem choque no robô ao vivo).
+
+Assim, estratégias que historicamente **mais acertam ganham mais peso** e as que erram perdem
+peso — a IA "aprende" quais critérios priorizar por conta própria.
+
+**Endpoint:** `GET /api/estrategias/pesos` retorna o relatório dos pesos aprendidos
+(base, peso atual, wins, losses, win-rate, se já está aprendendo).
 
 ### Limiares atuais (modo assertivo)
 
@@ -237,6 +272,7 @@ Variáveis de ambiente úteis: `RISK_PER_TRADE_PCT`, `ENABLE_NEWS_AI`, `ENABLE_A
 | Método | Rota | Função |
 |---|---|---|
 | GET | `/api/status` | Consolida saldos reais + posições reais + últimos trades |
+| GET | `/api/estrategias/pesos` | Pesos aprendidos das 5 estratégias (SMA, SuperTrend, Fibonacci, Volume, S/R) |
 | GET | `/api/investidores` | Lista investidores conectados (real) |
 | POST | `/api/vincular_cliente` | Valida chaves Bybit e cadastra investidor (conta real) |
 | GET | `/api/dashboard/balance` | Atualiza/retorna saldo real do dashboard |

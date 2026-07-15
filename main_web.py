@@ -969,6 +969,35 @@ def _ensure_broker_class(exchange='bybit'):
         BybitClient = _BybitClient
     return BybitClient
 
+# ── 3º CÉREBRO: pesos adaptativos das 5 estratégias (aprendizado) ──
+_local_ml_engine = None
+_local_ml_lock = threading.Lock()
+
+def _get_local_ml():
+    """Singleton do LocalMLEngine (Cérebro 3) para os pesos adaptativos das estratégias."""
+    global _local_ml_engine
+    if _local_ml_engine is None:
+        with _local_ml_lock:
+            if _local_ml_engine is None:
+                from src.ai_brain.local_ml_engine import LocalMLEngine
+                _local_ml_engine = LocalMLEngine()
+    return _local_ml_engine
+
+def _adaptive_log_entry(symbol, tech_data):
+    """Registra as estratégias ativas na ENTRADA para o aprendizado de pesos (best-effort)."""
+    try:
+        ml = _get_local_ml()
+        ml.weights.log_entry(symbol, ml._strategy_signals(tech_data or {}))
+    except Exception as e:
+        print(f"⚠️ [PESOS IA] log entrada {symbol}: {e}", flush=True)
+
+def _adaptive_record_outcome(symbol, pnl_pct):
+    """Ajusta os pesos das estratégias pelo RESULTADO do trade (best-effort)."""
+    try:
+        _get_local_ml().weights.record_outcome(symbol, float(pnl_pct or 0))
+    except Exception as e:
+        print(f"⚠️ [PESOS IA] outcome {symbol}: {e}", flush=True)
+
 def _make_broker(client):
     """
     Cria broker Bybit respeitando o ambiente do investidor:
@@ -1388,6 +1417,8 @@ def _monitor_financial_stop_loss():
                                                 print(f"   💾 [BANCO] {updated} trade(s) atualizado(s) — P&L: ${profit:.2f}", flush=True)
                                             else:
                                                 print(f"   ⚠️ [BANCO] Nenhum trade aberto encontrado para {symbol}", flush=True)
+                                            # 🧠 Aprendizado: ajusta pesos das estratégias pelo resultado
+                                            _adaptive_record_outcome(symbol, roi_pct)
                                         except Exception as db_err:
                                             print(f"   ⚠️ [BANCO] Erro ao atualizar trade: {db_err}", flush=True)
 
@@ -2487,6 +2518,8 @@ def sniper_worker_loop():
                     f"Timing={intel_ctx.get('timing_score')} | Regime={intel_ctx.get('market_regime')}",
                     flush=True,
                 )
+                # 🧠 Aprendizado: registra as estratégias ativas nesta entrada
+                _adaptive_log_entry(sym, signals)
                 broadcast_ordem_global(
                     sym,
                     side_best,
@@ -2732,6 +2765,24 @@ def add_cliente():
             }), status_code
         return jsonify({"status": "erro", "msg": "Falha ao salvar investidor"}), 500
     except Exception as e: return jsonify({"status": "erro", "msg": str(e)}), 400
+
+@app.route('/api/estrategias/pesos', methods=['GET'])
+def api_estrategias_pesos():
+    """
+    Pesos das 5 estratégias ajustados automaticamente pelo aprendizado do Cérebro 3:
+    SMA, SuperTrend, Fibonacci, Volume e Suporte/Resistência.
+    """
+    try:
+        report = _get_local_ml().get_strategy_weights_report()
+        total_samples = sum(int(r.get('samples', 0)) for r in report)
+        return jsonify({
+            "status": "ok",
+            "aprendendo": any(r.get('learning') for r in report),
+            "amostras_totais": total_samples,
+            "estrategias": report,
+        }), 200
+    except Exception as e:
+        return jsonify({"status": "erro", "msg": str(e), "estrategias": []}), 200
 
 @app.route('/api/status', methods=['GET'])
 def get_status():
