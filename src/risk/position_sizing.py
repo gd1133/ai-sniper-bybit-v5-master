@@ -15,7 +15,7 @@ import os
 from typing import Tuple
 
 
-DEFAULT_ENTRY_PCT = 0.05   # 5% da banca
+DEFAULT_ENTRY_PCT = 0.03   # 3% da banca (regra de risco V60.7)
 DEFAULT_ENTRY_AFTER_STOP_PCT = 0.03  # 3% após stop loss
 DEFAULT_TP_MARGIN_RATIO = 1.0   # +100% sobre a margem
 DEFAULT_SL_MARGIN_RATIO = 0.5   # -50% sobre a margem
@@ -37,7 +37,7 @@ def _env_float(name: str, default: float) -> float:
 
 
 def load_entry_pct() -> float:
-    """Percentual padrão de entrada (env RISK_PER_TRADE_PCT, default 5%)."""
+    """Percentual padrão de entrada (env RISK_PER_TRADE_PCT, default 3%)."""
     pct = _env_float('RISK_PER_TRADE_PCT', DEFAULT_ENTRY_PCT * 100)
     if pct > 1:
         return pct / 100.0

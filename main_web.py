@@ -1159,16 +1159,27 @@ def _repair_open_trades():
 
 def _can_open_new_signal(symbol):
     _repair_open_trades()
+    key = _normalize_symbol_key(_canonicalize_symbol(symbol))
     open_symbols = {_normalize_symbol_key(t.get('pair')) for t in db.get_open_trades(100) if t.get('pair')}
-    if _normalize_symbol_key(_canonicalize_symbol(symbol)) in open_symbols: return False, "Moeda já ativa."
-    if len(open_symbols) >= MAX_MOEDAS_ATIVAS: return False, f"Limite de {MAX_MOEDAS_ATIVAS} ativos atingido."
+    # 🔒 TRAVA DE ATIVO ÚNICO: bloqueia se já há entrada em processamento (lock ativo)
+    if key in SNIPER_SIGNAL_RESERVATIONS:
+        return False, "Entrada já em processamento (lock ativo)."
+    if key in open_symbols:
+        return False, "Moeda já ativa."
+    # Considera reservas + posições abertas no limite de ativos simultâneos
+    if len(open_symbols | SNIPER_SIGNAL_RESERVATIONS) >= MAX_MOEDAS_ATIVAS:
+        return False, f"Limite de {MAX_MOEDAS_ATIVAS} ativos atingido."
     return True, "ok"
 
 def _reserve_signal_slot(symbol):
+    """Reserva a trava de execução única para o par. Retorna True se reservado."""
     with SNIPER_SIGNAL_LOCK:
         ok, reason = _can_open_new_signal(symbol)
-        if ok: SNIPER_SIGNAL_RESERVATIONS.add(_normalize_symbol_key(_canonicalize_symbol(symbol)))
-        return ok, reason
+        if ok:
+            SNIPER_SIGNAL_RESERVATIONS.add(_normalize_symbol_key(_canonicalize_symbol(symbol)))
+        else:
+            print(f"   ⛔ [LOCK] Entrada em {symbol} bloqueada: {reason}", flush=True)
+        return ok
 
 def _release_signal_slot(symbol):
     with SNIPER_SIGNAL_LOCK: SNIPER_SIGNAL_RESERVATIONS.discard(_normalize_symbol_key(_canonicalize_symbol(symbol)))
@@ -2055,10 +2066,13 @@ def _is_order_execution_enabled(client_context):
     return ALLOW_ORDER_EXECUTION and ALLOW_REAL_TRADING
 
 def broadcast_ordem_global(symbol, side, entry_price, res_ia):
-    slot_reserved = False
+    # 🔒 TRAVA DE EXECUÇÃO ÚNICA: reserva o par e só libera após a confirmação
+    # da API (dentro de _process_client_orders_background), evitando ordens
+    # duplicadas por latência de rede (overtrading).
+    if not _reserve_signal_slot(symbol):
+        return
+    handed_off = False
     try:
-        if not _reserve_signal_slot(symbol): return
-        slot_reserved = True
         signal_snapshot = _build_last_sniper_signal(symbol, side, entry_price, res_ia.get('probabilidade', 70), res_ia.get('motivo', ''))
         central_state['last_sniper_signal'] = signal_snapshot
         central_state['symbol'] = signal_snapshot.get('symbol', central_state.get('symbol', '---'))
@@ -2073,14 +2087,16 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                 _publish_ai_tribunal_evidence(symbol, side, tech, res_ia, intel_ctx=intel, df=df_sig)
         except Exception:
             pass
-        
+
         threading.Thread(
             target=_process_client_orders_background,
             args=(symbol, side, entry_price, res_ia.get('probabilidade', 70), res_ia.get('motivo', '')),
             daemon=True
         ).start()
+        handed_off = True  # a thread de execução é responsável por liberar a trava
     finally:
-        if slot_reserved: _release_signal_slot(symbol)
+        if not handed_off:
+            _release_signal_slot(symbol)
 
 def sniper_worker_loop():
     time.sleep(1)
@@ -2481,6 +2497,21 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                 broker = _make_broker(c)
                 banca = float(c.get('saldo_base', 1000.0))
 
+                # 🔒 TRAVA DE ATIVO ÚNICO (ANTI-OVERTRADING): se JÁ existe qualquer
+                # quantidade aberta no par nesta conta, aborta imediatamente a compra.
+                try:
+                    if broker.has_open_position(symbol):
+                        print(f"   🚫 [ANTI-DUP] {c.get('nome')} já possui posição aberta em {symbol}. Nova entrada abortada.", flush=True)
+                        continue
+                except Exception as dup_err:
+                    print(f"   ⚠️ [ANTI-DUP] Falha ao verificar posição de {symbol}: {dup_err}", flush=True)
+
+                # 🔒 MARGEM ISOLADA + ALAVANCAGEM (proibido operar em Cross Margin)
+                try:
+                    broker.set_isolated_margin(symbol, ALAVANCAGEM)
+                except Exception as mm_err:
+                    print(f"   ⚠️ [MARGEM] Falha ao forçar isolada em {symbol}: {mm_err}", flush=True)
+
                 # 🔒 CORREÇÃO MODO CONSERVADOR: Bloqueia nova entrada se já houver posição aberta
                 if RISK_MODE == 'conservative':
                     try:
@@ -2538,8 +2569,13 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                             # Ignora erros se moeda já estiver na alavancagem desejada
                             print(f"   ⚠️ [LEVERAGE] Erro ao configurar para {ALAVANCAGEM}x (pode já estar neste valor): {lev_err}", flush=True)
 
+                    # 🎯 TP (+100% ROI) e SL (-50% ROI = 2.5% do preço @20x) VINCULADOS à ordem
+                    from src.risk.position_sizing import calculate_tp_sl_prices
+                    tp_price, sl_price = calculate_tp_sl_prices(entry_price, side.lower(), ALAVANCAGEM)
+
                     order_result = broker.execute_market_order(
                         symbol, side.lower(), qty, raise_on_error=True, strict_pct_sizing=True,
+                        tp_price=tp_price, sl_price=sl_price,
                     )
                     if order_result:
                         order_id = order_result.get('id', order_result.get('orderId', 'N/A'))
@@ -2566,7 +2602,13 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                             margin=margem
                         )
 
-                        broker.set_tp_sl_sniper(symbol, side.lower(), entry_price, qty, leverage=ALAVANCAGEM)
+                        # TP/SL já foram vinculados à ordem principal. Só usa a rota
+                        # separada (set_trading_stop) como fallback se o inline falhou.
+                        if not order_result.get('tp_sl_applied'):
+                            print("   ↩️ [TP/SL] Inline indisponível — aplicando via set_trading_stop (fallback).", flush=True)
+                            broker.set_tp_sl_sniper(symbol, side.lower(), entry_price, qty, leverage=ALAVANCAGEM)
+                        else:
+                            print("   ✅ [TP/SL] Alvos vinculados à ordem principal (Bybit V5).", flush=True)
 
                         # 2. DEPURAÇÃO ATIVA + 3. HIGIENIZAÇÃO DE ENVIO
                         if client_tk and client_chat:
@@ -2598,6 +2640,10 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                 print(f"⚠️ [CLIENT ERROR] Falha ao processar ordem para cliente {c.get('nome', 'Unknown')}: {client_err}", flush=True)
     except Exception as general_err:
         print(f"❌ [PROCESS ERROR] Erro geral no processamento de ordens: {general_err}", flush=True)
+    finally:
+        # 🔓 Libera a trava de execução única SOMENTE após concluir o envio/confirmação,
+        # garantindo que o radar não dispare ordens duplicadas no mesmo par (anti-overtrading).
+        _release_signal_slot(symbol)
 
 # ==============================================================================
 # 🎛️ ENDPOINTS DA API REST (FLASK)
@@ -2747,13 +2793,16 @@ def api_manual_entry_trade():
         from src.ai_brain.validator import GroqValidator
 
         if force_execute:
-            if not _reserve_signal_slot(symbol): return jsonify({"success": False, "error": "Limite atingido"}), 409
+            if not _reserve_signal_slot(symbol): return jsonify({"success": False, "error": "Limite atingido ou entrada já em processamento"}), 409
+            handed_off = False
             try:
                 db.record_trade(1, symbol, side_normalized, 0, 10, time.strftime("%d/%m %H:%M"), "ENTRADA MANUAL", "open", entry_price)
                 _sync_active_trades_from_db()
                 threading.Thread(target=_process_client_orders_background, args=(symbol, side_normalized, entry_price, 70, "Manual"), daemon=True).start()
+                handed_off = True  # a thread de execução libera a trava ao concluir
                 return jsonify({"success": True, "message": "Ordem manual enviada"}), 200
-            finally: _release_signal_slot(symbol)
+            finally:
+                if not handed_off: _release_signal_slot(symbol)
         
         df = pub_broker.fetch_ohlcv(symbol, timeframe='15m')
         tech_data = IndicatorEngine(df).get_signals() if df is not None and len(df) >= 200 else {'trend': 'ALTA', 'price': entry_price, 'sma_200': entry_price}

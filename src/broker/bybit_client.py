@@ -915,8 +915,89 @@ class BybitClient:
             print(f"   ⚠️ Não foi possível buscar os metadados da ordem {order_id}: {e}", flush=True)
             return None
 
-    def execute_market_order(self, symbol, side, qty, raise_on_error=False, strict_pct_sizing=False):
-        """Executa ordem a mercado para entrada instantânea na Bybit V5."""
+    def set_isolated_margin(self, symbol, leverage=20):
+        """
+        Força MARGEM ISOLADA + alavancagem antes de enviar a ordem (anti-cruzada).
+
+        Segue a diretriz de segurança: nunca operar em Cross Margin.
+        Best-effort: se já estiver isolada/na alavancagem, ignora o erro.
+        """
+        lev = int(float(leverage or getattr(self, 'default_leverage', 20) or 20))
+        applied = False
+        # 1) CCXT set_margin_mode('isolated', symbol, {'leverage': lev}) — conforme diretriz
+        try:
+            self.exchange.set_margin_mode('isolated', symbol, {'leverage': lev})
+            applied = True
+            print(f"   🔒 [MARGEM] {symbol} → ISOLATED {lev}x (CCXT)", flush=True)
+        except Exception as e:
+            msg = str(e).lower()
+            if any(tok in msg for tok in ('not modified', 'same', 'already', '110026')):
+                applied = True  # já está em isolada
+            else:
+                print(f"   ⚠️ [MARGEM] CCXT set_margin_mode falhou: {str(e)[:140]}", flush=True)
+
+        # 2) Fallback pybit switch_margin_mode (tradeMode=1 = ISOLATED)
+        if not applied and self.pybit_session is not None:
+            try:
+                v5_symbol = self._normalize_v5_symbol(symbol)
+                rsp = self.pybit_session.switch_margin_mode(
+                    category='linear',
+                    symbol=v5_symbol,
+                    tradeMode=1,
+                    buyLeverage=str(lev),
+                    sellLeverage=str(lev),
+                )
+                ok, err = self._handle_v5_ret_code(rsp, 'switch_margin_mode')
+                if ok or 'not modified' in str(err).lower() or '110026' in str(err):
+                    applied = True
+                    print(f"   🔒 [MARGEM] {symbol} → ISOLATED {lev}x (pybit)", flush=True)
+                else:
+                    print(f"   ⚠️ [MARGEM] pybit switch_margin_mode falhou: {str(err)[:140]}", flush=True)
+            except Exception as e:
+                # Muitos casos: já isolada, ou sem posição — não é fatal
+                print(f"   ⚠️ [MARGEM] pybit switch_margin_mode exceção: {str(e)[:140]}", flush=True)
+        return applied
+
+    def has_open_position(self, symbol) -> bool:
+        """
+        Anti-overtrading: True se já existe QUALQUER quantidade aberta para o símbolo.
+        Usado para abortar novas compras enquanto houver posição viva no par.
+        """
+        try:
+            if self.pybit_session is not None:
+                v5_symbol = self._normalize_v5_symbol(symbol)
+                rsp = self.pybit_session.get_positions(
+                    category='linear', symbol=v5_symbol, settleCoin='USDT'
+                )
+                ok, _ = self._handle_v5_ret_code(rsp, 'get_positions')
+                if not ok:
+                    return False
+                for pos in (rsp.get('result') or {}).get('list', []):
+                    if float(pos.get('size') or 0) > 0:
+                        return True
+                return False
+            # Fallback CCXT
+            positions = self.exchange.fetch_positions([symbol])
+            for pos in positions or []:
+                size = pos.get('contracts')
+                if size is None:
+                    size = (pos.get('info') or {}).get('size')
+                if abs(float(size or 0)) > 0:
+                    return True
+            return False
+        except Exception as e:
+            print(f"   ⚠️ [POSICAO] Falha ao checar posição de {symbol}: {str(e)[:140]}", flush=True)
+            return False
+
+    def execute_market_order(self, symbol, side, qty, raise_on_error=False, strict_pct_sizing=False,
+                             tp_price=None, sl_price=None):
+        """
+        Executa ordem a mercado para entrada instantânea na Bybit V5.
+
+        TP/SL são VINCULADOS à ordem principal (params takeProfit/stopLoss),
+        evitando requisições separadas após a compra. Retorna o resultado com
+        a flag 'tp_sl_applied' indicando se os alvos foram anexados na ordem.
+        """
         try:
             if not self.authenticated:
                 print("[ERRO BROKER] Ordem abortada: chaves ausentes ou inválidas.", flush=True)
@@ -927,7 +1008,23 @@ class BybitClient:
             normalized_qty = self._normalize_order_qty(symbol, qty, strict_pct_sizing=strict_pct_sizing)
             ccxt_qty = float(normalized_qty)
 
-            print(f"🔥 [ORDEM SNIPER BYBIT] {side.upper()} {normalized_qty} em {symbol}", flush=True)
+            # Formata TP/SL na precisão de preço da corretora
+            tp_str = sl_str = None
+            price_to_precision = getattr(self.exchange, 'price_to_precision', None)
+            try:
+                if tp_price and float(tp_price) > 0:
+                    tp_str = str(price_to_precision(symbol, float(tp_price))) if callable(price_to_precision) else str(tp_price)
+                if sl_price and float(sl_price) > 0:
+                    sl_str = str(price_to_precision(symbol, float(sl_price))) if callable(price_to_precision) else str(sl_price)
+            except Exception as prec_err:
+                print(f"   ⚠️ [TP/SL INLINE] Falha na precisão de preço: {prec_err}", flush=True)
+                tp_str = str(tp_price) if tp_price else None
+                sl_str = str(sl_price) if sl_price else None
+
+            tp_sl_applied = False
+
+            print(f"🔥 [ORDEM SNIPER BYBIT] {side.upper()} {normalized_qty} em {symbol}"
+                  + (f" | TP={tp_str} SL={sl_str}" if (tp_str or sl_str) else ""), flush=True)
 
             if self.pybit_session is not None:
                 v5_symbol = self._normalize_v5_symbol(symbol)
@@ -943,11 +1040,38 @@ class BybitClient:
                     'qty': normalized_qty,
                     'positionIdx': position_idx,
                 }
+                # TP/SL vinculados à ordem principal (Bybit V5)
+                if tp_str or sl_str:
+                    payload['tpslMode'] = 'Full'
+                    if tp_str:
+                        payload['takeProfit'] = tp_str
+                        payload['tpTriggerBy'] = 'LastPrice'
+                        payload['tpOrderType'] = 'Market'
+                    if sl_str:
+                        payload['stopLoss'] = sl_str
+                        payload['slTriggerBy'] = 'LastPrice'
+                        payload['slOrderType'] = 'Market'
+                    tp_sl_applied = True
+
                 print(f"   📤 Enviando via Pybit V5 (/v5/order/create): {payload}", flush=True)
                 rsp = self.pybit_session.place_order(**payload)
                 print(f"   📥 Resposta Bybit: {rsp}", flush=True)
 
                 ok, error_message = self._handle_v5_ret_code(rsp, 'v5/order/create')
+                if not ok and tp_sl_applied and any(
+                    tok in str(error_message).lower()
+                    for tok in ('takeprofit', 'stoploss', 'tpsl', 'tp/sl', 'trigger')
+                ):
+                    # Reenvia sem TP/SL inline; alvos serão aplicados por set_tp_sl_sniper (fallback)
+                    print(f"   ⚠️ [TP/SL INLINE] Rejeitado ({error_message}). Reenviando ordem sem TP/SL inline.", flush=True)
+                    for key in ('tpslMode', 'takeProfit', 'tpTriggerBy', 'tpOrderType',
+                                'stopLoss', 'slTriggerBy', 'slOrderType'):
+                        payload.pop(key, None)
+                    tp_sl_applied = False
+                    rsp = self.pybit_session.place_order(**payload)
+                    print(f"   📥 Resposta Bybit (retry): {rsp}", flush=True)
+                    ok, error_message = self._handle_v5_ret_code(rsp, 'v5/order/create')
+
                 if not ok:
                     print(f"❌ [ERRO EXECUÇÃO BYBIT] {error_message}", flush=True)
                     if raise_on_error: raise RuntimeError(error_message)
@@ -959,14 +1083,21 @@ class BybitClient:
 
                 order_details = self.fetch_order_details(symbol, order_id)
                 if order_details:
-                    return {**order_details, 'route': 'v5/order/create', 'category': 'linear'}
+                    return {**order_details, 'route': 'v5/order/create', 'category': 'linear', 'tp_sl_applied': tp_sl_applied}
                 else:
-                    return {**result, 'id': order_id, 'route': 'v5/order/create', 'category': 'linear', 'symbol': v5_symbol}
+                    return {**result, 'id': order_id, 'route': 'v5/order/create', 'category': 'linear', 'symbol': v5_symbol, 'tp_sl_applied': tp_sl_applied}
 
             # Fallback nativo via Core CCXT Engine
             # Mapeia positionIdx para Hedge Mode (Modo Bidirecional)
             position_idx = 1 if side.lower() == 'buy' else 2
             params = {'category': 'linear', 'positionIdx': position_idx}
+            if tp_str or sl_str:
+                params['tpslMode'] = 'Full'
+                if tp_str:
+                    params['takeProfit'] = tp_str
+                if sl_str:
+                    params['stopLoss'] = sl_str
+                tp_sl_applied = True
             print(f"   📤 Enviando via CCXT Fallback: {symbol} | qty={normalized_qty} | positionIdx={position_idx}", flush=True)
             order = self.exchange.create_order(symbol, 'market', side, ccxt_qty, params=params)
             order_id = order.get('id', 'N/A')
@@ -974,9 +1105,9 @@ class BybitClient:
 
             if order_id != 'N/A':
                 order_details = self.fetch_order_details(symbol, order_id)
-                if order_details: return order_details
+                if order_details: return {**order_details, 'tp_sl_applied': tp_sl_applied}
 
-            return order
+            return {**order, 'tp_sl_applied': tp_sl_applied}
         except Exception as e:
             ccxt = _get_ccxt()
             if isinstance(e, ccxt.BaseError):
