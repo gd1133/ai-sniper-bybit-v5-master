@@ -1,50 +1,297 @@
 # Documentação Técnica: Motor Sniper V60.7 🚀
 
-Esta documentação descreve as regras de negócio, arquitetura de proteção e gerenciamento de risco do sistema de trading automatizado de alta frequência integrado com a API da Bybit V5.
+Sistema de trading automatizado de alta frequência integrado à **API Bybit V5**, operando
+**100% em conta real (mainnet)**. Este documento descreve a arquitetura, todas as estratégias,
+a lógica de decisão, o gerenciamento de risco e as proteções anti-falha do robô.
+
+> **Regra de ouro:** a IA de notícias é apenas *assistente*. A palavra final é sempre do
+> **Cérebro 3** (decisão soberana com indicadores locais). Nenhuma indisponibilidade de IA
+> externa pode travar uma entrada.
 
 ---
 
-## 1. Arquitetura de Decisão: O Triplo Cérebro
+## 1. Visão Geral da Arquitetura
 
-O robô opera através de uma estrutura de decisão em camadas para garantir que nenhuma operação seja aberta sem uma confluência de dados de alta probabilidade:
+```
+                         ┌──────────────────────────────┐
+   Bybit V5 (mainnet) ── │  RADAR (sniper_worker_loop)  │  varre top volume a cada ciclo
+                         └───────────────┬──────────────┘
+                                         │ para cada moeda
+                    ┌────────────────────▼─────────────────────┐
+                    │  PIPELINE DE DECISÃO (Triplo Cérebro)     │
+                    │  1. Estrutura/SMC  2. Volume & Fluxo      │
+                    │  3. Decisão Soberana (ML local)           │
+                    └────────────────────┬─────────────────────┘
+                                         │ sinal aprovado (prob ≥ THRESHOLD)
+                    ┌────────────────────▼─────────────────────┐
+                    │  RESERVA DE SLOT (anti-overtrading lock)  │
+                    └────────────────────┬─────────────────────┘
+                                         │
+                    ┌────────────────────▼─────────────────────┐
+                    │  EXECUÇÃO POR CLIENTE (background thread)  │
+                    │  • margem ISOLADA 20x                      │
+                    │  • checa posição aberta (has_open_position)│
+                    │  • lote = 3% da banca × 20x / preço       │
+                    │  • ordem a mercado + TP/SL inline         │
+                    └───────────────────────────────────────────┘
+```
 
-* **Cérebro 1 (Mapeamento de Estrutura - SMC):** Analisa quebras de estrutura de mercado (BOS/CHoCH) e identifica blocos de ordens institucionais (*Order Blocks*) em tempos gráficos de 15m e 1h.
-* **Cérebro 2 (Volume & Fluxo):** Monitora picos de volume financeiro real (*Volume Clímax*) e analisa o desequilíbrio dinâmico do livro de ordens (mínimo de 60% de dominância de um lado do livro nas primeiras 20 profundidades).
-* **Cérebro 3 (Decisão Soberana & Contingência):** Consolida os dados e aprova a execução. Em caso de falha de conexão ou limites de requisição (*Rate Limit*) das IAs auxiliares, o Cérebro 3 assume o controle de forma autônoma utilizando indicadores matemáticos puramente locais para evitar o travamento do robô.
+Componentes principais (arquivos):
+
+| Camada | Arquivo | Responsabilidade |
+|---|---|---|
+| Web / API / Radar | `main_web.py` | Servidor Flask, dashboard, loop do radar, orquestração de ordens por cliente |
+| CLI / execução single | `main.py` | Execução direta (linha de comando) e helpers de posição |
+| Broker | `src/broker/bybit_client.py` | Chamadas à Bybit V5 (CCXT + pybit): saldo, ordens, margem, TP/SL, posições |
+| Cálculo de ordem | `src/broker/order_calculator.py` | Precisão/step size, arredondamento de lote |
+| Risco | `src/risk/position_sizing.py` | Fórmula de lote (3%), preços de TP/SL, ROI |
+| Risco | `src/risk/entry_viability.py` | Viabilidade da entrada (notional mínimo etc.) |
+| Cérebro 1/2 | `src/engine/confluence_absoluta.py` | Confluência institucional (volume, order book, ADX) |
+| Timing | `src/engine/entry_timing.py` | Confirmação de timing (tendência, pullback, momentum) |
+| Indicadores | `src/engine/indicators.py` | Cálculo de indicadores técnicos |
+| Cérebro 3 | `src/ai_brain/local_ml_engine.py` | Motor de ML local (decisão soberana / contingência) |
+| Validador | `src/ai_brain/validator.py` | Consolida votos e define ação final (BUY/SELL/HOLD) |
+| Inteligência | `src/intelligence/market_intelligence.py` | Regime de mercado + whales + notícias (score) |
+| Notícias | `src/intelligence/news_analyzer.py` | Sentimento de notícias (**assistente, nunca bloqueia**) |
+| Banco de dados | `src/database/manager.py` | SQLite: clientes, trades, config (100% real) |
+| Config | `src/config/` | Credenciais, URLs, ambiente |
 
 ---
 
-## 2. Protocolo Rígido de Gerenciamento de Risco
+## 2. Fluxo de Execução do Radar (passo a passo)
 
-Para evitar a quebra de capital das contas conectadas, o robô deve seguir as seguintes diretrizes matemáticas obrigatórias em cada operação:
+O `sniper_worker_loop` (em `main_web.py`) executa continuamente:
 
-### A. Seleção do Modo de Margem
-* **Proibição Absoluta:** É terminantemente proibido operar em modo de Margem Cruzada (*Cross Margin*).
-* **Padrão Exigido:** Toda e qualquer operação deve ser executada em **Margem Isolada (*Isolated Margin*)**. O robô força esta configuração via API antes de transmitir a ordem principal (`set_isolated_margin` → CCXT `set_margin_mode('isolated', symbol, {'leverage': 20})`, com fallback `pybit switch_margin_mode(tradeMode=1)`).
+1. **Coleta de mercado** — busca os `SCAN_TOP_COINS` ativos de maior volume em USDT
+   (padrão **40** por ciclo).
+2. **Pré-carga de módulos** — no boot, `_preload_runtime_modules()` importa broker/IA de
+   forma síncrona (single-thread) **antes** de iniciar as threads, evitando *import parcial/circular*.
+3. **Para cada moeda:**
+   1. Baixa OHLCV (15m/1h) e calcula indicadores.
+   2. **Cérebro 1 (SMC):** estrutura de mercado (BOS/CHoCH) e order blocks.
+   3. **Cérebro 2 (Volume & Fluxo):** volume clímax e desequilíbrio do livro de ordens.
+   4. **Inteligência de Mercado:** regime (tendência/lateral) + whales + notícias (assistente).
+   5. **Timing de entrada:** `confirmar_timing_entrada` valida tendência/pullback/momentum.
+   6. **Cérebro 3 (Validador + ML local):** consolida votos e emite a decisão soberana com
+      uma probabilidade.
+4. **Gatilho de entrada:** se `probabilidade ≥ THRESHOLD_ENTRADA` (padrão **48%**) e a decisão
+   for `BUY/SELL`, o robô tenta **reservar o slot** do par.
+5. **Reserva de slot (lock):** `_reserve_signal_slot(symbol)` marca o par como
+   *processando_entrada*. Se já houver reserva ou o limite `MAX_MOEDAS_ATIVAS` for atingido,
+   o sinal é descartado.
+6. **Execução por cliente:** `_process_client_orders_background` roda em thread separada e
+   envia a ordem para cada investidor ativo (ver seção 6). O slot só é liberado no `finally`,
+   após a confirmação da corretora.
 
-### B. Tamanho do Lote Dinâmico (Fórmula dos 3%)
-A margem utilizada em cada trade deve ser equivalente a exatamente **3%** do saldo real disponível na carteira do investidor:
+---
+
+## 3. Arquitetura de Decisão: O Triplo Cérebro
+
+O robô abre operação apenas com **confluência** de dados de alta probabilidade.
+
+* **Cérebro 1 — Estrutura de Mercado (SMC):** analisa quebras de estrutura (*BOS/CHoCH*) e
+  identifica *order blocks* institucionais em 15m e 1h.
+* **Cérebro 2 — Volume & Fluxo:** monitora *Volume Clímax* (volume financeiro real) e o
+  desequilíbrio dinâmico do livro de ordens. Implementado em `confluence_absoluta.py`.
+* **Cérebro 3 — Decisão Soberana & Contingência:** consolida os dados e aprova a execução.
+  Em caso de falha/limite de requisição das IAs auxiliares (Groq/Gemini), o Cérebro 3 assume
+  **autonomamente** usando indicadores matemáticos puramente locais (`local_ml_engine.py`),
+  garantindo que o robô **não trave**.
+
+### Limiares atuais (modo assertivo)
+
+| Componente | Parâmetro | Valor atual | Observação |
+|---|---|---|---|
+| Gatilho de entrada | `THRESHOLD_ENTRADA` | **48%** | probabilidade mínima do validador |
+| ML local | `min_local_confidence` | **52%** | confiança mínima do Cérebro 3 |
+| Validador (compra) | `buy_votes ≥ 2` + prob | **≥ 48%** | votos mínimos + probabilidade |
+| Validador (soberano) | prob soberana | **≥ 52%** | ação BUY/SELL autônoma |
+| Confluência Absoluta | `ENABLE_ABSOLUTE_CONFLUENCE` | **False (off)** | não bloqueia por padrão |
+| Volume clímax | ratio | **≥ 1.25** | antes 2.0 |
+| Order book | `min_imbalance_ratio` | **≥ 1.20** | ignora se book indisponível |
+| ADX (tendência) | `min_adx` | **≥ 14** | antes 22 |
+| Inteligência | `intelligence_score` | **≥ 32** | peso de notícias removido |
+
+> Estes limiares foram afrouxados a pedido para tornar o robô **mais assertivo / entradas mais
+> rápidas**. Para deixá-lo mais rigoroso, aumente os valores (ex.: `THRESHOLD_ENTRADA=60`,
+> `min_local_confidence=80`, `ENABLE_ABSOLUTE_CONFLUENCE=True`).
+
+---
+
+## 4. IA de Notícias — Assistente (nunca bloqueia)
+
+`news_analyzer.py` e `market_intelligence.py` foram ajustados para que a IA de notícias **jamais**
+bloqueie uma entrada:
+
+* **Neutralidade no cooldown/degradação:** se a Groq entra em cooldown (`in_cooldown`) ou
+  degradada (`cloud_degraded`), o analisador retorna sentimento **NEUTRAL** e
+  `ai_status = "degradado"`, com `block_trade = False`.
+* **Sem veto por *soft degradation*:** no lugar do bloqueio, registra o aviso:
+  `⚠️ [ASSISTENTE IA] Notícias indisponíveis para [MOEDA]. Passando comando para análise técnica do Cérebro 3.`
+* **Decisão soberana:** com notícia Neutra/Indisponível, o Cérebro 3 executa análise pura de
+  mercado (regime, livro de ordens, volume). Se os critérios técnicos forem preenchidos, entra
+  normalmente.
+* **Desativada por padrão:** `ENABLE_NEWS_AI = False` (assertividade). O peso de notícias foi
+  removido do `intelligence_score`.
+
+---
+
+## 5. Protocolo Rígido de Gerenciamento de Risco
+
+### A. Modo de Margem — ISOLADA obrigatória
+* **Proibição absoluta:** nunca operar em Margem Cruzada (*Cross Margin*).
+* **Padrão exigido:** toda ordem é executada em **Margem Isolada** com **20x**. O robô força a
+  configuração via `set_isolated_margin(symbol, 20)` antes da ordem:
+  * CCXT `set_margin_mode('isolated', symbol, {'leverage': 20})`
+  * Fallback `pybit switch_margin_mode(category='linear', tradeMode=1, buyLeverage='20', sellLeverage='20')`
+  * Idempotente: se já estiver isolada/na alavancagem, ignora o erro (`110026`, "not modified").
+
+### B. Lote Dinâmico — Fórmula dos 3%
+A margem de cada trade equivale a **3%** do saldo real do investidor
+(`DEFAULT_ENTRY_PCT = 0.03` em `position_sizing.py`):
 
 $$\text{Margem Isolada} = \text{Saldo da Conta} \times 0.03$$
 $$\text{Tamanho Nominal} = \text{Margem Isolada} \times 20 \text{ (Alavancagem)}$$
 $$\text{Lote Final} = \frac{\text{Tamanho Nominal}}{\text{Preço Atual do Ativo}}$$
 
-O lote é arredondado usando as regras de precisão (Step Size / minOrderQty) da corretora, respeitando o teto de tolerância de 7.5% da banca.
+O lote é arredondado pelas regras de precisão (Step Size / minOrderQty) da corretora e respeita
+um teto de tolerância de banca.
 
-### C. Parâmetros de Saída de Emergência
-* **Take Profit (TP):** Configurado na corretora para garantir **+100% de ROI** sobre a margem separada.
-* **Stop Loss (SL):** Configurado na corretora para limitar a perda em exatamente **-50% de ROI** sobre a margem separada. No caso de 20x de alavancagem, o SL é acionado quando o preço do ativo mover **2.5%** contra a direção de entrada.
-* **Vínculo à Ordem Principal:** TP e SL são enviados **dentro dos parâmetros da própria ordem de mercado** (`takeProfit`/`stopLoss`, `tpslMode=Full`), e não em requisições separadas. A rota `set_trading_stop` só é usada como fallback caso o TP/SL inline seja rejeitado.
+### C. Saída de Emergência — TP/SL vinculados à ordem principal
+* **Take Profit:** **+100% de ROI** sobre a margem separada (`DEFAULT_TP_ROI_PCT = 100.0`).
+* **Stop Loss:** **-50% de ROI** sobre a margem separada (`DEFAULT_SL_ROI_PCT = -50.0`).
+  Com 20x, o SL dispara quando o preço se move **2.5%** contra a entrada.
+* **Vínculo à ordem:** TP e SL são enviados **dentro dos parâmetros da ordem de mercado**
+  (`takeProfit` / `stopLoss` / `tpslMode='Full'`), não em requisições separadas.
+  `set_trading_stop` só é usada como **fallback** se o TP/SL inline for rejeitado.
+
+**Fórmula dos preços de TP/SL** (`calculate_tp_sl_prices`):
+```
+Δ_preço_TP = preço × (TP_ROI / 100) / alavancagem      # +100%/20 = +5.0% no preço
+Δ_preço_SL = preço × (|SL_ROI| / 100) / alavancagem    # 50%/20  = -2.5% no preço
+BUY : tp = preço × (1 + 0.05) ; sl = preço × (1 - 0.025)
+SELL: tp = preço × (1 - 0.05) ; sl = preço × (1 + 0.025)
+```
 
 ---
 
-## 3. Segurança Contra Sobrecarga e Duplicação (Anti-Overtrading)
+## 6. Segurança Contra Sobrecarga e Duplicação (Anti-Overtrading)
 
-* **Trava de Ativo Único:** O robô só pode manter **uma única posição aberta por par de moedas**. Sinais adicionais para um ativo já posicionado são descartados. Antes de cada compra, o robô chama `has_open_position(symbol)` (`get_positions`/`fetch_positions`) e **aborta imediatamente** se já houver qualquer quantidade aberta no par.
-* **Mutex / Lock de Concorrência:** O loop de varredura do radar reserva a trava do par (`SNIPER_SIGNAL_RESERVATIONS`) assim que o sinal é aprovado e **só a libera após a confirmação de retorno da API** (dentro de `_process_client_orders_background`). Isso evita a criação de ordens fantasmas duplicadas por atraso de rede (latência). A verificação `_can_open_new_signal` considera tanto as posições abertas no banco quanto as reservas em processamento.
+* **Trava de ativo único:** apenas **uma posição aberta por par**. Antes de comprar, o robô
+  chama `has_open_position(symbol)` (via `get_positions`/`fetch_positions`) e **aborta** se já
+  houver qualquer quantidade aberta no par.
+* **Mutex de concorrência:** ao aprovar um sinal, o par é reservado em
+  `SNIPER_SIGNAL_RESERVATIONS` e **só é liberado após a confirmação da API**, dentro do
+  `finally` de `_process_client_orders_background`. Isso evita ordens fantasmas duplicadas por
+  latência de rede.
+* **Checagem combinada:** `_can_open_new_signal` considera **posições no banco** + **reservas em
+  processamento** + limite global `MAX_MOEDAS_ATIVAS`.
+* **`_reserve_signal_slot`** retorna booleano (`True` = reservado / `False` = ocupado) para que a
+  verificação seja confiável.
 
 ---
 
-## 4. Conta Real (100%)
+## 7. Conta Real (100%)
 
-O sistema opera exclusivamente em **conta real (mainnet)**. Não há paper trading, testnet, demo ou saldo fictício. Todos os saldos e posições exibidos e processados são lidos diretamente das APIs reais da Bybit/Binance.
+O sistema opera **exclusivamente em conta real (mainnet)**. Não há paper trading, testnet, demo
+ou saldo fictício:
+
+* `USE_TESTNET = False`, `account_mode = 'real'`, `balance_source = 'broker_real_balance'`.
+* `manager.py`: `is_test_mode_enabled()` sempre `False`; `enable_test_mode()` é *no-op*; a
+  migração força todos os clientes existentes para `is_testnet = 0` / `real` (a coluna é
+  preservada, mas neutralizada).
+* Dashboard e `/api/status` exibem/consolidam **apenas** saldos e posições reais lidos das APIs.
+
+---
+
+## 8. Parâmetros de Configuração
+
+Valores atuais em `main_web.py` (raiz):
+
+| Parâmetro | Valor | Descrição |
+|---|---|---|
+| `ALAVANCAGEM` | 20 | Alavancagem de execução (margem isolada) |
+| `USE_TESTNET` | False | Sistema 100% real |
+| `RISK_MODE` | `aggressive` | `conservative` (1 moeda) ou `aggressive` (5 moedas) |
+| `MAX_MOEDAS_ATIVAS` | 5 | Máx. de posições simultâneas |
+| `SCAN_TOP_COINS` | 40 | Ativos por ciclo de radar |
+| `THRESHOLD_ENTRADA` | 48.0 | Probabilidade mínima para entrar |
+| `SNIPER_POSICAO_UNICA` | False | Permite multi-ativo |
+
+Risco (`src/risk/position_sizing.py`):
+
+| Parâmetro | Valor | Descrição |
+|---|---|---|
+| `DEFAULT_ENTRY_PCT` | 0.03 | 3% da banca por trade |
+| `DEFAULT_ENTRY_AFTER_STOP_PCT` | 0.03 | 3% após stop loss |
+| `DEFAULT_TP_ROI_PCT` | 100.0 | +100% ROI |
+| `DEFAULT_SL_ROI_PCT` | -50.0 | -50% ROI (2.5% de preço a 20x) |
+
+Variáveis de ambiente úteis: `RISK_PER_TRADE_PCT`, `ENABLE_NEWS_AI`, `ENABLE_ABSOLUTE_CONFLUENCE`,
+`BLOCK_LATERAL_MARKETS`, `USE_TESTNET`, credenciais Bybit por cliente (no banco).
+
+---
+
+## 9. Endpoints da API (Flask)
+
+| Método | Rota | Função |
+|---|---|---|
+| GET | `/api/status` | Consolida saldos reais + posições reais + últimos trades |
+| GET | `/api/investidores` | Lista investidores conectados (real) |
+| POST | `/api/vincular_cliente` | Valida chaves Bybit e cadastra investidor (conta real) |
+| GET | `/api/dashboard/balance` | Atualiza/retorna saldo real do dashboard |
+| POST | `/api/config/risk-mode` | Alterna `conservative` / `aggressive` |
+| POST | `/api/trade/manual-entry` | Entrada manual (usa o mesmo pipeline de execução) |
+| PUT | `/api/cliente/<id>/balance-source` | (compat) força `broker_real_balance` |
+
+Notas de validação (`/api/vincular_cliente`):
+* Retorna **400** quando a validação das chaves falha (`valid=False`) — o corpo traz a mensagem
+  de erro em `msg`/`api_error`.
+* Retorna **200** quando as chaves autenticam e o saldo real é lido.
+
+---
+
+## 10. Correções Recentes e Troubleshooting
+
+### 10.1 Erro de API no `/api/vincular_cliente` (import circular) — CORRIGIDO
+* **Sintoma:** `cannot import name 'BybitClient' from partially initialized module
+  'src.broker.bybit_client' (most likely due to a circular import)`; `POST /api/vincular_cliente`
+  retornava **400**.
+* **Causa raiz:** no *cold start* do gunicorn, `start_runtime_services()` iniciava a thread do
+  radar (que importa `bybit_client`) no mesmo instante em que a primeira requisição chamava
+  `_ensure_broker_class()` — as duas corriam para o **primeiro import** do módulo, gerando o
+  "módulo parcialmente inicializado".
+* **Correção:** `_preload_runtime_modules()` importa `bybit_client`, `indicators`, `validator`,
+  `market_intelligence` e `entry_timing` de forma **síncrona (single-thread)** dentro de
+  `start_runtime_services()`, **antes** de iniciar as threads e de servir requisições. Assim o
+  módulo já está totalmente carregado em `sys.modules`, e o import lazy vira apenas cache hit.
+
+### 10.2 Erro de escopo `gt` no radar — CORRIGIDO
+* **Sintoma:** `cannot access local variable 'gt' where it is not associated with a value` em
+  todas as moedas do radar.
+* **Correção:** `gt` é inicializada no início do escopo:
+  `gt = str(ctx.get('global_trend', '') or 'NEUTRAL').upper()`, eliminando o caminho condicional
+  que deixava a variável sem valor quando as notícias estavam desativadas (tendência NEUTRAL).
+
+### 10.3 Overtrading / ordens duplicadas — CORRIGIDO
+* Ver seção 6. `_reserve_signal_slot` passou a retornar booleano; `_can_open_new_signal` consulta
+  reservas + banco + limite global; a liberação do slot foi movida para o `finally` do worker de
+  execução; e `has_open_position` aborta compras se já houver posição na corretora.
+
+### 10.4 Encoding no Windows
+* Ao rodar scripts localmente: `set PYTHONIOENCODING=utf-8` (evita `UnicodeEncodeError` com
+  emojis nos logs).
+
+---
+
+## 11. Resumo da Lógica de Entrada (checklist)
+
+Uma entrada só é enviada quando **todas** as condições abaixo são satisfeitas:
+
+1. ✅ Radar seleciona a moeda (top volume).
+2. ✅ Cérebro 3 emite `BUY`/`SELL` com `probabilidade ≥ 48%` (ML local ≥ 52%).
+3. ✅ Timing confirmado (tendência alinhada, ou volume/momentum, ou estrutura).
+4. ✅ (Se ligada) Confluência Absoluta — mínimo de filtros técnicos (notícias não bloqueiam).
+5. ✅ Slot reservado (nenhuma outra entrada em andamento no par) e `MAX_MOEDAS_ATIVAS` não atingido.
+6. ✅ Nenhuma posição aberta para o símbolo (`has_open_position` = False).
+7. ✅ Margem isolada 20x aplicada; lote = 3% × 20x / preço; TP +100% / SL -50% inline.
