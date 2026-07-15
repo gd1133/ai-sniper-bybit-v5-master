@@ -697,9 +697,49 @@ def _build_exchange_trade_card(pos_data, key=None):
 
 def _refresh_active_trades_for_status():
     """
-    Atualiza cards para /api/status sem apagar posições já sincronizadas da Bybit.
+    Atualiza os cards de /api/status refletindo a realidade EM TEMPO REAL:
+      - remove moedas que já saíram (posição encerrada / fora do radar);
+      - inclui novas moedas que abriram;
+      - atualiza preço/PnL das que continuam abertas.
+
+    Fonte de verdade local: trades com status 'open' no banco — mantido em
+    sincronia com a Bybit pela sync reversa do monitor de posições, pelo monitor
+    de stop e pelas entradas/saídas. Antes os cards eram apenas "refrescados"
+    (preço), nunca podados nem acrescidos, então o painel travava em moedas
+    antigas e não mostrava as novas.
     """
+    # Conjunto de moedas realmente abertas segundo o banco (leitura local rápida).
+    try:
+        open_symbols = {
+            _normalize_symbol_key(_canonicalize_symbol(t.get('pair')) or t.get('pair'))
+            for t in db.get_open_trades(100)
+            if str(t.get('status') or '').lower() == 'open' and t.get('pair')
+        }
+    except Exception:
+        # Falha de leitura do banco: não mexe nos cards para evitar apagar tudo.
+        open_symbols = None
+
     existing = list(central_state.get('active_trades') or [])
+
+    if existing and open_symbols is not None:
+        # 1) Poda em tempo real as moedas que não estão mais abertas.
+        pruned = [
+            trade for trade in existing
+            if _normalize_symbol_key(trade.get('raw_symbol') or trade.get('symbol')) in open_symbols
+        ]
+        if len(pruned) != len(existing):
+            central_state['active_trades'] = pruned
+        existing = pruned
+
+        # 2) Se surgiram moedas abertas que ainda não estão nos cards, reconstroi.
+        shown_symbols = {
+            _normalize_symbol_key(trade.get('raw_symbol') or trade.get('symbol'))
+            for trade in existing
+        }
+        if open_symbols - shown_symbols:
+            _sync_active_trades_from_db()
+            existing = list(central_state.get('active_trades') or [])
+
     if existing:
         refreshed = []
         for trade in existing:
@@ -1518,15 +1558,16 @@ def _sync_active_trades_from_db():
             trade_group['client_count'] += 1
             trade_group['trade_count'] += 1
 
+        # Sem trades abertos no banco → limpa o painel (não "congela" moedas antigas).
+        # A leitura do SQLite é atômica; se falhar, cai no except abaixo e mantém o
+        # último estado bom, evitando apagar tudo por erro transitório.
         if not grouped:
-            if central_state.get('active_trades'):
-                return
             central_state['active_trades'] = []
             return
 
-        if central_state.get('active_trades') and len(central_state['active_trades']) > len(grouped):
-            return
-
+        # Reflete exatamente as posições abertas — incluindo remoções (moedas que
+        # saíram) e adições (moedas novas). Antes havia uma trava que impedia
+        # encolher a lista, o que deixava o painel preso em moedas antigas.
         central_state['active_trades'] = sorted(grouped.values(), key=lambda x: x.get('latest_trade_id', 0), reverse=True)
 
         for trade in central_state['active_trades']:
