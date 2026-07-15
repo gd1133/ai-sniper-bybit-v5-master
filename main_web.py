@@ -534,10 +534,43 @@ if db is not None:
         except (ValueError, TypeError):
             pass
 
+def _preload_runtime_modules():
+    """
+    Carrega os módulos pesados (broker/IA) de forma SÍNCRONA e single-thread
+    antes de iniciar as threads e de servir requisições.
+
+    Evita o erro "cannot import name 'BybitClient' from partially initialized
+    module" (import parcial/circular) causado pela corrida entre a thread do
+    radar e a primeira requisição no cold start do gunicorn.
+    """
+    global BybitClient, IndicatorEngine, GroqValidator
+    try:
+        from src.broker.bybit_client import BybitClient as _BC
+        BybitClient = _BC
+    except Exception as e:
+        print(f"⚠️ [BOOT] preload BybitClient adiado: {e}", flush=True)
+    try:
+        from src.engine.indicators import IndicatorEngine as _IE
+        IndicatorEngine = _IE
+    except Exception as e:
+        print(f"⚠️ [BOOT] preload IndicatorEngine adiado: {e}", flush=True)
+    try:
+        from src.ai_brain.validator import GroqValidator as _GV
+        GroqValidator = _GV
+    except Exception as e:
+        print(f"⚠️ [BOOT] preload GroqValidator adiado: {e}", flush=True)
+    try:
+        from src.intelligence.market_intelligence import get_market_intelligence  # noqa: F401
+        from src.engine.entry_timing import confirmar_timing_entrada  # noqa: F401
+    except Exception as e:
+        print(f"⚠️ [BOOT] preload intel/timing adiado: {e}", flush=True)
+
 def start_runtime_services():
     global RUNTIME_STARTED
     with RUNTIME_START_LOCK:
         if RUNTIME_STARTED: return False
+        # Pré-carrega módulos pesados antes de iniciar threads (anti import parcial/circular)
+        _preload_runtime_modules()
         threading.Thread(target=sniper_worker_loop, daemon=True).start()
         threading.Thread(target=_monitor_financial_stop_loss, daemon=True).start()
         threading.Thread(target=_fetch_active_client_balances, kwargs={'force': True}, daemon=True).start()
