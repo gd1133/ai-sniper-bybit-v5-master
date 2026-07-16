@@ -269,6 +269,13 @@ class IndicatorEngine:
                 'institutional_sl_price': 0.0,
             })
 
+        # Fair Value Gap (SMC) — confirmação de imbalance institucional
+        try:
+            from src.engine.cautious_entry_gate import detect_fair_value_gap
+            signals_out.update(detect_fair_value_gap(self.df))
+        except Exception:
+            signals_out.update({'fvg_bullish': False, 'fvg_bearish': False, 'fvg_mid': 0.0})
+
         try:
             from src.engine.market_heat import compute_candle_heat
             heat = compute_candle_heat(signals_out, self.df)

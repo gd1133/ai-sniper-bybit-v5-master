@@ -152,6 +152,27 @@ Integração:
 - Cérebro 3: +15 pts de confiança quando sinal institucional alinha com a tendência.
 - Radar: +12 pts no score quando COMPRA/VENDA institucional confirma a direção da ordem.
 
+### 3.3 Cérebro 3 Cauteloso — Anti-Armadilha (Padilha) ⭐
+
+O timing de entrada (`entry_timing` + `cautious_entry_gate`) passou a ser **rigoroso**:
+
+| Regra | Comportamento |
+|---|---|
+| Nunca comprar com vela vermelha | Bloqueio duro se `close < open` |
+| Nunca vender com vela verde | Bloqueio duro se `close > open` |
+| Nunca contra tendência | COMPRA só em ALTA+ST; VENDA só em BAIXA+ST |
+| Venda no fundo | Exige vela **FORTE VERMELHA** + engolfo/FVG/momentum (não vende no fundo cego) |
+| Compra no fundo | Só com vela **FORTE VERDE** (confirmação de mudança de momentum) |
+| Armadilha de topo | RSI≥72 exige vela forte + engolfo/FVG |
+
+Estratégias incrementais de confirmação (não substituem as 5 clássicas):
+- **Engolfo** bullish/bearish
+- **Fair Value Gap (FVG)** SMC
+- **Vela forte** + rejeição/bounce de pivô
+- **Momentum** de 2–3 velas na direção
+
+Confiança mínima do Cérebro 3 local: **62%** (mais seletivo, mirando qualidade > quantidade).
+
 ### Limiares atuais (modo assertivo)
 
 | Componente | Parâmetro | Valor atual | Observação |

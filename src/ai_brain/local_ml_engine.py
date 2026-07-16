@@ -27,7 +27,8 @@ class LocalMLEngine:
         self.memory = TradeLearner(db_path)
         # 🧠 Pesos das 5 estratégias ajustados automaticamente por aprendizado
         self.weights = AdaptiveStrategyWeights(db_path)
-        self.min_local_confidence = 52  # assertivo — antes 80%
+        # Cauteloso: exige mais confluência para mirar win-rate alto (antes 52 assertivo)
+        self.min_local_confidence = 62
         
     def evaluate_entry_conditions(self, symbol, tech_data, intelligence_context=None):
         """
@@ -152,6 +153,18 @@ class LocalMLEngine:
         elif inst_sig in ('COMPRA_INSTITUCIONAL', 'VENDA_INSTITUCIONAL'):
             score += 6  # pegada detectada, direção parcialmente alinhada
 
+        # Fair Value Gap alinhado — bônus SMC
+        if trend == 'ALTA' and tech_data.get('fvg_bullish'):
+            score += 8
+        elif trend == 'BAIXA' and tech_data.get('fvg_bearish'):
+            score += 8
+
+        # Vela forte na direção — bônus de momento certo
+        if trend == 'ALTA' and tech_data.get('strong_bullish_candle'):
+            score += 10
+        elif trend == 'BAIXA' and tech_data.get('strong_bearish_candle'):
+            score += 10
+
         # RSI (Filtro de Exaustão) - 8 pontos
         rsi = float(tech_data.get('rsi', 50) or 50)
         if 20 < rsi < 80:
@@ -183,7 +196,8 @@ class LocalMLEngine:
     
     def resolve_entry_direction(self, tech_data, intelligence_context=None):
         """
-        Define direção (BUY/SELL/WAIT) baseada em indicadores + heat + notícias.
+        Define direção (BUY/SELL/WAIT) — Cérebro 3 CAUTELOSO.
+        Nunca BUY em vela vermelha / SELL em vela verde; nunca contra tendência.
         """
         ctx = intelligence_context or {}
         trend = str(tech_data.get('trend', '---')).upper()
@@ -191,35 +205,68 @@ class LocalMLEngine:
         rsi = float(tech_data.get('rsi', 50) or 50)
         heat_bias = str(tech_data.get('heat_bias', 'NEUTRAL')).upper()
         global_trend = str(ctx.get('global_trend', tech_data.get('global_trend', 'NEUTRAL'))).upper()
+        strong_up = bool(tech_data.get('strong_bullish_candle'))
+        strong_down = bool(tech_data.get('strong_bearish_candle'))
+        # Cor da vela via candle_body + recent_return / heat (sem DF aqui)
+        candle_bias = str(tech_data.get('heat_bias', 'NEUTRAL')).upper()
+        body_ratio = float(tech_data.get('candle_body_ratio', 0) or 0)
+        recent_ret = float(tech_data.get('recent_return_pct', 0) or 0)
+        # Inferir cor aproximada: retorno recente + heat
+        is_red_candle = recent_ret < 0 and candle_bias in ('BEAR', 'BEARISH')
+        is_green_candle = recent_ret > 0 and candle_bias in ('BULL', 'BULLISH')
+        if body_ratio >= 40:
+            if recent_ret < -0.05:
+                is_red_candle = True
+                is_green_candle = False
+            elif recent_ret > 0.05:
+                is_green_candle = True
+                is_red_candle = False
 
         if tech_data.get('is_lateral') or trend == 'NEUTRO':
             return "WAIT", "⚪ Mercado lateral — sem direção"
 
-        # Lógica: Seguir tendência macro com confirmação de SuperTrend
+        # Lógica cautelosa: tendência + SuperTrend + COR da vela + força
         if trend == "ALTA" and supertrend == 1:
-            if heat_bias == 'BEAR':
-                return "WAIT", "🟡 ALTA técnica mas heat de velas bearish"
+            if heat_bias == 'BEAR' or is_red_candle:
+                return "WAIT", "🟡 NUNCA comprar com vela VERMELHA / heat bearish — aguarde verde forte"
             if global_trend == 'BEARISH':
                 return "WAIT", "🟡 ALTA técnica mas notícias web bearish"
-            if rsi < 70:
+            if rsi >= 72 and not strong_up:
+                return "WAIT", f"🟡 Armadilha de TOPO (RSI={rsi:.0f}) — aguarde vela FORTE verde"
+            if rsi < 70 and (strong_up or is_green_candle or body_ratio < 40):
                 return "BUY", (
-                    f"🟢 ALTA confirmada (ST={supertrend}, RSI={rsi:.0f}, "
-                    f"Heat={tech_data.get('heat_score', 0)}, News={global_trend})"
+                    f"🟢 ALTA cautelosa (ST={supertrend}, RSI={rsi:.0f}, "
+                    f"VelaForte={strong_up}, Heat={tech_data.get('heat_score', 0)})"
                 )
+            if rsi < 70:
+                return "WAIT", "🟡 ALTA mas sem vela VERDE de confirmação"
             return "WAIT", f"🟡 ALTA mas RSI exaurido ({rsi:.0f})"
-        
+
         if trend == "BAIXA" and supertrend == -1:
-            if heat_bias == 'BULL':
-                return "WAIT", "🟡 BAIXA técnica mas heat de velas bullish"
+            if heat_bias == 'BULL' or is_green_candle:
+                return "WAIT", "🟡 NUNCA vender com vela VERDE / heat bullish — aguarde vermelha forte"
             if global_trend == 'BULLISH':
                 return "WAIT", "🟡 BAIXA técnica mas notícias web bullish"
-            if rsi > 30:
-                return "SELL", (
-                    f"🔴 BAIXA confirmada (ST={supertrend}, RSI={rsi:.0f}, "
-                    f"Heat={tech_data.get('heat_score', 0)}, News={global_trend})"
+            # Armadilha de FUNDO: não vender no fundo sem vela FORTE vermelha
+            if rsi <= 28 and not strong_down:
+                return "WAIT", (
+                    f"🟡 Armadilha de FUNDO (RSI={rsi:.0f}) — "
+                    f"NÃO vender no fundo. Aguarde vela FORTE VERMELHA"
                 )
+            if rsi > 30 and strong_down:
+                return "SELL", (
+                    f"🔴 BAIXA cautelosa com vela FORTE VERMELHA "
+                    f"(ST={supertrend}, RSI={rsi:.0f}, Heat={tech_data.get('heat_score', 0)})"
+                )
+            if rsi > 30 and is_red_candle:
+                return "SELL", (
+                    f"🔴 BAIXA + vela vermelha "
+                    f"(ST={supertrend}, RSI={rsi:.0f})"
+                )
+            if rsi > 30:
+                return "WAIT", "🟡 BAIXA mas sem vela VERMELHA FORTE — aguardando momento"
             return "WAIT", f"🟡 BAIXA mas RSI exaurido ({rsi:.0f})"
-        
+
         return "WAIT", "⚪ Sem sinal claro nos indicadores"
     
     def record_local_decision(self, symbol, side, tech_data, entry_price, entry_qty, entry_margin):

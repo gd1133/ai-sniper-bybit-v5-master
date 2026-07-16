@@ -1,9 +1,16 @@
 """
-Confirmação de timing de entrada — tendência + repique + velas institucionais.
+Confirmação de timing de entrada — Cérebro 3 CAUTELOSO.
 
-Regra de ouro: NUNCA vender em tendência de alta nem comprar em tendência de baixa.
-Short só após repique em tendência BAIXA com vela de rejeição.
-Long só após repique em tendência ALTA com vela de rejeição.
+Regras de ouro:
+  - NUNCA comprar com vela vermelha ou contra tendência
+  - NUNCA vender com vela verde ou contra tendência
+  - Venda no fundo: só com vela FORTE vermelha
+  - Compra no fundo: só com vela FORTE verde (mudança de momentum)
+  - Sempre buscar o momento certo (cor + força + engolfo/FVG)
+
+Camada 1: Portão cauteloso (bloqueio DURO) — cautious_entry_gate
+Camada 2: Tendência + SuperTrend
+Camada 3: Confirmação institucional / estrutura / repique
 """
 
 from __future__ import annotations
@@ -13,6 +20,7 @@ from typing import Tuple
 import pandas as pd
 
 from src.engine.candle_patterns import institutional_candle_confirmation
+from src.engine.cautious_entry_gate import cautious_entry_gate, enrich_signals_with_fvg
 
 
 RSI_SHORT_OVERBOUGHT = 65.0
@@ -142,44 +150,40 @@ def _confirm_long_repique(df: pd.DataFrame) -> Tuple[bool, list[str]]:
 
 def confirmar_timing_entrada(side: str, df: pd.DataFrame, signals: dict | None = None) -> Tuple[bool, list[str]]:
     """
-    Validação assertiva antes de disparar ordem:
-      1. Tendência macro + SuperTrend (obrigatório)
-      2. Atalho assertivo: volume/heat/pivô OU velas institucionais OU repique
+    Validação CAUTELOSA antes de disparar ordem:
+      0. Portão cauteloso (cor da vela + força + anti-armadilha) — DURO
+      1. Tendência macro + SuperTrend — DURO
+      2. Velas institucionais / estrutura / repique / FVG — confirmação
     """
-    signals = signals or {}
+    signals = enrich_signals_with_fvg(df, signals or {})
     side_norm = str(side or '').strip().lower()
     all_reasons: list[str] = []
 
+    # ── 0) PORTÃO CAUTELOSO (bloqueio duro — anti Padilha/armadilha) ──
+    ok_gate, gate_reasons = cautious_entry_gate(side, df, signals)
+    if not ok_gate:
+        return False, gate_reasons
+    all_reasons.extend(gate_reasons)
+
+    # ── 1) Tendência + SuperTrend ──
     ok_trend, trend_reasons = _trend_must_align(side, signals)
     if not ok_trend:
         return False, trend_reasons
     all_reasons.extend(trend_reasons)
 
-    vol_ratio = float(signals.get('volume_ratio', 0) or 0)
-    heat = float(signals.get('heat_score', 0) or 0)
-    chart = float(signals.get('chart_entry_score', 0) or 0)
-    # Atalho assertivo: tendência alinhada + volume/momentum razoável
-    if vol_ratio >= 1.15 or heat >= 40 or chart >= 30:
-        all_reasons.append(
-            f'Atalho assertivo (vol×={vol_ratio:.2f} heat={heat:.0f} chart={chart:.0f})'
-        )
-        return True, all_reasons
-
+    # ── 2) Confirmações adicionais (não bypassam o portão) ──
     ok_candles, candle_reasons = institutional_candle_confirmation(side, df, signals)
-    if not ok_candles:
-        try:
-            from src.engine.chart_structure import assertive_structure_entry
-            ok_assert, assert_reasons = assertive_structure_entry(side, df, signals)
-        except Exception as exc:
-            ok_assert, assert_reasons = False, [f'Assertivo indisponível: {exc}']
-        if ok_assert:
-            all_reasons.extend(assert_reasons)
-            all_reasons.append('Caminho ASSERTIVO (pivô + vela forte)')
-            return True, all_reasons
-        # Ainda assim: tendência + SuperTrend já alinhados — libera com aviso
-        all_reasons.append('Timing clássico parcial — liberado por tendência alinhada (modo assertivo)')
-        return True, all_reasons
-    all_reasons.extend(candle_reasons)
+    if ok_candles:
+        all_reasons.extend(candle_reasons)
+
+    try:
+        from src.engine.chart_structure import assertive_structure_entry
+        ok_assert, assert_reasons = assertive_structure_entry(side, df, signals)
+    except Exception as exc:
+        ok_assert, assert_reasons = False, [f'Estrutura indisponível: {exc}']
+
+    if ok_assert:
+        all_reasons.extend(assert_reasons)
 
     if side_norm in ('sell', 'short', 'vender'):
         ok_repique, repique_reasons = _confirm_short_repique(df)
@@ -190,21 +194,23 @@ def confirmar_timing_entrada(side: str, df: pd.DataFrame, signals: dict | None =
 
     if ok_repique:
         all_reasons.extend(repique_reasons)
+        all_reasons.append('✅ Timing completo (portão + tendência + repique)')
         return True, all_reasons
 
-    try:
-        from src.engine.chart_structure import assertive_structure_entry
-        ok_assert, assert_reasons = assertive_structure_entry(side, df, signals)
-    except Exception as exc:
-        ok_assert, assert_reasons = False, [f'Assertivo indisponível: {exc}']
-
-    if ok_assert:
-        all_reasons.extend(assert_reasons)
-        all_reasons.append('entrada por estrutura de gráfico')
+    # Portão cauteloso já passou — se tiver estrutura OU velas institucionais, libera
+    if ok_candles or ok_assert:
+        all_reasons.append('✅ Timing cauteloso OK (portão + tendência + confirmação de vela/estrutura)')
         return True, all_reasons
 
-    # Modo assertivo: tendência + SuperTrend + velas ok já bastam (sem esperar RSI repique)
+    # Portão passou sozinho (vela forte na direção) — ainda assim exige volume mínimo
+    vol_ratio = float(signals.get('volume_ratio', 0) or 0)
+    if vol_ratio >= 1.15:
+        all_reasons.append(
+            f'✅ Timing cauteloso OK (portão + tendência + volume×{vol_ratio:.2f})'
+        )
+        return True, all_reasons
+
     all_reasons.append(
-        f'Repique RSI pendente — liberado por tendência+velas (modo assertivo)'
+        '⏳ Portão OK mas volume fraco — aguarde confirmação de fluxo'
     )
-    return True, all_reasons
+    return False, all_reasons

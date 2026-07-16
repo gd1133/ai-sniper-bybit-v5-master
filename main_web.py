@@ -2508,6 +2508,14 @@ def sniper_worker_loop():
                             f"(VWAP={signals.get('vwap', 0):.4f}, SL ref={signals.get('institutional_sl_price', 0):.4f})",
                             flush=True,
                         )
+                    if side_exec == 'buy' and signals.get('fvg_bullish'):
+                        chart_bonus += 8.0
+                    elif side_exec == 'sell' and signals.get('fvg_bearish'):
+                        chart_bonus += 8.0
+                    if side_exec == 'buy' and signals.get('strong_bullish_candle'):
+                        chart_bonus += 6.0
+                    elif side_exec == 'sell' and signals.get('strong_bearish_candle'):
+                        chart_bonus += 6.0
                     score = (
                         prob
                         + float(intel_ctx.get('intelligence_score', 0) or 0) * 0.25
