@@ -48,6 +48,7 @@ Componentes principais (arquivos):
 | Risco | `src/risk/entry_viability.py` | Viabilidade da entrada (notional mínimo etc.) |
 | Cérebro 1/2 | `src/engine/confluence_absoluta.py` | Confluência institucional (volume, order book, ADX) |
 | Timing | `src/engine/entry_timing.py` | Confirmação de timing (tendência, pullback, momentum) |
+| Institucional | `src/engine/rastreador_institucional.py` | VWAP diário + pegada de volume (big player) + filtro de spread |
 | Indicadores | `src/engine/indicators.py` | Cálculo de indicadores técnicos |
 | Cérebro 3 | `src/ai_brain/local_ml_engine.py` | Motor de ML local (decisão soberana / contingência) |
 | Aprendizado | `src/ai_brain/adaptive_weights.py` | Pesos das 5 estratégias auto-ajustados por resultado real |
@@ -132,6 +133,24 @@ peso — a IA "aprende" quais critérios priorizar por conta própria.
 
 **Endpoint:** `GET /api/estrategias/pesos` retorna o relatório dos pesos aprendidos
 (base, peso atual, wins, losses, win-rate, se já está aprendendo).
+
+### 3.2 Rastreador Institucional (VWAP + Big Players) ⭐ incremental
+
+Camada adicional em `src/engine/rastreador_institucional.py` — **não substitui** as 5 estratégias
+existentes; soma um filtro de fluxo institucional:
+
+1. **VWAP diário** — linha de equilíbrio (reinicia a cada dia).
+2. **Pegada de volume** — volume > média(20) + 2.5× desvio padrão → `big_player_ativo`.
+3. **Filtro de spread** — candle com range expressivo (> 1.5× média) evita falso rompimento.
+4. **Sinal:**
+   - `COMPRA_INSTITUCIONAL`: candle de alta, close > VWAP, big player + spread OK.
+   - `VENDA_INSTITUCIONAL`: candle de baixa, close < VWAP, big player + spread OK.
+
+Integração:
+- `IndicatorEngine.get_signals()` injeta `sinal_institucional`, `vwap`, `institutional_sl_price` (SL
+  de referência = mínima/máxima do candle sinal — informativo; TP/SL principal continua +100%/-50%).
+- Cérebro 3: +15 pts de confiança quando sinal institucional alinha com a tendência.
+- Radar: +12 pts no score quando COMPRA/VENDA institucional confirma a direção da ordem.
 
 ### Limiares atuais (modo assertivo)
 

@@ -143,6 +143,15 @@ class LocalMLEngine:
             if active:
                 score += float(weights.get(name, 0) or 0)
 
+        # Rastreador Institucional (VWAP + big player + spread) — bônus incremental
+        inst_sig = str(tech_data.get('sinal_institucional', 'NEUTRO') or 'NEUTRO').upper()
+        if trend == 'ALTA' and inst_sig == 'COMPRA_INSTITUCIONAL':
+            score += 15
+        elif trend == 'BAIXA' and inst_sig == 'VENDA_INSTITUCIONAL':
+            score += 15
+        elif inst_sig in ('COMPRA_INSTITUCIONAL', 'VENDA_INSTITUCIONAL'):
+            score += 6  # pegada detectada, direção parcialmente alinhada
+
         # RSI (Filtro de Exaustão) - 8 pontos
         rsi = float(tech_data.get('rsi', 50) or 50)
         if 20 < rsi < 80:
