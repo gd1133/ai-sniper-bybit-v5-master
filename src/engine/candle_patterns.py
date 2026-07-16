@@ -102,8 +102,9 @@ def institutional_candle_confirmation(
             return False, ['BLOQUEIO: tendência macro BAIXA — não comprar contra tendência']
         if st == -1:
             return False, ['BLOQUEIO: SuperTrend ainda em BAIXA']
-        if is_bearish_candle(last) and body_last >= 45:
-            return False, [f'BLOQUEIO: vela atual de VENDA forte ({body_last:.0f}% corpo)']
+        # NUNCA comprar com vela vermelha (qualquer corpo)
+        if is_bearish_candle(last):
+            return False, [f'BLOQUEIO: NUNCA comprar com vela VERMELHA (corpo={body_last:.0f}%)']
         if detect_bearish_engulfing(df):
             return False, ['BLOQUEIO: padrão Engulfing de baixa na vela atual']
         if bears >= 2 and bulls == 0:
@@ -112,13 +113,13 @@ def institutional_candle_confirmation(
             return False, [f'BLOQUEIO: momentum recente negativo ({recent_ret:.2f}%)']
         if money_flow == 'SELL':
             return False, ['BLOQUEIO: fluxo institucional apontando VENDA']
-        # Atalho assertivo: vela forte de subida + pivô/estrutura
+        # Confirmação premium: vela forte de subida + pivô/estrutura
         if detect_strong_up_candle(last, atr, vol_ratio) or detect_strong_up_candle(prev, atr, vol_ratio):
             if signals.get('bounce_from_pivot_low') or signals.get('near_pivot_support') or signals.get('structure_bias') == 'ALTA':
                 reasons.append('Vela FORTE de SUBIDA + pivô/estrutura — confirmação acelerada')
                 return True, reasons
-        if not is_bullish_candle(last) and not is_bullish_candle(prev):
-            return False, ['Aguardando vela de confirmação de compra']
+        if not is_bullish_candle(last):
+            return False, ['Aguardando vela VERDE de confirmação de compra']
         reasons.append('Velas e momentum confirmam COMPRA institucional')
         return True, reasons
 
@@ -127,8 +128,9 @@ def institutional_candle_confirmation(
             return False, ['BLOQUEIO: tendência macro ALTA — não vender contra tendência']
         if st == 1:
             return False, ['BLOQUEIO: SuperTrend ainda em ALTA']
-        if is_bullish_candle(last) and body_last >= 45:
-            return False, [f'BLOQUEIO: vela atual de COMPRA forte ({body_last:.0f}% corpo)']
+        # NUNCA vender com vela verde (qualquer corpo)
+        if is_bullish_candle(last):
+            return False, [f'BLOQUEIO: NUNCA vender com vela VERDE (corpo={body_last:.0f}%)']
         if detect_bullish_engulfing(df):
             return False, ['BLOQUEIO: padrão Engulfing de alta na vela atual']
         if bulls >= 2 and bears == 0:
@@ -141,8 +143,8 @@ def institutional_candle_confirmation(
             if signals.get('rejection_from_pivot_high') or signals.get('near_pivot_resistance') or signals.get('structure_bias') == 'BAIXA':
                 reasons.append('Vela FORTE de DESCIDA + pivô/estrutura — confirmação acelerada')
                 return True, reasons
-        if not is_bearish_candle(last) and not is_bearish_candle(prev):
-            return False, ['Aguardando vela de confirmação de venda']
+        if not is_bearish_candle(last):
+            return False, ['Aguardando vela VERMELHA de confirmação de venda']
         reasons.append('Velas e momentum confirmam VENDA institucional')
         return True, reasons
 
