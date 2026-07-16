@@ -252,6 +252,23 @@ class IndicatorEngine:
             'chart_entry_score': float(chart.get('chart_entry_score') or 0),
             'chart_reasons': list(chart.get('chart_reasons') or []),
         }
+        # Camada incremental: rastreador institucional (VWAP + pegada de volume + spread)
+        try:
+            from src.engine.rastreador_institucional import RastreadorInstitucional
+            inst = RastreadorInstitucional().get_latest_signal(self.df)
+            signals_out.update(inst)
+        except Exception:
+            signals_out.update({
+                'sinal_institucional': 'NEUTRO',
+                'vwap': 0.0,
+                'big_player_ativo': False,
+                'institutional_spread': 0.0,
+                'institutional_spread_ma': 0.0,
+                'institutional_signal_low': 0.0,
+                'institutional_signal_high': 0.0,
+                'institutional_sl_price': 0.0,
+            })
+
         try:
             from src.engine.market_heat import compute_candle_heat
             heat = compute_candle_heat(signals_out, self.df)

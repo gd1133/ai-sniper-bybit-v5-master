@@ -2493,6 +2493,21 @@ def sniper_worker_loop():
                         chart_bonus += 8.0
                     if intel_ctx.get('whale_aligned'):
                         chart_bonus += 10.0  # prioriza oportunidades com baleias alinhadas
+                    inst_sig = str(signals.get('sinal_institucional', 'NEUTRO') or 'NEUTRO').upper()
+                    if side_exec == 'buy' and inst_sig == 'COMPRA_INSTITUCIONAL':
+                        chart_bonus += 12.0
+                        print(
+                            f"   🏦 [INSTITUCIONAL] {clean_sym}: COMPRA_INSTITUCIONAL "
+                            f"(VWAP={signals.get('vwap', 0):.4f}, SL ref={signals.get('institutional_sl_price', 0):.4f})",
+                            flush=True,
+                        )
+                    elif side_exec == 'sell' and inst_sig == 'VENDA_INSTITUCIONAL':
+                        chart_bonus += 12.0
+                        print(
+                            f"   🏦 [INSTITUCIONAL] {clean_sym}: VENDA_INSTITUCIONAL "
+                            f"(VWAP={signals.get('vwap', 0):.4f}, SL ref={signals.get('institutional_sl_price', 0):.4f})",
+                            flush=True,
+                        )
                     score = (
                         prob
                         + float(intel_ctx.get('intelligence_score', 0) or 0) * 0.25
