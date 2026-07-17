@@ -373,7 +373,9 @@ ENV_CONFIG = get_environment_config()
 # ==============================================================================
 # 🚀 INICIALIZAÇÃO DO APP FLASK & BANCO DE DADOS (CORE RECONSTRUIDO)
 # ==============================================================================
-app = Flask(__name__, static_folder='dist', static_url_path='')
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+_DIST_DIR = os.path.join(_BASE_DIR, 'dist')
+app = Flask(__name__, static_folder=_DIST_DIR, static_url_path='')
 CORS(app)
 
 if db is not None:
@@ -392,7 +394,44 @@ def _frontend_is_built():
 
 def _frontend_asset_exists(path):
     """Verifica se um asset específico do frontend existe"""
-    return bool(path) and bool(app.static_folder) and os.path.isfile(os.path.join(app.static_folder, path))
+    if not path or not app.static_folder:
+        return False
+    # Bloqueia path traversal
+    safe = os.path.normpath(path).lstrip('/\\')
+    if safe.startswith('..'):
+        return False
+    full = os.path.join(app.static_folder, safe)
+    return os.path.isfile(full)
+
+def _emergency_dashboard_html():
+    """HTML de emergência se o build React falhar — evita tela preta vazia."""
+    return """<!DOCTYPE html>
+<html lang="pt-BR"><head>
+<meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Motor Sniper — Painel</title>
+<style>
+body{margin:0;font-family:system-ui,sans-serif;background:#020617;color:#e2e8f0;padding:2rem}
+.card{max-width:720px;margin:2rem auto;padding:1.5rem;border:1px solid #1e293b;border-radius:1rem;background:#0f172a}
+h1{color:#38bdf8;font-size:1.4rem}a{color:#7dd3fc}code{background:#1e293b;padding:.15rem .4rem;border-radius:.3rem}
+.ok{color:#4ade80}.err{color:#f87171}#status{white-space:pre-wrap;font-size:.85rem;margin-top:1rem}
+</style></head><body>
+<div class="card">
+<h1>⚡ Motor Sniper — API ativa</h1>
+<p>O painel React não carregou (build ausente ou JS com erro). A API do robô continua operando.</p>
+<p><a href="/api/status">/api/status</a> · <a href="/api/investidores">/api/investidores</a></p>
+<p id="hint" class="err">Verificando API…</p>
+<div id="status"></div>
+</div>
+<script>
+fetch('/api/status').then(r=>r.json()).then(d=>{
+  document.getElementById('hint').className='ok';
+  document.getElementById('hint').textContent='API OK — robô conectado';
+  document.getElementById('status').textContent=JSON.stringify(d,null,2).slice(0,2000);
+}).catch(e=>{
+  document.getElementById('hint').textContent='Falha ao ler /api/status: '+e;
+});
+</script>
+</body></html>"""
 
 APP_MODE = 'real'
 ALLOW_ORDER_EXECUTION = ENV_CONFIG.allow_order_execution
@@ -3317,9 +3356,15 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def serve_frontend(path):
-    if _frontend_asset_exists(path): return send_from_directory(app.static_folder, path)
-    if _frontend_is_built(): return send_from_directory(app.static_folder, 'index.html')
-    return jsonify({"status": "DuoIA Maestro API ativa. Painel React em compilação."}), 200
+    # Nunca intercepta API (segurança de rota)
+    if path.startswith('api/') or path == 'api':
+        return jsonify({"status": "erro", "msg": "Rota API não encontrada"}), 404
+    if _frontend_asset_exists(path):
+        return send_from_directory(app.static_folder, path)
+    if _frontend_is_built():
+        return send_from_directory(app.static_folder, 'index.html')
+    # Evita tela preta: painel de emergência com status da API
+    return _emergency_dashboard_html(), 200, {'Content-Type': 'text/html; charset=utf-8'}
 
 print("⚡ [MAESTRO CORE] Forçando inicialização dos serviços em background...", flush=True)
 start_runtime_services()
