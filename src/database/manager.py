@@ -220,10 +220,38 @@ def get_all_clients() -> List[Dict[str, Any]]:
         return []
 
 
+def find_client_by_name(nome: str) -> Dict[str, Any] | None:
+    """Busca cliente pelo nome (case-insensitive). Evita duplicar 'Márcio' etc."""
+    name = str(nome or '').strip()
+    if not name:
+        return None
+    try:
+        conn = _connect()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT * FROM clientes_sniper WHERE LOWER(TRIM(nome)) = LOWER(?) ORDER BY id DESC LIMIT 1",
+            (name,),
+        )
+        row = cur.fetchone()
+        conn.close()
+        return dict(row) if row else None
+    except Exception as e:
+        print(f"⚠️ [DATABASE] find_client_by_name: {e}")
+        return None
+
+
 def add_client(data: Dict[str, Any]):
     """Adiciona ou espelha um cliente localmente. Retorna o id persistido."""
     try:
         print(f"🔵 [DATABASE] add_client: Iniciando inserção de cliente: {data.get('nome')}")
+        # Se já existe cliente com o mesmo nome, atualiza em vez de duplicar
+        if data.get('id') is None:
+            existing = find_client_by_name(data.get('nome'))
+            if existing and existing.get('id'):
+                eid = int(existing['id'])
+                print(f"🔵 [DATABASE] add_client: Nome já existe (id={eid}) — atualizando")
+                return eid if update_client(eid, {**data, 'id': eid}) else False
+
         conn = _connect()
         cur = conn.cursor()
         account_mode = normalize_account_mode(data.get('account_mode', data.get('is_testnet')))
@@ -232,6 +260,11 @@ def add_client(data: Dict[str, Any]):
         exchange = str(data.get('exchange') or 'bybit').strip().lower()
         if exchange not in ('bybit', 'binance'):
             exchange = 'bybit'
+        # Garante diretório do DB (Render /tmp)
+        try:
+            os.makedirs(os.path.dirname(DB_PATH) or '.', exist_ok=True)
+        except Exception:
+            pass
         payload = (
             data.get('nome'),
             data.get('bybit_key'),
