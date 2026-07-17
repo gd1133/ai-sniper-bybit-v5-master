@@ -1,1 +1,1 @@
-web: python -m streamlit run streamlit_app.py --server.port $PORT --server.headless true
+web: python -m gunicorn main_web:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120 --keep-alive 5
