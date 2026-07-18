@@ -2291,9 +2291,22 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
         except Exception:
             pass
 
+        tech = (res_ia or {}).get('tech_data') or {}
+        structural_signal = str(
+            tech.get('sinal_institucional')
+            or (res_ia or {}).get('sinal_institucional')
+            or 'NEUTRO'
+        ).upper()
         threading.Thread(
             target=_process_client_orders_background,
-            args=(symbol, side, entry_price, res_ia.get('probabilidade', 70), res_ia.get('motivo', '')),
+            args=(
+                symbol,
+                side,
+                entry_price,
+                res_ia.get('probabilidade', 70),
+                res_ia.get('motivo', ''),
+                structural_signal,
+            ),
             daemon=True
         ).start()
         handed_off = True  # a thread de execução é responsável por liberar a trava
@@ -2452,6 +2465,36 @@ def sniper_worker_loop():
                     signals = IndicatorEngine(df).get_signals()
                     if signals.get('is_lateral') or signals['trend'] == 'NEUTRO':
                         continue
+
+                    # ══════════════════════════════════════════════════════════
+                    # SHORT-CIRCUIT ABSOLUTO (Cérebro 2) — ANTES do Cérebro 3
+                    # Portas: ADX≥23 → BB expansão → amplitude≥0.35% → volume μ+2.5σ → VWAP
+                    # Qualquer falha → NEUTRO e aborta (não gasta ML / não abre ordem).
+                    # ══════════════════════════════════════════════════════════
+                    try:
+                        from src.engine.hard_gates import institutional_entry_allowed
+                        hard_gate = institutional_entry_allowed(signals)
+                    except Exception as gate_err:
+                        print(
+                            f"   🚫 [HARD-GATE] {clean_sym}: falha ao avaliar portas ({gate_err}) → NEUTRO",
+                            flush=True,
+                        )
+                        time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
+                        continue
+                    if not hard_gate.get('allowed'):
+                        print(
+                            f"   🚫 [HARD-GATE] {clean_sym}: {hard_gate.get('abort_reason')} "
+                            f"→ NEUTRO (abort antes Cérebro 3)",
+                            flush=True,
+                        )
+                        time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
+                        continue
+                    print(
+                        f"   ✅ [HARD-GATE] {clean_sym}: "
+                        f"{hard_gate.get('sinal_institucional')} — portas 1–4 liberadas",
+                        flush=True,
+                    )
+
                     if validator.local_signal(signals) < 12:
                         continue
 
@@ -2517,6 +2560,17 @@ def sniper_worker_loop():
                         continue
 
                     side_exec = 'sell' if decisao in ('SELL', 'VENDER') else 'buy'
+                    # Short-circuit: Cérebro 3 deve concordar com o lado institucional já liberado
+                    from src.engine.hard_gates import side_matches_institutional
+                    inst_sig_early = str(signals.get('sinal_institucional', 'NEUTRO') or 'NEUTRO').upper()
+                    if not side_matches_institutional(side_exec, inst_sig_early):
+                        print(
+                            f"   🚫 [HARD-GATE] {clean_sym}: Cérebro 3={side_exec} "
+                            f"≠ Smart Money={inst_sig_early} — abort antes de timing/execução",
+                            flush=True,
+                        )
+                        time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
+                        continue
                     trend_now = str(signals.get('trend', 'NEUTRO')).upper()
                     if side_exec == 'sell' and trend_now != 'BAIXA':
                         print(f"   🚫 [TENDÊNCIA] {clean_sym}: VENDA bloqueada — tendência={trend_now}", flush=True)
@@ -2591,21 +2645,24 @@ def sniper_worker_loop():
                         chart_bonus += 8.0
                     if intel_ctx.get('whale_aligned'):
                         chart_bonus += 10.0  # prioriza oportunidades com baleias alinhadas
+                    # BLOQUEIO ABSOLUTO de lado: Cérebro 3 só opera a favor do Smart Money
+                    from src.engine.hard_gates import side_matches_institutional
                     inst_sig = str(signals.get('sinal_institucional', 'NEUTRO') or 'NEUTRO').upper()
-                    if side_exec == 'buy' and inst_sig == 'COMPRA_INSTITUCIONAL':
-                        chart_bonus += 12.0
+                    if not side_matches_institutional(side_exec, inst_sig):
                         print(
-                            f"   🏦 [INSTITUCIONAL] {clean_sym}: COMPRA_INSTITUCIONAL "
-                            f"(VWAP={signals.get('vwap', 0):.4f}, SL ref={signals.get('institutional_sl_price', 0):.4f})",
+                            f"   🚫 [HARD-GATE] {clean_sym}: decisão={side_exec} "
+                            f"≠ fluxo institucional={inst_sig} — abortando",
                             flush=True,
                         )
-                    elif side_exec == 'sell' and inst_sig == 'VENDA_INSTITUCIONAL':
-                        chart_bonus += 12.0
-                        print(
-                            f"   🏦 [INSTITUCIONAL] {clean_sym}: VENDA_INSTITUCIONAL "
-                            f"(VWAP={signals.get('vwap', 0):.4f}, SL ref={signals.get('institutional_sl_price', 0):.4f})",
-                            flush=True,
-                        )
+                        time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
+                        continue
+                    chart_bonus += 12.0
+                    print(
+                        f"   🏦 [INSTITUCIONAL] {clean_sym}: {inst_sig} "
+                        f"(VWAP={float(signals.get('vwap', 0) or 0):.4f}, "
+                        f"SL ref={float(signals.get('institutional_sl_price', 0) or 0):.4f})",
+                        flush=True,
+                    )
                     if side_exec == 'buy' and signals.get('fvg_bullish'):
                         chart_bonus += 8.0
                     elif side_exec == 'sell' and signals.get('fvg_bearish'):
@@ -2697,9 +2754,37 @@ def sniper_worker_loop():
         except Exception: pass
         time.sleep(15)
 
-def _process_client_orders_background(symbol, side, entry_price, confidence, reason):
-    """ Loop assíncrono com salvamento local e disparo protegido anti-400 do Telegram """
+def _process_client_orders_background(
+    symbol,
+    side,
+    entry_price,
+    confidence,
+    reason,
+    structural_signal='NEUTRO',
+):
+    """
+    Loop assíncrono de execução Bybit V5 (mainnet).
+
+    BLOQUEIO ABSOLUTO: se structural_signal == NEUTRO, return imediato
+    (não configura margem, não calcula lote, não envia ordem).
+    """
     try:
+        from src.engine.hard_gates import is_neutro_signal, side_matches_institutional
+
+        # Short-circuit absoluto na execução — defesa em profundidade
+        if is_neutro_signal(structural_signal):
+            print(
+                f"   🚫 [EXEC] {symbol}: sinal estrutural=NEUTRO — ordem abortada (return imediato)",
+                flush=True,
+            )
+            return
+        if not side_matches_institutional(side, structural_signal):
+            print(
+                f"   🚫 [EXEC] {symbol}: side={side} incompatível com {structural_signal} — abortado",
+                flush=True,
+            )
+            return
+
         # 1. DUALIDADE DE CONFIGURAÇÃO (FALLBACK DO BANCO)
         # Primeiro tenta ler do .env, depois fallback para variáveis do banco
         tk = f"{os.getenv('TELEGRAM_TOKEN') or ''}".strip()
@@ -2734,9 +2819,13 @@ def _process_client_orders_background(symbol, side, entry_price, confidence, rea
                 except Exception as dup_err:
                     print(f"   ⚠️ [ANTI-DUP] Falha ao verificar posição de {symbol}: {dup_err}", flush=True)
 
-                # 🔒 MARGEM ISOLADA + ALAVANCAGEM (proibido operar em Cross Margin)
+                # 🔒 MARGEM ISOLADA + ALAVANCAGEM 20x (proibido Cross Margin)
                 try:
-                    broker.set_isolated_margin(symbol, ALAVANCAGEM)
+                    # Preferência: switch_isolated_margin (alias Bybit V5 / diretriz)
+                    if hasattr(broker, 'switch_isolated_margin'):
+                        broker.switch_isolated_margin(symbol, ALAVANCAGEM)
+                    else:
+                        broker.set_isolated_margin(symbol, ALAVANCAGEM)
                 except Exception as mm_err:
                     print(f"   ⚠️ [MARGEM] Falha ao forçar isolada em {symbol}: {mm_err}", flush=True)
 
@@ -3073,22 +3162,62 @@ def api_manual_entry_trade():
         from src.engine.indicators import IndicatorEngine
         from src.ai_brain.validator import GroqValidator
 
+        df = pub_broker.fetch_ohlcv(symbol, timeframe='15m')
+        tech_data = IndicatorEngine(df).get_signals() if df is not None and len(df) >= 200 else {
+            'trend': 'ALTA', 'price': entry_price, 'sma_200': entry_price, 'sinal_institucional': 'NEUTRO',
+        }
+
         if force_execute:
-            if not _reserve_signal_slot(symbol): return jsonify({"success": False, "error": "Limite atingido ou entrada já em processamento"}), 409
+            from src.engine.hard_gates import institutional_entry_allowed, side_matches_institutional
+            hard_gate = institutional_entry_allowed(tech_data)
+            side_exec = 'buy' if side_normalized == 'COMPRAR' else 'sell'
+            if not hard_gate.get('allowed') or not side_matches_institutional(
+                side_exec, hard_gate.get('sinal_institucional'),
+            ):
+                return jsonify({
+                    "success": False,
+                    "error": (
+                        f"Bloqueio absoluto: {hard_gate.get('abort_reason') or 'lado ≠ Smart Money'}. "
+                        f"Sinal={hard_gate.get('sinal_institucional', 'NEUTRO')}"
+                    ),
+                }), 409
+            if not _reserve_signal_slot(symbol):
+                return jsonify({"success": False, "error": "Limite atingido ou entrada já em processamento"}), 409
             handed_off = False
             try:
                 db.record_trade(1, symbol, side_normalized, 0, 10, time.strftime("%d/%m %H:%M"), "ENTRADA MANUAL", "open", entry_price)
                 _sync_active_trades_from_db()
-                threading.Thread(target=_process_client_orders_background, args=(symbol, side_normalized, entry_price, 70, "Manual"), daemon=True).start()
-                handed_off = True  # a thread de execução libera a trava ao concluir
+                threading.Thread(
+                    target=_process_client_orders_background,
+                    args=(
+                        symbol,
+                        side_normalized,
+                        entry_price,
+                        70,
+                        "Manual",
+                        hard_gate.get('sinal_institucional', 'NEUTRO'),
+                    ),
+                    daemon=True,
+                ).start()
+                handed_off = True
                 return jsonify({"success": True, "message": "Ordem manual enviada"}), 200
             finally:
-                if not handed_off: _release_signal_slot(symbol)
-        
-        df = pub_broker.fetch_ohlcv(symbol, timeframe='15m')
-        tech_data = IndicatorEngine(df).get_signals() if df is not None and len(df) >= 200 else {'trend': 'ALTA', 'price': entry_price, 'sma_200': entry_price}
+                if not handed_off:
+                    _release_signal_slot(symbol)
+
         ai_result = GroqValidator().consensus_predict(tech_data, symbol, force_local_only=True)
-        return jsonify({"success": True, "analysis_only": True, "symbol": symbol, "side": side_normalized, "entry_price": entry_price, "ai_analysis": {"confidence": ai_result.get('probabilidade', 70), "reason": ai_result.get('motivo', 'Aprovado')}}), 200
+        return jsonify({
+            "success": True,
+            "analysis_only": True,
+            "symbol": symbol,
+            "side": side_normalized,
+            "entry_price": entry_price,
+            "sinal_institucional": tech_data.get('sinal_institucional', 'NEUTRO'),
+            "ai_analysis": {
+                "confidence": ai_result.get('probabilidade', 70),
+                "reason": ai_result.get('motivo', 'Aprovado'),
+            },
+        }), 200
     except Exception as e: return jsonify({"success": False, "error": str(e)}), 400
 
 @app.route('/api/trade/manual-close', methods=['POST'])

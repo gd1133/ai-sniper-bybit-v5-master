@@ -48,7 +48,8 @@ Componentes principais (arquivos):
 | Risco | `src/risk/entry_viability.py` | Viabilidade da entrada (notional mínimo etc.) |
 | Cérebro 1/2 | `src/engine/confluence_absoluta.py` | Confluência institucional (volume, order book, ADX) |
 | Timing | `src/engine/entry_timing.py` | Confirmação de timing (tendência, pullback, momentum) |
-| Institucional | `src/engine/rastreador_institucional.py` | Amplitude anti-lateral + VWAP + volume (μ+2.5σ) + spread → só então COMPRA/VENDA_INSTITUCIONAL |
+| Institucional | `src/engine/rastreador_institucional.py` | Portas 1–4: ADX+BB+amplitude+volume μ+2.5σ+VWAP → COMPRA/VENDA_INSTITUCIONAL |
+| Hard Gates | `src/engine/hard_gates.py` | Short-circuit absoluto: qualquer porta fechada = NEUTRO e aborta ANTES do Cérebro 3 |
 | Indicadores | `src/engine/indicators.py` | Cálculo de indicadores técnicos |
 | Cérebro 3 | `src/ai_brain/local_ml_engine.py` | Motor de ML local (decisão soberana / contingência) |
 | Aprendizado | `src/ai_brain/adaptive_weights.py` | Pesos das 5 estratégias auto-ajustados por resultado real |
@@ -134,23 +135,24 @@ peso — a IA "aprende" quais critérios priorizar por conta própria.
 **Endpoint:** `GET /api/estrategias/pesos` retorna o relatório dos pesos aprendidos
 (base, peso atual, wins, losses, win-rate, se já está aprendendo).
 
-### 3.2 Rastreador Institucional (VWAP + Big Players) ⭐ incremental
+### 3.2 Rastreador Institucional + Hard Gates (Short-Circuit Absoluto) ⭐
 
-Camada adicional em `src/engine/rastreador_institucional.py` — **não substitui** as 5 estratégias
-existentes; soma um filtro de fluxo institucional:
+Camada **obrigatória** em `rastreador_institucional.py` + `hard_gates.py`.
+Se QUALQUER porta falhar → `NEUTRO` e o radar **aborta antes do Cérebro 3**.
 
-1. **VWAP diário** — linha de equilíbrio (reinicia a cada dia).
-2. **Pegada de volume** — volume > média(20) + 2.5× desvio padrão → `big_player_ativo`.
-3. **Filtro de spread** — candle com range expressivo (> 1.5× média) evita falso rompimento.
-4. **Sinal:**
-   - `COMPRA_INSTITUCIONAL`: candle de alta, close > VWAP, big player + spread OK.
-   - `VENDA_INSTITUCIONAL`: candle de baixa, close < VWAP, big player + spread OK.
+| Porta | Regra | Falha |
+|---|---|---|
+| 1a | ADX(14) ≥ 23 | NEUTRO (ignora volume) |
+| 1b | BB Width(20,2σ) > média das últimas 50 larguras | NEUTRO (squeeze) |
+| 2 | Amplitude `((Hmax−Lmin)/Lmin)*100` ≥ 0.35% (20 candles) | NEUTRO (acumulação) |
+| 3 | Volume > MA(20) + 2.5σ | NEUTRO (só após 1–2) |
+| 4 | COMPRA: alta + close > VWAP + spread > 1.5× média; VENDA: espelho | NEUTRO |
 
 Integração:
-- `IndicatorEngine.get_signals()` injeta `sinal_institucional`, `vwap`, `institutional_sl_price` (SL
-  de referência = mínima/máxima do candle sinal — informativo; TP/SL principal continua +100%/-50%).
-- Cérebro 3: +15 pts de confiança quando sinal institucional alinha com a tendência.
-- Radar: +12 pts no score quando COMPRA/VENDA institucional confirma a direção da ordem.
+- Radar: short-circuit imediato após `get_signals()` se portas fechadas.
+- Execução: se `structural_signal == NEUTRO`, `return` imediato (não envia ordem).
+- Lado: BUY só com `COMPRA_INSTITUCIONAL`; SELL só com `VENDA_INSTITUCIONAL`.
+- Cérebro 3: +15 pts quando alinhado; bônus de score +12 no radar.
 
 ### 3.3 Cérebro 3 Cauteloso — Anti-Armadilha (Padilha) ⭐
 
@@ -371,9 +373,10 @@ Notas de validação (`/api/vincular_cliente`):
 Uma entrada só é enviada quando **todas** as condições abaixo são satisfeitas:
 
 1. ✅ Radar seleciona a moeda (top volume).
-2. ✅ Cérebro 3 emite `BUY`/`SELL` com `probabilidade ≥ 48%` (ML local ≥ 52%).
-3. ✅ Timing confirmado (tendência alinhada, ou volume/momentum, ou estrutura).
-4. ✅ (Se ligada) Confluência Absoluta — mínimo de filtros técnicos (notícias não bloqueiam).
-5. ✅ Slot reservado (nenhuma outra entrada em andamento no par) e `MAX_MOEDAS_ATIVAS` não atingido.
-6. ✅ Nenhuma posição aberta para o símbolo (`has_open_position` = False).
-7. ✅ Margem isolada 20x aplicada; lote = 3% × 20x / preço; TP +100% / SL -50% inline.
+2. ✅ **Hard Gates (Portas 1–4)** liberadas — ADX≥23, BB expandindo, amplitude≥0.35%, volume μ+2.5σ, lado vs VWAP.
+3. ✅ `sinal_institucional` ≠ NEUTRO e Cérebro 3 emite `BUY`/`SELL` **no mesmo lado** do Smart Money (≥48%).
+4. ✅ Timing / anti-armadilha confirmado.
+5. ✅ (Se ligada) Confluência Absoluta — filtros técnicos complementares.
+6. ✅ Slot reservado + `MAX_MOEDAS_ATIVAS` + sem posição aberta no par.
+7. ✅ Margem isolada 20x; lote = 3% × 20x / preço; TP +100% ROI / SL −50% ROI inline (`str()` na Bybit V5).
+8. ✅ Execução: se sinal estrutural = NEUTRO → `return` imediato (bloqueio absoluto).
