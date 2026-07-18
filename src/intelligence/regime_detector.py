@@ -77,14 +77,35 @@ def calculate_bollinger_bandwidth(df: pd.DataFrame, period: int = 20) -> float:
     return float(bandwidth.iloc[-1]) if len(bandwidth) else 0.0
 
 
+def calculate_range_amplitude_pct(df: pd.DataFrame, period: int = 20) -> float:
+    """
+    Amplitude percentual dos últimos X períodos:
+      ((High.max() - Low.min()) / Low.min()) * 100
+    """
+    try:
+        from src.engine.rastreador_institucional import calculate_range_amplitude_pct as _amp
+        return float(_amp(df, period))
+    except Exception:
+        if df is None or len(df) < 2:
+            return 0.0
+        window = df.iloc[-max(2, int(period)):]
+        low_min = float(window['low'].min())
+        high_max = float(window['high'].max())
+        if low_min <= 0:
+            return 0.0
+        return float(((high_max - low_min) / low_min) * 100.0)
+
+
 def detect_market_regime(df: pd.DataFrame, signals: dict | None = None) -> dict:
     """
     Classifica o mercado em TREND ou RANGE (lateral).
 
     Bloqueia entradas quando:
+    - Amplitude % dos últimos X períodos < LATERAL_AMPLITUDE_PCT (padrão 0.35%)
     - ADX < 20 e Choppiness > 55
     - Preço preso na SMA200 (trend NEUTRO) com baixa expansão
     """
+    import os
     signals = signals or {}
     adx = calculate_adx(df)
     choppiness = calculate_choppiness(df)
@@ -93,7 +114,21 @@ def detect_market_regime(df: pd.DataFrame, signals: dict | None = None) -> dict:
     distance_sma = float(signals.get('distance_from_sma_pct', 0) or 0)
     range_expansion = float(signals.get('range_expansion', 0) or 0)
 
+    # Amplitude anti-acumulação (configurável via env)
+    try:
+        amp_periods = int(float(os.getenv('LATERAL_AMPLITUDE_PERIODS', '20') or 20))
+    except (TypeError, ValueError):
+        amp_periods = 20
+    try:
+        amp_max = float(str(os.getenv('LATERAL_AMPLITUDE_PCT', '0.35') or '0.35').replace(',', '.'))
+    except (TypeError, ValueError):
+        amp_max = 0.35
+    amplitude_pct = calculate_range_amplitude_pct(df, amp_periods)
+    amplitude_lateral = amplitude_pct < amp_max
+
     lateral_score = 0.0
+    if amplitude_lateral:
+        lateral_score += 50  # peso alto: acumulação = bloqueio
     if adx < 20:
         lateral_score += 35
     if adx < 15:
@@ -112,12 +147,18 @@ def detect_market_regime(df: pd.DataFrame, signals: dict | None = None) -> dict:
         lateral_score += 10
 
     lateral_score = min(100.0, lateral_score)
-    # Mais rigoroso: lateral a partir de 45 (antes 50) — só entra com direção clara
-    is_lateral = lateral_score >= 45 or (adx < 18 and trend == 'NEUTRO')
+    # Amplitude baixa força lateral independente do restante
+    is_lateral = bool(amplitude_lateral) or lateral_score >= 45 or (adx < 18 and trend == 'NEUTRO')
 
     if is_lateral:
         regime = 'RANGE'
-        regime_label = 'LATERAL — grandes players em consolidação, sem direção clara'
+        if amplitude_lateral:
+            regime_label = (
+                f'LATERAL/ACUMULAÇÃO — amplitude {amplitude_pct:.3f}% < {amp_max}% '
+                f'(últimos {amp_periods} períodos) — sinais ignorados'
+            )
+        else:
+            regime_label = 'LATERAL — grandes players em consolidação, sem direção clara'
     elif trend == 'ALTA' and adx >= 20:
         regime = 'TREND_UP'
         regime_label = 'TENDÊNCIA DE ALTA — fluxo institucional comprador'
@@ -136,5 +177,7 @@ def detect_market_regime(df: pd.DataFrame, signals: dict | None = None) -> dict:
         'adx': round(adx, 2),
         'choppiness': round(choppiness, 2),
         'bollinger_bandwidth': round(bb_width, 2),
+        'amplitude_pct': round(amplitude_pct, 4),
+        'amplitude_lateral': bool(amplitude_lateral),
         'allow_entry': not is_lateral,
     }

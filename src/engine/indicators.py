@@ -234,6 +234,8 @@ class IndicatorEngine:
             'adx': float(regime.get('adx', 0) or 0),
             'choppiness': float(regime.get('choppiness', 50) or 50),
             'regime_label': str(regime.get('regime_label', '')),
+            'amplitude_pct': float(regime.get('amplitude_pct', 0) or 0),
+            'amplitude_lateral': bool(regime.get('amplitude_lateral', False)),
             'ema_9': float(last['ema_9']) if 'ema_9' in last else 0.0,
             'ema_21': float(last['ema_21']) if 'ema_21' in last else 0.0,
             'ema_50': ema50,
@@ -267,7 +269,20 @@ class IndicatorEngine:
                 'institutional_signal_low': 0.0,
                 'institutional_signal_high': 0.0,
                 'institutional_sl_price': 0.0,
+                'amplitude_pct': float(signals_out.get('amplitude_pct', 0) or 0),
+                'is_accumulation': False,
+                'is_lateral_amplitude': False,
             })
+
+        # Acumulação / amplitude baixa: força NEUTRO e bloqueia entrada
+        if signals_out.get('is_lateral_amplitude') or signals_out.get('is_accumulation') or signals_out.get('amplitude_lateral') or signals_out.get('is_lateral'):
+            signals_out['trend'] = 'NEUTRO'
+            signals_out['is_lateral'] = True
+            signals_out['sinal_institucional'] = 'NEUTRO'
+            signals_out['money_flow_side'] = 'WAIT'
+            if not signals_out.get('regime_label'):
+                amp = float(signals_out.get('amplitude_pct', 0) or 0)
+                signals_out['regime_label'] = f'LATERAL/ACUMULAÇÃO — amplitude {amp:.3f}% — sinais ignorados'
 
         # Fair Value Gap (SMC) — confirmação de imbalance institucional
         try:
