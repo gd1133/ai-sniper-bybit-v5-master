@@ -8,28 +8,38 @@ def _get_db_path():
     """
     Determine writable database path with fallbacks (always returns ABSOLUTE path):
     1. SQLITE_DB_PATH environment variable (converted to absolute)
-    2. Render/Linux: /tmp/ai-sniper/database.db (evita disk I/O em FS efêmero)
-    3. ./database.db (repository root, converted to absolute)
-    4. /tmp/ai-sniper/database.db (absolute path as fallback)
+    2. ./data/database.db (persistente no disco do projeto — preferido)
+    3. ./database.db (repository root)
+    4. /tmp/ai-sniper/database.db (último recurso; efêmero no Render)
     """
     env_path = os.getenv('SQLITE_DB_PATH')
     if env_path:
         if "/app/data/" in env_path and os.name == 'nt':
-            repo_path = os.path.abspath(os.path.join(os.getcwd(), 'database.db'))
+            repo_path = os.path.abspath(os.path.join(os.getcwd(), 'data', 'database.db'))
             print(f"📂 [DATABASE] Detectado caminho Docker em Windows. Usando local: {repo_path}")
             return repo_path
+        # Evita /tmp por padrão (dados somem no restart do Render)
         abs_env_path = os.path.abspath(env_path)
+        if '/tmp/' in abs_env_path.replace('\\', '/').lower() and not os.getenv('FORCE_TMP_SQLITE'):
+            data_path = os.path.abspath(os.path.join(os.getcwd(), 'data', 'database.db'))
+            try:
+                os.makedirs(os.path.dirname(data_path), exist_ok=True)
+                print(f"📂 [DATABASE] SQLITE_DB_PATH em /tmp ignorado (efêmero). Usando: {data_path}")
+                return data_path
+            except (OSError, IOError):
+                pass
         print(f"📂 [DATABASE] Usando SQLITE_DB_PATH: {abs_env_path}")
         return abs_env_path
 
-    if os.getenv('RENDER') or (os.name != 'nt' and not os.access(os.getcwd(), os.W_OK)):
-        render_tmp = '/tmp/ai-sniper/database.db'
-        try:
-            os.makedirs(os.path.dirname(render_tmp), exist_ok=True)
-            print(f"📂 [DATABASE] Usando caminho Render/tmp: {render_tmp}")
-            return render_tmp
-        except (OSError, IOError):
-            pass
+    # Preferência: pasta data/ no projeto (persiste entre restarts do processo)
+    data_path = os.path.abspath(os.path.join(os.getcwd(), 'data', 'database.db'))
+    try:
+        os.makedirs(os.path.dirname(data_path), exist_ok=True)
+        if os.access(os.path.dirname(data_path), os.W_OK):
+            print(f"📂 [DATABASE] Usando caminho persistente data/: {data_path}")
+            return data_path
+    except (OSError, IOError):
+        pass
 
     repo_path = os.path.abspath(os.path.join(os.getcwd(), 'database.db'))
     try:
@@ -45,7 +55,7 @@ def _get_db_path():
         os.makedirs(os.path.dirname(fallback_path), exist_ok=True)
     except (OSError, IOError):
         pass
-    print(f"📂 [DATABASE] Usando caminho de fallback: {fallback_path}")
+    print(f"📂 [DATABASE] Usando caminho de fallback (efêmero): {fallback_path}")
     return fallback_path
 
 DB_PATH = _get_db_path()
@@ -75,16 +85,28 @@ def normalize_balance_source(value: Any) -> str:
 
 
 def _connect():
-    """Conecta ao banco com timeout e retry (evita travamento disk I/O no Render)."""
+    """
+    Conecta ao banco com:
+    - check_same_thread=False (Flask + threads do radar)
+    - timeout / busy_timeout (evita lock)
+    - WAL + synchronous FULL em escritas críticas via helper
+    """
     import time as _time
     last_err = None
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir:
+        try:
+            os.makedirs(db_dir, exist_ok=True)
+        except (OSError, IOError):
+            pass
     for attempt in range(4):
         try:
-            conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=15.0)
+            conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30.0)
             conn.row_factory = sqlite3.Row
             conn.execute('PRAGMA journal_mode=WAL')
             conn.execute('PRAGMA synchronous=NORMAL')
-            conn.execute('PRAGMA busy_timeout=10000')
+            conn.execute('PRAGMA busy_timeout=15000')
+            conn.execute('PRAGMA foreign_keys=ON')
             return conn
         except sqlite3.OperationalError as err:
             last_err = err
@@ -94,6 +116,46 @@ def _connect():
                 continue
             raise
     raise last_err
+
+
+def _execute_write(operation_name: str, sql_fn) -> Any:
+    """
+    Executa INSERT/UPDATE/DELETE com commit obrigatório e finally fechando a conexão.
+    sql_fn(cur, conn) -> valor de retorno (opcional).
+    """
+    conn = None
+    try:
+        conn = _connect()
+        # Escritas de clientes/chaves: força flush mais seguro no disco
+        try:
+            conn.execute('PRAGMA synchronous=FULL')
+        except Exception:
+            pass
+        cur = conn.cursor()
+        result = sql_fn(cur, conn)
+        conn.commit()
+        # Garante flush no SO (especialmente em FS em nuvem)
+        try:
+            conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+        except Exception:
+            pass
+        return result
+    except Exception as e:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        print(f"❌ [DATABASE] {operation_name}: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def _ensure_column(cur, table: str, column: str, definition: str):
@@ -108,79 +170,79 @@ def init_db():
     db_dir = os.path.dirname(DB_PATH)
     if db_dir:  # Only create directory if there's a directory component
         os.makedirs(db_dir, exist_ok=True)
-    conn = _connect()
-    cur = conn.cursor()
-    
-    # Tabela principal: Clientes/Pessoas cadastradas
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS clientes_sniper (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nome TEXT NOT NULL,
-        bybit_key TEXT,
-        bybit_secret TEXT,
-        tg_token TEXT,
-        tg_api_key TEXT,
-        chat_id TEXT,
-        status TEXT DEFAULT 'ativo',
-        saldo_base REAL DEFAULT 1000.0,
-        is_testnet INTEGER DEFAULT 0,
-        account_mode TEXT DEFAULT 'real',
-        balance_source TEXT DEFAULT 'broker_real_balance',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
-    _ensure_column(cur, 'clientes_sniper', 'account_mode', "TEXT DEFAULT 'real'")
-    _ensure_column(cur, 'clientes_sniper', 'balance_source', "TEXT DEFAULT 'broker_real_balance'")
-    _ensure_column(cur, 'clientes_sniper', 'exchange', "TEXT DEFAULT 'bybit'")
-    # Sistema 100% REAL: força todos os clientes existentes para conta real.
-    cur.execute("""
-        UPDATE clientes_sniper
-        SET is_testnet = 0,
-            account_mode = 'real',
-            balance_source = 'broker_real_balance'
-    """)
 
-    # Tabela de histórico de trades (para P&L tracking)
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS trades (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        client_id INTEGER,
-        pair TEXT,
-        side TEXT,
-        pnl_pct REAL,
-        profit REAL,
-        entry_price REAL DEFAULT 0,
-        exit_price REAL DEFAULT 0,
-        quantity REAL DEFAULT 0,
-        margin REAL DEFAULT 0,
-        closed_at TEXT,
-        notes TEXT,
-        status TEXT DEFAULT 'closed',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
-    _ensure_column(cur, 'trades', 'entry_price', 'REAL DEFAULT 0')
-    _ensure_column(cur, 'trades', 'exit_price', 'REAL DEFAULT 0')
-    _ensure_column(cur, 'trades', 'quantity', 'REAL DEFAULT 0')
-    _ensure_column(cur, 'trades', 'margin', 'REAL DEFAULT 0')
+    def _schema(cur, conn):
+        # Tabela principal: Clientes/Pessoas cadastradas
+        cur.execute('''
+        CREATE TABLE IF NOT EXISTS clientes_sniper (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nome TEXT NOT NULL,
+            bybit_key TEXT,
+            bybit_secret TEXT,
+            tg_token TEXT,
+            tg_api_key TEXT,
+            chat_id TEXT,
+            status TEXT DEFAULT 'ativo',
+            saldo_base REAL DEFAULT 1000.0,
+            is_testnet INTEGER DEFAULT 0,
+            account_mode TEXT DEFAULT 'real',
+            balance_source TEXT DEFAULT 'broker_real_balance',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        _ensure_column(cur, 'clientes_sniper', 'account_mode', "TEXT DEFAULT 'real'")
+        _ensure_column(cur, 'clientes_sniper', 'balance_source', "TEXT DEFAULT 'broker_real_balance'")
+        _ensure_column(cur, 'clientes_sniper', 'exchange', "TEXT DEFAULT 'bybit'")
+        # Sistema 100% REAL: força todos os clientes existentes para conta real.
+        cur.execute("""
+            UPDATE clientes_sniper
+            SET is_testnet = 0,
+                account_mode = 'real',
+                balance_source = 'broker_real_balance'
+        """)
 
-    # Tabela de configuração global (TEST_MODE, TEST_BALANCE, etc)
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS config (
-        k TEXT PRIMARY KEY,
-        v TEXT
-    )
-    ''')
+        # Tabela de histórico de trades (para P&L tracking)
+        cur.execute('''
+        CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_id INTEGER,
+            pair TEXT,
+            side TEXT,
+            pnl_pct REAL,
+            profit REAL,
+            entry_price REAL DEFAULT 0,
+            exit_price REAL DEFAULT 0,
+            quantity REAL DEFAULT 0,
+            margin REAL DEFAULT 0,
+            closed_at TEXT,
+            notes TEXT,
+            status TEXT DEFAULT 'closed',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        _ensure_column(cur, 'trades', 'entry_price', 'REAL DEFAULT 0')
+        _ensure_column(cur, 'trades', 'exit_price', 'REAL DEFAULT 0')
+        _ensure_column(cur, 'trades', 'quantity', 'REAL DEFAULT 0')
+        _ensure_column(cur, 'trades', 'margin', 'REAL DEFAULT 0')
 
-    # ÍNDICES PARA PERFORMANCE
-    cur.execute('CREATE INDEX IF NOT EXISTS idx_trades_client_id ON trades(client_id)')
-    cur.execute('CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)')
-    cur.execute('CREATE INDEX IF NOT EXISTS idx_trades_pair ON trades(pair)')
-    cur.execute('CREATE INDEX IF NOT EXISTS idx_clientes_status ON clientes_sniper(status)')
-    cur.execute('CREATE INDEX IF NOT EXISTS idx_config_k ON config(k)')
+        # Tabela de configuração global (TEST_MODE, TEST_BALANCE, etc)
+        cur.execute('''
+        CREATE TABLE IF NOT EXISTS config (
+            k TEXT PRIMARY KEY,
+            v TEXT
+        )
+        ''')
 
-    conn.commit()
-    conn.close()
+        # ÍNDICES PARA PERFORMANCE
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_trades_client_id ON trades(client_id)')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_trades_pair ON trades(pair)')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_clientes_status ON clientes_sniper(status)')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_config_k ON config(k)')
+        return True
+
+    _execute_write('init_db', _schema)
+    print(f"✅ [DATABASE] Schema inicializado em {DB_PATH}")
 
     # Inicializa tabela de histórico avançado para a IA analista
     try:
@@ -220,12 +282,38 @@ def get_all_clients() -> List[Dict[str, Any]]:
         return []
 
 
-def add_client(data: Dict[str, Any]):
-    """Adiciona ou espelha um cliente localmente. Retorna o id persistido."""
+def find_client_by_name(nome: str) -> Dict[str, Any] | None:
+    """Busca cliente pelo nome (case-insensitive). Evita duplicar 'Márcio' etc."""
+    name = str(nome or '').strip()
+    if not name:
+        return None
     try:
-        print(f"🔵 [DATABASE] add_client: Iniciando inserção de cliente: {data.get('nome')}")
         conn = _connect()
         cur = conn.cursor()
+        cur.execute(
+            "SELECT * FROM clientes_sniper WHERE LOWER(TRIM(nome)) = LOWER(?) ORDER BY id DESC LIMIT 1",
+            (name,),
+        )
+        row = cur.fetchone()
+        conn.close()
+        return dict(row) if row else None
+    except Exception as e:
+        print(f"⚠️ [DATABASE] find_client_by_name: {e}")
+        return None
+
+
+def add_client(data: Dict[str, Any]):
+    """Adiciona ou espelha um cliente localmente. Retorna o id persistido. Commit obrigatório."""
+    try:
+        print(f"🔵 [DATABASE] add_client: Iniciando inserção de cliente: {data.get('nome')}")
+        # Se já existe cliente com o mesmo nome, atualiza em vez de duplicar
+        if data.get('id') is None:
+            existing = find_client_by_name(data.get('nome'))
+            if existing and existing.get('id'):
+                eid = int(existing['id'])
+                print(f"🔵 [DATABASE] add_client: Nome já existe (id={eid}) — atualizando")
+                return eid if update_client(eid, {**data, 'id': eid}) else False
+
         account_mode = normalize_account_mode(data.get('account_mode', data.get('is_testnet')))
         is_testnet_flag = 1 if account_mode in ('testnet', 'demo') else 0
         balance_source = normalize_balance_source(data.get('balance_source'))
@@ -252,25 +340,30 @@ def add_client(data: Dict[str, Any]):
             print(f"🔵 [DATABASE] add_client: Cliente com ID explícito: {explicit_id}")
             existing = get_client_by_id(int(explicit_id))
             if existing:
-                conn.close()
                 print(f"🔵 [DATABASE] add_client: Cliente já existe, atualizando...")
                 return int(explicit_id) if update_client(int(explicit_id), data) else False
 
-            cur.execute(
-                'INSERT INTO clientes_sniper (id, nome, bybit_key, bybit_secret, tg_token, tg_api_key, chat_id, status, saldo_base, is_testnet, account_mode, balance_source, exchange) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                (int(explicit_id), *payload)
-            )
-            inserted_id = int(explicit_id)
+            def _insert_with_id(cur, conn):
+                cur.execute(
+                    'INSERT INTO clientes_sniper (id, nome, bybit_key, bybit_secret, tg_token, tg_api_key, chat_id, status, saldo_base, is_testnet, account_mode, balance_source, exchange) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (int(explicit_id), *payload),
+                )
+                return int(explicit_id)
+
+            inserted_id = _execute_write('add_client(explicit_id)', _insert_with_id)
         else:
             print(f"🔵 [DATABASE] add_client: Novo cliente sem ID, gerando automaticamente")
-            cur.execute(
-                'INSERT INTO clientes_sniper (nome, bybit_key, bybit_secret, tg_token, tg_api_key, chat_id, status, saldo_base, is_testnet, account_mode, balance_source, exchange) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-                payload
-            )
-            inserted_id = cur.lastrowid
-        conn.commit()
-        conn.close()
-        print(f"✅ [DATABASE] add_client: Cliente inserido com sucesso! ID: {inserted_id}")
+
+            def _insert_auto(cur, conn):
+                cur.execute(
+                    'INSERT INTO clientes_sniper (nome, bybit_key, bybit_secret, tg_token, tg_api_key, chat_id, status, saldo_base, is_testnet, account_mode, balance_source, exchange) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+                    payload,
+                )
+                return int(cur.lastrowid)
+
+            inserted_id = _execute_write('add_client(auto)', _insert_auto)
+
+        print(f"✅ [DATABASE] add_client: Cliente persistido no disco! ID: {inserted_id} path={DB_PATH}")
         return inserted_id
     except Exception as e:
         print(f"❌ [DATABASE] add_client: Erro ao adicionar cliente: {e}")
@@ -293,21 +386,23 @@ def record_trade(
     quantity: float = 0.0,
     margin: float = 0.0,
 ):
-    # Normaliza notas para facilitar filtros na UI (ex: SNIPER, BROADCAST, AUTO)
     notes_clean = (notes or '').strip()
     try:
         notes_clean = notes_clean.upper()
     except Exception:
         notes_clean = str(notes_clean)
 
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute(
-        'INSERT INTO trades (client_id, pair, side, pnl_pct, profit, entry_price, exit_price, quantity, margin, closed_at, notes, status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-        (client_id, pair, side, pnl_pct, profit, entry_price, exit_price, quantity, margin, closed_at, notes_clean, status.lower())
-    )
-    conn.commit()
-    conn.close()
+    def _op(cur, conn):
+        cur.execute(
+            'INSERT INTO trades (client_id, pair, side, pnl_pct, profit, entry_price, exit_price, quantity, margin, closed_at, notes, status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+            (client_id, pair, side, pnl_pct, profit, entry_price, exit_price, quantity, margin, closed_at, notes_clean, status.lower()),
+        )
+        return cur.lastrowid
+
+    try:
+        return _execute_write('record_trade', _op)
+    except Exception:
+        return None
 
 
 def close_trade(
@@ -347,9 +442,7 @@ def close_trade(
     elif profit is None:
         profit = 0.0
 
-    try:
-        conn = _connect()
-        cur = conn.cursor()
+    def _op(cur, conn):
         cur.execute(
             '''
             UPDATE trades
@@ -363,39 +456,46 @@ def close_trade(
             ''',
             (pnl_pct, profit, exit_price, closed_at, notes_clean, trade_id),
         )
-        conn.commit()
-        conn.close()
         return True
+
+    try:
+        return bool(_execute_write('close_trade', _op))
     except Exception as e:
         print(f"⚠️ Erro ao fechar trade {trade_id}: {e}")
         return False
 
 
 def get_client_by_id(client_id: int) -> Dict[str, Any]:
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute('SELECT * FROM clientes_sniper WHERE id=?', (client_id,))
-    row = cur.fetchone()
-    conn.close()
-    return dict(row) if row else None
-
-
-def update_client(client_id: int, data: Dict[str, Any]) -> bool:
-    """Atualiza informações de um cliente existente."""
+    conn = None
     try:
         conn = _connect()
         cur = conn.cursor()
-        account_mode = normalize_account_mode(data.get('account_mode', data.get('is_testnet')))
-        is_testnet = 1 if account_mode in ('testnet', 'demo') else 0
-        balance_source = normalize_balance_source(
-            data.get(
-                'balance_source',
-                'broker_real_balance',
-            )
+        cur.execute('SELECT * FROM clientes_sniper WHERE id=?', (client_id,))
+        row = cur.fetchone()
+        return dict(row) if row else None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def update_client(client_id: int, data: Dict[str, Any]) -> bool:
+    """Atualiza informações de um cliente existente. Commit obrigatório via _execute_write."""
+    account_mode = normalize_account_mode(data.get('account_mode', data.get('is_testnet')))
+    is_testnet = 1 if account_mode in ('testnet', 'demo') else 0
+    balance_source = normalize_balance_source(
+        data.get(
+            'balance_source',
+            'broker_real_balance',
         )
-        exchange = str(data.get('exchange') or 'bybit').strip().lower()
-        if exchange not in ('bybit', 'binance'):
-            exchange = 'bybit'
+    )
+    exchange = str(data.get('exchange') or 'bybit').strip().lower()
+    if exchange not in ('bybit', 'binance'):
+        exchange = 'bybit'
+
+    def _op(cur, conn):
         cur.execute(
             "UPDATE clientes_sniper SET nome=?, bybit_key=?, bybit_secret=?, tg_token=?, tg_api_key=?, chat_id=?, status=?, saldo_base=?, is_testnet=?, account_mode=?, balance_source=?, exchange=? WHERE id=?",
             (
@@ -414,9 +514,13 @@ def update_client(client_id: int, data: Dict[str, Any]) -> bool:
                 client_id,
             ),
         )
-        conn.commit()
-        conn.close()
         return True
+
+    try:
+        ok = bool(_execute_write(f'update_client({client_id})', _op))
+        if ok:
+            print(f"✅ [DATABASE] update_client: Cliente {client_id} persistido em {DB_PATH}")
+        return ok
     except Exception as e:
         print(f"⚠️ Erro ao atualizar cliente {client_id}: {e}")
         return False
@@ -435,17 +539,14 @@ def upsert_client_local(data: Dict[str, Any]) -> bool:
 
 
 def delete_client(client_id: int) -> bool:
-    """Remove um cliente e seus trades associados para evitar erros de integridade."""
-    try:
-        conn = _connect()
-        cur = conn.cursor()
-        # Primeiro remove os trades do cliente
+    """Remove um cliente e seus trades associados. Commit obrigatório via _execute_write."""
+    def _op(cur, conn):
         cur.execute("DELETE FROM trades WHERE client_id = ?", (client_id,))
-        # Depois remove o cliente
         cur.execute("DELETE FROM clientes_sniper WHERE id = ?", (client_id,))
-        conn.commit()
-        conn.close()
         return True
+
+    try:
+        return bool(_execute_write(f'delete_client({client_id})', _op))
     except Exception as e:
         print(f"⚠️ Erro ao deletar cliente {client_id}: {e}")
         return False
@@ -504,15 +605,14 @@ def get_config(key: str, default: str = None) -> str:
 
 
 def set_config(key: str, value: str) -> bool:
-    """Escreve/atualiza uma configuração"""
-    try:
-        conn = _connect()
-        cur = conn.cursor()
+    """Escreve/atualiza uma configuração com commit obrigatório."""
+    def _op(cur, conn):
         cur.execute("DELETE FROM config WHERE k = ?", (key,))
         cur.execute("INSERT INTO config (k, v) VALUES (?, ?)", (key, str(value)))
-        conn.commit()
-        conn.close()
         return True
+
+    try:
+        return bool(_execute_write(f'set_config({key})', _op))
     except Exception as e:
         print(f"❌ Erro ao set_config({key}): {e}")
         return False

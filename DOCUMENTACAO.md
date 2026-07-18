@@ -48,7 +48,7 @@ Componentes principais (arquivos):
 | Risco | `src/risk/entry_viability.py` | Viabilidade da entrada (notional mínimo etc.) |
 | Cérebro 1/2 | `src/engine/confluence_absoluta.py` | Confluência institucional (volume, order book, ADX) |
 | Timing | `src/engine/entry_timing.py` | Confirmação de timing (tendência, pullback, momentum) |
-| Institucional | `src/engine/rastreador_institucional.py` | VWAP diário + pegada de volume (big player) + filtro de spread |
+| Institucional | `src/engine/rastreador_institucional.py` | Amplitude anti-lateral + VWAP + volume (μ+2.5σ) + spread → só então COMPRA/VENDA_INSTITUCIONAL |
 | Indicadores | `src/engine/indicators.py` | Cálculo de indicadores técnicos |
 | Cérebro 3 | `src/ai_brain/local_ml_engine.py` | Motor de ML local (decisão soberana / contingência) |
 | Aprendizado | `src/ai_brain/adaptive_weights.py` | Pesos das 5 estratégias auto-ajustados por resultado real |
@@ -56,7 +56,7 @@ Componentes principais (arquivos):
 | Validador | `src/ai_brain/validator.py` | Consolida votos e define ação final (BUY/SELL/HOLD) |
 | Inteligência | `src/intelligence/market_intelligence.py` | Regime de mercado + whales + notícias (score) |
 | Notícias | `src/intelligence/news_analyzer.py` | Sentimento de notícias (**assistente, nunca bloqueia**) |
-| Banco de dados | `src/database/manager.py` | SQLite: clientes, trades, config (100% real) |
+| Banco de dados | `src/database/manager.py` | SQLite em `./data/database.db`: `check_same_thread=False` + `commit` obrigatório em INSERT/UPDATE |
 | Config | `src/config/` | Credenciais, URLs, ambiente |
 
 ---
@@ -303,8 +303,14 @@ Risco (`src/risk/position_sizing.py`):
 | `DEFAULT_SL_ROI_PCT` | -50.0 | -50% ROI (2.5% de preço a 20x) |
 
 Variáveis de ambiente úteis: `RISK_PER_TRADE_PCT`, `ENABLE_NEWS_AI`, `ENABLE_ABSOLUTE_CONFLUENCE`,
-`BLOCK_LATERAL_MARKETS`, `USE_TESTNET`, credenciais Bybit por cliente (no banco).
+`BLOCK_LATERAL_MARKETS`, `LATERAL_AMPLITUDE_PERIODS` (20), `LATERAL_AMPLITUDE_PCT` (0.35),
+`SQLITE_DB_PATH` (`./data/database.db` — evitar `/tmp` no Render), `USE_TESTNET`,
+credenciais Bybit por cliente (no banco).
 
+**Anti-acumulação:** se `((High.max - Low.min) / Low.min) * 100` nos últimos X períodos
+estiver abaixo de `LATERAL_AMPLITUDE_PCT`, o robô força `NEUTRO` e ignora o sinal.
+Sinal institucional só dispara com volume > média + 2.5σ **e** fechamento vs VWAP diária
+**e** spread expressivo da vela.
 ---
 
 ## 9. Endpoints da API (Flask)

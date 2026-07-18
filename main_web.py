@@ -1132,20 +1132,79 @@ def _get_active_investor_bybit_credentials():
     return None, '', ''
 
 def _save_client_everywhere(client_data):
+    """
+    Persiste o investidor no SQLite local.
+    - Sem id: se o nome já existir, atualiza (evita duplicar Márcio/givaldo).
+    - Sempre devolve um dict `record` usável (mesmo se o re-fetch falhar).
+    """
     payload = dict(client_data or {})
     account_mode = _resolve_client_account_mode(payload)
     payload['account_mode'] = account_mode
-    payload['is_testnet'] = account_mode in ('testnet', 'demo')
+    payload['is_testnet'] = False
     payload['balance_source'] = _normalize_balance_source(payload.get('balance_source'))
-    if account_mode == 'demo':
-        payload['bybit_endpoint_mode'] = 'demo'
-    res = db.upsert_client_local(payload) if payload.get('id') is not None else db.add_client(payload)
-    saved_id = int(payload.get('id') or res or 0)
-    if saved_id > 0:
-        endpoint_mode = 'demo' if account_mode == 'demo' else ('testnet' if account_mode == 'testnet' else 'mainnet')
+    payload['bybit_endpoint_mode'] = 'mainnet'
+    payload['exchange'] = 'bybit'
+
+    nome = str(payload.get('nome') or '').strip()
+    if not nome:
+        print("❌ [SAVE] Nome do investidor vazio — abortando", flush=True)
+        return None, False, False
+    payload['nome'] = nome
+
+    # Upsert por nome quando o frontend não envia id (form "novo")
+    if payload.get('id') is None:
+        try:
+            existing = db.find_client_by_name(nome)
+            if existing and existing.get('id'):
+                payload['id'] = int(existing['id'])
+                print(f"🔵 [SAVE] Reusando cliente existente id={payload['id']} nome={nome}", flush=True)
+        except Exception as e:
+            print(f"⚠️ [SAVE] find_client_by_name falhou: {e}", flush=True)
+
+    saved_id = 0
+    ok = False
+    try:
+        if payload.get('id') is not None:
+            ok = bool(db.upsert_client_local(payload))
+            saved_id = int(payload.get('id') or 0)
+            if not ok and saved_id > 0:
+                ok = bool(db.update_client(saved_id, payload))
+        else:
+            res = db.add_client(payload)
+            if res and int(res) > 0:
+                saved_id = int(res)
+                ok = True
+                payload['id'] = saved_id
+    except Exception as e:
+        print(f"❌ [SAVE] Exceção ao persistir cliente: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        return None, False, False
+
+    if not ok or saved_id <= 0:
+        print(f"❌ [SAVE] Persistência falhou ok={ok} saved_id={saved_id}", flush=True)
+        return None, False, False
+
+    try:
+        endpoint_mode = 'mainnet'
         _set_client_endpoint_mode(saved_id, endpoint_mode)
+    except Exception as e:
+        print(f"⚠️ [SAVE] set endpoint mode: {e}", flush=True)
+
     client_balance_cache.clear()
-    return _get_registered_client_by_id(saved_id or payload.get('id')), False, bool(res)
+    record = _get_registered_client_by_id(saved_id)
+    if not record:
+        # Fallback: devolve o payload salvo para o frontend não receber 500 genérico
+        record = {
+            **payload,
+            'id': saved_id,
+            'storage_source': 'local',
+            'account_mode': 'real',
+            'is_testnet': False,
+            'bybit_endpoint_mode': 'mainnet',
+        }
+        print(f"⚠️ [SAVE] Re-fetch falhou — usando record sintético id={saved_id}", flush=True)
+    return record, False, True
 
 def _delete_client_everywhere(client_id):
     _get_broker_manager().invalidate_client(client_id)
@@ -2856,18 +2915,43 @@ def add_cliente():
         data['exchange'] = 'bybit'
         requested_is_testnet = _resolve_request_is_testnet(data, default=USE_TESTNET)
         data['is_testnet'] = requested_is_testnet
-        validation = validar_e_salvar_cliente(data.get('bybit_key'), data.get('bybit_secret'), requested_is_testnet, client_payload=data)
-        if validation.get('record'):
+        if not str(data.get('nome') or '').strip():
+            return jsonify({"status": "erro", "msg": "Informe o nome do investidor", "valid": False}), 400
+        if not str(data.get('bybit_key') or '').strip() or not str(data.get('bybit_secret') or '').strip():
+            return jsonify({"status": "erro", "msg": "Informe API Key e Secret da Bybit", "valid": False}), 400
+
+        print(f"🔵 [BACKEND] POST /api/vincular_cliente nome={data.get('nome')}", flush=True)
+        validation = validar_e_salvar_cliente(
+            data.get('bybit_key'), data.get('bybit_secret'), requested_is_testnet, client_payload=data,
+        ) or {}
+        record = validation.get('record')
+        msg = (
+            validation.get('msg')
+            or validation.get('api_error')
+            or ('Investidor conectado!' if validation.get('valid') else 'Falha ao salvar investidor')
+        )
+        # Sempre devolve a mensagem real (auth/API/banco) — nunca esconde atrás de 500 genérico
+        if record:
             status_code = 200 if validation.get('valid') else 400
             return jsonify({
                 "status": "sucesso" if validation.get('valid') else "erro",
-                "msg": validation.get("msg") or ("Investidor conectado!" if validation.get('valid') else "Falha na autenticação"),
+                "msg": msg,
                 "valid": bool(validation.get("valid")),
-                "api_error": validation.get("api_error"),
-                "client": validation.get('record'),
+                "api_error": validation.get("api_error") or (None if validation.get('valid') else msg),
+                "client": record,
             }), status_code
-        return jsonify({"status": "erro", "msg": "Falha ao salvar investidor"}), 500
-    except Exception as e: return jsonify({"status": "erro", "msg": str(e)}), 400
+        print(f"❌ [BACKEND] vincular_cliente sem record: {msg}", flush=True)
+        return jsonify({
+            "status": "erro",
+            "msg": msg,
+            "api_error": validation.get("api_error") or msg,
+            "valid": False,
+        }), 400
+    except Exception as e:
+        print(f"❌ [BACKEND] Exceção vincular_cliente: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        return jsonify({"status": "erro", "msg": f"Erro no servidor: {e}", "valid": False}), 400
 
 @app.route('/api/estrategias/pesos', methods=['GET'])
 def api_estrategias_pesos():
@@ -2938,8 +3022,18 @@ def api_cliente_manage(client_id):
             data['exchange'] = 'bybit'
             requested_is_testnet = _resolve_request_is_testnet(data, default=USE_TESTNET)
             data['is_testnet'] = requested_is_testnet
-            v = validar_e_salvar_cliente(data.get('bybit_key'), data.get('bybit_secret'), requested_is_testnet, client_payload=data, client_id=client_id, existing_client=_get_registered_client_by_id(client_id))
-            return jsonify({"success": True, "client": v.get('record')})
+            v = validar_e_salvar_cliente(
+                data.get('bybit_key'), data.get('bybit_secret'), requested_is_testnet,
+                client_payload=data, client_id=client_id,
+                existing_client=_get_registered_client_by_id(client_id),
+            ) or {}
+            return jsonify({
+                "success": bool(v.get('record')),
+                "valid": bool(v.get('valid')),
+                "msg": v.get('msg') or v.get('api_error') or ('Atualizado' if v.get('valid') else 'Falha ao atualizar'),
+                "api_error": v.get('api_error'),
+                "client": v.get('record'),
+            }), (200 if v.get('record') else 400)
         elif request.method == 'DELETE':
             return jsonify({"success": _delete_client_everywhere(client_id)[1]})
     except Exception as e: return jsonify({"error": str(e)}), 400
@@ -3325,7 +3419,16 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
 
         payload['status'] = 'erro_api'
         payload['saldo_base'] = round(float((existing_client or {}).get('saldo_base') or 0.0), 2)
-        record, _, local_synced = _save_client_everywhere(payload)
+        try:
+            record, _, local_synced = _save_client_everywhere(payload)
+        except Exception as save_err:
+            print(f"❌ [VALIDAR] Falha ao persistir após erro de API: {save_err}", flush=True)
+            record, local_synced = None, False
+            err_text = f"{err_text} | Também falhou ao salvar no banco: {save_err}"
+        if record is None and not err_text:
+            err_text = 'Falha ao salvar investidor no banco de dados'
+        elif record is None:
+            err_text = f"{err_text} (cliente NÃO foi persistido no banco)"
         if final_is_testnet and is_invalid_key:
             err_text = (
                 "Falha na autenticação da Bybit Testnet/Conta de Teste (retCode 10003). "

@@ -47,8 +47,14 @@ class MarketIntelligence:
         # Notícias desligadas por padrão — sem HTTP/Groq no caminho crítico de entrada
         news = analyze_news_sentiment(symbol, signals, regime, whale)
 
-        # Lateral: só bloqueia se explicitamente ligado (default OFF = mais assertivo)
-        block_lateral = _env_bool('BLOCK_LATERAL_MARKETS', False)
+        # Amplitude / acumulação: SEMPRE bloqueia (anti falso sinal em range)
+        # BLOCK_LATERAL_MARKETS controla apenas o lateral "clássico" (ADX/chop)
+        amplitude_lateral = bool(
+            regime.get('amplitude_lateral')
+            or signals.get('is_lateral_amplitude')
+            or signals.get('is_accumulation')
+        )
+        block_lateral = _env_bool('BLOCK_LATERAL_MARKETS', True)  # default ON — anti-acumulação
         hard_veto_reasons = []
         soft_veto_reasons = []
         ai_assistants_unavailable = False
@@ -59,7 +65,13 @@ class MarketIntelligence:
             or str(news.get('source', '')).lower() == 'disabled'
         )
 
-        if block_lateral and regime.get('is_lateral'):
+        if amplitude_lateral:
+            hard_veto_reasons.append(
+                f"ACUMULAÇÃO/LATERAL por amplitude "
+                f"({regime.get('amplitude_pct', signals.get('amplitude_pct', 0))}% "
+                f"< limite) — sinais ignorados (NEUTRO)"
+            )
+        elif block_lateral and regime.get('is_lateral'):
             hard_veto_reasons.append(
                 f"Mercado LATERAL (ADX={regime.get('adx')}, Choppiness={regime.get('choppiness')})"
             )

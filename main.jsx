@@ -1478,13 +1478,13 @@ const App = () => {
                          setAddFormFields(prev => ({ ...prev, id: json.client.id, saldo_base: json.client.saldo_base ?? prev.saldo_base }));
                        }
                        const msgAtualiza = json.valid === false
-                         ? `Salvo, mas API inválida: ${json.api_error || 'verifique as chaves'}`
+                         ? `Salvo, mas API inválida: ${json.api_error || json.msg || 'verifique as chaves'}`
                          : (json.msg || 'Investidor atualizado');
                        setAddFormMsg({ type: json.valid === false ? 'error' : 'success', text: msgAtualiza });
                         const invRes = await fetch(`${API_BASE}/api/investidores`); if (invRes.ok) setInvestidores((await invRes.json()).map(normalizeInvestorRecord));
                      } else {
                       console.error('❌ [FRONTEND] Erro na resposta do servidor:', json);
-                      setAddFormMsg({ type: 'error', text: json.error || 'Erro ao atualizar' });
+                      setAddFormMsg({ type: 'error', text: json.msg || json.api_error || json.error || 'Erro ao atualizar' });
                     }
                   } else {
                     console.log('🔵 [FRONTEND] Criando novo cliente via /api/vincular_cliente');
@@ -1507,10 +1507,16 @@ const App = () => {
                         try { const invRes = await fetch(`${API_BASE}/api/investidores`); if (invRes.ok) setInvestidores((await invRes.json()).map(normalizeInvestorRecord)); } catch (e) { console.error('❌ [FRONTEND] Erro ao recarregar lista:', e); }
                      } else {
                       console.error('❌ [FRONTEND] Erro na resposta do servidor:', json);
-                      setAddFormMsg({ type: 'error', text: json.msg || json.error || 'Erro ao salvar investidor' });
+                      // Mostra a causa real (auth Bybit / banco / import) em vez de genérico
+                      const detail = json.msg || json.api_error || json.error || 'Erro ao salvar investidor';
+                      setAddFormMsg({ type: 'error', text: detail });
+                      // Se o servidor salvou o cliente mesmo com API inválida, atualiza a lista
+                      if (json.client) {
+                        upsertInvestor(json.client);
+                        setAddFormFields(prev => ({ ...prev, id: json.client.id, saldo_base: json.client.saldo_base ?? prev.saldo_base }));
+                      }
                     }
-                  }
-                } catch (err) {
+                  }                } catch (err) {
                   console.error('❌ [FRONTEND] Erro de rede ou exceção ao vincular:', err);
                   const errorMsg = err.message || String(err);
                   setAddFormMsg({ type: 'error', text: `Erro de conexão: ${errorMsg}. Verifique se o servidor está acessível em ${API_BASE}` });
