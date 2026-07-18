@@ -4,11 +4,13 @@ Rastreador de Pegadas Institucionais (Smart Money / Big Players)
 
 Detecta entradas institucionais via:
   1. Amplitude percentual (anti-acumulação / mercado lateral)
-  2. VWAP diário (linha de equilíbrio)
-  3. Anomalia de volume (média 20 + 2.5× desvio padrão)
-  4. Spread expressivo do candle (evita falsos rompimentos)
+  2. ADX(14) >= 23 (tendência obrigatória)
+  3. BB Width(20, 2σ) atual > média das últimas 50 larguras
+  4. VWAP diário (linha de equilíbrio)
+  5. Anomalia de volume (média 20 + 2.5× desvio padrão)
+  6. Spread expressivo do candle (evita falsos rompimentos)
 
-Em acumulação (amplitude < limite), força Sinal = NEUTRO e ignora qualquer entrada.
+Qualquer trava estrutural fechada força Sinal = NEUTRO, inclusive diante de volume extremo.
 """
 
 from __future__ import annotations
@@ -16,7 +18,10 @@ from __future__ import annotations
 import os
 
 import pandas as pd
-import numpy as np
+from src.intelligence.regime_detector import (
+    calculate_adx_series,
+    calculate_bollinger_bandwidth_series,
+)
 
 
 def _env_float(name: str, default: float) -> float:
@@ -42,6 +47,11 @@ def _env_int(name: str, default: int) -> int:
 # Amplitude dos últimos X candles: ((High.max - Low.min) / Low.min) * 100
 DEFAULT_AMPLITUDE_PERIODS = 20
 DEFAULT_AMPLITUDE_PCT_MAX = 0.35  # abaixo disso = acumulação / lateral
+ADX_PERIOD = 14
+ADX_MIN = 23.0
+BB_PERIOD = 20
+BB_DEVIATIONS = 2.0
+BB_WIDTH_AVERAGE_PERIOD = 50
 
 
 def _normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
@@ -147,13 +157,46 @@ class RastreadorInstitucional:
         df['vwap'] = cum_tp_v / (cum_vol + 1e-9)
         return df
 
+    def calcular_filtros_estrutura(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Calcula as travas estruturais antes do volume.
+
+        Liberação = ADX(14) >= 23 E BB Width atual > média móvel das últimas
+        50 larguras. NaN/dados insuficientes falham de forma segura (NEUTRO).
+        """
+        out = df.copy()
+        out['adx'] = calculate_adx_series(out, ADX_PERIOD)
+        out['adx_gate_pass'] = out['adx'].ge(ADX_MIN).fillna(False)
+
+        out['bb_middle'] = out['close'].rolling(BB_PERIOD, min_periods=BB_PERIOD).mean()
+        bb_std = out['close'].rolling(BB_PERIOD, min_periods=BB_PERIOD).std()
+        out['bb_upper'] = out['bb_middle'] + (BB_DEVIATIONS * bb_std)
+        out['bb_lower'] = out['bb_middle'] - (BB_DEVIATIONS * bb_std)
+        out['bb_width'] = calculate_bollinger_bandwidth_series(
+            out,
+            BB_PERIOD,
+            BB_DEVIATIONS,
+        )
+        out['bb_width_mean_50'] = out['bb_width'].rolling(
+            BB_WIDTH_AVERAGE_PERIOD,
+            min_periods=BB_WIDTH_AVERAGE_PERIOD,
+        ).mean()
+        out['bb_expanding'] = (
+            out['bb_width'].gt(out['bb_width_mean_50'])
+            & out['bb_width'].notna()
+            & out['bb_width_mean_50'].notna()
+        )
+        out['structure_filters_pass'] = out['adx_gate_pass'] & out['bb_expanding']
+        return out
+
     def analisar_mercado(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Processa o histórico e marca cada candle com sinal institucional.
-        Em acumulação (amplitude baixa), força NEUTRO em todo o DataFrame.
+        Ordem obrigatória: estrutura (ADX + BB Width) -> volume -> VWAP/spread.
         """
         df = _normalize_ohlcv(df)
         df = self.calcular_vwap(df)
+        df = self.calcular_filtros_estrutura(df)
 
         df['vol_ma'] = df['vol'].rolling(window=self.periodo_ma, min_periods=self.periodo_ma).mean()
         df['vol_std'] = df['vol'].rolling(window=self.periodo_ma, min_periods=self.periodo_ma).std()
@@ -166,8 +209,13 @@ class RastreadorInstitucional:
         df['amplitude_pct'] = ((roll_high - roll_low) / (roll_low + 1e-9)) * 100.0
         df['is_accumulation'] = df['amplitude_pct'] < self.amplitude_pct_max
 
-        vol_threshold = df['vol_ma'] + (self.multiplicador_vol * df['vol_std'].fillna(0))
-        df['big_player_ativo'] = df['vol'] > vol_threshold
+        df['volume_threshold'] = df['vol_ma'] + (self.multiplicador_vol * df['vol_std'])
+        # O volume institucional só existe quando as duas travas estruturais liberam.
+        df['big_player_ativo'] = (
+            df['structure_filters_pass']
+            & df['vol'].gt(df['volume_threshold'])
+            & df['volume_threshold'].notna()
+        )
 
         df['sinal_institucional'] = 'NEUTRO'
 
@@ -175,18 +223,37 @@ class RastreadorInstitucional:
         is_acc_now, amp_now = is_accumulation_range(
             df, self.amplitude_periods, self.amplitude_pct_max,
         )
-        if is_acc_now:
+        last = df.iloc[-1]
+        if (
+            is_acc_now
+            or not bool(last.get('adx_gate_pass', False))
+            or not bool(last.get('bb_expanding', False))
+        ):
             df['amplitude_pct_atual'] = amp_now
             return df
 
-        for i in range(self.periodo_ma, len(df)):
+        first_valid = max(
+            self.periodo_ma,
+            (ADX_PERIOD * 2) - 1,
+            BB_PERIOD + BB_WIDTH_AVERAGE_PERIOD - 1,
+        )
+        for i in range(first_valid, len(df)):
             # Por candle: ignora acumulação local
             if bool(df.iloc[i].get('is_accumulation', False)):
                 continue
-            if not bool(df.iloc[i]['big_player_ativo']):
+            row = df.iloc[i]
+
+            # Travas absolutas avaliadas antes de sequer considerar o volume.
+            if not bool(row.get('adx_gate_pass', False)):
+                continue
+            if not bool(row.get('bb_expanding', False)):
                 continue
 
-            row = df.iloc[i]
+            volume = float(row['vol'])
+            volume_threshold = float(row['volume_threshold'])
+            if pd.isna(volume_threshold) or volume <= volume_threshold:
+                continue
+
             close = float(row['close'])
             open_p = float(row['open'])
             vwap = float(row['vwap'])
@@ -225,28 +292,34 @@ class RastreadorInstitucional:
             'amplitude_pct': 0.0,
             'is_accumulation': False,
             'is_lateral_amplitude': False,
+            'adx': 0.0,
+            'adx_gate_pass': False,
+            'bollinger_bandwidth': 0.0,
+            'bollinger_bandwidth_mean_50': 0.0,
+            'bollinger_expanding': False,
+            'structure_filters_pass': False,
         }
-        if df is None or len(df) < self.periodo_ma + 1:
+        minimum_history = max(
+            self.periodo_ma + 1,
+            BB_PERIOD + BB_WIDTH_AVERAGE_PERIOD - 1,
+            (ADX_PERIOD * 2),
+        )
+        if df is None or len(df) < minimum_history:
             return neutral
 
         try:
             is_acc, amp = is_accumulation_range(
                 df, self.amplitude_periods, self.amplitude_pct_max,
             )
-            if is_acc:
-                return {
-                    **neutral,
-                    'amplitude_pct': round(amp, 4),
-                    'is_accumulation': True,
-                    'is_lateral_amplitude': True,
-                    'sinal_institucional': 'NEUTRO',
-                }
-
             work = self.analisar_mercado(df)
             last = work.iloc[-1]
             sig = str(last.get('sinal_institucional', 'NEUTRO') or 'NEUTRO').upper()
-            # Dupla checagem: só dispara com big player + VWAP + spread (já no loop)
-            if sig != 'NEUTRO' and not bool(last.get('big_player_ativo', False)):
+            structure_pass = bool(last.get('structure_filters_pass', False))
+            # Defesa em profundidade: estrutura e big player são obrigatórios.
+            if sig != 'NEUTRO' and (
+                not structure_pass
+                or not bool(last.get('big_player_ativo', False))
+            ):
                 sig = 'NEUTRO'
 
             low = float(last['low'])
@@ -263,8 +336,14 @@ class RastreadorInstitucional:
                 'institutional_signal_high': high,
                 'institutional_sl_price': sl,
                 'amplitude_pct': round(float(amp), 4),
-                'is_accumulation': False,
-                'is_lateral_amplitude': False,
+                'is_accumulation': bool(is_acc),
+                'is_lateral_amplitude': bool(is_acc),
+                'adx': round(float(last.get('adx', 0) or 0), 4),
+                'adx_gate_pass': bool(last.get('adx_gate_pass', False)),
+                'bollinger_bandwidth': round(float(last.get('bb_width', 0) or 0), 8),
+                'bollinger_bandwidth_mean_50': round(float(last.get('bb_width_mean_50', 0) or 0), 8),
+                'bollinger_expanding': bool(last.get('bb_expanding', False)),
+                'structure_filters_pass': structure_pass,
             }
         except Exception:
             return neutral

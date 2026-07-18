@@ -958,6 +958,16 @@ class BybitClient:
                 print(f"   ⚠️ [MARGEM] pybit switch_margin_mode exceção: {str(e)[:140]}", flush=True)
         return applied
 
+    def switch_isolated_margin(self, symbol, leverage=20):
+        """
+        Alias de produção (Bybit V5): força margem ISOLADA + alavancagem.
+
+        A API oficial expõe ``switch_margin_mode(tradeMode=1)``; este método
+        encapsula o fluxo e mantém compatibilidade com a diretriz
+        ``session.switch_isolated_margin``.
+        """
+        return self.set_isolated_margin(symbol, leverage=leverage)
+
     def has_open_position(self, symbol) -> bool:
         """
         Anti-overtrading: True se já existe QUALQUER quantidade aberta para o símbolo.

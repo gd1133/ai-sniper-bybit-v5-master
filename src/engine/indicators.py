@@ -236,6 +236,11 @@ class IndicatorEngine:
             'regime_label': str(regime.get('regime_label', '')),
             'amplitude_pct': float(regime.get('amplitude_pct', 0) or 0),
             'amplitude_lateral': bool(regime.get('amplitude_lateral', False)),
+            'adx_gate_pass': bool(regime.get('adx_gate_pass', False)),
+            'bollinger_bandwidth': float(regime.get('bollinger_bandwidth', 0) or 0),
+            'bollinger_bandwidth_mean_50': float(regime.get('bollinger_bandwidth_mean_50', 0) or 0),
+            'bollinger_expanding': bool(regime.get('bollinger_expanding', False)),
+            'structure_filters_pass': bool(regime.get('structure_filters_pass', False)),
             'ema_9': float(last['ema_9']) if 'ema_9' in last else 0.0,
             'ema_21': float(last['ema_21']) if 'ema_21' in last else 0.0,
             'ema_50': ema50,
@@ -272,6 +277,9 @@ class IndicatorEngine:
                 'amplitude_pct': float(signals_out.get('amplitude_pct', 0) or 0),
                 'is_accumulation': False,
                 'is_lateral_amplitude': False,
+                'adx_gate_pass': False,
+                'bollinger_expanding': False,
+                'structure_filters_pass': False,
             })
 
         # Acumulação / amplitude baixa: força NEUTRO e bloqueia entrada

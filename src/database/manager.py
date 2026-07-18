@@ -1,5 +1,6 @@
 import sqlite3
 import os
+from contextlib import closing
 from typing import List, Dict, Any
 from src.config import get_environment_config
 
@@ -120,42 +121,72 @@ def _connect():
 
 def _execute_write(operation_name: str, sql_fn) -> Any:
     """
-    Executa INSERT/UPDATE/DELETE com commit obrigatório e finally fechando a conexão.
+    Executa uma escrita em conexão isolada, com commit físico e fechamento imediato.
+
+    ``sqlite3.Connection`` como context manager não fecha a conexão sozinho; por isso
+    usamos ``closing(sqlite3.connect(...))`` e commit explícito.
     sql_fn(cur, conn) -> valor de retorno (opcional).
     """
-    conn = None
-    try:
-        conn = _connect()
-        # Escritas de clientes/chaves: força flush mais seguro no disco
+    import time as _time
+
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir:
         try:
-            conn.execute('PRAGMA synchronous=FULL')
-        except Exception:
+            os.makedirs(db_dir, exist_ok=True)
+        except (OSError, IOError):
             pass
-        cur = conn.cursor()
-        result = sql_fn(cur, conn)
-        conn.commit()
-        # Garante flush no SO (especialmente em FS em nuvem)
+
+    last_error = None
+    for attempt in range(4):
         try:
-            conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
-        except Exception:
-            pass
-        return result
-    except Exception as e:
-        if conn is not None:
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-        print(f"❌ [DATABASE] {operation_name}: {e}")
-        import traceback
-        traceback.print_exc()
-        raise
-    finally:
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception:
-                pass
+            # closing garante close imediato; o bloco interno isola a transação.
+            with closing(
+                sqlite3.connect(
+                    DB_PATH,
+                    check_same_thread=False,
+                    timeout=30.0,
+                )
+            ) as conn:
+                conn.row_factory = sqlite3.Row
+                conn.execute('PRAGMA journal_mode=WAL')
+                conn.execute('PRAGMA synchronous=FULL')
+                conn.execute('PRAGMA busy_timeout=15000')
+                conn.execute('PRAGMA foreign_keys=ON')
+
+                try:
+                    cur = conn.cursor()
+                    result = sql_fn(cur, conn)
+                    conn.commit()  # obrigatório: grava a transação antes do close
+                except Exception:
+                    conn.rollback()
+                    raise
+
+                # Consolida o WAL após a gravação sem tornar falha de checkpoint fatal.
+                try:
+                    conn.execute('PRAGMA wal_checkpoint(PASSIVE)')
+                except sqlite3.Error:
+                    pass
+                return result
+        except sqlite3.OperationalError as error:
+            last_error = error
+            message = str(error).lower()
+            if (
+                attempt < 3
+                and ('locked' in message or 'busy' in message or 'disk i/o' in message)
+            ):
+                _time.sleep(0.35 * (attempt + 1))
+                continue
+            break
+        except Exception as error:
+            last_error = error
+            break
+
+    print(f"❌ [DATABASE] {operation_name}: {last_error}")
+    import traceback
+    traceback.print_exception(type(last_error), last_error, last_error.__traceback__)
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError(f"Falha desconhecida na escrita SQLite: {operation_name}")
 
 
 def _ensure_column(cur, table: str, column: str, definition: str):

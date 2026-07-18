@@ -39,21 +39,25 @@ class MarketIntelligence:
         signals: dict,
         ticker: dict | None = None,
     ) -> dict[str, Any]:
-        if not _env_bool('ENABLE_MARKET_INTELLIGENCE', True):
-            return self._passthrough(signals)
-
+        # ADX/BB são blindagem estrutural obrigatória, mesmo se a camada de IA
+        # complementar estiver desativada.
         regime = detect_market_regime(df, signals)
+        if not _env_bool('ENABLE_MARKET_INTELLIGENCE', True):
+            return self._passthrough(signals, regime)
+
         whale = analyze_whale_activity(signals, ticker, df)
         # Notícias desligadas por padrão — sem HTTP/Groq no caminho crítico de entrada
         news = analyze_news_sentiment(symbol, signals, regime, whale)
 
-        # Amplitude / acumulação: SEMPRE bloqueia (anti falso sinal em range)
-        # BLOCK_LATERAL_MARKETS controla apenas o lateral "clássico" (ADX/chop)
+        # Estrutura: amplitude, ADX e expansão das Bandas são travas absolutas.
+        # BLOCK_LATERAL_MARKETS controla apenas critérios complementares (chop/range).
         amplitude_lateral = bool(
             regime.get('amplitude_lateral')
             or signals.get('is_lateral_amplitude')
             or signals.get('is_accumulation')
         )
+        adx_blocked = float(regime.get('adx', 0) or 0) < 23
+        bb_blocked = not bool(regime.get('bollinger_expanding', False))
         block_lateral = _env_bool('BLOCK_LATERAL_MARKETS', True)  # default ON — anti-acumulação
         hard_veto_reasons = []
         soft_veto_reasons = []
@@ -65,13 +69,22 @@ class MarketIntelligence:
             or str(news.get('source', '')).lower() == 'disabled'
         )
 
+        if adx_blocked:
+            hard_veto_reasons.append(
+                f"SEM TENDÊNCIA: ADX(14)={regime.get('adx', 0)} < 23 — sinal forçado a NEUTRO"
+            )
+        if bb_blocked:
+            hard_veto_reasons.append(
+                f"SEM EXPANSÃO: BB Width={regime.get('bollinger_bandwidth', 0)} <= "
+                f"média(50)={regime.get('bollinger_bandwidth_mean_50', 0)} — sinal forçado a NEUTRO"
+            )
         if amplitude_lateral:
             hard_veto_reasons.append(
                 f"ACUMULAÇÃO/LATERAL por amplitude "
                 f"({regime.get('amplitude_pct', signals.get('amplitude_pct', 0))}% "
                 f"< limite) — sinais ignorados (NEUTRO)"
             )
-        elif block_lateral and regime.get('is_lateral'):
+        elif block_lateral and regime.get('is_lateral') and not (adx_blocked or bb_blocked):
             hard_veto_reasons.append(
                 f"Mercado LATERAL (ADX={regime.get('adx')}, Choppiness={regime.get('choppiness')})"
             )
@@ -163,20 +176,43 @@ class MarketIntelligence:
             'summary': self._build_summary(regime, whale, news, timing_score, allow_entry),
         }
 
-    def _passthrough(self, signals: dict) -> dict:
+    def _passthrough(self, signals: dict, regime: dict) -> dict:
+        amplitude_blocked = bool(
+            regime.get('amplitude_lateral')
+            or signals.get('is_lateral_amplitude')
+            or signals.get('is_accumulation')
+        )
+        adx_blocked = float(regime.get('adx', 0) or 0) < 23
+        bb_blocked = not bool(regime.get('bollinger_expanding', False))
+        structure_blocked = amplitude_blocked or adx_blocked or bb_blocked
+        reasons = []
+        if adx_blocked:
+            reasons.append(f"ADX(14)={regime.get('adx', 0)} < 23")
+        if bb_blocked:
+            reasons.append("BB Width sem expansão acima da média(50)")
+        if amplitude_blocked:
+            reasons.append("amplitude em acumulação")
         return {
             'intelligence_score': 70.0,
             'timing_score': 70.0,
-            'allow_entry': True,
-            'veto_reasons': [],
-            'hard_veto_reasons': [],
+            'allow_entry': not structure_blocked,
+            'veto_reasons': reasons,
+            'hard_veto_reasons': reasons,
             'soft_veto_reasons': [],
             'soft_ai_veto_only': False,
             'ai_assistants_unavailable': False,
             'autonomous_mode': False,
-            'market_regime': 'TREND',
-            'is_lateral': False,
-            'summary': 'Inteligência de mercado desativada',
+            'market_regime': regime.get('market_regime'),
+            'is_lateral': regime.get('is_lateral'),
+            'adx': regime.get('adx'),
+            'bollinger_bandwidth': regime.get('bollinger_bandwidth'),
+            'bollinger_bandwidth_mean_50': regime.get('bollinger_bandwidth_mean_50'),
+            'bollinger_expanding': regime.get('bollinger_expanding'),
+            'summary': (
+                'Inteligência complementar desativada; entrada bloqueada pela estrutura'
+                if structure_blocked
+                else 'Inteligência complementar desativada; estrutura liberada'
+            ),
         }
 
     def _build_summary(self, regime, whale, news, timing_score, allow_entry) -> str:
