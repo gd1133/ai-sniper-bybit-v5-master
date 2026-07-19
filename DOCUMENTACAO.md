@@ -51,7 +51,9 @@ Componentes principais (arquivos):
 | Institucional | `src/engine/rastreador_institucional.py` | Portas 1–4: ADX+BB+amplitude+volume μ+2.5σ+VWAP → COMPRA/VENDA_INSTITUCIONAL |
 | Hard Gates | `src/engine/hard_gates.py` | Short-circuit absoluto: qualquer porta fechada = NEUTRO e aborta ANTES do Cérebro 3 |
 | Indicadores | `src/engine/indicators.py` | Cálculo de indicadores técnicos |
-| Cérebro 3 | `src/ai_brain/local_ml_engine.py` | Motor de ML local (decisão soberana / contingência) |
+| Cérebro 3 | `src/ai_brain/local_ml_engine.py` + `cerebro3_soberano.py` | ML local + blend 70% técnica / 20% Groq fluxo / 10% Gemini + pesos por condição |
+| Fluxo Groq | `src/intelligence/order_flow_analyzer.py` | Order Book → JSON `score_fluxo` / agressão / defesa / liquidação |
+| Macro Gemini | `src/intelligence/gemini_macro_analyzer.py` | Notícias → JSON sentimento / volatilidade / filtro sistêmico (soft por padrão) |
 | Aprendizado | `src/ai_brain/adaptive_weights.py` | Pesos das 5 estratégias auto-ajustados por resultado real |
 | Memória | `src/ai_brain/learning.py` | Histórico de trades, win-rate, bloqueio por padrão de perda |
 | Validador | `src/ai_brain/validator.py` | Consolida votos e define ação final (BUY/SELL/HOLD) |

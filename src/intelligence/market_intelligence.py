@@ -12,6 +12,9 @@ from typing import Any
 from src.intelligence.news_analyzer import analyze_news_sentiment
 from src.intelligence.regime_detector import detect_market_regime
 from src.intelligence.whale_detector import analyze_whale_activity
+from src.intelligence.order_flow_analyzer import analyze_order_book_flow
+from src.intelligence.gemini_macro_analyzer import analyze_gemini_macro_news
+from src.ai_brain.cerebro3_soberano import market_condition_from_signals
 
 
 def _env_bool(name: str, default: bool = True) -> bool:
@@ -38,6 +41,7 @@ class MarketIntelligence:
         df,
         signals: dict,
         ticker: dict | None = None,
+        order_book: dict | None = None,
     ) -> dict[str, Any]:
         # ADX/BB são blindagem estrutural obrigatória, mesmo se a camada de IA
         # complementar estiver desativada.
@@ -46,8 +50,19 @@ class MarketIntelligence:
             return self._passthrough(signals, regime)
 
         whale = analyze_whale_activity(signals, ticker, df)
-        # Notícias desligadas por padrão — sem HTTP/Groq no caminho crítico de entrada
+        # Notícias legado (assistente) — desligado por padrão via ENABLE_NEWS_AI
         news = analyze_news_sentiment(symbol, signals, regime, whale)
+
+        # Incremental: Groq fluxo (order book) + Gemini macro (manchetes)
+        flow = analyze_order_book_flow(symbol, order_book=order_book, signals=signals)
+        headlines = list(news.get('headlines') or [])
+        gemini_macro = analyze_gemini_macro_news(
+            symbol,
+            headlines=headlines,
+            news_blob=str(news.get('reason') or ''),
+            signals={**signals, 'market_regime': regime.get('market_regime')},
+        )
+        condicao = market_condition_from_signals(signals, regime)
 
         # Estrutura: amplitude, ADX e expansão das Bandas são travas absolutas.
         # BLOCK_LATERAL_MARKETS controla apenas critérios complementares (chop/range).
@@ -137,15 +152,42 @@ class MarketIntelligence:
 
         soft_ai_veto_only = False
 
-        # Assertivo: libera com score baixo; notícias nunca travam; Cérebro 3 soberano
+        # Soft alerta Gemini (hard-veto só se ALLOW_NEWS_HARD_VETO e filtro True)
+        if gemini_macro.get('filtro_noticia_travar_bot'):
+            soft_veto_reasons.append(
+                f"Gemini macro: risco sistêmico — {gemini_macro.get('narrativa_dominante', '')}"
+            )
+            if _env_bool('ALLOW_NEWS_HARD_VETO', False):
+                hard_veto_reasons.append(
+                    f"GEMINI HARD VETO: {gemini_macro.get('narrativa_dominante', 'notícia crítica')}"
+                )
+            else:
+                soft_ai_veto_only = True
+        elif gemini_macro.get('filtro_noticia_travar_bot_sugerido'):
+            soft_veto_reasons.append(
+                f"Gemini alerta (soft): {gemini_macro.get('narrativa_dominante', '')}"
+            )
+            soft_ai_veto_only = True
+
+        # Assertivo: libera com score baixo; Cérebro 3 soberano
         allow_entry = len(hard_veto_reasons) == 0 and intelligence_score >= 32
         autonomous_mode = True
+
+        # Sentimento derivado do Gemini macro (não zera o contrato legado)
+        sent_macro = float(gemini_macro.get('score_sentimento_noticias', 0) or 0)
+        sentiment_score = 50.0 + (sent_macro * 50.0)
+        if sent_macro > 0.25:
+            global_trend = 'BULLISH'
+        elif sent_macro < -0.25:
+            global_trend = 'BEARISH'
+        else:
+            global_trend = str(news.get('global_trend') or 'NEUTRAL').upper()
 
         return {
             'intelligence_score': round(intelligence_score, 2),
             'timing_score': round(timing_score, 2),
             'allow_entry': allow_entry,
-            'veto_reasons': veto_reasons,
+            'veto_reasons': veto_reasons + soft_veto_reasons,
             'hard_veto_reasons': hard_veto_reasons,
             'soft_veto_reasons': soft_veto_reasons,
             'soft_ai_veto_only': soft_ai_veto_only,
@@ -160,20 +202,27 @@ class MarketIntelligence:
             'whale_score': whale.get('whale_score'),
             'whale_aligned': whale.get('whale_aligned'),
             'whale_reasons': whale.get('reasons', []),
-            'sentiment_score': 50.0,
-            'global_trend': 'NEUTRAL',
-            'investor_mood': 'NEUTRAL',
-            'news_risk': 'LOW',
-            'is_trending': False,
+            'sentiment_score': round(sentiment_score, 2),
+            'global_trend': global_trend,
+            'investor_mood': news.get('investor_mood', 'NEUTRAL'),
+            'news_risk': (
+                'HIGH' if gemini_macro.get('impacto_volatilidade') == 'ALTO'
+                else news.get('news_risk', 'LOW')
+            ),
+            'is_trending': bool(news.get('is_trending')),
             'news_reason': news.get('reason'),
             'ai_source': news.get('source'),
             'ai_status': news.get('ai_status', 'disabled'),
             'news': news,
-            # Assistente nunca bloqueia — Cérebro 3 é soberano
             'news_block_trade': False,
-            'headlines': [],
-            'web_news_bias': 'NEUTRAL',
-            'summary': self._build_summary(regime, whale, news, timing_score, allow_entry),
+            'headlines': headlines,
+            'web_news_bias': news.get('web_news_bias', 'NEUTRAL'),
+            # Incremental Smart Money assistants
+            'order_flow': flow,
+            'groq_flow': flow,
+            'gemini_macro': gemini_macro,
+            'condicao_mercado': condicao,
+            'summary': self._build_summary(regime, whale, news, timing_score, allow_entry, flow, gemini_macro),
         }
 
     def _passthrough(self, signals: dict, regime: dict) -> dict:
@@ -215,11 +264,14 @@ class MarketIntelligence:
             ),
         }
 
-    def _build_summary(self, regime, whale, news, timing_score, allow_entry) -> str:
+    def _build_summary(self, regime, whale, news, timing_score, allow_entry, flow=None, gemini_macro=None) -> str:
+        flow = flow or {}
+        gemini_macro = gemini_macro or {}
         parts = [
             str(regime.get('regime_label', '')),
             f"Baleias: {whale.get('whale_score', 0)}/100",
-            f"Sentimento: {news.get('global_trend', 'NEUTRAL')} ({news.get('investor_mood', '')})",
+            f"Fluxo Groq: {float(flow.get('score_fluxo', 0) or 0):+.2f}",
+            f"Gemini: {gemini_macro.get('narrativa_dominante') or news.get('global_trend', 'NEUTRAL')}",
             f"Timing: {timing_score:.0f}/100",
         ]
         if not allow_entry:

@@ -192,7 +192,26 @@ class LocalMLEngine:
         ):
             score -= 15
 
-        return min(100, max(0, int(round(score))))
+        tech_score = min(100, max(0, int(round(score))))
+
+        # Blend incremental 70/20/10 (técnica + Groq fluxo + Gemini macro)
+        try:
+            from src.ai_brain.cerebro3_soberano import (
+                get_cerebro3_soberano,
+                market_condition_from_signals,
+            )
+            blend = get_cerebro3_soberano().calcular_probabilidade_sucesso(
+                sinais_5_estrategias=signals,
+                condicao_mercado=market_condition_from_signals(tech_data, ctx),
+                dados_groq=ctx.get('groq_flow') or ctx.get('order_flow') or {},
+                dados_gemini=ctx.get('gemini_macro') or {},
+                tech_confidence_0_100=tech_score,
+            )
+            if blend.get('veto'):
+                return 0
+            return int(round(float(blend.get('probabilidade', tech_score))))
+        except Exception:
+            return tech_score
     
     def resolve_entry_direction(self, tech_data, intelligence_context=None):
         """

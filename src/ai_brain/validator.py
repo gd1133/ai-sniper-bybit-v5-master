@@ -361,6 +361,42 @@ class Cerebro3Sovereign:
         score_c2 = float(report_c2.get('score', 0) or 0)
         probability = (score_c1 * 0.28) + (score_c2 * 0.22) + (score_learner * 0.20) + (local_score * 0.30)
 
+        # Incremental: repondera com Groq fluxo + Gemini macro (70/20/10 sobre a base técnica)
+        ia_insights = {}
+        try:
+            from src.ai_brain.cerebro3_soberano import (
+                get_cerebro3_soberano,
+                market_condition_from_signals,
+            )
+            from src.ai_brain.local_ml_engine import LocalMLEngine
+            strat = LocalMLEngine()._strategy_signals(enriched)
+            blend = get_cerebro3_soberano().calcular_probabilidade_sucesso(
+                sinais_5_estrategias=strat,
+                condicao_mercado=str(ctx.get('condicao_mercado') or market_condition_from_signals(enriched, ctx)),
+                dados_groq=ctx.get('groq_flow') or ctx.get('order_flow') or {},
+                dados_gemini=ctx.get('gemini_macro') or {},
+                tech_confidence_0_100=probability,
+            )
+            ia_insights = blend.get('json_ia_insights') or {}
+            if blend.get('veto'):
+                return {
+                    'autonomous': False,
+                    'probabilidade': 0.0,
+                    'decisao': 'WAIT',
+                    'motivo': f"Veto Gemini macro: {blend.get('motivo_veto')}",
+                    'score_learner': float(score_learner),
+                    'action_learner': action_learner,
+                    'motivo_learner': motivo_learner,
+                    'learning_context': learning_ctx,
+                    'votes': {'buy': 0, 'sell': 0},
+                    'local_score': local_score,
+                    'ia_insights': ia_insights,
+                }
+            # Mistura suave: 60% consenso clássico + 40% blend soberano (não apaga C1/C2)
+            probability = (float(probability) * 0.60) + (float(blend.get('probabilidade', probability)) * 0.40)
+        except Exception:
+            pass
+
         actions = [
             report_c1.get('action', 'WAIT'),
             report_c2.get('action', 'WAIT'),
@@ -379,7 +415,7 @@ class Cerebro3Sovereign:
         elif probability >= 62 and trend == 'BAIXA' and st == -1 and report_c1.get('action') == 'SELL':
             final_action = 'SELL'
 
-        # Notícias NÃO bloqueiam direção no modo assertivo
+        # Notícias NÃO bloqueiam direção no modo assertivo (salvo hard veto já tratado)
 
         return {
             'autonomous': False,
@@ -397,6 +433,7 @@ class Cerebro3Sovereign:
             'learning_context': learning_ctx,
             'votes': {'buy': buy_votes, 'sell': sell_votes},
             'local_score': local_score,
+            'ia_insights': ia_insights,
         }
 
 
