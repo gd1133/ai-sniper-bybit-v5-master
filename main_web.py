@@ -1062,18 +1062,46 @@ def _get_local_ml():
                 _local_ml_engine = LocalMLEngine()
     return _local_ml_engine
 
-def _adaptive_log_entry(symbol, tech_data):
+def _adaptive_log_entry(symbol, tech_data, intel_ctx=None):
     """Registra as estratégias ativas na ENTRADA para o aprendizado de pesos (best-effort)."""
     try:
         ml = _get_local_ml()
-        ml.weights.log_entry(symbol, ml._strategy_signals(tech_data or {}))
+        sigs = ml._strategy_signals(tech_data or {})
+        ml.weights.log_entry(symbol, sigs)
+        # Incremental: pesos por condição + insights Groq/Gemini
+        try:
+            from src.ai_brain.cerebro3_soberano import get_cerebro3_soberano, market_condition_from_signals
+            ctx = intel_ctx or {}
+            cond = str(ctx.get('condicao_mercado') or market_condition_from_signals(tech_data, ctx))
+            insights = {
+                'groq': ctx.get('groq_flow') or ctx.get('order_flow'),
+                'gemini': ctx.get('gemini_macro'),
+            }
+            get_cerebro3_soberano().log_entry_with_insights(symbol, sigs, cond, insights)
+        except Exception:
+            pass
     except Exception as e:
         print(f"⚠️ [PESOS IA] log entrada {symbol}: {e}", flush=True)
 
 def _adaptive_record_outcome(symbol, pnl_pct):
     """Ajusta os pesos das estratégias pelo RESULTADO do trade (best-effort)."""
     try:
-        _get_local_ml().weights.record_outcome(symbol, float(pnl_pct or 0))
+        pnl = float(pnl_pct or 0)
+        _get_local_ml().weights.record_outcome(symbol, pnl)
+        try:
+            from src.ai_brain.cerebro3_soberano import get_cerebro3_soberano
+            resultado = 'GANHOU' if pnl > 0 else 'PERDEU'
+            # Só reforço por condição (global já atualizado acima)
+            get_cerebro3_soberano().aprender_com_resultado(
+                resultado=resultado,
+                condicao_mercado='NEUTRO',
+                sinais_usados={
+                    'sma200': 1, 'supertrend': 1, 'fibonacci': 1,
+                    'volume_climax': 1, 'sup_res': 1,
+                },
+            )
+        except Exception:
+            pass
     except Exception as e:
         print(f"⚠️ [PESOS IA] outcome {symbol}: {e}", flush=True)
 
@@ -2498,8 +2526,15 @@ def sniper_worker_loop():
                     if validator.local_signal(signals) < 12:
                         continue
 
-                    intel_ctx = market_intel.evaluate(sym, df, signals, t)
-                    # Injeta notícias/heat nos sinais para o Cérebro 3
+                    # Order book antes do Cérebro 3 — alimenta Groq fluxo (incremental)
+                    order_book = None
+                    try:
+                        order_book = radar_broker.fetch_order_book(sym, limit=20)
+                    except Exception:
+                        order_book = None
+
+                    intel_ctx = market_intel.evaluate(sym, df, signals, t, order_book=order_book)
+                    # Injeta notícias/heat/fluxo nos sinais para o Cérebro 3
                     signals = dict(signals)
                     signals['sentiment_score'] = intel_ctx.get('sentiment_score')
                     signals['global_trend'] = intel_ctx.get('global_trend')
@@ -2738,7 +2773,7 @@ def sniper_worker_loop():
                     flush=True,
                 )
                 # 🧠 Aprendizado: registra as estratégias ativas nesta entrada
-                _adaptive_log_entry(sym, signals)
+                _adaptive_log_entry(sym, signals, intel_ctx)
                 broadcast_ordem_global(
                     sym,
                     side_best,
