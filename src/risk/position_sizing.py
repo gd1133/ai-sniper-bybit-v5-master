@@ -15,12 +15,13 @@ import os
 from typing import Tuple
 
 
-DEFAULT_ENTRY_PCT = 0.03   # 3% da banca (regra de risco V60.7)
+DEFAULT_ENTRY_PCT = 0.05   # 5% da banca (Escada de Lucro / tendência forte)
 DEFAULT_ENTRY_AFTER_STOP_PCT = 0.03  # 3% após stop loss
 DEFAULT_TP_MARGIN_RATIO = 1.0   # +100% sobre a margem
 DEFAULT_SL_MARGIN_RATIO = 0.5   # -50% sobre a margem
 DEFAULT_TP_ROI_PCT = 100.0      # +100% ROI sobre margem real da posição
 DEFAULT_SL_ROI_PCT = -50.0      # -50% ROI sobre margem real da posição
+MAX_ENTRY_PCT_CAP = 0.10        # teto de segurança (10%) — não força para baixo o default
 
 
 def _env_float(name: str, default: float) -> float:
@@ -37,7 +38,7 @@ def _env_float(name: str, default: float) -> float:
 
 
 def load_entry_pct() -> float:
-    """Percentual padrão de entrada (env RISK_PER_TRADE_PCT, default 3%)."""
+    """Percentual padrão de entrada (env RISK_PER_TRADE_PCT, default 5%)."""
     pct = _env_float('RISK_PER_TRADE_PCT', DEFAULT_ENTRY_PCT * 100)
     if pct > 1:
         return pct / 100.0
@@ -220,7 +221,8 @@ def calcular_tamanho_posicao(
     leverage = max(float(alavancagem or 1), 1.0)
     price = float(preco_entrada or 0)
     pct = float(pct_banca if pct_banca is not None else load_entry_pct())
-    pct = min(pct, DEFAULT_ENTRY_PCT) if pct > DEFAULT_ENTRY_PCT else pct
+    # Não força para baixo o % configurado; só aplica teto de segurança.
+    pct = max(0.0, min(pct, MAX_ENTRY_PCT_CAP))
 
     if saldo <= 0 or price <= 0:
         return {

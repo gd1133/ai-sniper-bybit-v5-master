@@ -255,6 +255,7 @@ def init_db():
         _ensure_column(cur, 'trades', 'exit_price', 'REAL DEFAULT 0')
         _ensure_column(cur, 'trades', 'quantity', 'REAL DEFAULT 0')
         _ensure_column(cur, 'trades', 'margin', 'REAL DEFAULT 0')
+        _ensure_column(cur, 'trades', 'protection_status', "TEXT DEFAULT 'AGUARDANDO_PROTECAO'")
 
         # Tabela de configuração global (TEST_MODE, TEST_BALANCE, etc)
         cur.execute('''
@@ -619,6 +620,39 @@ def get_last_closed_trade(client_id: int) -> Dict[str, Any]:
     row = cur.fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+def mark_trade_profit_shield(
+    client_id: int,
+    symbol: str,
+    new_sl: float,
+    roi_pct: float,
+) -> bool:
+    """Marca a operação aberta como PROTEGIDO_50 após Escada de Lucro."""
+    notes_extra = f"PROTEGIDO_50|SL={new_sl}|ROI={roi_pct:.1f}%"
+
+    def _op(cur, conn):
+        cur.execute(
+            """
+            UPDATE trades
+            SET protection_status = 'PROTEGIDO_50',
+                notes = TRIM(COALESCE(notes, '') || ' | ' || ?)
+            WHERE client_id = ?
+              AND LOWER(COALESCE(status, 'open')) = 'open'
+              AND (
+                    REPLACE(UPPER(pair), '/', '') = REPLACE(UPPER(?), '/', '')
+                 OR REPLACE(UPPER(pair), ':USDT', '') LIKE '%' || REPLACE(REPLACE(UPPER(?), '/USDT', ''), 'USDT', '') || '%'
+              )
+            """,
+            (notes_extra, client_id, symbol, symbol),
+        )
+        return cur.rowcount > 0
+
+    try:
+        return bool(_execute_write('mark_trade_profit_shield', _op))
+    except Exception as e:
+        print(f"⚠️ [DATABASE] mark_trade_profit_shield: {e}")
+        return False
 
 
 # ============================================================================

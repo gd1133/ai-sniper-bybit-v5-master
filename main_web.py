@@ -1480,17 +1480,19 @@ def _resolve_position_margin(cliente, symbol, size, entry_price, leverage, pos=N
 
 def _monitor_financial_stop_loss():
     """
-    🎯 MONITOR FINANCEIRO — Protocolo 100/50 sobre o valor da entrada.
+    🎯 MONITOR FINANCEIRO — Protocolo 100/50 + Escada de Lucro.
 
     Entrada: 5% da banca (3% se o último fechamento foi STOP_LOSS).
     Saída por operação:
       - Take Profit: +100% da margem de entrada
       - Stop Loss:   -50% da margem de entrada
+    Escada de Lucro (incremental):
+      - ROI >= +50% → move SL na Bybit para travar ~+20% ROI (PROTEGIDO_50)
     """
     time.sleep(5)
     print(
         f"🎯 [MONITOR FINANCEIRO] Protocolo 100/50 — entrada {format_entry_pct()} "
-        f"(após SL: {format_entry_pct(PERCENTUAL_ENTRADA_POS_STOP)})",
+        f"(após SL: {format_entry_pct(PERCENTUAL_ENTRADA_POS_STOP)}) | Escada de Lucro ON",
         flush=True
     )
 
@@ -1536,6 +1538,30 @@ def _monitor_financial_stop_loss():
                                     continue
 
                                 entry_margin = _resolve_entry_margin_for_exit(cliente, symbol, pos=pos)
+
+                                # ── Escada de Lucro: +50% ROI → SL em +20% ROI ──
+                                try:
+                                    from src.risk.profit_shield import apply_profit_shield_if_needed
+                                    shield = apply_profit_shield_if_needed(
+                                        broker,
+                                        client_id=client_id,
+                                        symbol=symbol,
+                                        side=side,
+                                        entry_price=entry_price,
+                                        mark_price=mark_price,
+                                        leverage=leverage,
+                                        unrealised_pnl=unrealised_pnl,
+                                        entry_margin=entry_margin,
+                                    )
+                                    if shield.get('applied'):
+                                        print(
+                                            f"   🪜 [ESCADA DE LUCRO] {symbol} ROI={shield.get('roi_pct')}% → "
+                                            f"{shield.get('reason')}",
+                                            flush=True,
+                                        )
+                                except Exception as shield_err:
+                                    print(f"   ⚠️ [ESCADA DE LUCRO] {symbol}: {shield_err}", flush=True)
+
                                 motivo_fechamento, roi_pct = evaluate_position_exit(
                                     unrealised_pnl, entry_margin,
                                 )
@@ -1564,6 +1590,12 @@ def _monitor_financial_stop_loss():
 
                                     if success:
                                         print(f"   ✅ [{motivo_fechamento}] Posição {symbol} fechada com sucesso!", flush=True)
+
+                                        try:
+                                            from src.risk.profit_shield import get_profit_shield_registry
+                                            get_profit_shield_registry().clear(client_id, symbol)
+                                        except Exception:
+                                            pass
 
                                         try:
                                             profit = unrealised_pnl
