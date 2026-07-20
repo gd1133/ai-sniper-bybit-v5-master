@@ -31,7 +31,8 @@ a lógica de decisão, o gerenciamento de risco e as proteções anti-falha do r
                     │  EXECUÇÃO POR CLIENTE (background thread)  │
                     │  • margem ISOLADA 20x                      │
                     │  • checa posição aberta (has_open_position)│
-                    │  • lote = 3% da banca × 20x / preço       │
+                    │  • lote = 5% da banca × 20x / preço       │
+                    │  • Escada de Lucro: +50% ROI → SL +20%    │
                     │  • ordem a mercado + TP/SL inline         │
                     └───────────────────────────────────────────┘
 ```
@@ -44,7 +45,8 @@ Componentes principais (arquivos):
 | CLI / execução single | `main.py` | Execução direta (linha de comando) e helpers de posição |
 | Broker | `src/broker/bybit_client.py` | Chamadas à Bybit V5 (CCXT + pybit): saldo, ordens, margem, TP/SL, posições |
 | Cálculo de ordem | `src/broker/order_calculator.py` | Precisão/step size, arredondamento de lote |
-| Risco | `src/risk/position_sizing.py` | Fórmula de lote (3%), preços de TP/SL, ROI |
+| Risco | `src/risk/position_sizing.py` | Fórmula de lote (5%), preços de TP/SL, ROI |
+| Escada de Lucro | `src/risk/profit_shield.py` | Em +50% ROI move SL para travar ~+20% ROI (PROTEGIDO_50) |
 | Risco | `src/risk/entry_viability.py` | Viabilidade da entrada (notional mínimo etc.) |
 | Cérebro 1/2 | `src/engine/confluence_absoluta.py` | Confluência institucional (volume, order book, ADX) |
 | Timing | `src/engine/entry_timing.py` | Confirmação de timing (tendência, pullback, momentum) |
@@ -225,9 +227,9 @@ bloqueie uma entrada:
   * Fallback `pybit switch_margin_mode(category='linear', tradeMode=1, buyLeverage='20', sellLeverage='20')`
   * Idempotente: se já estiver isolada/na alavancagem, ignora o erro (`110026`, "not modified").
 
-### B. Lote Dinâmico — Fórmula dos 3%
-A margem de cada trade equivale a **3%** do saldo real do investidor
-(`DEFAULT_ENTRY_PCT = 0.03` em `position_sizing.py`):
+### B. Lote Dinâmico — Fórmula dos 5%
+A margem de cada trade equivale a **5%** do saldo real do investidor
+(`DEFAULT_ENTRY_PCT = 0.05` em `position_sizing.py`, override `RISK_PER_TRADE_PCT`):
 
 $$\text{Margem Isolada} = \text{Saldo da Conta} \times 0.03$$
 $$\text{Tamanho Nominal} = \text{Margem Isolada} \times 20 \text{ (Alavancagem)}$$
@@ -301,8 +303,10 @@ Risco (`src/risk/position_sizing.py`):
 
 | Parâmetro | Valor | Descrição |
 |---|---|---|
-| `DEFAULT_ENTRY_PCT` | 0.03 | 3% da banca por trade |
+| `DEFAULT_ENTRY_PCT` | 0.05 | 5% da banca por trade |
 | `DEFAULT_ENTRY_AFTER_STOP_PCT` | 0.03 | 3% após stop loss |
+| `PROFIT_SHIELD_TRIGGER_ROI` | 50 | Escada: arma proteção neste ROI % |
+| `PROFIT_SHIELD_LOCK_ROI` | 20 | Escada: SL travado neste ROI % |
 | `DEFAULT_TP_ROI_PCT` | 100.0 | +100% ROI |
 | `DEFAULT_SL_ROI_PCT` | -50.0 | -50% ROI (2.5% de preço a 20x) |
 
@@ -380,5 +384,6 @@ Uma entrada só é enviada quando **todas** as condições abaixo são satisfeit
 4. ✅ Timing / anti-armadilha confirmado.
 5. ✅ (Se ligada) Confluência Absoluta — filtros técnicos complementares.
 6. ✅ Slot reservado + `MAX_MOEDAS_ATIVAS` + sem posição aberta no par.
-7. ✅ Margem isolada 20x; lote = 3% × 20x / preço; TP +100% ROI / SL −50% ROI inline (`str()` na Bybit V5).
-8. ✅ Execução: se sinal estrutural = NEUTRO → `return` imediato (bloqueio absoluto).
+7. ✅ Margem isolada 20x; lote = 5% × 20x / preço; TP +100% ROI / SL −50% ROI inline (`str()` na Bybit V5).
+8. ✅ Escada de Lucro: se ROI ≥ +50%, SL movido para ~+20% ROI (`PROTEGIDO_50`) — evita “quase ganhei”.
+9. ✅ Execução: se sinal estrutural = NEUTRO → `return` imediato (bloqueio absoluto).

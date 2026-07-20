@@ -1244,6 +1244,53 @@ class BybitClient:
             print(f"⚠️ [TP/SL FALHOU] Erro na injeção de alvos Bybit: {e}", flush=True)
             return False
 
+    def update_stop_loss_only(self, symbol, side, sl_price):
+        """
+        Escada de Lucro: move apenas o Stop Loss (mantém Take Profit final).
+        Usado quando ROI >= 50% para travar ~+20% ROI.
+        """
+        try:
+            if not self.authenticated or not self.pybit_session:
+                return False
+            side_norm = str(side or '').strip().lower()
+            pos_idx = 1 if side_norm in ('buy', 'comprar', 'long') else 2
+            v5_symbol = self._normalize_v5_symbol(symbol)
+            sl = float(sl_price or 0)
+            if sl <= 0:
+                return False
+            price_to_precision = getattr(self.exchange, 'price_to_precision', None)
+            sl_str = str(sl)
+            if callable(price_to_precision):
+                try:
+                    sl_str = str(price_to_precision(symbol, sl))
+                except Exception:
+                    sl_str = str(sl)
+            print(
+                f"🛡️  [ESCADA DE LUCRO] {v5_symbol} | novo SL={sl_str} (idx={pos_idx})",
+                flush=True,
+            )
+            for attempt in range(1, 4):
+                rsp = self.pybit_session.set_trading_stop(
+                    category='linear',
+                    symbol=v5_symbol,
+                    stopLoss=sl_str,
+                    positionIdx=pos_idx,
+                    tpslMode='Full',
+                )
+                ok, err = self._handle_v5_ret_code(rsp, 'set_trading_stop_shield')
+                if ok:
+                    print(f"✅ [ESCADA DE LUCRO] SL atualizado para {sl_str}", flush=True)
+                    return True
+                if attempt < 3 and ('position not exists' in str(err).lower() or '110017' in str(err)):
+                    time.sleep(1.2)
+                    continue
+                print(f"⚠️ [ESCADA DE LUCRO] falhou: {err}", flush=True)
+                return False
+            return False
+        except Exception as e:
+            print(f"⚠️ [ESCADA DE LUCRO] erro: {e}", flush=True)
+            return False
+
     def close_position_with_sl(self, symbol, position_side):
         """Encerra posição aberta na Bybit (pybit V5 primeiro, CCXT como fallback)."""
         try:
