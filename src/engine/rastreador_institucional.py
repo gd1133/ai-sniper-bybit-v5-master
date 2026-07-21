@@ -256,6 +256,8 @@ class RastreadorInstitucional:
 
             close = float(row['close'])
             open_p = float(row['open'])
+            high = float(row['high'])
+            low = float(row['low'])
             vwap = float(row['vwap'])
             spread = float(row['spread'])
             spread_ma = float(row['spread_ma']) if pd.notna(row['spread_ma']) else 0.0
@@ -266,11 +268,15 @@ class RastreadorInstitucional:
             if spread <= (spread_ma * self.multiplicador_spread):
                 continue
 
-            # Sinal institucional: volume anômalo + VWAP + spread
+            # Sinal institucional: volume anômalo + VWAP + spread + anatomia da vela
             if close > open_p and close > vwap:
-                df.iloc[i, df.columns.get_loc('sinal_institucional')] = 'COMPRA_INSTITUCIONAL'
+                # COMPRA exige close nos 35% superiores (pressão de sombra)
+                if close >= (high - (spread * 0.35)):
+                    df.iloc[i, df.columns.get_loc('sinal_institucional')] = 'COMPRA_INSTITUCIONAL'
             elif close < open_p and close < vwap:
-                df.iloc[i, df.columns.get_loc('sinal_institucional')] = 'VENDA_INSTITUCIONAL'
+                # VENDA exige close nos 35% inferiores
+                if close <= (low + (spread * 0.35)):
+                    df.iloc[i, df.columns.get_loc('sinal_institucional')] = 'VENDA_INSTITUCIONAL'
 
         df['amplitude_pct_atual'] = amp_now
         return df

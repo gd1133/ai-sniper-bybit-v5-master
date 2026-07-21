@@ -2586,12 +2586,12 @@ def sniper_worker_loop():
 
                     # ══════════════════════════════════════════════════════════
                     # SHORT-CIRCUIT ABSOLUTO (Cérebro 2) — ANTES do Cérebro 3
-                    # Portas: ADX≥23 → BB expansão → amplitude≥0.35% → volume μ+2.5σ → VWAP
+                    # Portas: ADX≥23 → BB → amplitude → volume → VWAP → anatomia vela
                     # Qualquer falha → NEUTRO e aborta (não gasta ML / não abre ordem).
                     # ══════════════════════════════════════════════════════════
                     try:
                         from src.engine.hard_gates import institutional_entry_allowed
-                        hard_gate = institutional_entry_allowed(signals)
+                        hard_gate = institutional_entry_allowed(signals, df=df)
                     except Exception as gate_err:
                         print(
                             f"   🚫 [HARD-GATE] {clean_sym}: falha ao avaliar portas ({gate_err}) → NEUTRO",
@@ -2609,7 +2609,7 @@ def sniper_worker_loop():
                         continue
                     print(
                         f"   ✅ [HARD-GATE] {clean_sym}: "
-                        f"{hard_gate.get('sinal_institucional')} — portas 1–4 liberadas",
+                        f"{hard_gate.get('sinal_institucional')} — portas 1–5 liberadas",
                         flush=True,
                     )
 

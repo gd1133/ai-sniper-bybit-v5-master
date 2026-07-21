@@ -213,6 +213,11 @@ class IndicatorEngine:
         macd_hist = float(last['macd_hist']) if 'macd_hist' in last else 0.0
         macd_trend = 'ALTA' if macd_hist > 0 else ('BAIXA' if macd_hist < 0 else 'NEUTRO')
 
+        candle_open = float(last['open'])
+        candle_high = float(last['high'])
+        candle_low = float(last['low'])
+        candle_close = float(last['close'])
+
         signals_out = {
             'trend': trend,
             'price': float(current_price),
@@ -226,6 +231,11 @@ class IndicatorEngine:
             'atr': float(last['atr']),
             'recent_return_pct': float(recent_return_pct),
             'candle_body_ratio': float(candle_body_ratio),
+            'candle_open': candle_open,
+            'candle_high': candle_high,
+            'candle_low': candle_low,
+            'candle_close': candle_close,
+            'candle_spread': float(max(candle_high - candle_low, 0.0)),
             'range_expansion': float(range_expansion),
             'distance_from_sma_pct': float(distance_from_sma_pct),
             'money_flow_side': money_flow_side,
@@ -291,6 +301,29 @@ class IndicatorEngine:
             if not signals_out.get('regime_label'):
                 amp = float(signals_out.get('amplitude_pct', 0) or 0)
                 signals_out['regime_label'] = f'LATERAL/ACUMULAÇÃO — amplitude {amp:.3f}% — sinais ignorados'
+
+        # Anatomia da vela (cor + close 35% + anti-faca) — defesa em profundidade
+        try:
+            from src.engine.candle_anatomy import analyze_from_dataframe
+            anatomy = analyze_from_dataframe(
+                self.df,
+                str(signals_out.get('sinal_institucional') or 'NEUTRO'),
+            )
+            signals_out['candle_color'] = anatomy.get('candle_color')
+            signals_out['candle_anatomy_ok'] = bool(anatomy.get('allowed'))
+            signals_out['falling_knife'] = bool(anatomy.get('falling_knife'))
+            signals_out['candle_anatomy_reason'] = anatomy.get('abort_reason') or ''
+            if (
+                str(signals_out.get('sinal_institucional') or '').upper()
+                in ('COMPRA_INSTITUCIONAL', 'VENDA_INSTITUCIONAL')
+                and not anatomy.get('allowed')
+            ):
+                signals_out['sinal_institucional'] = 'NEUTRO'
+                signals_out['money_flow_side'] = 'WAIT'
+                signals_out['candle_anatomy_blocked'] = True
+        except Exception as anat_err:
+            signals_out['candle_anatomy_ok'] = False
+            signals_out['candle_anatomy_reason'] = str(anat_err)
 
         # Fair Value Gap (SMC) — confirmação de imbalance institucional
         try:
