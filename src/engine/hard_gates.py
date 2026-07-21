@@ -8,6 +8,7 @@ Ordem obrigatória (qualquer falha → NEUTRO e aborta ANTES do Cérebro 3):
   Porta 2 — Anti-acumulação: amplitude % dos últimos 20 >= 0.35%
   Porta 3 — Pegada institucional: Volume > MA(20) + 2.5σ
   Porta 4 — Lado vs VWAP: COMPRA/VENDA_INSTITUCIONAL
+  Porta 5 — Anatomia da vela: cor + close nos 35% + anti-faca caindo
 
 O surto de volume NUNCA é avaliado se as Portas 1–2 estiverem fechadas.
 """
@@ -29,10 +30,12 @@ def _f(value: Any, default: float = 0.0) -> float:
         return default
 
 
-def evaluate_hard_gates(signals: dict | None) -> dict[str, Any]:
+def evaluate_hard_gates(signals: dict | None, df=None) -> dict[str, Any]:
     """
-    Avalia as 4 portas a partir do dict já calculado por IndicatorEngine /
+    Avalia as 5 portas a partir do dict já calculado por IndicatorEngine /
     RastreadorInstitucional. Fail-closed: dado ausente = porta fechada.
+
+    ``df`` (OHLC) é opcional mas recomendado para Porta 5 (falling knife).
     """
     signals = signals or {}
     adx = _f(signals.get('adx'))
@@ -54,6 +57,10 @@ def evaluate_hard_gates(signals: dict | None) -> dict[str, Any]:
 
     volume_ok = bool(signals.get('big_player_ativo'))
     side_ok = sinal in (INSTITUTIONAL_BUY, INSTITUTIONAL_SELL)
+
+    # Porta 5 — anatomia da vela (cor + sombra 35% + falling knife)
+    anatomy = _evaluate_anatomy_gate(signals, sinal, df=df)
+    anatomy_ok = bool(anatomy.get('allowed'))
 
     ports = {
         'porta1_adx': {
@@ -81,6 +88,16 @@ def evaluate_hard_gates(signals: dict | None) -> dict[str, Any]:
             'sinal': sinal,
             'rule': 'COMPRA: alta+close>VWAP+spread | VENDA: baixa+close<VWAP+spread',
         },
+        'porta5_anatomia_vela': {
+            'pass': anatomy_ok,
+            'candle_color': anatomy.get('candle_color'),
+            'falling_knife': anatomy.get('falling_knife'),
+            'reason': anatomy.get('abort_reason') or 'ok',
+            'rule': (
+                'COMPRA=verde+close 35% topo; VENDA=vermelha+close 35% fundo; '
+                'bloqueia COMPRA se 2 velas anteriores vermelhas com spread > MA'
+            ),
+        },
     }
 
     # Short-circuit na primeira porta fechada (ordem obrigatória)
@@ -102,6 +119,9 @@ def evaluate_hard_gates(signals: dict | None) -> dict[str, Any]:
         return _blocked(ports, NEUTRO, 'Porta 3 fechada: sem volume institucional (μ+2.5σ)')
     if not side_ok:
         return _blocked(ports, NEUTRO, f'Porta 4 fechada: sinal={sinal} (sem lado vs VWAP)')
+    if not anatomy_ok:
+        reason = anatomy.get('abort_reason') or 'anatomia da vela inválida'
+        return _blocked(ports, NEUTRO, f'Porta 5 fechada: {reason}')
 
     return {
         'allowed': True,
@@ -110,7 +130,42 @@ def evaluate_hard_gates(signals: dict | None) -> dict[str, Any]:
         'short_circuit': False,
         'ports': ports,
         'structure_filters_pass': True,
+        'candle_anatomy': anatomy,
     }
+
+
+def _evaluate_anatomy_gate(signals: dict, sinal: str, df=None) -> dict[str, Any]:
+    """Monta OHLC a partir de signals/df e avalia anatomia."""
+    try:
+        from src.engine.candle_anatomy import analyze_from_dataframe, evaluate_candle_anatomy
+    except Exception as err:
+        return {
+            'allowed': False,
+            'abort_reason': f'módulo candle_anatomy indisponível: {err}',
+            'candle_color': 'DOJI',
+            'falling_knife': False,
+        }
+
+    # Preferência: DataFrame completo (falling knife precisa de histórico)
+    if df is not None and hasattr(df, 'iloc') and len(df) >= 1:
+        return analyze_from_dataframe(df, sinal)
+
+    # Fallback: OHLC embutido nos signals (+ arrays opcionais)
+    open_p = _f(signals.get('candle_open', signals.get('open')))
+    high = _f(signals.get('candle_high', signals.get('high')))
+    low = _f(signals.get('candle_low', signals.get('low')))
+    close = _f(signals.get('candle_close', signals.get('close', signals.get('price'))))
+    return evaluate_candle_anatomy(
+        sinal_institucional=sinal,
+        open_p=open_p,
+        high=high,
+        low=low,
+        close=close,
+        opens=signals.get('candle_opens'),
+        highs=signals.get('candle_highs'),
+        lows=signals.get('candle_lows'),
+        closes=signals.get('candle_closes'),
+    )
 
 
 def _blocked(ports: dict, sinal: str, reason: str) -> dict[str, Any]:
@@ -124,9 +179,9 @@ def _blocked(ports: dict, sinal: str, reason: str) -> dict[str, Any]:
     }
 
 
-def institutional_entry_allowed(signals: dict | None) -> dict[str, Any]:
+def institutional_entry_allowed(signals: dict | None, df=None) -> dict[str, Any]:
     """Alias semântico para o radar: True só com Smart Money completo."""
-    return evaluate_hard_gates(signals)
+    return evaluate_hard_gates(signals, df=df)
 
 
 def side_matches_institutional(side: str, sinal_institucional: str) -> bool:
