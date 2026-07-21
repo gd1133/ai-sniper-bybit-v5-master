@@ -1,7 +1,9 @@
 import sqlite3
 import os
+import re
 from contextlib import closing
-from typing import List, Dict, Any
+from datetime import datetime, timedelta, timezone
+from typing import List, Dict, Any, Optional, Tuple
 from src.config import get_environment_config
 
 # DB path with fallback logic for writable locations
@@ -271,6 +273,19 @@ def init_db():
         cur.execute('CREATE INDEX IF NOT EXISTS idx_trades_pair ON trades(pair)')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_clientes_status ON clientes_sniper(status)')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_config_k ON config(k)')
+
+        # Castigo pós Stop Loss — bloqueia reentrada na mesma moeda por 24h
+        cur.execute('''
+        CREATE TABLE IF NOT EXISTS cooldown_moedas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT NOT NULL UNIQUE,
+            motivo TEXT DEFAULT 'STOP_LOSS',
+            bloqueado_ate TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_cooldown_symbol ON cooldown_moedas(symbol)')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_cooldown_bloqueado ON cooldown_moedas(bloqueado_ate)')
         return True
 
     _execute_write('init_db', _schema)
@@ -653,6 +668,125 @@ def mark_trade_profit_shield(
     except Exception as e:
         print(f"⚠️ [DATABASE] mark_trade_profit_shield: {e}")
         return False
+
+
+# ============================================================================
+# ⏸️ COOLDOWN PÓS STOP LOSS (anti-reentrada na mesma moeda)
+# ============================================================================
+
+COOLDOWN_AFTER_STOP_HOURS = float(os.getenv('COOLDOWN_AFTER_STOP_HOURS', '24'))
+
+
+def _normalize_cooldown_symbol(symbol: str) -> str:
+    return re.sub(r'[^A-Z0-9]', '', str(symbol or '').upper())
+
+
+def register_symbol_cooldown(
+    symbol: str,
+    hours: float = None,
+    motivo: str = 'STOP_LOSS',
+) -> bool:
+    """Registra castigo de reentrada para o símbolo (padrão: 24h após Stop Loss)."""
+    sym = _normalize_cooldown_symbol(symbol)
+    if not sym:
+        print("⚠️ [COOLDOWN] Símbolo inválido — castigo não registrado", flush=True)
+        return False
+
+    block_hours = float(hours if hours is not None else COOLDOWN_AFTER_STOP_HOURS)
+    blocked_until = (datetime.now(timezone.utc) + timedelta(hours=block_hours)).isoformat()
+    motivo_clean = str(motivo or 'STOP_LOSS').strip().upper()
+
+    def _op(cur, conn):
+        cur.execute(
+            '''
+            INSERT INTO cooldown_moedas (symbol, motivo, bloqueado_ate)
+            VALUES (?, ?, ?)
+            ON CONFLICT(symbol) DO UPDATE SET
+                motivo = excluded.motivo,
+                bloqueado_ate = excluded.bloqueado_ate,
+                created_at = CURRENT_TIMESTAMP
+            ''',
+            (sym, motivo_clean, blocked_until),
+        )
+        return True
+
+    try:
+        ok = bool(_execute_write('register_symbol_cooldown', _op))
+        if ok:
+            print(
+                f"⏸️ [COOLDOWN] {sym} bloqueada por {block_hours:.0f}h "
+                f"(desbloqueio ~ {blocked_until}) — motivo: {motivo_clean}",
+                flush=True,
+            )
+        return ok
+    except Exception as err:
+        print(f"⚠️ [COOLDOWN] Erro ao registrar castigo para {sym}: {err}", flush=True)
+        return False
+
+
+def is_symbol_in_cooldown(symbol: str) -> Tuple[bool, Optional[str], Optional[str]]:
+    """
+    Verifica se o par está em período de castigo.
+
+    Returns:
+        (bloqueado, bloqueado_ate_iso, motivo)
+    """
+    sym = _normalize_cooldown_symbol(symbol)
+    if not sym:
+        return False, None, None
+
+    conn = None
+    try:
+        conn = _connect()
+        cur = conn.cursor()
+        cur.execute(
+            '''
+            SELECT bloqueado_ate, motivo FROM cooldown_moedas
+            WHERE symbol = ?
+            ORDER BY id DESC
+            LIMIT 1
+            ''',
+            (sym,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return False, None, None
+
+        until_raw = str(row['bloqueado_ate'] or '').strip()
+        motivo = str(row['motivo'] or 'STOP_LOSS')
+        if not until_raw:
+            return False, None, None
+
+        try:
+            until_dt = datetime.fromisoformat(until_raw.replace('Z', '+00:00'))
+        except ValueError:
+            return False, None, None
+
+        if until_dt.tzinfo is None:
+            until_dt = until_dt.replace(tzinfo=timezone.utc)
+
+        now_utc = datetime.now(timezone.utc)
+        if now_utc < until_dt:
+            return True, until_dt.isoformat(), motivo
+
+        def _purge(cur, _conn):
+            cur.execute('DELETE FROM cooldown_moedas WHERE symbol = ?', (sym,))
+            return True
+
+        try:
+            _execute_write('purge_expired_cooldown', _purge)
+        except Exception:
+            pass
+        return False, None, None
+    except Exception as err:
+        print(f"⚠️ [COOLDOWN] Erro ao consultar castigo de {sym}: {err}", flush=True)
+        return False, None, None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 # ============================================================================
