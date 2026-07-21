@@ -644,10 +644,60 @@ def _close_open_trades_in_db(client_id, symbol, *, pnl_pct=0.0, profit=0.0, note
             updated += 1
         conn.commit()
         conn.close()
+        if updated and 'STOP_LOSS' in str(note_tag or '').upper():
+            _register_stop_loss_cooldown(symbol, source='fechamento DB')
         return updated
     except Exception as err:
         print(f"   ⚠️ [BANCO] Erro ao fechar trade {symbol}: {err}", flush=True)
         return 0
+
+
+def _register_stop_loss_cooldown(symbol, source=''):
+    """Grava castigo de 24h na tabela cooldown_moedas após Stop Loss."""
+    try:
+        db.register_symbol_cooldown(symbol, motivo='STOP_LOSS')
+    except Exception as err:
+        suffix = f" ({source})" if source else ''
+        print(f"   ⚠️ [COOLDOWN] Falha ao registrar castigo para {symbol}{suffix}: {err}", flush=True)
+
+
+def _radar_symbol_pre_checks(sym, clean_sym, radar_broker):
+    """
+    Travas de segurança antes de analisar um par no radar:
+    1) Cooldown pós Stop Loss (SQLite cooldown_moedas)
+    2) Maturidade mínima (>= 30 velas diárias Bybit V5)
+    """
+    try:
+        blocked, until, motivo = db.is_symbol_in_cooldown(sym)
+        if blocked:
+            print(
+                f"   ⏸️ [COOLDOWN] {clean_sym} em castigo até {until} "
+                f"({motivo}) — reentrada bloqueada por Stop Loss recente",
+                flush=True,
+            )
+            return False
+    except Exception as cd_err:
+        print(f"   ⚠️ [COOLDOWN] Erro ao verificar {clean_sym}: {cd_err}", flush=True)
+
+    try:
+        from src.engine.asset_maturity import check_asset_maturity
+        maturity = check_asset_maturity(radar_broker, sym)
+        if not maturity.get('allowed'):
+            print(
+                f"   🆕 [MATURIDADE] {clean_sym} descartada: {maturity.get('reason')} "
+                f"— proibido operar moedas novas/recém-listadas",
+                flush=True,
+            )
+            return False
+    except Exception as mat_err:
+        print(
+            f"   ⚠️ [MATURIDADE] Erro ao verificar {clean_sym}: {mat_err} "
+            f"— descartando por segurança",
+            flush=True,
+        )
+        return False
+
+    return True
 
 def _count_live_open_positions():
     """Conta símbolos únicos com posição aberta na Bybit (fonte de verdade)."""
@@ -1613,6 +1663,10 @@ def _monitor_financial_stop_loss():
                                             )
                                             if updated:
                                                 print(f"   💾 [BANCO] {updated} trade(s) atualizado(s) — P&L: ${profit:.2f}", flush=True)
+                                            elif motivo_fechamento == "STOP_LOSS":
+                                                _register_stop_loss_cooldown(
+                                                    symbol, source='monitor financeiro (sem trade DB)',
+                                                )
                                             else:
                                                 print(f"   ⚠️ [BANCO] Nenhum trade aberto encontrado para {symbol}", flush=True)
                                             # 🧠 Aprendizado: ajusta pesos das estratégias pelo resultado
@@ -2518,6 +2572,10 @@ def sniper_worker_loop():
                 clean_sym = _limpar_simbolo(sym)
                 central_state['status'] = f'🔍 Radar IA: {clean_sym}'
                 try:
+                    if not _radar_symbol_pre_checks(sym, clean_sym, radar_broker):
+                        time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
+                        continue
+
                     df = radar_broker.fetch_ohlcv(sym, timeframe='15m')
                     if df is None or len(df) < 200:
                         continue

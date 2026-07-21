@@ -209,8 +209,10 @@ class BybitClient:
         # --- SISTEMA DE CACHE E PROTEÇÃO CONTRA EXPULSÃO ---
         self.cache_ohlcv = {}
         self.cache_ticker = {}
+        self.cache_daily_count = {}
         self.cache_ttl_ohlcv = 30
         self.cache_ttl_ticker = 10
+        self.cache_ttl_daily_count = 3600
         self.ohlcv_failures = {}
         self.max_ohlcv_failures = 3
         self.last_request_time = {}
@@ -756,6 +758,54 @@ class BybitClient:
                 return None
 
             return self.cache_ohlcv[cache_key][0] if cache_key in self.cache_ohlcv else None
+
+    def count_daily_candles(self, symbol, limit=35):
+        """
+        Conta velas diárias (intervalo D / timeframe 1d) na Bybit V5.
+        Usado pelo filtro de maturidade — mínimo 30 dias de histórico.
+        """
+        cache_key = f"{symbol}_D"
+        if (
+            cache_key in self.cache_daily_count
+            and self._is_cache_valid(self.cache_daily_count[cache_key], self.cache_ttl_daily_count)
+        ):
+            return self.cache_daily_count[cache_key][0]
+
+        fetch_limit = max(30, min(int(limit or 35), 200))
+        v5_symbol = self._normalize_v5_symbol(symbol)
+
+        try:
+            self._apply_rate_limit('fetch_ohlcv')
+
+            if self.pybit_session:
+                rsp = self.pybit_session.get_kline(
+                    category='linear',
+                    symbol=v5_symbol,
+                    interval='D',
+                    limit=fetch_limit,
+                )
+                ok, _ = self._handle_v5_ret_code(rsp, 'get_kline')
+                if ok:
+                    rows = (rsp.get('result') or {}).get('list') or []
+                    count = len(rows)
+                    self.cache_daily_count[cache_key] = (count, time.time())
+                    return count
+
+            params = {'category': 'linear'}
+            data = self.exchange.fetch_ohlcv(
+                symbol, '1d', limit=fetch_limit, params=params,
+            )
+            count = len(data or [])
+            self.cache_daily_count[cache_key] = (count, time.time())
+            return count
+        except Exception as e:
+            print(
+                f"[MATURIDADE] Falha ao contar velas D de {symbol}: {e}",
+                flush=True,
+            )
+            if cache_key in self.cache_daily_count:
+                return self.cache_daily_count[cache_key][0]
+            return None
 
     def fetch_order_book(self, symbol, limit=20):
         """
