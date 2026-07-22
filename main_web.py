@@ -957,6 +957,21 @@ def _publish_ai_tribunal_evidence(symbol, side, tech_data, consensus, intel_ctx=
         except Exception:
             learning_stats = {'total_trades': 0, 'wins': 0, 'win_rate': float(central_state.get('win_rate') or 0), 'total_pnl': 0, 'summary': 'Sem histórico local ainda'}
 
+        # Feedback Loop evolutivo — desbloqueia "0 Amostras" no Render
+        try:
+            from src.learning.feedback_loop import get_feedback_loop
+            fb = get_feedback_loop().resumo_aprendizado()
+            if int(fb.get('sample_size') or 0) > 0 or not int(learning_stats.get('total_trades') or 0):
+                learning_stats = {
+                    **learning_stats,
+                    'total_trades': int(fb.get('sample_size') or learning_stats.get('total_trades') or 0),
+                    'win_rate': float(fb.get('win_rate') or learning_stats.get('win_rate') or 0),
+                    'summary': fb.get('summary') or learning_stats.get('summary'),
+                    'modulos_ia': fb.get('modulos') or [],
+                }
+        except Exception:
+            pass
+
         # Completa win rate global se o par não tem amostra
         if int(learning_stats.get('total_trades') or 0) == 0 and central_state.get('win_rate'):
             learning_stats = {
@@ -980,6 +995,42 @@ def _publish_ai_tribunal_evidence(symbol, side, tech_data, consensus, intel_ctx=
             threshold=float(THRESHOLD_ENTRADA),
             max_positions=int(MAX_MOEDAS_ATIVAS),
         )
+
+        # Sobrescreve pesos/assertividade dos agentes com pesos_ia_evolutivo
+        try:
+            mods = (learning_stats.get('modulos_ia') or [])
+            if mods:
+                by_label = {str(m.get('modulo')): m for m in mods}
+                label_map = {
+                    'groq': 'Groq Tático',
+                    'analyst': 'Analista de Dados',
+                    'learner': 'Aprendizado Neural',
+                }
+                agents = list(evidence.get('agents') or [])
+                for agent in agents:
+                    key = label_map.get(agent.get('id'))
+                    if not key or key not in by_label:
+                        continue
+                    m = by_label[key]
+                    agent['weight'] = float(m.get('peso_pct') or agent.get('weight') or 0)
+                    agent['assertiveness'] = float(m.get('assertividade') or agent.get('assertiveness') or 0)
+                    agent['samples'] = int(m.get('total_amostras') or 0)
+                    agent['learning_notes'] = (
+                        f"{int(m.get('total_amostras') or 0)} amostras · "
+                        f"{float(m.get('assertividade') or 0):.0f}% assertividade · "
+                        f"peso {float(m.get('peso_pct') or 0):.0f}%"
+                    )
+                evidence['agents'] = agents
+                evidence['learning_from_history'] = {
+                    **(evidence.get('learning_from_history') or {}),
+                    'sample_size': int(learning_stats.get('total_trades') or 0),
+                    'win_rate': float(learning_stats.get('win_rate') or 0),
+                    'summary': learning_stats.get('summary') or '',
+                    'modulos': mods,
+                }
+        except Exception:
+            pass
+
         central_state['evidence'] = evidence
         central_state['ai_tribunal'] = {
             'agents': evidence.get('agents'),
@@ -992,16 +1043,15 @@ def _publish_ai_tribunal_evidence(symbol, side, tech_data, consensus, intel_ctx=
             'motivo': str((consensus or {}).get('motivo') or evidence.get('strategic_reason') or ''),
             'decisao': evidence.get('side'),
             'probabilidade': evidence.get('confidence'),
-            'assertiveness': evidence.get('assertiveness'),
-            'brains': evidence.get('brains') or {},
-            'dialogue_preview': (evidence.get('dialogue') or [{}])[-1].get('text', ''),
+            'dialogue_preview': (evidence.get('dialogue') or [{}])[-1].get('text', '') if evidence.get('dialogue') else '',
         }
+        central_state['pesos_ia_evolutivo'] = learning_stats.get('modulos_ia') or []
         central_state['confidence'] = evidence.get('confidence', central_state.get('confidence', 0))
         if evidence.get('symbol'):
             central_state['symbol'] = evidence['symbol']
         return evidence
-    except Exception as exc:
-        print(f'⚠️ [TRIBUNAL] Falha ao publicar evidência: {exc}', flush=True)
+    except Exception as err:
+        print(f"⚠️ [TRIBUNAL] Falha ao publicar evidência: {err}", flush=True)
         return None
 
 
@@ -1152,8 +1202,64 @@ def _adaptive_record_outcome(symbol, pnl_pct):
             )
         except Exception:
             pass
+        # Cooldown backup se perda (Feedback Loop também cobre via get_closed_pnl)
+        try:
+            if pnl <= 0:
+                _register_stop_loss_cooldown(symbol, source='adaptive_outcome')
+        except Exception:
+            pass
     except Exception as e:
         print(f"⚠️ [PESOS IA] outcome {symbol}: {e}", flush=True)
+
+
+def _run_feedback_pnl_sync(force: bool = False):
+    """
+    Reconcilia P&L fechado Bybit V5 → WIN/LOSS + cooldown + RL.
+    Chamado no início de cada ciclo do radar (throttle 30s).
+    """
+    try:
+        from src.learning.feedback_loop import get_feedback_loop
+        key, sec = '', ''
+        broker = None
+        try:
+            _, key, sec = _get_active_investor_bybit_credentials()
+        except Exception:
+            pass
+        try:
+            clientes = _get_registered_clients(active_only=True)
+            if clientes:
+                broker = _make_broker(clientes[0])
+        except Exception:
+            broker = None
+        fb = get_feedback_loop()
+        result = fb.sincronizar_trades_fechados(
+            api_key=key or '',
+            api_secret=sec or '',
+            broker=broker,
+            force=force,
+        )
+        # Atualiza métricas no central_state para o /api/status
+        try:
+            resumo = fb.resumo_aprendizado()
+            central_state['pesos_ia_evolutivo'] = resumo.get('modulos') or []
+            central_state['feedback_learning'] = resumo
+            if int(resumo.get('sample_size') or 0) > 0:
+                ev = central_state.get('evidence') or {}
+                lfh = dict(ev.get('learning_from_history') or {})
+                lfh.update({
+                    'sample_size': resumo.get('sample_size'),
+                    'win_rate': resumo.get('win_rate'),
+                    'summary': resumo.get('summary'),
+                    'modulos': resumo.get('modulos'),
+                })
+                ev['learning_from_history'] = lfh
+                central_state['evidence'] = ev
+        except Exception:
+            pass
+        return result
+    except Exception as err:
+        print(f"⚠️ [FEEDBACK LOOP] sync ciclo: {err}", flush=True)
+        return {'errors': [str(err)]}
 
 def _make_broker(client):
     """
@@ -1389,6 +1495,26 @@ def _build_api_status_payload():
     payload['saldo_atual'] = balance
     payload['posicoes'] = active_trades
     payload['active_positions'] = active_trades
+    # Feedback Loop — amostras/pesos para o painel (evita travar em 0)
+    try:
+        from src.learning.feedback_loop import get_feedback_loop
+        resumo = get_feedback_loop().resumo_aprendizado()
+        payload['pesos_ia_evolutivo'] = resumo.get('modulos') or payload.get('pesos_ia_evolutivo') or []
+        payload['feedback_learning'] = resumo
+        ev = payload.get('evidence') if isinstance(payload.get('evidence'), dict) else {}
+        if int(resumo.get('sample_size') or 0) > 0:
+            lfh = dict(ev.get('learning_from_history') or {})
+            lfh.update({
+                'sample_size': resumo.get('sample_size'),
+                'win_rate': resumo.get('win_rate'),
+                'summary': resumo.get('summary'),
+                'modulos': resumo.get('modulos'),
+            })
+            ev = dict(ev)
+            ev['learning_from_history'] = lfh
+            payload['evidence'] = ev
+    except Exception:
+        pass
     payload['radar'] = payload.get('symbol') or '---'
     payload['confianca_ia'] = _coerce_float(payload.get('confidence'), default=0.0)
     # Card da próxima entrada (~5% da banca) com filtro de viabilidade
@@ -2439,6 +2565,9 @@ def sniper_worker_loop():
 
     while True:
         try:
+            # Feedback Loop: reconcilia fechamentos Bybit antes de buscar novos pares
+            _run_feedback_pnl_sync(force=False)
+
             _repair_open_trades()
             _calcular_pnl_trades()
             _refresh_real_balance_state()
@@ -3043,6 +3172,25 @@ def _process_client_orders_background(
                             quantity=qty,
                             margin=margem
                         )
+                        # Feedback Loop — log inicial ABERTA (sinais Groq/Gemini/Cérebro 3)
+                        try:
+                            from src.learning.feedback_loop import get_feedback_loop
+                            get_feedback_loop().registrar_operacao_aberta(
+                                symbol,
+                                side_label,
+                                client_id=int(c.get('id') or 0),
+                                entry_price=float(entry_price or 0),
+                                quantity=float(qty or 0),
+                                bybit_order_id=str(order_id),
+                                sinais={
+                                    'motivo': reason,
+                                    'confidence': confidence,
+                                    'structural_signal': structural_signal,
+                                    'entry_pct': entry_pct_label,
+                                },
+                            )
+                        except Exception as fb_open_err:
+                            print(f"   ⚠️ [FEEDBACK LOOP] ABERTA não registrada: {fb_open_err}", flush=True)
 
                         # TP/SL já foram vinculados à ordem principal. Só usa a rota
                         # separada (set_trading_stop) como fallback se o inline falhou.
@@ -3170,20 +3318,52 @@ def add_cliente():
 @app.route('/api/estrategias/pesos', methods=['GET'])
 def api_estrategias_pesos():
     """
-    Pesos das 5 estratégias ajustados automaticamente pelo aprendizado do Cérebro 3:
-    SMA, SuperTrend, Fibonacci, Volume e Suporte/Resistência.
+    Pesos das 5 estratégias + módulos evolutivos (Groq/Analista/Neural)
+    alimentados pelo Feedback Loop (desbloqueia 0 Amostras no Render).
     """
     try:
         report = _get_local_ml().get_strategy_weights_report()
         total_samples = sum(int(r.get('samples', 0)) for r in report)
+        modulos = []
+        amostras_fb = 0
+        try:
+            from src.learning.feedback_loop import get_feedback_loop
+            fb = get_feedback_loop()
+            modulos = fb.consultar_metricas_dashboard()
+            amostras_fb = max((int(m.get('total_amostras') or 0) for m in modulos), default=0)
+        except Exception:
+            modulos = []
         return jsonify({
             "status": "ok",
-            "aprendendo": any(r.get('learning') for r in report),
-            "amostras_totais": total_samples,
+            "aprendendo": any(r.get('learning') for r in report) or amostras_fb > 0,
+            "amostras_totais": max(total_samples, amostras_fb),
             "estrategias": report,
+            "modulos_ia": modulos,
+            "pesos_ia_evolutivo": modulos,
         }), 200
     except Exception as e:
-        return jsonify({"status": "erro", "msg": str(e), "estrategias": []}), 200
+        return jsonify({"status": "erro", "msg": str(e), "estrategias": [], "modulos_ia": []}), 200
+
+
+@app.route('/api/ia/pesos-evolutivo', methods=['GET'])
+def api_pesos_ia_evolutivo():
+    """Endpoint dedicado do painel Render — métricas do Feedback Loop."""
+    try:
+        from src.learning.feedback_loop import get_feedback_loop
+        fb = get_feedback_loop()
+        modulos = fb.consultar_metricas_dashboard()
+        resumo = fb.resumo_aprendizado()
+        return jsonify({
+            "status": "ok",
+            "amostras_totais": resumo.get('sample_size', 0),
+            "win_rate": resumo.get('win_rate', 0),
+            "assertividade_media": resumo.get('assertividade_media', 0),
+            "summary": resumo.get('summary', ''),
+            "modulos": modulos,
+        }), 200
+    except Exception as e:
+        return jsonify({"status": "erro", "msg": str(e), "modulos": []}), 200
+
 
 @app.route('/api/status', methods=['GET'])
 def get_status():

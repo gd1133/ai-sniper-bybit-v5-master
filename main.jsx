@@ -119,6 +119,9 @@ const AiAnalyzerCard = ({ agent }) => {
         {agent?.learning_notes ? (
           <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-wide leading-relaxed">Aprendeu: {agent.learning_notes}</p>
         ) : null}
+        {Number(agent?.samples || 0) > 0 ? (
+          <p className="text-[10px] text-zinc-600 font-black uppercase tracking-widest">{Number(agent.samples)} amostras</p>
+        ) : null}
       </div>
     </div>
   );
