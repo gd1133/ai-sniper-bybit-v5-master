@@ -286,6 +286,60 @@ def init_db():
         ''')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_cooldown_symbol ON cooldown_moedas(symbol)')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_cooldown_bloqueado ON cooldown_moedas(bloqueado_ate)')
+
+        # Feedback Loop — operações ABERTA/WIN/LOSS + pesos evolutivos das IAs
+        cur.execute('''
+        CREATE TABLE IF NOT EXISTS operacoes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_id INTEGER DEFAULT 0,
+            ativo TEXT NOT NULL,
+            side TEXT DEFAULT '',
+            status TEXT DEFAULT 'ABERTA',
+            pnl_realizado REAL DEFAULT 0,
+            entry_price REAL DEFAULT 0,
+            exit_price REAL DEFAULT 0,
+            quantity REAL DEFAULT 0,
+            sinais_json TEXT DEFAULT '',
+            bybit_order_id TEXT DEFAULT '',
+            closed_pnl_order_id TEXT DEFAULT '',
+            closed_at TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_operacoes_status ON operacoes(status)')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_operacoes_ativo ON operacoes(ativo)')
+
+        cur.execute('''
+        CREATE TABLE IF NOT EXISTS pesos_ia_evolutivo (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            modulo TEXT UNIQUE NOT NULL,
+            peso REAL DEFAULT 0.33,
+            acertos INTEGER DEFAULT 0,
+            erros INTEGER DEFAULT 0,
+            total_amostras INTEGER DEFAULT 0,
+            assertividade REAL DEFAULT 0.0,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        for _mod in ('Groq Tático', 'Analista de Dados', 'Aprendizado Neural'):
+            cur.execute(
+                '''
+                INSERT OR IGNORE INTO pesos_ia_evolutivo
+                    (modulo, peso, acertos, erros, total_amostras, assertividade)
+                VALUES (?, 0.33, 0, 0, 0, 0.0)
+                ''',
+                (_mod,),
+            )
+
+        cur.execute('''
+        CREATE TABLE IF NOT EXISTS feedback_pnl_processados (
+            order_id TEXT PRIMARY KEY,
+            symbol TEXT,
+            closed_pnl REAL,
+            status TEXT,
+            processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
         return True
 
     _execute_write('init_db', _schema)
@@ -297,6 +351,13 @@ def init_db():
         init_trade_history_table()
     except Exception as th_err:
         print(f"⚠️ [DATABASE] Aviso ao inicializar trade_history: {th_err}")
+
+    # Feedback Loop (pesos evolutivos / operacoes)
+    try:
+        from src.learning.feedback_loop import get_feedback_loop
+        get_feedback_loop().inicializar_tabelas()
+    except Exception as fb_err:
+        print(f"⚠️ [DATABASE] Aviso ao inicializar Feedback Loop: {fb_err}")
 
 
 def get_active_clients() -> List[Dict[str, Any]]:
