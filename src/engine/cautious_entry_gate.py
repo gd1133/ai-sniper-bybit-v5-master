@@ -136,13 +136,23 @@ def cautious_entry_gate(
                 ]
             reasons.append('✅ Compra no fundo com vela FORTE VERDE (bounce)')
         else:
-            # Em tendência normal: exige vela verde + (forte OU engolfo OU FVG OU momentum)
+            # Em tendência normal: LONG RÍGIDO — exige vela FORTE verde (não basta 2 verdes fracas)
             if not is_bullish_candle(last):
                 return False, ['⛔ Aguardando vela VERDE de confirmação']
-            if not (strong_up or engulf_up or fvg['fvg_bullish'] or bulls >= 2):
+            whale_ok = bool(signals.get('whale_aligned')) or float(signals.get('whale_score') or 0) >= 40
+            if bool(signals.get('meltdown')) or bool(signals.get('falling_knife')):
+                return False, ['⛔ LONG bloqueado — mercado em derretimento/falling-knife']
+            if not strong_up:
                 return False, [
-                    '⛔ Momento ainda fraco — aguarde vela FORTE / engolfo / FVG / 2+ verdes'
+                    '⛔ LONG RÍGIDO — exige vela FORTE VERDE (sem chase de topo fraco)'
                 ]
+            if not (whale_ok or engulf_up or fvg['fvg_bullish']):
+                return False, [
+                    '⛔ LONG RÍGIDO — exige BALEIAS alinhadas ou engolfo/FVG institucional'
+                ]
+            if whale_ok:
+                reasons.append('✅ Baleias alinhadas na COMPRA')
+            reasons.append('✅ Vela FORTE VERDE (long rígido)')
 
         if strong_up:
             reasons.append('Vela FORTE VERDE confirmada')
@@ -184,8 +194,21 @@ def cautious_entry_gate(
         else:
             if not is_bearish_candle(last):
                 return False, ['⛔ Aguardando vela VERMELHA de confirmação']
-            # Exige força real — não vender em vela vermelha fraca/doji
-            if not (strong_down or engulf_down or fvg['fvg_bearish'] or bears >= 2):
+            # Derretimento (2 vermelhas / dump): libera SHORT com menos burocracia
+            meltdown_fast = (
+                bears >= 2
+                and strong_down
+                and (
+                    bool(signals.get('meltdown'))
+                    or bool(signals.get('second_red_entry'))
+                    or bool(signals.get('falling_knife'))
+                )
+            )
+            if meltdown_fast:
+                reasons.append(
+                    '✅ DERRETIMENTO: 2ª vermelha forte — SHORT liberado (tese dump)'
+                )
+            elif not (strong_down or engulf_down or fvg['fvg_bearish'] or bears >= 2):
                 return False, [
                     '⛔ Momento ainda fraco para venda — '
                     'aguarde vela FORTE VERMELHA / engolfo / FVG'

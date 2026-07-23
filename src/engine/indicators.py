@@ -325,6 +325,22 @@ class IndicatorEngine:
             signals_out['candle_anatomy_ok'] = False
             signals_out['candle_anatomy_reason'] = str(anat_err)
 
+        # Derretimento / assimetria (SHORT agressivo, LONG rígido)
+        try:
+            from src.engine.asymmetric_sniper import detect_meltdown
+            melt = detect_meltdown(self.df, signals_out)
+            signals_out['meltdown'] = bool(melt.get('meltdown'))
+            signals_out['meltdown_strength'] = float(melt.get('strength') or 0)
+            signals_out['second_red_entry'] = bool(melt.get('second_red_entry'))
+            signals_out['meltdown_reason'] = melt.get('reason') or ''
+            # Em dump: se ainda estava marcado COMPRA, força NEUTRO (não comprar faca)
+            if melt.get('meltdown') and str(signals_out.get('sinal_institucional') or '').upper() == 'COMPRA_INSTITUCIONAL':
+                signals_out['sinal_institucional'] = 'NEUTRO'
+                signals_out['money_flow_side'] = 'WAIT'
+                signals_out['meltdown_blocked_long'] = True
+        except Exception:
+            signals_out.setdefault('meltdown', False)
+
         # Fair Value Gap (SMC) — confirmação de imbalance institucional
         try:
             from src.engine.cautious_entry_gate import detect_fair_value_gap
