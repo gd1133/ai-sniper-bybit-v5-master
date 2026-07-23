@@ -2835,12 +2835,49 @@ def sniper_worker_loop():
                         time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
                         continue
 
-                    # Baleias: bônus no score (abaixo), não mais hard-block
-                    if not intel_ctx.get('whale_aligned'):
+                    # ── ENTRADA ASSIMÉTRICA (opinião quant + setups que lucram) ──
+                    # SHORT em derretimento = agressivo | LONG = rígido (baleias + vela forte)
+                    try:
+                        from src.engine.asymmetric_sniper import (
+                            detect_meltdown,
+                            evaluate_asymmetric_entry,
+                            pleno_study_notes,
+                        )
+                        melt_pre = detect_meltdown(df, signals)
+                        signals = dict(signals)
+                        signals['meltdown'] = bool(melt_pre.get('meltdown'))
+                        signals['meltdown_strength'] = float(melt_pre.get('strength') or 0)
+                        signals['second_red_entry'] = bool(melt_pre.get('second_red_entry'))
+                        if melt_pre.get('prefer_short') and melt_pre.get('reason'):
+                            print(
+                                f"   🧊 [DERRETIMENTO] {clean_sym}: {melt_pre.get('reason')}",
+                                flush=True,
+                            )
+
+                        asym = evaluate_asymmetric_entry(
+                            side_exec, df, signals, intel_ctx=intel_ctx,
+                        )
+                        if not asym.get('allowed'):
+                            print(
+                                f"   🚫 [ASSIMÉTRICO] {clean_sym} {side_exec.upper()}: "
+                                f"{asym.get('abort_reason')}",
+                                flush=True,
+                            )
+                            time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
+                            continue
+                        for note in pleno_study_notes(side_exec, asym, signals)[:2]:
+                            print(f"   🧠 [PLENO] {clean_sym}: {note}", flush=True)
+                        signals['asymmetric_boost'] = float(asym.get('score_boost') or 0)
+                        signals['asymmetric_ok'] = True
+                    except Exception as asym_err:
                         print(
-                            f"   ⚡ [BALEIAS] {clean_sym}: fluxo parcial — seguindo tendência {trend_now} (modo agressivo)",
+                            f"   ⚠️ [ASSIMÉTRICO] {clean_sym}: falha ({asym_err}) — "
+                            f"fail-closed em LONG, libera SHORT só com tendência",
                             flush=True,
                         )
+                        if side_exec == 'buy':
+                            time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
+                            continue
 
                     signals_timing = dict(signals)
                     signals_timing['whale_aligned'] = bool(intel_ctx.get('whale_aligned'))
@@ -2899,6 +2936,14 @@ def sniper_worker_loop():
                         chart_bonus += 8.0
                     if intel_ctx.get('whale_aligned'):
                         chart_bonus += 10.0  # prioriza oportunidades com baleias alinhadas
+                    # Boost assimétrico: derretimento SHORT / long institucional
+                    chart_bonus += float(signals.get('asymmetric_boost') or 0)
+                    if signals.get('meltdown') and side_exec == 'sell':
+                        chart_bonus += 14.0
+                        print(
+                            f"   🔥 [SHORT DUMP] {clean_sym}: prioridade de score em derretimento",
+                            flush=True,
+                        )
                     # BLOQUEIO ABSOLUTO de lado: Cérebro 3 só opera a favor do Smart Money
                     from src.engine.hard_gates import side_matches_institutional
                     inst_sig = str(signals.get('sinal_institucional', 'NEUTRO') or 'NEUTRO').upper()
