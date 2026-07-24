@@ -106,19 +106,108 @@ def _connect():
         try:
             conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30.0)
             conn.row_factory = sqlite3.Row
+            # Integrity check leve: falha cedo se a imagem estiver malformada
             conn.execute('PRAGMA journal_mode=WAL')
             conn.execute('PRAGMA synchronous=NORMAL')
             conn.execute('PRAGMA busy_timeout=15000')
             conn.execute('PRAGMA foreign_keys=ON')
+            conn.execute('SELECT 1').fetchone()
             return conn
         except sqlite3.OperationalError as err:
+            # OperationalError é subclass de DatabaseError — tratar ANTES
             last_err = err
+            if _is_malformed_db_error(err):
+                print(
+                    f"🚨 [DATABASE] Conexão detectou SQLite malformado: {err}",
+                    flush=True,
+                )
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                purge_corrupted_database(reason=str(err)[:120])
+                try:
+                    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30.0)
+                    conn.row_factory = sqlite3.Row
+                    conn.execute('PRAGMA journal_mode=WAL')
+                    conn.execute('PRAGMA synchronous=NORMAL')
+                    conn.execute('PRAGMA busy_timeout=15000')
+                    conn.execute('PRAGMA foreign_keys=ON')
+                    return conn
+                except Exception as retry_err:
+                    raise retry_err from err
             msg = str(err).lower()
             if 'disk i/o' in msg or 'locked' in msg or 'unable to open' in msg:
                 _time.sleep(0.35 * (attempt + 1))
                 continue
             raise
+        except sqlite3.DatabaseError as err:
+            last_err = err
+            if _is_malformed_db_error(err):
+                print(
+                    f"🚨 [DATABASE] Conexão detectou SQLite malformado: {err}",
+                    flush=True,
+                )
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                purge_corrupted_database(reason=str(err)[:120])
+                try:
+                    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30.0)
+                    conn.row_factory = sqlite3.Row
+                    conn.execute('PRAGMA journal_mode=WAL')
+                    conn.execute('PRAGMA synchronous=NORMAL')
+                    conn.execute('PRAGMA busy_timeout=15000')
+                    conn.execute('PRAGMA foreign_keys=ON')
+                    return conn
+                except Exception as retry_err:
+                    raise retry_err from err
+            raise
     raise last_err
+
+
+def _is_malformed_db_error(err: BaseException) -> bool:
+    """Detecta SQLite corrompido (database disk image is malformed)."""
+    msg = str(err or '').lower()
+    return (
+        'malformed' in msg
+        or 'file is not a database' in msg
+        or 'disk image is malformed' in msg
+    )
+
+
+def _sidecar_db_paths(db_path: str | None = None) -> list:
+    """Arquivo principal + sidecars WAL/SHM do SQLite."""
+    path = db_path or DB_PATH
+    return [path, f'{path}-wal', f'{path}-shm', f'{path}-journal']
+
+
+def purge_corrupted_database(reason: str = 'malformed') -> bool:
+    """
+    Remove o arquivo SQLite corrompido e sidecars (-wal/-shm) para permitir recriação.
+    Retorna True se pelo menos um arquivo foi removido (ou já não existia o principal).
+    """
+    removed = []
+    for path in _sidecar_db_paths():
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+                removed.append(path)
+        except OSError as err:
+            print(f"⚠️ [DATABASE] Falha ao remover {path}: {err}", flush=True)
+    if removed:
+        print(
+            f"🗑️ [DATABASE] Banco corrompido removido ({reason}): "
+            f"{', '.join(removed)}",
+            flush=True,
+        )
+    else:
+        print(
+            f"🗑️ [DATABASE] Nenhum arquivo de banco para remover ({reason}) em {DB_PATH}",
+            flush=True,
+        )
+    return True
 
 
 def _execute_write(operation_name: str, sql_fn) -> Any:
@@ -199,7 +288,13 @@ def _ensure_column(cur, table: str, column: str, definition: str):
 
 
 def init_db():
-    """Inicializa banco com tabelas otimizadas e sem travamentos"""
+    """
+    Inicializa banco com tabelas otimizadas e sem travamentos.
+
+    Se o arquivo SQLite estiver corrompido (``database disk image is malformed``),
+    apaga o arquivo + sidecars WAL/SHM e recria o schema do zero — evita crash
+    no boot do Render (gunicorn / main_web.init_db).
+    """
     db_dir = os.path.dirname(DB_PATH)
     if db_dir:  # Only create directory if there's a directory component
         os.makedirs(db_dir, exist_ok=True)
@@ -342,7 +437,32 @@ def init_db():
         ''')
         return True
 
-    _execute_write('init_db', _schema)
+    def _run_schema_once():
+        _execute_write('init_db', _schema)
+
+    try:
+        _run_schema_once()
+    except Exception as err:
+        if not _is_malformed_db_error(err):
+            raise
+        print(
+            f"🚨 [DATABASE] SQLite corrompido detectado em {DB_PATH}: {err}",
+            flush=True,
+        )
+        print(
+            "♻️ [DATABASE] Removendo imagem malformada e recriando banco do zero...",
+            flush=True,
+        )
+        purge_corrupted_database(reason=str(err)[:120])
+        try:
+            _run_schema_once()
+        except Exception as retry_err:
+            print(
+                f"❌ [DATABASE] Falha ao recriar banco após purge: {retry_err}",
+                flush=True,
+            )
+            raise
+
     print(f"✅ [DATABASE] Schema inicializado em {DB_PATH}")
 
     # Inicializa tabela de histórico avançado para a IA analista
