@@ -379,7 +379,15 @@ app = Flask(__name__, static_folder=_DIST_DIR, static_url_path='')
 CORS(app)
 
 if db is not None:
-    db.init_db()
+    try:
+        db.init_db()
+    except Exception as boot_db_err:
+        # init_db já tenta purge+recreate em malformed; se ainda falhar, log explícito
+        print(
+            f"❌ [BOOT] Falha crítica ao inicializar SQLite: {boot_db_err}",
+            flush=True,
+        )
+        raise
 
 # ==============================================================================
 # 🎨 FUNÇÕES DE VALIDAÇÃO DO BUILD DO FRONTEND VITE (REACT)
