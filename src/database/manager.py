@@ -435,6 +435,30 @@ def init_db():
             processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         ''')
+
+        # Tribunal de IAs — cards do dashboard em tempo real
+        cur.execute('''
+        CREATE TABLE IF NOT EXISTS tribunal_debate (
+            symbol TEXT PRIMARY KEY,
+            groq_score INTEGER DEFAULT 0,
+            groq_action TEXT DEFAULT 'WAIT',
+            groq_reason TEXT DEFAULT '',
+            dados_score INTEGER DEFAULT 0,
+            dados_action TEXT DEFAULT 'WAIT',
+            dados_reason TEXT DEFAULT '',
+            neural_score INTEGER DEFAULT 0,
+            neural_action TEXT DEFAULT 'WAIT',
+            neural_reason TEXT DEFAULT '',
+            gemini_score INTEGER DEFAULT 0,
+            gemini_action TEXT DEFAULT 'WAIT',
+            gemini_reason TEXT DEFAULT '',
+            side TEXT DEFAULT '',
+            confidence REAL DEFAULT 0,
+            raw_json TEXT DEFAULT '',
+            timestamp TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_tribunal_ts ON tribunal_debate(timestamp)')
         return True
 
     def _run_schema_once():

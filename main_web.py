@@ -622,8 +622,131 @@ def start_runtime_services():
         threading.Thread(target=_monitor_financial_stop_loss, daemon=True).start()
         threading.Thread(target=_fetch_active_client_balances, kwargs={'force': True}, daemon=True).start()
         threading.Thread(target=_monitor_dashboard_positions, daemon=True).start()
+        try:
+            _start_position_sentinel()
+        except Exception as sent_err:
+            print(f"⚠️ [BOOT] Sentinela adiada: {sent_err}", flush=True)
         RUNTIME_STARTED = True
         return True
+
+
+def _start_position_sentinel():
+    """Inicia SentinelaPosicaoAtiva (saída de emergência por dump/pump)."""
+    from src.risk.position_sentinel import get_position_sentinel
+
+    def _collect_open_positions():
+        positions = []
+        try:
+            for trade in (central_state.get('active_trades') or []):
+                positions.append({
+                    'symbol': trade.get('raw_symbol') or trade.get('symbol'),
+                    'side': trade.get('side') or 'buy',
+                    'client_id': trade.get('client_id'),
+                })
+        except Exception:
+            pass
+        if positions:
+            return positions
+        # Fallback: posições live Bybit
+        try:
+            for cliente in _get_registered_clients(active_only=True):
+                broker = _make_broker(cliente)
+                if not broker or not getattr(broker, 'pybit_session', None):
+                    continue
+                rsp = broker.pybit_session.get_positions(category='linear', settleCoin='USDT')
+                ok, _ = broker._handle_v5_ret_code(rsp, 'get_positions')
+                if not ok:
+                    continue
+                for pos in (rsp.get('result') or {}).get('list', []):
+                    if float(pos.get('size') or 0) <= 0:
+                        continue
+                    positions.append({
+                        'symbol': pos.get('symbol'),
+                        'side': 'buy' if str(pos.get('side') or '').lower() in ('buy', 'long') else 'sell',
+                        'client_id': cliente.get('id'),
+                        'broker': broker,
+                    })
+        except Exception:
+            pass
+        return positions
+
+    def _fetch_ohlcv(symbol, timeframe='15m'):
+        try:
+            return _get_public_radar_broker_mainnet().fetch_ohlcv(symbol, timeframe=timeframe)
+        except Exception:
+            return None
+
+    def _close_pos(symbol, side):
+        try:
+            for cliente in _get_registered_clients(active_only=True):
+                broker = _make_broker(cliente)
+                if broker and broker.close_position_with_sl(symbol, side):
+                    return True
+        except Exception as err:
+            print(f"⚠️ [SENTINELA] close: {err}", flush=True)
+        return False
+
+    def _on_debate(symbol, debate):
+        try:
+            from src.database.tribunal_store import save_tribunal_debate
+            agents = []
+            for v in debate.get('votes') or []:
+                agents.append({
+                    'id': v.get('id'),
+                    'label': v.get('label'),
+                    'score': v.get('score'),
+                    'action': v.get('action'),
+                    'motivo': v.get('motivo'),
+                })
+            # Map learner/analyst/groq ids
+            save_tribunal_debate(
+                symbol,
+                agents=agents,
+                side='EXIT',
+                confidence=float(debate.get('exit_votes') or 0) * 33,
+                extra={'emergency': True, 'summary': debate.get('summary')},
+            )
+            central_state['status'] = f"🚨 Sentinela: {debate.get('summary')}"
+        except Exception:
+            pass
+
+    def _record_exit(symbol, side, note):
+        try:
+            for cliente in _get_registered_clients(active_only=True):
+                _close_open_trades_in_db(
+                    cliente.get('id'),
+                    symbol,
+                    pnl_pct=0.0,
+                    profit=0.0,
+                    note_tag=f' | {note}',
+                )
+        except Exception:
+            pass
+        try:
+            db.record_trade(
+                client_id=1,
+                pair=symbol,
+                side=str(side).upper(),
+                pnl_pct=0,
+                profit=0.0,
+                closed_at=time.strftime('%d/%m %H:%M'),
+                notes=note,
+                status='closed',
+            )
+        except Exception:
+            pass
+
+    def _cycle():
+        get_position_sentinel().run_once(
+            get_open_positions=_collect_open_positions,
+            fetch_ohlcv=_fetch_ohlcv,
+            close_position=_close_pos,
+            on_debate=_on_debate,
+            record_exit=_record_exit,
+        )
+
+    get_position_sentinel().start(cycle_fn=_cycle)
+    print("🛡️ [BOOT] SentinelaPosicaoAtiva ativa", flush=True)
 
 def _limpar_simbolo(sym):
     if not sym: return "---"
@@ -1057,6 +1180,20 @@ def _publish_ai_tribunal_evidence(symbol, side, tech_data, consensus, intel_ctx=
         central_state['confidence'] = evidence.get('confidence', central_state.get('confidence', 0))
         if evidence.get('symbol'):
             central_state['symbol'] = evidence['symbol']
+
+        # Persistência SQLite — alimenta /api/tribunal/status e cards do Render
+        try:
+            from src.database.tribunal_store import save_tribunal_debate
+            save_tribunal_debate(
+                symbol,
+                agents=evidence.get('agents') or [],
+                side=str(evidence.get('side') or side or ''),
+                confidence=float(evidence.get('confidence') or 0),
+                evidence=evidence,
+            )
+        except Exception as db_trib_err:
+            print(f"⚠️ [TRIBUNAL] persistência SQLite: {db_trib_err}", flush=True)
+
         return evidence
     except Exception as err:
         print(f"⚠️ [TRIBUNAL] Falha ao publicar evidência: {err}", flush=True)
@@ -2742,6 +2879,22 @@ def sniper_worker_loop():
                             f"→ NEUTRO (abort antes Cérebro 3)",
                             flush=True,
                         )
+                        try:
+                            from src.database.tribunal_store import save_tribunal_debate
+                            reason = str(hard_gate.get('abort_reason') or 'Porta fechada')
+                            save_tribunal_debate(
+                                sym,
+                                agents=[
+                                    {'id': 'groq', 'score': 20, 'action': 'WAIT', 'motivo': f'Hard-gate: {reason}'},
+                                    {'id': 'analyst', 'score': 15, 'action': 'WAIT', 'motivo': f'Estrutura rejeitada: {reason}'},
+                                    {'id': 'learner', 'score': 25, 'action': 'WAIT', 'motivo': 'Aguardando setup válido para amostrar'},
+                                    {'id': 'gemini', 'score': 20, 'action': 'WAIT', 'motivo': 'Macro em observação — portas Smart Money fechadas'},
+                                ],
+                                side='SCANNER',
+                                confidence=0,
+                            )
+                        except Exception:
+                            pass
                         time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
                         continue
                     print(
@@ -2818,6 +2971,20 @@ def sniper_worker_loop():
                     central_state['confidence'] = round(prob, 2)
 
                     if prob < THRESHOLD_ENTRADA or decisao not in ['COMPRAR', 'VENDER', 'BUY', 'SELL']:
+                        # Mesmo sem entrada: alimenta cards do tribunal com o estudo atual
+                        try:
+                            _publish_ai_tribunal_evidence(
+                                sym,
+                                'buy' if decisao in ('BUY', 'COMPRAR') else (
+                                    'sell' if decisao in ('SELL', 'VENDER') else 'SCANNER'
+                                ),
+                                signals,
+                                res,
+                                intel_ctx=intel_ctx,
+                                df=df,
+                            )
+                        except Exception:
+                            pass
                         time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
                         continue
 
@@ -2883,6 +3050,25 @@ def sniper_worker_loop():
                             f"fail-closed em LONG, libera SHORT só com tendência",
                             flush=True,
                         )
+                        if side_exec == 'buy':
+                            time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
+                            continue
+
+                    # Anti-armadilha SMC — bloqueia compra no topo / falso rompimento
+                    try:
+                        from src.engine.anti_trap_smc import evaluate_anti_trap_smc
+                        trap = evaluate_anti_trap_smc(side_exec, df, signals)
+                        if not trap.get('allowed'):
+                            print(
+                                f"   🪤 [ANTI-TRAP] {clean_sym}: {trap.get('abort_reason')}",
+                                flush=True,
+                            )
+                            time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
+                            continue
+                        signals['anti_trap_ok'] = True
+                        signals['ema20_smc'] = trap.get('ema20')
+                    except Exception as trap_err:
+                        print(f"   ⚠️ [ANTI-TRAP] {clean_sym}: {trap_err}", flush=True)
                         if side_exec == 'buy':
                             time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
                             continue
@@ -3416,6 +3602,39 @@ def api_pesos_ia_evolutivo():
         }), 200
     except Exception as e:
         return jsonify({"status": "erro", "msg": str(e), "modulos": []}), 200
+
+
+@app.route('/api/tribunal/status', methods=['GET'])
+def api_tribunal_status():
+    """
+    Cards do Tribunal (Groq / Analista / Neural) em tempo real — SQLite tribunal_debate.
+    Usado pelo Dashboard Render para sair do estado 'Aguardando ciclo do radar...'.
+    """
+    try:
+        from src.database.tribunal_store import build_tribunal_status_payload
+        payload = build_tribunal_status_payload()
+        # Espelha no central_state para /api/status também
+        if payload.get('agents'):
+            central_state['ai_tribunal'] = {
+                'agents': payload.get('agents'),
+                'symbol': payload.get('symbol'),
+                'side': payload.get('side'),
+                'assertiveness': payload.get('confidence'),
+                'timestamp': payload.get('timestamp'),
+            }
+            ev = dict(central_state.get('evidence') or {})
+            ev['agents'] = payload.get('agents')
+            ev['symbol'] = payload.get('symbol') or ev.get('symbol')
+            central_state['evidence'] = ev
+        return jsonify(payload), 200
+    except Exception as e:
+        return jsonify({
+            'status': 'erro',
+            'msg': str(e),
+            'agents': [],
+            'cards': {},
+            'has_data': False,
+        }), 200
 
 
 @app.route('/api/status', methods=['GET'])

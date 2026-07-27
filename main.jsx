@@ -389,10 +389,36 @@ const App = () => {
           return;
         }
         const json = result.json;
+        let tribunal = null;
+        try {
+          const trib = await fetchJson('/api/tribunal/status');
+          if (trib.ok && trib.json && trib.json.has_data) {
+            tribunal = trib.json;
+          }
+        } catch (_) { /* ignore */ }
+
         if (mounted) {
+          const evidenceFromDb = tribunal?.agents?.length
+            ? {
+                ...(json.evidence || {}),
+                agents: tribunal.agents,
+                symbol: tribunal.symbol || json.evidence?.symbol,
+                side: tribunal.side || json.evidence?.side,
+                confidence: tribunal.confidence || json.evidence?.confidence,
+              }
+            : json.evidence;
           setData(prev => ({
             ...prev,
             ...json,
+            evidence: evidenceFromDb || json.evidence || prev.evidence,
+            ai_tribunal: tribunal
+              ? {
+                  agents: tribunal.agents,
+                  symbol: tribunal.symbol,
+                  side: tribunal.side,
+                  assertiveness: tribunal.confidence,
+                }
+              : (json.ai_tribunal || prev.ai_tribunal),
             balance: json.balance ?? json.test_balance ?? 0,
             test_balance: json.test_balance ?? 0,
             test_mode: json.test_mode ?? false,
