@@ -162,6 +162,10 @@ class BybitClient:
         # SANITIZAÇÃO: Remove espaços, quebras de linha e caracteres invisíveis
         api_key = str(api_key or env_api_key or '').strip().replace('\n', '').replace('\r', '')
         api_secret = str(api_secret or env_api_secret or '').strip().replace('\n', '').replace('\r', '')
+        # Persistidas para reconnect thread-safe (Feedback Loop / background)
+        self._api_key = api_key
+        self._api_secret = api_secret
+        self._session_lock = threading.Lock()
 
         normalized_base_url = str(base_url or '').strip()
         if normalized_base_url:
@@ -271,6 +275,129 @@ class BybitClient:
         except Exception as e:
             print(f"⚠️ [PYBIT] Sessão HTTP indisponível: {e}", flush=True)
             self.pybit_session = None
+
+    def _session_has_api_key(self) -> bool:
+        """True se pybit HTTP ou CCXT têm credenciais utilizáveis."""
+        if self.pybit_session is not None:
+            for attr in ('api_key', 'apiKey', '_api_key'):
+                val = getattr(self.pybit_session, attr, None)
+                if val:
+                    return True
+            # pybit pode ocultar a chave; sessão viva + credenciais locais = OK
+            if self._api_key and self._api_secret:
+                return True
+        exchange = getattr(self, 'exchange', None)
+        if exchange is not None and getattr(exchange, 'apiKey', None):
+            return True
+        return bool(self._api_key and self._api_secret)
+
+    def ensure_private_session(self, api_key: str | None = None, api_secret: str | None = None) -> bool:
+        """
+        Garante sessão privada viva (pybit + CCXT) — thread-safe.
+        Reconecta se session/apiKey estiverem nulos (caso típico do Feedback Loop no Render).
+        """
+        key = str(api_key or self._api_key or '').strip()
+        secret = str(api_secret or self._api_secret or '').strip()
+        if not key or not secret:
+            try:
+                from src.config import get_bybit_credentials
+                env_k, env_s = get_bybit_credentials()
+                key = key or str(env_k or '').strip()
+                secret = secret or str(env_s or '').strip()
+            except Exception:
+                pass
+        if not key or not secret:
+            self.authenticated = False
+            return False
+
+        with self._session_lock:
+            self._api_key = key
+            self._api_secret = secret
+            if self.pybit_session is None:
+                print("♻️ [BYBIT] Reconectando sessão privada (pybit V5)...", flush=True)
+                self._init_pybit_session(key, secret)
+
+            # Reaplica chaves no CCXT (sandbox=False em mainnet / category linear via defaultType)
+            try:
+                exchange = getattr(self, 'exchange', None)
+                if exchange is None or not getattr(exchange, 'apiKey', None):
+                    self.exchange, self.active_endpoint, resolved_testnet, resolved_demo = (
+                        inicializar_exchange_bybit(
+                            api_key=key,
+                            api_secret=secret,
+                            e_testnet=bool(self.testnet),
+                            e_demo=bool(self.is_demo),
+                            base_url=self.active_endpoint,
+                        )
+                    )
+                    self.testnet = bool(resolved_testnet and not resolved_demo)
+                    self.is_demo = bool(resolved_demo)
+                else:
+                    exchange.apiKey = key
+                    exchange.secret = secret
+            except Exception as ccxt_err:
+                print(f"⚠️ [BYBIT] CCXT reconnect: {ccxt_err}", flush=True)
+
+            ok = self.pybit_session is not None or bool(
+                getattr(getattr(self, 'exchange', None), 'apiKey', None)
+            )
+            self.authenticated = bool(ok)
+            return ok
+
+    def get_closed_pnl(self, category: str = 'linear', limit: int = 50) -> list:
+        """
+        Lista P&L fechados (Bybit V5 Unified — category=linear).
+        Ordem: pybit get_closed_pnl → CCXT privateGetV5PositionClosedPnl.
+        """
+        if not self.ensure_private_session():
+            raise RuntimeError('sessão Bybit indisponível para get_closed_pnl')
+
+        limit = max(1, min(int(limit or 50), 100))
+        category = str(category or 'linear')
+        last_err = None
+
+        # 1) pybit HTTP
+        if self.pybit_session is not None:
+            try:
+                rsp = self.pybit_session.get_closed_pnl(category=category, limit=limit)
+                ok, err = self._handle_v5_ret_code(rsp, 'get_closed_pnl')
+                if ok:
+                    return list((rsp.get('result') or {}).get('list') or [])
+                last_err = err or rsp
+                # Sessão morta / auth → força reconnect uma vez
+                if self._is_auth_error(str(err or '')):
+                    self.pybit_session = None
+                    if self.ensure_private_session() and self.pybit_session is not None:
+                        rsp2 = self.pybit_session.get_closed_pnl(category=category, limit=limit)
+                        ok2, err2 = self._handle_v5_ret_code(rsp2, 'get_closed_pnl_retry')
+                        if ok2:
+                            return list((rsp2.get('result') or {}).get('list') or [])
+                        last_err = err2 or rsp2
+            except Exception as e:
+                last_err = e
+                print(f"⚠️ [BYBIT] get_closed_pnl pybit: {e}", flush=True)
+
+        # 2) CCXT V5 fallback
+        exchange = getattr(self, 'exchange', None)
+        if exchange is not None:
+            params = {'category': category, 'limit': str(limit)}
+            try:
+                if hasattr(exchange, 'privateGetV5PositionClosedPnl'):
+                    rsp = exchange.privateGetV5PositionClosedPnl(params)
+                elif hasattr(exchange, 'private_get_v5_position_closed_pnl'):
+                    rsp = exchange.private_get_v5_position_closed_pnl(params)
+                else:
+                    rsp = None
+                if isinstance(rsp, dict):
+                    ret = rsp.get('retCode')
+                    if ret in (0, '0', None):
+                        return list((rsp.get('result') or {}).get('list') or [])
+                    last_err = f"retCode={ret} {rsp.get('retMsg')}"
+            except Exception as e:
+                last_err = e
+                print(f"⚠️ [BYBIT] get_closed_pnl CCXT: {e}", flush=True)
+
+        raise RuntimeError(f'get_closed_pnl falhou: {last_err}')
 
     def _format_bybit_error(self, payload):
         """Normaliza erros da Bybit V5 para o front-end."""
