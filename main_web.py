@@ -529,6 +529,7 @@ central_state = {
     "risk_mode": RISK_MODE,
     "entry_sizing": None,
     "proxima_entrada": None,
+    "ia_decisions": [],
 }
 
 def _is_rate_limit_error(err: Exception) -> bool:
@@ -622,8 +623,172 @@ def start_runtime_services():
         threading.Thread(target=_monitor_financial_stop_loss, daemon=True).start()
         threading.Thread(target=_fetch_active_client_balances, kwargs={'force': True}, daemon=True).start()
         threading.Thread(target=_monitor_dashboard_positions, daemon=True).start()
+        try:
+            _start_live_position_manager()
+        except Exception as live_err:
+            print(f"⚠️ [BOOT] Gestão viva adiada: {live_err}", flush=True)
         RUNTIME_STARTED = True
         return True
+
+
+def _start_live_position_manager():
+    """Gestão viva: early exit + let profits run (1m/5m)."""
+    from src.risk.live_position_manager import get_live_position_manager
+    from src.risk.position_sizing import position_roi_pct
+    from src.database.decision_history import record_ia_decision
+
+    def _cycle():
+        from src.risk.live_position_manager import (
+            decide_live_action,
+            get_trailing_registry,
+        )
+        trailing_reg = get_trailing_registry()
+        radar = _get_public_radar_broker_mainnet()
+
+        for cliente in _get_registered_clients(active_only=True):
+            client_id = int(cliente.get('id') or 0)
+            if _is_training_fake_balance_client(cliente) or _is_client_temporarily_disabled(client_id):
+                continue
+            broker = _make_broker(cliente)
+            if not broker or not getattr(broker, 'pybit_session', None) or not broker.authenticated:
+                continue
+            try:
+                rsp = broker.pybit_session.get_positions(category='linear', settleCoin='USDT')
+                ok, _ = broker._handle_v5_ret_code(rsp, 'get_positions')
+                if not ok:
+                    continue
+            except Exception:
+                continue
+
+            for pos in (rsp.get('result') or {}).get('list', []):
+                size = float(pos.get('size') or 0)
+                if size <= 0:
+                    continue
+                symbol = pos.get('symbol') or ''
+                side = str(pos.get('side') or '').lower()
+                entry_price = float(pos.get('avgPrice') or pos.get('entryPrice') or 0)
+                mark_price = float(pos.get('markPrice') or entry_price or 0)
+                unrealised = float(pos.get('unrealisedPnl') or 0)
+                entry_margin = _resolve_entry_margin_for_exit(cliente, symbol, pos=pos)
+                roi = float(position_roi_pct(unrealised, entry_margin)) if entry_margin else 0.0
+
+                df_1m = df_5m = None
+                signals = {}
+                try:
+                    df_1m = radar.fetch_ohlcv(symbol, timeframe='1m')
+                    df_5m = radar.fetch_ohlcv(symbol, timeframe='5m')
+                    from src.engine.indicators import IndicatorEngine
+                    if df_5m is not None and len(df_5m) >= 30:
+                        signals = IndicatorEngine(df_5m).get_signals()
+                    elif df_1m is not None and len(df_1m) >= 30:
+                        signals = IndicatorEngine(df_1m).get_signals()
+                except Exception as fetch_err:
+                    print(f"   ⚠️ [GESTÃO VIVA] OHLCV {symbol}: {fetch_err}", flush=True)
+
+                st = trailing_reg.get(client_id, symbol)
+                decision = decide_live_action(
+                    side=side,
+                    roi_pct=roi,
+                    mark_price=mark_price,
+                    entry_price=entry_price,
+                    df_fast=df_1m,
+                    df_slow=df_5m,
+                    signals=signals,
+                    peak_price=st.get('peak'),
+                    trailing_armed=bool(st.get('armed')),
+                )
+                action = decision.get('action')
+                if action == 'HOLD':
+                    continue
+
+                print(
+                    f"🫀 [GESTÃO VIVA] {symbol} {side.upper()} ROI={roi:.1f}% → "
+                    f"{decision.get('payload')} | {decision.get('motivo')}",
+                    flush=True,
+                )
+
+                if action == 'EXTEND_TRAILING':
+                    peak = float(decision.get('new_peak') or mark_price)
+                    sl = float(decision.get('trailing_sl') or 0)
+                    if sl <= 0:
+                        continue
+                    ok_trail = False
+                    try:
+                        if hasattr(broker, 'clear_take_profit_set_trailing_sl'):
+                            ok_trail = bool(broker.clear_take_profit_set_trailing_sl(symbol, side, sl))
+                        elif hasattr(broker, 'update_stop_loss_only'):
+                            ok_trail = bool(broker.update_stop_loss_only(symbol, side, sl))
+                    except Exception as trail_err:
+                        print(f"   ⚠️ [GESTÃO VIVA] trailing API: {trail_err}", flush=True)
+                    if ok_trail:
+                        trailing_reg.set_trailing(client_id, symbol, peak, sl)
+                        record_ia_decision(
+                            symbol,
+                            motivo_saida=decision.get('motivo') or '',
+                            pnl_garantido_pct=roi,
+                            tipo_execucao=decision.get('tipo_execucao') or 'TRAILING_PROFIT_EXPANSION',
+                            action_payload=decision.get('payload') or 'ACTION: EXTEND_TRAILING',
+                            client_id=client_id,
+                        )
+                        central_state['status'] = (
+                            f"🚀 Let Profits Run { _limpar_simbolo(symbol) } — trailing SL={sl:.6g}"
+                        )
+                        recent = list(central_state.get('ia_decisions') or [])
+                        recent.insert(0, {
+                            'symbol': _limpar_simbolo(symbol),
+                            'action': decision.get('payload'),
+                            'motivo': decision.get('motivo'),
+                            'roi': round(roi, 2),
+                            'tipo': decision.get('tipo_execucao'),
+                            'ts': time.strftime('%H:%M:%S'),
+                        })
+                        central_state['ia_decisions'] = recent[:20]
+                    continue
+
+                if action in ('EMERGENCY_EXIT', 'CLOSE_EXHAUSTION'):
+                    try:
+                        # Cancela TP/SL pendentes best-effort antes do market close
+                        try:
+                            if broker.pybit_session:
+                                v5 = broker._normalize_v5_symbol(symbol)
+                                broker.pybit_session.cancel_all_orders(category='linear', symbol=v5)
+                        except Exception:
+                            pass
+                        closed = bool(broker.close_position_with_sl(symbol, side))
+                    except Exception as close_err:
+                        print(f"   ❌ [GESTÃO VIVA] close {symbol}: {close_err}", flush=True)
+                        closed = False
+                    if closed:
+                        trailing_reg.clear(client_id, symbol)
+                        note = decision.get('motivo') or 'Saída de Emergência por Inversão de Tendência'
+                        _close_open_trades_in_db(
+                            client_id, symbol, pnl_pct=roi, profit=unrealised,
+                            note_tag=f' | LIVE_EXIT {note}',
+                        )
+                        record_ia_decision(
+                            symbol,
+                            motivo_saida=note,
+                            pnl_garantido_pct=roi,
+                            tipo_execucao=decision.get('tipo_execucao') or 'REVERSAL_EXIT',
+                            action_payload=decision.get('payload') or 'ACTION: EMERGENCY_EXIT',
+                            client_id=client_id,
+                        )
+                        _adaptive_record_outcome(symbol, roi)
+                        _sync_active_trades_from_db()
+                        central_state['status'] = f"⚡ Saída viva {_limpar_simbolo(symbol)} — {note[:80]}"
+                        recent = list(central_state.get('ia_decisions') or [])
+                        recent.insert(0, {
+                            'symbol': _limpar_simbolo(symbol),
+                            'action': decision.get('payload'),
+                            'motivo': note,
+                            'roi': round(roi, 2),
+                            'tipo': decision.get('tipo_execucao'),
+                            'ts': time.strftime('%H:%M:%S'),
+                        })
+                        central_state['ia_decisions'] = recent[:20]
+
+    get_live_position_manager().start(cycle_fn=_cycle)
+    print("🫀 [BOOT] LivePositionManager ativo (early exit + trailing sem teto)", flush=True)
 
 def _limpar_simbolo(sym):
     if not sym: return "---"
@@ -1544,6 +1709,15 @@ def _build_api_status_payload():
         }
     payload['entry_sizing'] = entry_sizing
     payload['proxima_entrada'] = entry_sizing
+    # Gestão viva — últimos eventos EMERGENCY_EXIT / EXTEND_TRAILING
+    try:
+        from src.database.decision_history import list_ia_decisions
+        live_events = list_ia_decisions(20)
+        payload['ia_decisions'] = live_events or payload.get('ia_decisions') or []
+        payload['historico_decisoes_ia'] = payload['ia_decisions']
+    except Exception:
+        payload['ia_decisions'] = payload.get('ia_decisions') or []
+        payload['historico_decisoes_ia'] = payload['ia_decisions']
     return payload
 
 def _refresh_real_balance_state(force=False):
@@ -1664,19 +1838,20 @@ def _resolve_position_margin(cliente, symbol, size, entry_price, leverage, pos=N
 
 def _monitor_financial_stop_loss():
     """
-    🎯 MONITOR FINANCEIRO — Protocolo 100/50 + Escada de Lucro.
+    🎯 MONITOR FINANCEIRO — Protocolo 100/50 + Escada de Lucro + Gestão Viva.
 
     Entrada: 5% da banca (3% se o último fechamento foi STOP_LOSS).
-    Saída por operação:
-      - Take Profit: +100% da margem de entrada
-      - Stop Loss:   -50% da margem de entrada
-    Escada de Lucro (incremental):
-      - ROI >= +50% → move SL na Bybit para travar ~+20% ROI (PROTEGIDO_50)
+    Saída:
+      - Stop Loss: −50% da margem (inalterado)
+      - Take Profit +100%: NÃO fecha mais de forma cega —
+        delega ao LivePositionManager (EXTEND_TRAILING ou CLOSE_EXHAUSTION)
+    Escada de Lucro: ROI >= +50% → SL ~+20% ROI (PROTEGIDO_50)
     """
     time.sleep(5)
     print(
-        f"🎯 [MONITOR FINANCEIRO] Protocolo 100/50 — entrada {format_entry_pct()} "
-        f"(após SL: {format_entry_pct(PERCENTUAL_ENTRADA_POS_STOP)}) | Escada de Lucro ON",
+        f"🎯 [MONITOR FINANCEIRO] Protocolo 100/50 + Gestão Viva — entrada {format_entry_pct()} "
+        f"(após SL: {format_entry_pct(PERCENTUAL_ENTRADA_POS_STOP)}) | Escada de Lucro ON | "
+        f"TP+100% → let profits run",
         flush=True
     )
 
@@ -1759,6 +1934,53 @@ def _monitor_financial_stop_loss():
 
                                 if not motivo_fechamento:
                                     continue
+
+                                # Gestão viva: +100% ROI NÃO fecha cegamente — deixa lucro correr
+                                if motivo_fechamento == "TAKE_PROFIT":
+                                    try:
+                                        from src.risk.live_position_manager import (
+                                            compute_trailing_sl_from_peak,
+                                            get_trailing_registry,
+                                            ENABLED as LIVE_MGR_ON,
+                                        )
+                                        if LIVE_MGR_ON:
+                                            st = get_trailing_registry().get(client_id, symbol)
+                                            peak = float(st.get('peak') or mark_price or entry_price or 0)
+                                            if str(side).lower() in ('buy', 'long', 'comprar'):
+                                                peak = max(peak, float(mark_price or 0))
+                                            else:
+                                                peak = min(peak, float(mark_price or 0)) if peak > 0 else float(mark_price or 0)
+                                            sl = compute_trailing_sl_from_peak(peak, side)
+                                            # Remove TP da Bybit AGORA (evita fechamento cego no exchange)
+                                            # e arma trailing 15% abaixo do peak; gestão viva refina em 1m/5m.
+                                            if sl > 0 and hasattr(broker, 'clear_take_profit_set_trailing_sl'):
+                                                try:
+                                                    if broker.clear_take_profit_set_trailing_sl(symbol, side, sl):
+                                                        get_trailing_registry().set_trailing(
+                                                            client_id, symbol, peak, sl,
+                                                        )
+                                                        print(
+                                                            f"   🚀 [LET PROFITS RUN] {symbol} ROI={roi_pct:.1f}% "
+                                                            f"— TP removido · trailing SL={sl:.6g} (peak={peak:.6g})",
+                                                            flush=True,
+                                                        )
+                                                except Exception as arm_err:
+                                                    print(
+                                                        f"   ⚠️ [LET PROFITS RUN] arm trailing: {arm_err}",
+                                                        flush=True,
+                                                    )
+                                            else:
+                                                print(
+                                                    f"   🚀 [LET PROFITS RUN] {symbol} ROI={roi_pct:.1f}% "
+                                                    f"— TP estático ignorado (gestão viva ativa)",
+                                                    flush=True,
+                                                )
+                                            continue
+                                    except Exception as live_skip_err:
+                                        print(
+                                            f"   ⚠️ [LET PROFITS RUN] fallback TP clássico: {live_skip_err}",
+                                            flush=True,
+                                        )
 
                                 if motivo_fechamento == "TAKE_PROFIT":
                                     print(f"🏆 [TAKE PROFIT] {symbol} atingiu alvo de lucro!", flush=True)
@@ -3416,6 +3638,24 @@ def api_pesos_ia_evolutivo():
         }), 200
     except Exception as e:
         return jsonify({"status": "erro", "msg": str(e), "modulos": []}), 200
+
+
+@app.route('/api/decisoes-ia', methods=['GET'])
+def api_decisoes_ia():
+    """Eventos ao vivo da gestão viva (early exit / trailing expansion) para o Dashboard."""
+    try:
+        limit = int(request.args.get('limit') or 30)
+        from src.database.decision_history import list_ia_decisions
+        rows = list_ia_decisions(limit)
+        live = list(central_state.get('ia_decisions') or [])
+        return jsonify({
+            'status': 'ok',
+            'count': len(rows),
+            'decisoes': rows,
+            'live': live[:20],
+        }), 200
+    except Exception as e:
+        return jsonify({'status': 'erro', 'msg': str(e), 'decisoes': [], 'live': []}), 200
 
 
 @app.route('/api/status', methods=['GET'])
