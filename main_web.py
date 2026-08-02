@@ -1220,13 +1220,22 @@ def _adaptive_record_outcome(symbol, pnl_pct):
         print(f"⚠️ [PESOS IA] outcome {symbol}: {e}", flush=True)
 
 
+_FEEDBACK_ENV_BROKER = None
+_FEEDBACK_ENV_BROKER_KEY = ''
+_FEEDBACK_ENV_BROKER_LOCK = threading.Lock()
+
+
 def _run_feedback_pnl_sync(force: bool = False):
     """
     Reconcilia P&L fechado Bybit V5 → WIN/LOSS + cooldown + RL.
     Chamado no início de cada ciclo do radar (throttle 30s).
+    Garante credenciais do investidor ativo OU BYBIT_API_KEY/SECRET do Render.
     """
+    global _FEEDBACK_ENV_BROKER, _FEEDBACK_ENV_BROKER_KEY
     try:
         from src.learning.feedback_loop import get_feedback_loop
+        from src.config import get_bybit_credentials
+
         key, sec = '', ''
         broker = None
         try:
@@ -1234,11 +1243,66 @@ def _run_feedback_pnl_sync(force: bool = False):
         except Exception:
             pass
         try:
-            clientes = _get_registered_clients(active_only=True)
-            if clientes:
-                broker = _make_broker(clientes[0])
+            env_k, env_s = get_bybit_credentials()
+            key = key or env_k or ''
+            sec = sec or env_s or ''
+        except Exception:
+            pass
+        # Fallback direto Render (env vars)
+        if not key or not sec:
+            key = key or str(os.getenv('BYBIT_API_KEY') or '').strip()
+            sec = sec or str(os.getenv('BYBIT_API_SECRET') or '').strip()
+
+        try:
+            for cliente in _get_registered_clients(active_only=True):
+                cid = int(cliente.get('id') or 0)
+                if _is_training_fake_balance_client(cliente) or _is_client_temporarily_disabled(cid):
+                    continue
+                candidate = _make_broker(cliente)
+                if not candidate:
+                    continue
+                try:
+                    if hasattr(candidate, 'ensure_private_session'):
+                        ok = candidate.ensure_private_session(
+                            key or getattr(candidate, '_api_key', None),
+                            sec or getattr(candidate, '_api_secret', None),
+                        )
+                        if ok:
+                            broker = candidate
+                            key = key or str(getattr(candidate, '_api_key', '') or '')
+                            sec = sec or str(getattr(candidate, '_api_secret', '') or '')
+                            break
+                    elif getattr(candidate, 'pybit_session', None) and getattr(candidate, 'authenticated', False):
+                        broker = candidate
+                        break
+                except Exception:
+                    continue
         except Exception:
             broker = None
+
+        # Sem investidor no DB, mas com env no Render → broker cacheado + reconnect
+        if broker is None and key and sec:
+            try:
+                with _FEEDBACK_ENV_BROKER_LOCK:
+                    session_dead = (
+                        _FEEDBACK_ENV_BROKER is None
+                        or _FEEDBACK_ENV_BROKER_KEY != key
+                        or not getattr(_FEEDBACK_ENV_BROKER, 'pybit_session', None)
+                        or not getattr(getattr(_FEEDBACK_ENV_BROKER, 'exchange', None), 'apiKey', None)
+                    )
+                    if session_dead:
+                        from src.broker.bybit_client import BybitClient
+                        _FEEDBACK_ENV_BROKER = BybitClient(
+                            api_key=key, api_secret=sec, testnet=False,
+                        )
+                        _FEEDBACK_ENV_BROKER_KEY = key
+                    if hasattr(_FEEDBACK_ENV_BROKER, 'ensure_private_session'):
+                        _FEEDBACK_ENV_BROKER.ensure_private_session(key, sec)
+                    broker = _FEEDBACK_ENV_BROKER
+            except Exception as boot_err:
+                print(f"⚠️ [FEEDBACK LOOP] broker env: {boot_err}", flush=True)
+                broker = None
+
         fb = get_feedback_loop()
         result = fb.sincronizar_trades_fechados(
             api_key=key or '',
