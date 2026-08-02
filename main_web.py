@@ -1248,6 +1248,10 @@ def _run_feedback_pnl_sync(force: bool = False):
             sec = sec or env_s or ''
         except Exception:
             pass
+        # Fallback direto Render (env vars)
+        if not key or not sec:
+            key = key or str(os.getenv('BYBIT_API_KEY') or '').strip()
+            sec = sec or str(os.getenv('BYBIT_API_SECRET') or '').strip()
 
         try:
             for cliente in _get_registered_clients(active_only=True):
@@ -1276,21 +1280,23 @@ def _run_feedback_pnl_sync(force: bool = False):
         except Exception:
             broker = None
 
-        # Sem investidor no DB, mas com env no Render → broker cacheado (1×)
+        # Sem investidor no DB, mas com env no Render → broker cacheado + reconnect
         if broker is None and key and sec:
             try:
                 with _FEEDBACK_ENV_BROKER_LOCK:
-                    if (
+                    session_dead = (
                         _FEEDBACK_ENV_BROKER is None
                         or _FEEDBACK_ENV_BROKER_KEY != key
                         or not getattr(_FEEDBACK_ENV_BROKER, 'pybit_session', None)
-                    ):
+                        or not getattr(getattr(_FEEDBACK_ENV_BROKER, 'exchange', None), 'apiKey', None)
+                    )
+                    if session_dead:
                         from src.broker.bybit_client import BybitClient
                         _FEEDBACK_ENV_BROKER = BybitClient(
                             api_key=key, api_secret=sec, testnet=False,
                         )
                         _FEEDBACK_ENV_BROKER_KEY = key
-                    elif hasattr(_FEEDBACK_ENV_BROKER, 'ensure_private_session'):
+                    if hasattr(_FEEDBACK_ENV_BROKER, 'ensure_private_session'):
                         _FEEDBACK_ENV_BROKER.ensure_private_session(key, sec)
                     broker = _FEEDBACK_ENV_BROKER
             except Exception as boot_err:

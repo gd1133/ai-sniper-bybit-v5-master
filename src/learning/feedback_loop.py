@@ -32,6 +32,10 @@ PESO_MAX = float(os.getenv('FEEDBACK_WEIGHT_MAX', '0.60'))
 PESO_INICIAL = float(os.getenv('FEEDBACK_WEIGHT_INIT', '0.33'))
 SYNC_MIN_INTERVAL_SECS = float(os.getenv('FEEDBACK_SYNC_INTERVAL_SECS', '30'))
 
+# Log de schema apenas 1× por processo (startup), mesmo com múltiplas instâncias.
+_TABLES_STARTUP_LOGGED = False
+_TABLES_STARTUP_LOCK = threading.Lock()
+
 
 def _normalize_symbol(symbol: str) -> str:
     return re.sub(r'[^A-Z0-9]', '', str(symbol or '').upper().replace(':USDT', ''))
@@ -53,10 +57,11 @@ class FeedbackLoopEvolutivo:
         self._lock = threading.Lock()
         self._last_sync_ts = 0.0
         self._tables_ready = False
-        self._tables_logged = False
         self._last_session_warn_ts = 0.0
         self._standalone_http = None
         self._standalone_http_key = ''
+        self._standalone_ccxt = None
+        self._standalone_ccxt_key = ''
         self._http_lock = threading.Lock()
         self.inicializar_tabelas()
 
@@ -147,9 +152,11 @@ class FeedbackLoopEvolutivo:
         try:
             _execute_write('feedback_loop_init', _schema)
             self._tables_ready = True
-            if not self._tables_logged:
-                print("✅ [FEEDBACK LOOP] Tabelas operacoes / pesos_ia_evolutivo prontas", flush=True)
-                self._tables_logged = True
+            global _TABLES_STARTUP_LOGGED
+            with _TABLES_STARTUP_LOCK:
+                if not _TABLES_STARTUP_LOGGED:
+                    print("✅ [FEEDBACK LOOP] Tabelas operacoes / pesos_ia_evolutivo prontas", flush=True)
+                    _TABLES_STARTUP_LOGGED = True
         except Exception as err:
             print(f"⚠️ [FEEDBACK LOOP] Falha ao inicializar tabelas: {err}", flush=True)
 
@@ -234,14 +241,17 @@ class FeedbackLoopEvolutivo:
         try:
             pnl_list = self._fetch_closed_pnl(api_key, api_secret, broker=broker)
         except Exception as err:
+            # Defesa em profundidade: _fetch_closed_pnl já soft-fail, mas nunca derruba o ciclo
             msg = f'falha get_closed_pnl: {err}'
-            # Throttle: evita spam no Render a cada ciclo do radar
             now_err = time.time()
             if (now_err - self._last_session_warn_ts) >= 300:
                 print(f"[ERRO FEEDBACK LOOP] {msg}", flush=True)
                 self._last_session_warn_ts = now_err
             result['errors'].append(msg)
             return result
+
+        if not isinstance(pnl_list, list):
+            pnl_list = []
 
         for trade in pnl_list:
             try:
@@ -306,11 +316,9 @@ class FeedbackLoopEvolutivo:
     def _get_standalone_http(self, api_key: str, api_secret: str):
         """Sessão pybit dedicada ao Feedback Loop (reconnect se chave mudar / morrer)."""
         with self._http_lock:
-            if (
-                self._standalone_http is not None
-                and self._standalone_http_key == api_key
-            ):
-                return self._standalone_http
+            session = self._standalone_http
+            if session is not None and self._standalone_http_key == api_key:
+                return session
             from pybit.unified_trading import HTTP
             print("♻️ [FEEDBACK LOOP] Inicializando sessão Bybit V5 (mainnet linear)...", flush=True)
             self._standalone_http = HTTP(
@@ -322,24 +330,62 @@ class FeedbackLoopEvolutivo:
             self._standalone_http_key = api_key
             return self._standalone_http
 
+    def _get_standalone_ccxt(self, api_key: str, api_secret: str):
+        """Cliente CCXT Bybit V5 dedicado (sandbox=False, category=linear)."""
+        with self._http_lock:
+            exchange = self._standalone_ccxt
+            if (
+                exchange is not None
+                and self._standalone_ccxt_key == api_key
+                and getattr(exchange, 'apiKey', None)
+            ):
+                return exchange
+            import ccxt
+            print("♻️ [FEEDBACK LOOP] Reconectando CCXT Bybit V5 (sandbox=False, linear)...", flush=True)
+            exchange = ccxt.bybit({
+                'apiKey': api_key,
+                'secret': api_secret,
+                'enableRateLimit': True,
+                'options': {
+                    'defaultType': 'swap',
+                    'defaultSubType': 'linear',
+                    'accountType': 'UNIFIED',
+                    'recvWindow': 20000,
+                },
+            })
+            try:
+                exchange.set_sandbox_mode(False)
+            except Exception:
+                pass
+            self._standalone_ccxt = exchange
+            self._standalone_ccxt_key = api_key
+            return exchange
+
     def _fetch_closed_pnl_via_ccxt(self, api_key: str, api_secret: str, limit: int = 50) -> List[dict]:
-        """Fallback CCXT: privateGetV5PositionClosedPnl (Unified Trading)."""
+        """Fallback CCXT: private_get_v5_position_closed_pnl (Unified Trading)."""
         import ccxt
-        exchange = ccxt.bybit({
-            'apiKey': api_key,
-            'secret': api_secret,
-            'enableRateLimit': True,
-            'options': {'defaultType': 'linear', 'accountType': 'UNIFIED'},
-        })
-        exchange.set_sandbox_mode(False)
-        params = {'category': 'linear', 'limit': str(limit)}
+        exchange = self._get_standalone_ccxt(api_key, api_secret)
+        # Reconexão se sessão nula / sem apiKey
+        if not exchange or not getattr(exchange, 'apiKey', None):
+            with self._http_lock:
+                self._standalone_ccxt = None
+            exchange = self._get_standalone_ccxt(api_key, api_secret)
+
+        params = {'category': 'linear', 'limit': str(max(1, min(int(limit or 50), 100)))}
         try:
             if hasattr(exchange, 'privateGetV5PositionClosedPnl'):
                 rsp = exchange.privateGetV5PositionClosedPnl(params)
             else:
                 rsp = exchange.private_get_v5_position_closed_pnl(params)
         except (ccxt.AuthenticationError, ccxt.NetworkError) as e:
+            with self._http_lock:
+                self._standalone_ccxt = None
             raise RuntimeError(f'CCXT closed_pnl: {e}') from e
+        except Exception as e:
+            with self._http_lock:
+                self._standalone_ccxt = None
+            raise RuntimeError(f'CCXT closed_pnl: {e}') from e
+
         if not isinstance(rsp, dict):
             return []
         if rsp.get('retCode') not in (0, '0', None):
@@ -350,51 +396,65 @@ class FeedbackLoopEvolutivo:
         """
         Busca closed PnL Bybit V5 com reconexão automática.
         Ordem: broker.get_closed_pnl → pybit HTTP → CCXT private_get_v5_position_closed_pnl.
-        Sem chaves: retorna [] (não derruba o loop principal).
+        Sem chaves / falha de rede: retorna [] (nunca levanta — não derruba o loop principal).
         """
-        key, secret = self._resolve_credentials(api_key, api_secret, broker=broker)
-        last_err: Exception | str | None = None
+        try:
+            key, secret = self._resolve_credentials(api_key, api_secret, broker=broker)
+            last_err: Exception | str | None = None
 
-        # 1) Broker BybitClient (ensure + get_closed_pnl)
-        if broker is not None:
+            # 1) Broker BybitClient (ensure + get_closed_pnl) — soft-fail
+            if broker is not None:
+                try:
+                    if hasattr(broker, 'ensure_private_session'):
+                        broker.ensure_private_session(key or None, secret or None)
+                    if hasattr(broker, 'get_closed_pnl'):
+                        rows = list(broker.get_closed_pnl(category='linear', limit=50) or [])
+                        # Lista vazia com sessão OK = sem fechamentos; com sessão morta
+                        # get_closed_pnl agora retorna [] sem raise — tenta fallbacks se sem keys no broker
+                        if rows or (
+                            getattr(broker, 'authenticated', False)
+                            or getattr(getattr(broker, 'exchange', None), 'apiKey', None)
+                            or getattr(broker, 'pybit_session', None) is not None
+                        ):
+                            return rows
+                    session = getattr(broker, 'pybit_session', None)
+                    if session is not None:
+                        rsp = session.get_closed_pnl(category='linear', limit=50)
+                        if isinstance(rsp, dict) and rsp.get('retCode') not in (0, '0', None):
+                            raise RuntimeError(f"retCode={rsp.get('retCode')} {rsp.get('retMsg')}")
+                        return list((rsp.get('result') or {}).get('list') or [])
+                except Exception as err:
+                    last_err = err
+
+            if not key or not secret:
+                self._warn_session_unavailable(str(last_err or 'sem API key'))
+                return []
+
+            # 2) Sessão pybit standalone (reconnect)
             try:
-                if hasattr(broker, 'ensure_private_session'):
-                    broker.ensure_private_session(key or None, secret or None)
-                if hasattr(broker, 'get_closed_pnl'):
-                    return list(broker.get_closed_pnl(category='linear', limit=50) or [])
-                session = getattr(broker, 'pybit_session', None)
-                if session is not None:
-                    rsp = session.get_closed_pnl(category='linear', limit=50)
-                    if isinstance(rsp, dict) and rsp.get('retCode') not in (0, '0', None):
-                        raise RuntimeError(f"retCode={rsp.get('retCode')} {rsp.get('retMsg')}")
-                    return list((rsp.get('result') or {}).get('list') or [])
+                session = self._get_standalone_http(key, secret)
+                if not session:
+                    raise RuntimeError('pybit session nula após reconnect')
+                rsp = session.get_closed_pnl(category='linear', limit=50)
+                if isinstance(rsp, dict) and rsp.get('retCode') not in (0, '0', None):
+                    raise RuntimeError(f"retCode={rsp.get('retCode')} {rsp.get('retMsg')}")
+                return list((rsp.get('result') or {}).get('list') or [])
+            except Exception as err:
+                last_err = err
+                with self._http_lock:
+                    self._standalone_http = None
+
+            # 3) CCXT fallback (sandbox=False, linear)
+            try:
+                return self._fetch_closed_pnl_via_ccxt(key, secret, limit=50)
             except Exception as err:
                 last_err = err
 
-        if not key or not secret:
-            self._warn_session_unavailable(str(last_err or 'sem API key'))
+            self._warn_session_unavailable(str(last_err or 'todos os fallbacks falharam'))
             return []
-
-        # 2) Sessão pybit standalone (reconnect)
-        try:
-            session = self._get_standalone_http(key, secret)
-            rsp = session.get_closed_pnl(category='linear', limit=50)
-            if isinstance(rsp, dict) and rsp.get('retCode') not in (0, '0', None):
-                raise RuntimeError(f"retCode={rsp.get('retCode')} {rsp.get('retMsg')}")
-            return list((rsp.get('result') or {}).get('list') or [])
         except Exception as err:
-            last_err = err
-            with self._http_lock:
-                self._standalone_http = None
-
-        # 3) CCXT fallback
-        try:
-            return self._fetch_closed_pnl_via_ccxt(key, secret, limit=50)
-        except Exception as err:
-            last_err = err
-
-        self._warn_session_unavailable(str(last_err or 'todos os fallbacks falharam'))
-        return []
+            self._warn_session_unavailable(str(err))
+            return []
 
     def _already_processed(self, order_id: str) -> bool:
         if not order_id:

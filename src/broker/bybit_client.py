@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import os
 import time
 import sys
 import threading
@@ -291,11 +292,10 @@ class BybitClient:
             return True
         return bool(self._api_key and self._api_secret)
 
-    def ensure_private_session(self, api_key: str | None = None, api_secret: str | None = None) -> bool:
-        """
-        Garante sessão privada viva (pybit + CCXT) — thread-safe.
-        Reconecta se session/apiKey estiverem nulos (caso típico do Feedback Loop no Render).
-        """
+    def _resolve_private_credentials(
+        self, api_key: str | None = None, api_secret: str | None = None
+    ) -> tuple[str, str]:
+        """Resolve chaves: args → instância → get_bybit_credentials → os.getenv (Render)."""
         key = str(api_key or self._api_key or '').strip()
         secret = str(api_secret or self._api_secret or '').strip()
         if not key or not secret:
@@ -307,20 +307,40 @@ class BybitClient:
             except Exception:
                 pass
         if not key or not secret:
+            key = key or str(os.getenv('BYBIT_API_KEY') or '').strip()
+            secret = secret or str(os.getenv('BYBIT_API_SECRET') or '').strip()
+        return key, secret
+
+    def ensure_private_session(self, api_key: str | None = None, api_secret: str | None = None) -> bool:
+        """
+        Garante sessão privada viva (pybit + CCXT) — thread-safe.
+        Reconecta se session/apiKey estiverem nulos (caso típico do Feedback Loop no Render).
+        """
+        key, secret = self._resolve_private_credentials(api_key, api_secret)
+        if not key or not secret:
             self.authenticated = False
             return False
 
         with self._session_lock:
             self._api_key = key
             self._api_secret = secret
-            if self.pybit_session is None:
+            session_dead = (
+                self.pybit_session is None
+                or not self._session_has_api_key()
+            )
+            if session_dead:
                 print("♻️ [BYBIT] Reconectando sessão privada (pybit V5)...", flush=True)
+                self.pybit_session = None
                 self._init_pybit_session(key, secret)
 
-            # Reaplica chaves no CCXT (sandbox=False em mainnet / category linear via defaultType)
+            # Reaplica chaves no CCXT (sandbox=False em mainnet / category linear)
             try:
                 exchange = getattr(self, 'exchange', None)
-                if exchange is None or not getattr(exchange, 'apiKey', None):
+                needs_ccxt = (
+                    exchange is None
+                    or not getattr(exchange, 'apiKey', None)
+                )
+                if needs_ccxt:
                     self.exchange, self.active_endpoint, resolved_testnet, resolved_demo = (
                         inicializar_exchange_bybit(
                             api_key=key,
@@ -332,9 +352,19 @@ class BybitClient:
                     )
                     self.testnet = bool(resolved_testnet and not resolved_demo)
                     self.is_demo = bool(resolved_demo)
+                    if not self.testnet and not self.is_demo:
+                        try:
+                            self.exchange.set_sandbox_mode(False)
+                        except Exception:
+                            pass
                 else:
                     exchange.apiKey = key
                     exchange.secret = secret
+                    if not self.testnet and not self.is_demo:
+                        try:
+                            exchange.set_sandbox_mode(False)
+                        except Exception:
+                            pass
             except Exception as ccxt_err:
                 print(f"⚠️ [BYBIT] CCXT reconnect: {ccxt_err}", flush=True)
 
@@ -347,10 +377,12 @@ class BybitClient:
     def get_closed_pnl(self, category: str = 'linear', limit: int = 50) -> list:
         """
         Lista P&L fechados (Bybit V5 Unified — category=linear).
-        Ordem: pybit get_closed_pnl → CCXT privateGetV5PositionClosedPnl.
+        Ordem: pybit get_closed_pnl → CCXT private_get_v5_position_closed_pnl.
+        Nunca levanta exceção para o Feedback Loop: retorna [] em falha.
         """
         if not self.ensure_private_session():
-            raise RuntimeError('sessão Bybit indisponível para get_closed_pnl')
+            # Soft-fail: background loop não pode derrubar o robô
+            return []
 
         limit = max(1, min(int(limit or 50), 100))
         category = str(category or 'linear')
@@ -377,9 +409,9 @@ class BybitClient:
                 last_err = e
                 print(f"⚠️ [BYBIT] get_closed_pnl pybit: {e}", flush=True)
 
-        # 2) CCXT V5 fallback
+        # 2) CCXT V5 fallback (Unified Trading Account)
         exchange = getattr(self, 'exchange', None)
-        if exchange is not None:
+        if exchange is not None and getattr(exchange, 'apiKey', None):
             params = {'category': category, 'limit': str(limit)}
             try:
                 if hasattr(exchange, 'privateGetV5PositionClosedPnl'):
@@ -395,9 +427,12 @@ class BybitClient:
                     last_err = f"retCode={ret} {rsp.get('retMsg')}"
             except Exception as e:
                 last_err = e
+                # NetworkError / AuthenticationError do CCXT — não derruba o loop
                 print(f"⚠️ [BYBIT] get_closed_pnl CCXT: {e}", flush=True)
 
-        raise RuntimeError(f'get_closed_pnl falhou: {last_err}')
+        if last_err is not None:
+            print(f"⚠️ [BYBIT] get_closed_pnl soft-fail: {last_err}", flush=True)
+        return []
 
     def _format_bybit_error(self, payload):
         """Normaliza erros da Bybit V5 para o front-end."""
