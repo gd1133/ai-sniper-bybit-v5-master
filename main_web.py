@@ -3235,6 +3235,75 @@ def sniper_worker_loop():
                         continue
                     print(f"   ✅ [TIMING] {clean_sym}: {' | '.join(timing_reasons)}", flush=True)
 
+                    # ── ANTI-CHASE: RSI / extensão EMA-VWAP / pullback EMA8 ──
+                    # Bloqueia entrada no topo/fundo esticado ANTES da ordem a mercado.
+                    try:
+                        from src.engine.anti_chase_gate import evaluate_anti_chase_entry
+                        df_1m_ac = df_5m_ac = None
+                        try:
+                            df_1m_ac = radar_broker.fetch_ohlcv(sym, timeframe='1m')
+                        except Exception:
+                            df_1m_ac = None
+                        try:
+                            df_5m_ac = radar_broker.fetch_ohlcv(sym, timeframe='5m')
+                        except Exception:
+                            df_5m_ac = None
+                        mark_ac = float(
+                            signals.get('price')
+                            or (df_1m_ac['close'].iloc[-1] if df_1m_ac is not None and len(df_1m_ac) else 0)
+                            or (df['close'].iloc[-1] if df is not None and len(df) else 0)
+                            or 0
+                        )
+                        anti = evaluate_anti_chase_entry(
+                            side=side_exec,
+                            mark_price=mark_ac,
+                            df_1m=df_1m_ac,
+                            df_5m=df_5m_ac,
+                            signals=signals,
+                        )
+                        if not anti.get('allowed'):
+                            code = anti.get('code') or 'REJECTED'
+                            reason = anti.get('abort_reason') or code
+                            print(
+                                f"   🚫 [ANTI-CHASE] {clean_sym} {side_exec.upper()}: {reason}",
+                                flush=True,
+                            )
+                            try:
+                                from src.database.decision_history import record_ia_decision
+                                record_ia_decision(
+                                    sym,
+                                    motivo_saida=reason,
+                                    pnl_garantido_pct=0.0,
+                                    tipo_execucao='ENTRY_REJECTED',
+                                    action_payload=str(code),
+                                    client_id=0,
+                                )
+                                _push_ia_decision_live(
+                                    clean_sym, str(code), reason, 0.0, 'ENTRY_REJECTED',
+                                )
+                            except Exception as log_err:
+                                print(
+                                    f"   ⚠️ [ANTI-CHASE] log SQLite: {log_err}",
+                                    flush=True,
+                                )
+                            central_state['status'] = (
+                                f"🚫 Anti-chase {clean_sym}: {str(code)[:48]}"
+                            )
+                            time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
+                            continue
+                        print(
+                            f"   ✅ [ANTI-CHASE] {clean_sym}: {anti.get('abort_reason')}",
+                            flush=True,
+                        )
+                    except Exception as anti_err:
+                        # Fail-closed: não chasear se o filtro quebrar
+                        print(
+                            f"   🚫 [ANTI-CHASE] {clean_sym}: falha no filtro ({anti_err}) — abort",
+                            flush=True,
+                        )
+                        time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
+                        continue
+
                     # Confluência Absoluta — Concordância Total (5 filtros). Um falso = aborta.
                     try:
                         from src.engine.confluence_absoluta import (
@@ -3379,6 +3448,60 @@ def sniper_worker_loop():
                     f"Timing={intel_ctx.get('timing_score')} | Regime={intel_ctx.get('market_regime')}",
                     flush=True,
                 )
+                # Revalida anti-chase no momento da execução (preço pode ter esticado)
+                try:
+                    from src.engine.anti_chase_gate import evaluate_anti_chase_entry
+                    df_exec = melhor.get('df')
+                    df_1m_x = df_5m_x = None
+                    try:
+                        df_1m_x = radar_broker.fetch_ohlcv(sym, timeframe='1m')
+                    except Exception:
+                        df_1m_x = None
+                    try:
+                        df_5m_x = radar_broker.fetch_ohlcv(sym, timeframe='5m')
+                    except Exception:
+                        df_5m_x = None
+                    mark_x = float(signals.get('price') or 0)
+                    anti_x = evaluate_anti_chase_entry(
+                        side=side_best,
+                        mark_price=mark_x,
+                        df_1m=df_1m_x if df_1m_x is not None else df_exec,
+                        df_5m=df_5m_x if df_5m_x is not None else df_exec,
+                        signals=signals,
+                    )
+                    if not anti_x.get('allowed'):
+                        code = anti_x.get('code') or 'REJECTED'
+                        reason = anti_x.get('abort_reason') or code
+                        print(
+                            f"   🚫 [ANTI-CHASE EXEC] {melhor['clean_symbol']}: {reason}",
+                            flush=True,
+                        )
+                        try:
+                            from src.database.decision_history import record_ia_decision
+                            record_ia_decision(
+                                sym,
+                                motivo_saida=reason,
+                                pnl_garantido_pct=0.0,
+                                tipo_execucao='ENTRY_REJECTED',
+                                action_payload=str(code),
+                                client_id=0,
+                            )
+                            _push_ia_decision_live(
+                                melhor['clean_symbol'], str(code), reason, 0.0, 'ENTRY_REJECTED',
+                            )
+                        except Exception:
+                            pass
+                        time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
+                        continue
+                except Exception as anti_exec_err:
+                    print(
+                        f"   🚫 [ANTI-CHASE EXEC] {melhor['clean_symbol']}: "
+                        f"falha ({anti_exec_err}) — abort",
+                        flush=True,
+                    )
+                    time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
+                    continue
+
                 # 🧠 Aprendizado: registra as estratégias ativas nesta entrada
                 _adaptive_log_entry(sym, signals, intel_ctx)
                 broadcast_ordem_global(
