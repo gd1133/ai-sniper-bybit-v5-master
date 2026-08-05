@@ -1503,6 +1503,67 @@ class BybitClient:
             print(f"⚠️ [ESCADA DE LUCRO] erro: {e}", flush=True)
             return False
 
+    def clear_take_profit_set_trailing_sl(self, symbol, side, sl_price):
+        """
+        Remove TP fixo e aplica trailing SL (lucro sem teto).
+        Bybit V5: takeProfit='0' cancela o TP quando suportado.
+        """
+        try:
+            if not self.authenticated or not self.pybit_session:
+                return False
+            side_norm = str(side or '').strip().lower()
+            pos_idx = 1 if side_norm in ('buy', 'comprar', 'long') else 2
+            v5_symbol = self._normalize_v5_symbol(symbol)
+            sl = float(sl_price or 0)
+            if sl <= 0:
+                return False
+            price_to_precision = getattr(self.exchange, 'price_to_precision', None)
+            sl_str = str(sl)
+            if callable(price_to_precision):
+                try:
+                    sl_str = str(price_to_precision(symbol, sl))
+                except Exception:
+                    sl_str = str(sl)
+            print(
+                f"🚀 [TRAILING TREND] {v5_symbol} | remove TP | SL={sl_str}",
+                flush=True,
+            )
+            for attempt in range(1, 4):
+                rsp = self.pybit_session.set_trading_stop(
+                    category='linear',
+                    symbol=v5_symbol,
+                    takeProfit='0',
+                    stopLoss=sl_str,
+                    positionIdx=pos_idx,
+                    tpslMode='Full',
+                )
+                ok, err = self._handle_v5_ret_code(rsp, 'set_trading_stop_trailing')
+                if ok:
+                    print(f"✅ [TRAILING TREND] TP removido · SL={sl_str}", flush=True)
+                    return True
+                if attempt == 2:
+                    rsp2 = self.pybit_session.set_trading_stop(
+                        category='linear',
+                        symbol=v5_symbol,
+                        stopLoss=sl_str,
+                        positionIdx=pos_idx,
+                        tpslMode='Full',
+                    )
+                    ok2, err2 = self._handle_v5_ret_code(rsp2, 'set_trading_stop_trailing_sl_only')
+                    if ok2:
+                        print(f"✅ [TRAILING TREND] SL={sl_str} (TP clear parcial)", flush=True)
+                        return True
+                    err = err2
+                if attempt < 3 and ('position not exists' in str(err).lower() or '110017' in str(err)):
+                    time.sleep(1.2)
+                    continue
+                print(f"⚠️ [TRAILING TREND] falhou: {err}", flush=True)
+                return False
+            return False
+        except Exception as e:
+            print(f"⚠️ [TRAILING TREND] erro: {e}", flush=True)
+            return False
+
     def close_position_with_sl(self, symbol, position_side):
         """Encerra posição aberta na Bybit (pybit V5 primeiro, CCXT como fallback)."""
         try:

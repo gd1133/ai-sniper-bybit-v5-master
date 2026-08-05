@@ -529,6 +529,7 @@ central_state = {
     "risk_mode": RISK_MODE,
     "entry_sizing": None,
     "proxima_entrada": None,
+    "ia_decisions": [],
 }
 
 def _is_rate_limit_error(err: Exception) -> bool:
@@ -622,8 +623,218 @@ def start_runtime_services():
         threading.Thread(target=_monitor_financial_stop_loss, daemon=True).start()
         threading.Thread(target=_fetch_active_client_balances, kwargs={'force': True}, daemon=True).start()
         threading.Thread(target=_monitor_dashboard_positions, daemon=True).start()
+        try:
+            _start_trend_position_manager()
+        except Exception as trend_boot_err:
+            print(f"⚠️ [BOOT] TrendPositionManager adiado: {trend_boot_err}", flush=True)
         RUNTIME_STARTED = True
         return True
+
+
+def _push_ia_decision_live(symbol, action, motivo, roi, tipo):
+    recent = list(central_state.get('ia_decisions') or [])
+    recent.insert(0, {
+        'symbol': _limpar_simbolo(symbol),
+        'action': action,
+        'motivo': motivo,
+        'roi': round(float(roi or 0), 2),
+        'tipo': tipo,
+        'ts': time.strftime('%H:%M:%S'),
+    })
+    central_state['ia_decisions'] = recent[:20]
+
+
+def _start_trend_position_manager():
+    """
+    Gestão viva trend-following (~8s):
+      BE +12%ROI → Trailing +25%ROI → Early EMA20 → Stagnation 35min
+    """
+    from src.risk.trend_position_manager import get_trend_position_manager, get_trend_registry, decide_trend_action
+    from src.risk.position_sizing import position_roi_pct
+    from src.database.decision_history import record_ia_decision
+
+    def _apply_sl(broker, symbol, side, sl, clear_tp=False):
+        if sl <= 0:
+            return False
+        try:
+            if clear_tp and hasattr(broker, 'clear_take_profit_set_trailing_sl'):
+                return bool(broker.clear_take_profit_set_trailing_sl(symbol, side, sl))
+            if hasattr(broker, 'update_stop_loss_only'):
+                return bool(broker.update_stop_loss_only(symbol, side, sl))
+        except Exception as err:
+            print(f"   ⚠️ [TREND MGR] set SL {symbol}: {err}", flush=True)
+        return False
+
+    def _cycle():
+        reg = get_trend_registry()
+        radar = _get_public_radar_broker_mainnet()
+
+        for cliente in _get_registered_clients(active_only=True):
+            client_id = int(cliente.get('id') or 0)
+            if _is_training_fake_balance_client(cliente) or _is_client_temporarily_disabled(client_id):
+                continue
+            broker = _make_broker(cliente)
+            if not broker or not getattr(broker, 'pybit_session', None) or not broker.authenticated:
+                continue
+            try:
+                rsp = broker.pybit_session.get_positions(category='linear', settleCoin='USDT')
+                ok, _ = broker._handle_v5_ret_code(rsp, 'get_positions')
+                if not ok:
+                    continue
+            except Exception:
+                continue
+
+            for pos in (rsp.get('result') or {}).get('list', []):
+                size = float(pos.get('size') or 0)
+                if size <= 0:
+                    continue
+                symbol = pos.get('symbol') or ''
+                side = str(pos.get('side') or '').lower()
+                entry_price = float(pos.get('avgPrice') or pos.get('entryPrice') or 0)
+                mark_price = float(pos.get('markPrice') or entry_price or 0)
+                unrealised = float(pos.get('unrealisedPnl') or 0)
+                created_ms = float(pos.get('createdTime') or pos.get('updatedTime') or 0)
+                entry_margin = _resolve_entry_margin_for_exit(cliente, symbol, pos=pos)
+                roi = float(position_roi_pct(unrealised, entry_margin)) if entry_margin else 0.0
+
+                st = reg.touch_open(client_id, symbol, mark_price)
+                if created_ms > 1e12:
+                    # Bybit ms → se registry acabou de criar, alinhar opened_at
+                    bybit_open = created_ms / 1000.0
+                    if float(st.get('opened_at') or 0) > (time.time() - 15):
+                        # só sobrescreve se parece recém-inicializado
+                        age_guess = time.time() - bybit_open
+                        if 0 < age_guess < 48 * 3600:
+                            reg.update(client_id, symbol, opened_at=bybit_open)
+                            st = reg.get(client_id, symbol)
+
+                df_1m = df_5m = None
+                try:
+                    df_1m = radar.fetch_ohlcv(symbol, timeframe='1m')
+                    df_5m = radar.fetch_ohlcv(symbol, timeframe='5m')
+                except Exception as fetch_err:
+                    print(f"   ⚠️ [TREND MGR] OHLCV {symbol}: {fetch_err}", flush=True)
+
+                decision = decide_trend_action(
+                    side=side,
+                    roi_pct=roi,
+                    entry_price=entry_price,
+                    mark_price=mark_price,
+                    opened_at=st.get('opened_at'),
+                    peak_price=st.get('peak'),
+                    last_extreme_at=st.get('last_extreme_at'),
+                    breakeven_armed=bool(st.get('breakeven_armed')),
+                    trailing_armed=bool(st.get('trailing_armed')),
+                    df_fast=df_1m,
+                    df_slow=df_5m,
+                )
+                action = decision.get('action')
+                reg.update(
+                    client_id, symbol,
+                    peak=decision.get('new_peak'),
+                    last_extreme_at=decision.get('last_extreme_at'),
+                    breakeven_armed=bool(decision.get('breakeven_armed')),
+                    trailing_armed=bool(decision.get('trailing_armed')),
+                    sl=float(decision.get('sl_price') or st.get('sl') or 0),
+                )
+                if action == 'HOLD':
+                    continue
+
+                print(
+                    f"🫀 [TREND MGR] {symbol} {side.upper()} ROI={roi:.1f}% → {action} | "
+                    f"{decision.get('motivo')}",
+                    flush=True,
+                )
+
+                if action == 'ARM_BREAKEVEN':
+                    sl = float(decision.get('sl_price') or 0)
+                    if _apply_sl(broker, symbol, side, sl, clear_tp=False):
+                        reg.update(client_id, symbol, breakeven_armed=True, sl=sl)
+                        record_ia_decision(
+                            symbol,
+                            motivo_saida=decision.get('motivo') or '',
+                            pnl_garantido_pct=roi,
+                            tipo_execucao='BREAKEVEN',
+                            action_payload='ACTION: ARM_BREAKEVEN',
+                            client_id=client_id,
+                        )
+                        _push_ia_decision_live(symbol, 'ARM_BREAKEVEN', decision.get('motivo'), roi, 'BREAKEVEN')
+                        central_state['status'] = (
+                            f"🛡️ Breakeven {_limpar_simbolo(symbol)} — SL={sl:.6g}"
+                        )
+                    continue
+
+                if action == 'EXTEND_TRAILING':
+                    sl = float(decision.get('sl_price') or 0)
+                    prev_sl = float(st.get('sl') or 0)
+                    is_long = side in ('buy', 'long', 'comprar')
+                    improved = (
+                        (is_long and (prev_sl <= 0 or sl > prev_sl * 1.0001))
+                        or ((not is_long) and (prev_sl <= 0 or sl < prev_sl * 0.9999))
+                        or not st.get('trailing_armed')
+                    )
+                    if improved and _apply_sl(broker, symbol, side, sl, clear_tp=True):
+                        reg.update(
+                            client_id, symbol,
+                            trailing_armed=True, breakeven_armed=True, sl=sl,
+                            peak=decision.get('new_peak'),
+                        )
+                        record_ia_decision(
+                            symbol,
+                            motivo_saida=decision.get('motivo') or '',
+                            pnl_garantido_pct=roi,
+                            tipo_execucao='TRAILING_PROFIT',
+                            action_payload='ACTION: EXTEND_TRAILING',
+                            client_id=client_id,
+                        )
+                        _push_ia_decision_live(symbol, 'EXTEND_TRAILING', decision.get('motivo'), roi, 'TRAILING_PROFIT')
+                        central_state['status'] = (
+                            f"🚀 Trailing {_limpar_simbolo(symbol)} — SL={sl:.6g}"
+                        )
+                    continue
+
+                if action in ('EARLY_EXIT', 'STAGNATION_TIMEOUT'):
+                    try:
+                        try:
+                            if broker.pybit_session:
+                                v5 = broker._normalize_v5_symbol(symbol)
+                                broker.pybit_session.cancel_all_orders(category='linear', symbol=v5)
+                        except Exception:
+                            pass
+                        closed = bool(broker.close_position_with_sl(symbol, side))
+                    except Exception as close_err:
+                        print(f"   ❌ [TREND MGR] close {symbol}: {close_err}", flush=True)
+                        closed = False
+                    if closed:
+                        reg.clear(client_id, symbol)
+                        try:
+                            from src.risk.profit_shield import get_profit_shield_registry
+                            get_profit_shield_registry().clear(client_id, symbol)
+                        except Exception:
+                            pass
+                        note = decision.get('motivo') or action
+                        tipo = decision.get('tipo_execucao') or action
+                        _close_open_trades_in_db(
+                            client_id, symbol, pnl_pct=roi, profit=unrealised,
+                            note_tag=f' | {tipo} {note}',
+                        )
+                        record_ia_decision(
+                            symbol,
+                            motivo_saida=note,
+                            pnl_garantido_pct=roi,
+                            tipo_execucao=tipo,
+                            action_payload=f'ACTION: {action}',
+                            client_id=client_id,
+                        )
+                        _push_ia_decision_live(symbol, action, note, roi, tipo)
+                        _adaptive_record_outcome(symbol, roi)
+                        _sync_active_trades_from_db()
+                        central_state['status'] = (
+                            f"⚡ {action} {_limpar_simbolo(symbol)} — {str(note)[:80]}"
+                        )
+
+    get_trend_position_manager().start(cycle_fn=_cycle)
+    print("🫀 [BOOT] TrendPositionManager ativo (BE / Trailing / Early / Time-Stop)", flush=True)
 
 def _limpar_simbolo(sym):
     if not sym: return "---"
@@ -1608,6 +1819,13 @@ def _build_api_status_payload():
         }
     payload['entry_sizing'] = entry_sizing
     payload['proxima_entrada'] = entry_sizing
+    try:
+        from src.database.decision_history import list_ia_decisions
+        payload['ia_decisions'] = list_ia_decisions(20) or payload.get('ia_decisions') or []
+        payload['historico_decisoes_ia'] = payload['ia_decisions']
+    except Exception:
+        payload['ia_decisions'] = payload.get('ia_decisions') or []
+        payload['historico_decisoes_ia'] = payload['ia_decisions']
     return payload
 
 def _refresh_real_balance_state(force=False):
@@ -1728,19 +1946,19 @@ def _resolve_position_margin(cliente, symbol, size, entry_price, leverage, pos=N
 
 def _monitor_financial_stop_loss():
     """
-    🎯 MONITOR FINANCEIRO — Protocolo 100/50 + Escada de Lucro.
+    🎯 MONITOR FINANCEIRO — Protocolo 100/50 + Escada + Trend Manager.
 
-    Entrada: 5% da banca (3% se o último fechamento foi STOP_LOSS).
-    Saída por operação:
-      - Take Profit: +100% da margem de entrada
-      - Stop Loss:   -50% da margem de entrada
-    Escada de Lucro (incremental):
-      - ROI >= +50% → move SL na Bybit para travar ~+20% ROI (PROTEGIDO_50)
+    Saída:
+      - Stop Loss: −50% da margem
+      - Take Profit +100%: ignorado se Trailing Trend estiver armado (lucro sem teto)
+    Escada de Lucro: ROI >= +50% → SL ~+20% (só se trailing ainda não estiver mais alto)
+    Trend Manager (thread ~8s): BE@12% · Trailing@25% · Early EMA20 · MaxHold 35min
     """
     time.sleep(5)
     print(
-        f"🎯 [MONITOR FINANCEIRO] Protocolo 100/50 — entrada {format_entry_pct()} "
-        f"(após SL: {format_entry_pct(PERCENTUAL_ENTRADA_POS_STOP)}) | Escada de Lucro ON",
+        f"🎯 [MONITOR FINANCEIRO] Protocolo 100/50 + Trend Manager — entrada {format_entry_pct()} "
+        f"(após SL: {format_entry_pct(PERCENTUAL_ENTRADA_POS_STOP)}) | "
+        f"BE/Trailing/Early/Time-Stop ON",
         flush=True
     )
 
@@ -1788,27 +2006,36 @@ def _monitor_financial_stop_loss():
                                 entry_margin = _resolve_entry_margin_for_exit(cliente, symbol, pos=pos)
 
                                 # ── Escada de Lucro: +50% ROI → SL em +20% ROI ──
+                                # Se Trend Trailing já está armado, não puxa SL para trás.
                                 try:
-                                    from src.risk.profit_shield import apply_profit_shield_if_needed
-                                    shield = apply_profit_shield_if_needed(
-                                        broker,
-                                        client_id=client_id,
-                                        symbol=symbol,
-                                        side=side,
-                                        entry_price=entry_price,
-                                        mark_price=mark_price,
-                                        leverage=leverage,
-                                        unrealised_pnl=unrealised_pnl,
-                                        entry_margin=entry_margin,
-                                    )
-                                    if shield.get('applied'):
-                                        print(
-                                            f"   🪜 [ESCADA DE LUCRO] {symbol} ROI={shield.get('roi_pct')}% → "
-                                            f"{shield.get('reason')}",
-                                            flush=True,
+                                    from src.risk.trend_position_manager import get_trend_registry
+                                    trend_st = get_trend_registry().get(client_id, symbol)
+                                except Exception:
+                                    trend_st = {}
+                                if trend_st.get('trailing_armed'):
+                                    pass  # trailing cuida do SL
+                                else:
+                                    try:
+                                        from src.risk.profit_shield import apply_profit_shield_if_needed
+                                        shield = apply_profit_shield_if_needed(
+                                            broker,
+                                            client_id=client_id,
+                                            symbol=symbol,
+                                            side=side,
+                                            entry_price=entry_price,
+                                            mark_price=mark_price,
+                                            leverage=leverage,
+                                            unrealised_pnl=unrealised_pnl,
+                                            entry_margin=entry_margin,
                                         )
-                                except Exception as shield_err:
-                                    print(f"   ⚠️ [ESCADA DE LUCRO] {symbol}: {shield_err}", flush=True)
+                                        if shield.get('applied'):
+                                            print(
+                                                f"   🪜 [ESCADA DE LUCRO] {symbol} ROI={shield.get('roi_pct')}% → "
+                                                f"{shield.get('reason')}",
+                                                flush=True,
+                                            )
+                                    except Exception as shield_err:
+                                        print(f"   ⚠️ [ESCADA DE LUCRO] {symbol}: {shield_err}", flush=True)
 
                                 motivo_fechamento, roi_pct = evaluate_position_exit(
                                     unrealised_pnl, entry_margin,
@@ -1823,6 +2050,50 @@ def _monitor_financial_stop_loss():
 
                                 if not motivo_fechamento:
                                     continue
+
+                                # Lucro sem teto: com trailing armado, ignora TP estático +100%
+                                if motivo_fechamento == "TAKE_PROFIT" and trend_st.get('trailing_armed'):
+                                    print(
+                                        f"   🚀 [LET PROFITS RUN] {symbol} ROI={roi_pct:.1f}% — "
+                                        f"TP estático ignorado (trailing trend ativo)",
+                                        flush=True,
+                                    )
+                                    continue
+                                # Aos +100% ainda sem trailing: tenta armar trailing antes de fechar cego
+                                if motivo_fechamento == "TAKE_PROFIT" and not trend_st.get('trailing_armed'):
+                                    try:
+                                        from src.risk.trend_position_manager import (
+                                            compute_trailing_sl,
+                                            get_trend_registry,
+                                            ENABLED as TREND_ON,
+                                        )
+                                        if TREND_ON:
+                                            peak = max(float(trend_st.get('peak') or 0), float(mark_price or 0)) \
+                                                if side in ('buy', 'long', 'comprar') else (
+                                                    min(float(trend_st.get('peak') or mark_price), float(mark_price))
+                                                    if float(trend_st.get('peak') or 0) > 0 else float(mark_price)
+                                                )
+                                            sl = compute_trailing_sl(
+                                                side=side, peak=peak, mark=mark_price,
+                                            )
+                                            if sl > 0 and hasattr(broker, 'clear_take_profit_set_trailing_sl'):
+                                                if broker.clear_take_profit_set_trailing_sl(symbol, side, sl):
+                                                    get_trend_registry().update(
+                                                        client_id, symbol,
+                                                        trailing_armed=True, breakeven_armed=True,
+                                                        peak=peak, sl=sl,
+                                                    )
+                                                    print(
+                                                        f"   🚀 [LET PROFITS RUN] {symbol} +100% → "
+                                                        f"trailing SL={sl:.6g} (sem fechar)",
+                                                        flush=True,
+                                                    )
+                                                    continue
+                                    except Exception as trail_arm_err:
+                                        print(
+                                            f"   ⚠️ [LET PROFITS RUN] fallback TP: {trail_arm_err}",
+                                            flush=True,
+                                        )
 
                                 if motivo_fechamento == "TAKE_PROFIT":
                                     print(f"🏆 [TAKE PROFIT] {symbol} atingiu alvo de lucro!", flush=True)
@@ -3480,6 +3751,24 @@ def api_pesos_ia_evolutivo():
         }), 200
     except Exception as e:
         return jsonify({"status": "erro", "msg": str(e), "modulos": []}), 200
+
+
+@app.route('/api/decisoes-ia', methods=['GET'])
+def api_decisoes_ia():
+    """Eventos BE / Trailing / Early Exit / Stagnation para o Dashboard."""
+    try:
+        limit = int(request.args.get('limit') or 30)
+        from src.database.decision_history import list_ia_decisions
+        rows = list_ia_decisions(limit)
+        live = list(central_state.get('ia_decisions') or [])
+        return jsonify({
+            'status': 'ok',
+            'count': len(rows),
+            'decisoes': rows,
+            'live': live[:20],
+        }), 200
+    except Exception as e:
+        return jsonify({'status': 'erro', 'msg': str(e), 'decisoes': [], 'live': []}), 200
 
 
 @app.route('/api/status', methods=['GET'])
