@@ -44,13 +44,13 @@ class BinanceClient:
     Mecanismo de proteção Decimal via String + amount_to_precision nativo do CCXT.
     """
     def __init__(self, api_key=None, api_secret=None, testnet=False):
-        # Lazy loading de configurações internas para evitar importação circular
+        # Lazy loading: não importa OrderCalculator no boot (evita circular)
         from src.config import resolve_use_testnet
-        from src.broker.order_calculator import OrderCalculator
 
         ccxt = _get_ccxt()
         self.testnet = resolve_use_testnet(testnet)
         self.authenticated = bool(api_key and api_secret)
+        self._order_calculator = None
 
         cfg = {
             'enableRateLimit': True,
@@ -68,7 +68,6 @@ class BinanceClient:
             cfg['secret'] = str(api_secret).strip()
 
         self.exchange = ccxt.binance(cfg)
-        self.order_calculator = OrderCalculator(exchange_name='binance')
 
         if self.testnet:
             self.exchange.set_sandbox_mode(True)
@@ -86,6 +85,15 @@ class BinanceClient:
         self.cache_ticker = {}
         self.cache_ttl_ohlcv = 30
         self.cache_ttl_ticker = 5
+
+    @property
+    def order_calculator(self):
+        if self._order_calculator is None:
+            import importlib
+            mod = importlib.import_module('src.broker.order_calculator')
+            cls = getattr(mod, 'OrderCalculator')
+            self._order_calculator = cls(exchange_name='binance')
+        return self._order_calculator
 
     def _is_cache_valid(self, cache_entry, ttl):
         if cache_entry is None: return False

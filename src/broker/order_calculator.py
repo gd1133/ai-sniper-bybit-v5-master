@@ -11,7 +11,11 @@ Sistema de cálculo de ordens que respeita os limites ESTRITOS da corretora:
 REMOVE o modelo antigo de "apenas mínimo da exchange".
 CALCULA a quantidade com percentual da banca (padrão 5%).
 Se 5% da banca for menor que o mínimo da exchange, a ordem é abortada (não forçada ao mínimo).
+
+Sem imports de bybit_client/binance_client — evita circular import.
 """
+
+from __future__ import annotations
 
 from decimal import Decimal, ROUND_UP, InvalidOperation
 from typing import Tuple, Optional
