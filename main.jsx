@@ -1467,10 +1467,18 @@ const App = () => {
                   api_base: API_BASE,
                 });
                 try {
+                  const fetchOpts = {
+                    method: undefined,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                    signal: (typeof AbortSignal !== 'undefined' && AbortSignal.timeout)
+                      ? AbortSignal.timeout(20000)
+                      : undefined,
+                  };
                   // Se id definido, atualiza; caso contrário cria novo
                   if (addFormFields.id) {
                     console.log('🔵 [FRONTEND] Atualizando cliente existente ID:', addFormFields.id);
-                    const res = await fetch(`${API_BASE}/api/cliente/${addFormFields.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                    const res = await fetch(`${API_BASE}/api/cliente/${addFormFields.id}`, { ...fetchOpts, method: 'PUT' });
                     console.log('🔵 [FRONTEND] Resposta do servidor (PUT):', res.status, res.statusText);
                      const json = await res.json();
                      console.log('🔵 [FRONTEND] JSON recebido (PUT):', json);
@@ -1491,7 +1499,7 @@ const App = () => {
                     }
                   } else {
                     console.log('🔵 [FRONTEND] Criando novo cliente via /api/vincular_cliente');
-                    const res = await fetch(`${API_BASE}/api/vincular_cliente`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                    const res = await fetch(`${API_BASE}/api/vincular_cliente`, { ...fetchOpts, method: 'POST' });
                     console.log('🔵 [FRONTEND] Resposta do servidor (POST):', res.status, res.statusText);
                      const json = await res.json();
                      console.log('🔵 [FRONTEND] JSON recebido (POST):', json);
@@ -1521,8 +1529,10 @@ const App = () => {
                     }
                   }                } catch (err) {
                   console.error('❌ [FRONTEND] Erro de rede ou exceção ao vincular:', err);
-                  const errorMsg = err.message || String(err);
-                  setAddFormMsg({ type: 'error', text: `Erro de conexão: ${errorMsg}. Verifique se o servidor está acessível em ${API_BASE}` });
+                  const errorMsg = err.name === 'TimeoutError' || /aborted|timeout/i.test(String(err.message || err))
+                    ? 'Timeout ao falar com o servidor (Bybit lenta ou Render acordando). Tente novamente em alguns segundos.'
+                    : (err.message || String(err));
+                  setAddFormMsg({ type: 'error', text: `Erro de conexão: ${errorMsg}` });
                 }
                 setAddFormSaving(false);
                 // NÃO fecha automaticamente o modal — o usuário pode revisar/editar ou fechar manualmente

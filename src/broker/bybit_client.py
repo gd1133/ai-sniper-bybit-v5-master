@@ -172,9 +172,19 @@ class BybitClient:
     Versão 1.8.6: Correção estrita de tipos Decimal/Float + Tratamento nativo CCXT + Protocolo 100/50.
     Blindagem contra bloqueios de API e vazamento de memória.
     """
-    def __init__(self, api_key=None, api_secret=None, testnet=None, base_url=None, allow_env_credentials=True):
+    def __init__(
+        self,
+        api_key=None,
+        api_secret=None,
+        testnet=None,
+        base_url=None,
+        allow_env_credentials=True,
+        quick_validate=False,
+    ):
         # LAZY LOADING: config só; OrderCalculator sob demanda (não bloqueia validação de API)
         from src.config import get_bybit_credentials, resolve_use_testnet
+
+        self.quick_validate = bool(quick_validate)
 
         # allow_env_credentials=False: market data público sem herdar BYBIT_API_* do .env
         if allow_env_credentials:
@@ -212,13 +222,22 @@ class BybitClient:
         self.use_sandbox = bool(self.testnet or self.is_demo)
         self.pybit_session = None
 
-        # SINCRONIZAÇÃO DE TEMPO: Executa na inicialização para mitigar drift de timestamp
-        if api_key and api_secret:
+        # Timeout curto no fluxo de vincular investidor (evita SALVANDO... eterno)
+        if self.quick_validate:
+            try:
+                self.exchange.timeout = 8000
+            except Exception:
+                pass
+
+        # SINCRONIZAÇÃO DE TEMPO — pula no quick_validate (load_time_difference trava no Render)
+        if api_key and api_secret and not self.quick_validate:
             try:
                 self.exchange.load_time_difference()
                 print("✅ [BYBIT TIME SYNC] Diferença de tempo sincronizada com o servidor", flush=True)
             except Exception as sync_err:
                 print(f"⚠️ [BYBIT TIME SYNC] Aviso: {sync_err}", flush=True)
+        elif self.quick_validate:
+            print("⚡ [BYBIT] quick_validate: time-sync ignorado", flush=True)
 
         self.pybit_api_version = 'v5'
         self.pybit_sdk_module = ''
@@ -227,7 +246,8 @@ class BybitClient:
             self._init_pybit_session(api_key, api_secret)
 
         print(
-            f"🔍 [BYBIT ENDPOINT] testnet={self.testnet} demo={self.is_demo} endpoint={self.active_endpoint}",
+            f"🔍 [BYBIT ENDPOINT] testnet={self.testnet} demo={self.is_demo} "
+            f"endpoint={self.active_endpoint} quick={self.quick_validate}",
             flush=True,
         )
 
@@ -809,6 +829,10 @@ class BybitClient:
         if not getattr(self, 'authenticated', False):
             return None
 
+        # Fluxo rápido (vincular investidor): só pybit UNIFIED, sem cascata CCXT
+        if getattr(self, 'quick_validate', False):
+            return self.get_balance_quick()
+
         def _usdt_from(balance):
             total = (balance or {}).get('total') or {}
             usdt = total.get('USDT')
@@ -908,6 +932,61 @@ class BybitClient:
             return None
 
         return None
+
+    def get_balance_quick(self):
+        """
+        Validação rápida de chaves: apenas pybit get_wallet_balance UNIFIED.
+        Sem fallbacks CCXT (evita até ~45s de timeout em cascata no Render).
+        """
+        if not getattr(self, 'authenticated', False):
+            return None
+        if not self.pybit_session:
+            print("⚠️ [BYBIT QUICK] pybit_session indisponível", flush=True)
+            return None
+
+        def _extract_unified_available_usdt(wallet_response):
+            try:
+                result = (wallet_response or {}).get('result') or {}
+                wallet_list = result.get('list') or []
+                for wallet_data in wallet_list:
+                    coin_list = wallet_data.get('coin') or []
+                    for coin in coin_list:
+                        if str(coin.get('coin') or '').upper() != 'USDT':
+                            continue
+                        for field in ('availableBalance', 'availableToWithdraw', 'walletBalance', 'equity'):
+                            raw = coin.get(field)
+                            if raw is None:
+                                continue
+                            return float(raw)
+                    for field in ('totalAvailableBalance', 'totalWalletBalance'):
+                        raw = wallet_data.get(field)
+                        if raw is None:
+                            continue
+                        return float(raw)
+            except Exception:
+                return None
+            return None
+
+        try:
+            key_preview = (getattr(self.exchange, 'apiKey', None) or self._api_key or '????')[:4]
+            print(f"⚡ [BYBIT QUICK] get_wallet_balance UNIFIED ({key_preview}…)", flush=True)
+            wallet_response = self.pybit_session.get_wallet_balance(accountType='UNIFIED')
+            ok, err = self._handle_v5_ret_code(wallet_response, 'get_wallet_balance_quick')
+            if not ok:
+                print(f"⚠️ [BYBIT QUICK] falhou: {err}", flush=True)
+                self._record_last_auth_error(wallet_response)
+                return None
+            wallet_balance = _extract_unified_available_usdt(wallet_response)
+            if wallet_balance is not None:
+                print(f"✅ [BYBIT QUICK] saldo=${float(wallet_balance):.2f} USDT", flush=True)
+                return float(wallet_balance)
+            # Auth OK mas saldo zero/ausente — ainda valida a chave
+            print("✅ [BYBIT QUICK] chave OK · saldo USDT=0.00", flush=True)
+            return 0.0
+        except Exception as e:
+            self._record_last_auth_error(e)
+            print(f"⚠️ [BYBIT QUICK] exceção: {e}", flush=True)
+            return None
 
     def fetch_ohlcv(self, symbol, timeframe="15m"):
         """Busca base de dados histórica filtrada por cache atômico."""

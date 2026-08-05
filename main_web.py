@@ -3816,14 +3816,15 @@ def add_cliente():
         )
         # Sempre devolve a mensagem real (auth/API/banco) — nunca esconde atrás de 500 genérico
         if record:
-            status_code = 200 if validation.get('valid') else 400
+            # Persistiu no banco → HTTP 200 (valid=false cobre API inválida/timeout sem travar o modal)
             return jsonify({
-                "status": "sucesso" if validation.get('valid') else "erro",
+                "status": "sucesso",
                 "msg": msg,
                 "valid": bool(validation.get("valid")),
                 "api_error": validation.get("api_error") or (None if validation.get('valid') else msg),
                 "client": record,
-            }), status_code
+                "timeout": bool(validation.get("timeout")),
+            }), 200
         print(f"❌ [BACKEND] vincular_cliente sem record: {msg}", flush=True)
         return jsonify({
             "status": "erro",
@@ -4298,33 +4299,49 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
         payload['bybit_secret'] = existing_secret
 
     def _try_validate(client_payload):
-        # Retry 1× se import parcial/circular (cold start gunicorn)
-        last_err = None
-        for attempt in range(1, 3):
+        """
+        Validação rápida de API (timeout rígido).
+        Evita SALVANDO... eterno: sem time-sync CCXT e sem cascata de fallbacks.
+        """
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+        from src.broker.bybit_client import BybitClient
+
+        api_k = str(client_payload.get('bybit_key') or '').strip()
+        api_s = str(client_payload.get('bybit_secret') or '').strip()
+        if not api_k or not api_s:
+            raise RuntimeError('Informe API Key e API Secret da Bybit')
+
+        endpoint_mode = str(client_payload.get('bybit_endpoint_mode') or 'mainnet').strip().lower()
+        endpoint_url = _endpoint_url_for_mode(endpoint_mode)
+        use_testnet = endpoint_mode == 'testnet'
+        validate_timeout = float(os.getenv('BYBIT_VALIDATE_TIMEOUT_SECS', '12'))
+
+        def _run():
+            broker = BybitClient(
+                api_key=api_k,
+                api_secret=api_s,
+                testnet=use_testnet,
+                base_url=endpoint_url,
+                allow_env_credentials=False,
+                quick_validate=True,
+            )
+            balance = broker.get_balance_quick()
+            return broker, balance
+
+        print(
+            f"⚡ [VALIDAR] quick path timeout={validate_timeout:.0f}s endpoint={endpoint_mode}",
+            flush=True,
+        )
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            fut = pool.submit(_run)
             try:
-                broker = _make_broker(client_payload)
-                balance = broker.get_balance()
-                return broker, balance
-            except ImportError as imp_err:
-                last_err = imp_err
-                msg = str(imp_err or '')
-                if 'OrderCalculator' in msg or 'partially initialized' in msg.lower() or 'circular' in msg.lower():
-                    print(
-                        f"♻️ [VALIDAR] Import parcial detectado (tentativa {attempt}/2): {imp_err}",
-                        flush=True,
-                    )
-                    try:
-                        import importlib
-                        import src.broker.order_calculator as oc_mod
-                        importlib.reload(oc_mod)
-                        import src.broker.bybit_client as bb_mod
-                        importlib.reload(bb_mod)
-                    except Exception as reload_err:
-                        print(f"⚠️ [VALIDAR] reload adiado: {reload_err}", flush=True)
-                    time.sleep(0.15)
-                    continue
-                raise
-        raise last_err or RuntimeError('Falha ao validar broker')
+                return fut.result(timeout=validate_timeout)
+            except FuturesTimeout:
+                raise TimeoutError(
+                    f'Bybit não respondeu em {validate_timeout:.0f}s '
+                    f'(timeout na leitura de saldo). Chaves foram salvas se possível; '
+                    f'tente novamente ou verifique a rede/API.'
+                )
 
     try:
         print(
@@ -4357,6 +4374,32 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
             'exchange': payload['exchange'],
             'balance_source': payload.get('balance_source'),
             'is_testnet': saved_mode in ('testnet', 'demo'),
+        }
+    except TimeoutError as te:
+        # Persiste as chaves mesmo com Bybit lenta — libera o botão SALVANDO
+        err_text = str(te)
+        print(f"⏱️ [VALIDAR] timeout: {err_text}", flush=True)
+        payload['status'] = 'ativo'
+        payload['saldo_base'] = round(float((existing_client or {}).get('saldo_base') or 0.0), 2)
+        try:
+            record, _, local_synced = _save_client_everywhere(payload)
+        except Exception as save_err:
+            print(f"❌ [VALIDAR] Falha ao persistir após timeout: {save_err}", flush=True)
+            record, local_synced = None, False
+            err_text = f"{err_text} | Também falhou ao salvar no banco: {save_err}"
+        failed_mode = _resolve_client_account_mode(payload)
+        return {
+            'valid': False,
+            'msg': err_text,
+            'api_error': err_text,
+            'record': record,
+            'synced_to_local': local_synced,
+            'balance': payload['saldo_base'],
+            'account_mode': failed_mode,
+            'exchange': payload['exchange'],
+            'balance_source': payload.get('balance_source'),
+            'is_testnet': failed_mode in ('testnet', 'demo'),
+            'timeout': True,
         }
     except Exception as e:
         err_text = str(e or '')
