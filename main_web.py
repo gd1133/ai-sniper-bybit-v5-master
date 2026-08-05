@@ -587,14 +587,25 @@ def _preload_runtime_modules():
     Carrega os módulos pesados (broker/IA) de forma SÍNCRONA e single-thread
     antes de iniciar as threads e de servir requisições.
 
-    Evita o erro "cannot import name 'BybitClient' from partially initialized
-    module" (import parcial/circular) causado pela corrida entre a thread do
-    radar e a primeira requisição no cold start do gunicorn.
+    Evita o erro "cannot import name 'BybitClient'/'OrderCalculator' from
+    partially initialized module" (import parcial/circular) causado pela
+    corrida entre a thread do radar e a primeira requisição no cold start.
     """
     global BybitClient, IndicatorEngine, GroqValidator
+    # OrderCalculator ANTES do BybitClient — desacopla o grafo de imports
+    try:
+        from src.broker.order_calculator import OrderCalculator as _OC  # noqa: F401
+    except Exception as e:
+        print(f"⚠️ [BOOT] preload OrderCalculator adiado: {e}", flush=True)
     try:
         from src.broker.bybit_client import BybitClient as _BC
         BybitClient = _BC
+        # Aquece o loader thread-safe sem forçar OrderCalculator no __init__
+        try:
+            from src.broker import bybit_client as _bb
+            _bb._load_order_calculator_class()
+        except Exception:
+            pass
     except Exception as e:
         print(f"⚠️ [BOOT] preload BybitClient adiado: {e}", flush=True)
     try:
@@ -4287,9 +4298,33 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
         payload['bybit_secret'] = existing_secret
 
     def _try_validate(client_payload):
-        broker = _make_broker(client_payload)
-        balance = broker.get_balance()
-        return broker, balance
+        # Retry 1× se import parcial/circular (cold start gunicorn)
+        last_err = None
+        for attempt in range(1, 3):
+            try:
+                broker = _make_broker(client_payload)
+                balance = broker.get_balance()
+                return broker, balance
+            except ImportError as imp_err:
+                last_err = imp_err
+                msg = str(imp_err or '')
+                if 'OrderCalculator' in msg or 'partially initialized' in msg.lower() or 'circular' in msg.lower():
+                    print(
+                        f"♻️ [VALIDAR] Import parcial detectado (tentativa {attempt}/2): {imp_err}",
+                        flush=True,
+                    )
+                    try:
+                        import importlib
+                        import src.broker.order_calculator as oc_mod
+                        importlib.reload(oc_mod)
+                        import src.broker.bybit_client as bb_mod
+                        importlib.reload(bb_mod)
+                    except Exception as reload_err:
+                        print(f"⚠️ [VALIDAR] reload adiado: {reload_err}", flush=True)
+                    time.sleep(0.15)
+                    continue
+                raise
+        raise last_err or RuntimeError('Falha ao validar broker')
 
     try:
         print(

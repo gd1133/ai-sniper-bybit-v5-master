@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+from __future__ import annotations
+
 import os
 import time
 import sys
@@ -6,12 +8,10 @@ import threading
 import json
 import re
 from decimal import Decimal
-from src.risk.position_sizing import (
-    calculate_position_qty,
-    calculate_tp_sl_prices,
-    load_entry_after_stop_pct,
-    load_entry_pct,
-)
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.broker.order_calculator import OrderCalculator as OrderCalculatorType
 
 # Força UTF-8 no stdout sem reempacotar o stream (evita fechar stdout no Windows)
 if sys.platform == 'win32':
@@ -32,6 +32,29 @@ _pybit_http_class = None
 _ccxt_lock = threading.Lock()
 _pd_lock = threading.Lock()
 _pybit_lock = threading.Lock()
+_order_calc_cls = None
+_order_calc_cls_lock = threading.Lock()
+
+
+def _load_order_calculator_class():
+    """Import thread-safe de OrderCalculator (evita partial init / circular)."""
+    global _order_calc_cls
+    if _order_calc_cls is not None:
+        return _order_calc_cls
+    with _order_calc_cls_lock:
+        if _order_calc_cls is not None:
+            return _order_calc_cls
+        import importlib
+        mod = importlib.import_module('src.broker.order_calculator')
+        cls = getattr(mod, 'OrderCalculator', None)
+        if cls is None:
+            raise ImportError(
+                "OrderCalculator ausente em src.broker.order_calculator "
+                "(módulo parcialmente inicializado?)"
+            )
+        _order_calc_cls = cls
+        return _order_calc_cls
+
 
 def _get_ccxt():
     """Carrega CCXT lazy (apenas na primeira vez) com thread lock."""
@@ -150,9 +173,8 @@ class BybitClient:
     Blindagem contra bloqueios de API e vazamento de memória.
     """
     def __init__(self, api_key=None, api_secret=None, testnet=None, base_url=None, allow_env_credentials=True):
-        # LAZY LOADING: Evita importação circular puxando apenas no escopo local
+        # LAZY LOADING: config só; OrderCalculator sob demanda (não bloqueia validação de API)
         from src.config import get_bybit_credentials, resolve_use_testnet
-        from src.broker.order_calculator import OrderCalculator
 
         # allow_env_credentials=False: market data público sem herdar BYBIT_API_* do .env
         if allow_env_credentials:
@@ -167,6 +189,7 @@ class BybitClient:
         self._api_key = api_key
         self._api_secret = api_secret
         self._session_lock = threading.Lock()
+        self._order_calculator = None
 
         normalized_base_url = str(base_url or '').strip()
         if normalized_base_url:
@@ -176,8 +199,7 @@ class BybitClient:
             e_demo = False
             e_testnet = resolve_use_testnet(testnet)
 
-        # Inicializa a calculadora de ordens dinâmica
-        self.order_calculator = OrderCalculator(exchange_name='bybit')
+        # NÃO instancia OrderCalculator aqui — validação de chaves/saldo não precisa
         self.exchange, self.active_endpoint, resolved_testnet, resolved_demo = inicializar_exchange_bybit(
             api_key=api_key,
             api_secret=api_secret,
@@ -224,6 +246,18 @@ class BybitClient:
         self.adaptive_delay = 0.5
         self.rate_limit_block_until = 0
         self._public_market_exchange = None
+
+    @property
+    def order_calculator(self):
+        """Lazy: só carrega OrderCalculator quando o sizing de ordem precisar."""
+        if self._order_calculator is None:
+            cls = _load_order_calculator_class()
+            self._order_calculator = cls(exchange_name='bybit')
+        return self._order_calculator
+
+    @order_calculator.setter
+    def order_calculator(self, value):
+        self._order_calculator = value
 
     def _configure_exchange_endpoint(self):
         """Reaplica sandbox/endpoint (compatível com testes legados)."""
@@ -549,6 +583,7 @@ class BybitClient:
             extract_bybit_lot_filters,
             print_entry_viability_log,
         )
+        from src.risk.position_sizing import load_entry_after_stop_pct, load_entry_pct
 
         current_price = self.get_last_price(symbol)
         if current_price <= 0:
@@ -1418,6 +1453,7 @@ class BybitClient:
             lev = self._fetch_open_position_leverage(symbol, side)
             if not lev or lev <= 0:
                 lev = float(leverage or getattr(self, 'default_leverage', 20) or 20)
+            from src.risk.position_sizing import calculate_tp_sl_prices
             tp_price, sl_price = calculate_tp_sl_prices(entry_price, side, lev)
 
             price_to_precision = getattr(self.exchange, 'price_to_precision', None)
