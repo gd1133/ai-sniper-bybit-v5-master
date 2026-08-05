@@ -435,6 +435,20 @@ def init_db():
             processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         ''')
+        cur.execute('''
+        CREATE TABLE IF NOT EXISTS historico_decisoes_ia (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT NOT NULL,
+            motivo_saida TEXT DEFAULT '',
+            pnl_garantido_pct REAL DEFAULT 0,
+            tipo_execucao TEXT DEFAULT '',
+            action_payload TEXT DEFAULT '',
+            client_id INTEGER DEFAULT 0,
+            timestamp TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_decisoes_ts ON historico_decisoes_ia(timestamp)')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_decisoes_symbol ON historico_decisoes_ia(symbol)')
         return True
 
     def _run_schema_once():
