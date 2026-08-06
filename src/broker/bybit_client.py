@@ -222,10 +222,10 @@ class BybitClient:
         self.use_sandbox = bool(self.testnet or self.is_demo)
         self.pybit_session = None
 
-        # Timeout curto no fluxo de vincular investidor (evita SALVANDO... eterno)
+        # Timeout do CCXT no fluxo de vincular (ms). A validação leve usa pybit + retry.
         if self.quick_validate:
             try:
-                self.exchange.timeout = 8000
+                self.exchange.timeout = 15000
             except Exception:
                 pass
 
@@ -310,12 +310,15 @@ class BybitClient:
             if 'pybit.unified_trading' not in self.pybit_sdk_module:
                 raise RuntimeError(f"SDK pybit incompatível: esperado pybit.unified_trading, recebido {self.pybit_sdk_module}")
 
+            # quick_validate: timeout por request ~15s (cabe em orçamento 28–30s com 1 retry)
+            pybit_timeout = 15 if self.quick_validate else 10
             self.pybit_session = HTTP(
                 testnet=self.testnet,
                 demo=self.is_demo,
                 api_key=api_key,
                 api_secret=api_secret,
                 recv_window=20000,
+                timeout=pybit_timeout,
             )
             # Sempre fixa o endpoint resolvido (mainnet / testnet / demo)
             try:
@@ -324,12 +327,53 @@ class BybitClient:
                 pass
             print(
                 f"🔌 [PYBIT V5] módulo={self.pybit_sdk_module} testnet={self.testnet} demo={self.is_demo} "
-                f"endpoint={self.pybit_session.endpoint} recv_window=20000ms",
+                f"endpoint={self.pybit_session.endpoint} recv_window=20000ms timeout={pybit_timeout}s",
                 flush=True,
             )
         except Exception as e:
             print(f"⚠️ [PYBIT] Sessão HTTP indisponível: {e}", flush=True)
             self.pybit_session = None
+
+    @staticmethod
+    def _is_timeout_or_network_error(exc) -> bool:
+        """Detecta timeouts/rede (requests, httpx, asyncio) para 1 retry rápido."""
+        if exc is None:
+            return False
+        if isinstance(exc, TimeoutError):
+            return True
+        try:
+            import asyncio
+            if isinstance(exc, asyncio.TimeoutError):
+                return True
+        except Exception:
+            pass
+        try:
+            import requests
+            if isinstance(exc, (
+                requests.exceptions.Timeout,
+                requests.exceptions.ReadTimeout,
+                requests.exceptions.ConnectTimeout,
+                requests.exceptions.ConnectionError,
+            )):
+                return True
+        except Exception:
+            pass
+        try:
+            import httpx
+            if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)):
+                return True
+        except Exception:
+            pass
+        name = type(exc).__name__.lower()
+        msg = str(exc or '').lower()
+        return (
+            'timeout' in name
+            or 'timeout' in msg
+            or 'timed out' in msg
+            or 'connection reset' in msg
+            or 'connection aborted' in msg
+            or 'temporarily unavailable' in msg
+        )
 
     def _session_has_api_key(self) -> bool:
         """True se pybit HTTP ou CCXT têm credenciais utilizáveis."""
@@ -935,14 +979,27 @@ class BybitClient:
 
     def get_balance_quick(self):
         """
-        Validação rápida de chaves: apenas pybit get_wallet_balance UNIFIED.
+        Validação rápida de chaves: apenas pybit get_wallet_balance UNIFIED (coin=USDT).
         Sem fallbacks CCXT (evita até ~45s de timeout em cascata no Render).
         """
-        if not getattr(self, 'authenticated', False):
+        result = self.validate_keys_lightweight()
+        if not result.get('ok'):
             return None
+        bal = result.get('balance')
+        return 0.0 if bal is None else float(bal)
+
+    def validate_keys_lightweight(self):
+        """
+        Checagem leve de API (vincular investidor):
+        1) GET /v5/user/query-api via get_api_key_information (prova retCode=0)
+        2) get_wallet_balance UNIFIED com coin=USDT (saldo opcional)
+        1 retry rápido em timeout/rede (httpx/requests/asyncio).
+        """
+        if not getattr(self, 'authenticated', False):
+            return {'ok': False, 'balance': None, 'error': 'Credenciais ausentes'}
         if not self.pybit_session:
             print("⚠️ [BYBIT QUICK] pybit_session indisponível", flush=True)
-            return None
+            return {'ok': False, 'balance': None, 'error': 'Sessão pybit indisponível'}
 
         def _extract_unified_available_usdt(wallet_response):
             try:
@@ -967,26 +1024,63 @@ class BybitClient:
                 return None
             return None
 
-        try:
-            key_preview = (getattr(self.exchange, 'apiKey', None) or self._api_key or '????')[:4]
-            print(f"⚡ [BYBIT QUICK] get_wallet_balance UNIFIED ({key_preview}…)", flush=True)
-            wallet_response = self.pybit_session.get_wallet_balance(accountType='UNIFIED')
-            ok, err = self._handle_v5_ret_code(wallet_response, 'get_wallet_balance_quick')
-            if not ok:
-                print(f"⚠️ [BYBIT QUICK] falhou: {err}", flush=True)
-                self._record_last_auth_error(wallet_response)
-                return None
-            wallet_balance = _extract_unified_available_usdt(wallet_response)
-            if wallet_balance is not None:
-                print(f"✅ [BYBIT QUICK] saldo=${float(wallet_balance):.2f} USDT", flush=True)
-                return float(wallet_balance)
-            # Auth OK mas saldo zero/ausente — ainda valida a chave
-            print("✅ [BYBIT QUICK] chave OK · saldo USDT=0.00", flush=True)
-            return 0.0
-        except Exception as e:
-            self._record_last_auth_error(e)
-            print(f"⚠️ [BYBIT QUICK] exceção: {e}", flush=True)
-            return None
+        key_preview = (getattr(self.exchange, 'apiKey', None) or self._api_key or '????')[:4]
+        last_err = None
+        max_attempts = 2  # 1 tentativa + 1 retry de fallback
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                print(
+                    f"⚡ [BYBIT LIGHT] query-api attempt={attempt}/{max_attempts} ({key_preview}…)",
+                    flush=True,
+                )
+                # Endpoint leve: /v5/user/query-api — não busca histórico/posições
+                api_info = self.pybit_session.get_api_key_information()
+                ok, err = self._handle_v5_ret_code(api_info, 'query-api')
+                if not ok:
+                    print(f"⚠️ [BYBIT LIGHT] query-api falhou: {err}", flush=True)
+                    self._record_last_auth_error(api_info)
+                    self.authenticated = False
+                    return {'ok': False, 'balance': None, 'error': err or 'API Key inválida'}
+
+                balance = 0.0
+                try:
+                    print("⚡ [BYBIT LIGHT] walletBalance UNIFIED coin=USDT…", flush=True)
+                    wallet_response = self.pybit_session.get_wallet_balance(
+                        accountType='UNIFIED',
+                        coin='USDT',
+                    )
+                    w_ok, w_err = self._handle_v5_ret_code(wallet_response, 'get_wallet_balance_light')
+                    if w_ok:
+                        extracted = _extract_unified_available_usdt(wallet_response)
+                        balance = float(extracted) if extracted is not None else 0.0
+                        print(f"✅ [BYBIT LIGHT] chave OK · saldo=${balance:.2f} USDT", flush=True)
+                    else:
+                        # Chave válida (query-api OK); saldo pode falhar por permissão Wallet
+                        print(f"⚠️ [BYBIT LIGHT] saldo indisponível ({w_err}) — chave válida", flush=True)
+                        balance = 0.0
+                except Exception as bal_err:
+                    if self._is_timeout_or_network_error(bal_err) and attempt < max_attempts:
+                        raise
+                    print(f"⚠️ [BYBIT LIGHT] saldo exceção ({bal_err}) — chave válida", flush=True)
+                    balance = 0.0
+
+                return {'ok': True, 'balance': balance, 'error': None}
+
+            except Exception as e:
+                last_err = e
+                self._record_last_auth_error(e)
+                if self._is_timeout_or_network_error(e) and attempt < max_attempts:
+                    print(
+                        f"🔄 [BYBIT LIGHT] timeout/rede — retry rápido ({type(e).__name__}: {e})",
+                        flush=True,
+                    )
+                    time.sleep(0.5)
+                    continue
+                print(f"⚠️ [BYBIT LIGHT] exceção: {e}", flush=True)
+                return {'ok': False, 'balance': None, 'error': str(e)}
+
+        return {'ok': False, 'balance': None, 'error': str(last_err or 'Timeout Bybit')}
 
     def fetch_ohlcv(self, symbol, timeframe="15m"):
         """Busca base de dados histórica filtrada por cache atômico."""
