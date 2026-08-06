@@ -1471,8 +1471,9 @@ const App = () => {
                     method: undefined,
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload),
+                    // Backend: save-first + validação Bybit ≤~28s (+ retry interno); margem de rede
                     signal: (typeof AbortSignal !== 'undefined' && AbortSignal.timeout)
-                      ? AbortSignal.timeout(20000)
+                      ? AbortSignal.timeout(45000)
                       : undefined,
                   };
                   // Se id definido, atualiza; caso contrário cria novo
@@ -1512,9 +1513,11 @@ const App = () => {
                          console.warn('⚠️ [FRONTEND] Sucesso mas sem dados do cliente na resposta');
                        }
                        const msgSalvo = json.valid === false
-                         ? `Salvo, mas API inválida: ${json.api_error || 'verifique as chaves'}`
+                         ? (json.timeout
+                           ? (json.msg || json.api_error || 'Salvo; Bybit lenta — saldo sincroniza depois')
+                           : `Salvo, mas API inválida: ${json.api_error || 'verifique as chaves'}`)
                          : (json.msg || 'Investidor salvo com sucesso');
-                       setAddFormMsg({ type: json.valid === false ? 'error' : 'success', text: msgSalvo });
+                       setAddFormMsg({ type: json.valid === false ? (json.timeout ? 'success' : 'error') : 'success', text: msgSalvo });
                         try { const invRes = await fetch(`${API_BASE}/api/investidores`); if (invRes.ok) setInvestidores((await invRes.json()).map(normalizeInvestorRecord)); } catch (e) { console.error('❌ [FRONTEND] Erro ao recarregar lista:', e); }
                      } else {
                       console.error('❌ [FRONTEND] Erro na resposta do servidor:', json);
