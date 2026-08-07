@@ -349,6 +349,11 @@ class BrokerManager:
             api_secret = str(client.get('bybit_secret') or '').strip()
             if not api_key or not api_secret: raise RuntimeError(f"Cliente sem credenciais (id={client_id})")
 
+            print(
+                f"🏦 [MAKE BROKER] cache-miss id={client_id} exchange={exchange} "
+                f"testnet={testnet} url={endpoint_url or '-'}",
+                flush=True,
+            )
             broker_instance = broker_cls(api_key, api_secret, testnet=testnet, base_url=endpoint_url)
             self._broker_cache[cache_key] = broker_instance
             return broker_instance
@@ -1582,12 +1587,10 @@ def _make_broker(client):
     use_testnet = endpoint_mode == 'testnet'
     endpoint_url = _endpoint_url_for_mode(endpoint_mode)
     broker_cls = _ensure_broker_class(exchange)
-    print(
-        f"🏦 [MAKE BROKER] exchange=bybit account={account_mode or '-'} "
-        f"endpoint_mode={endpoint_mode} testnet_flag={use_testnet} url={endpoint_url}",
-        flush=True,
+    broker = _get_broker_manager().get_broker(
+        {**client, 'exchange': 'bybit'}, broker_cls, use_testnet, endpoint_url=endpoint_url
     )
-    return _get_broker_manager().get_broker({**client, 'exchange': 'bybit'}, broker_cls, use_testnet, endpoint_url=endpoint_url)
+    return broker
 
 def _get_registered_clients(active_only=False):
     try: return [{**dict(c), "storage_source": "local"} for c in (db.get_active_clients() if active_only else db.get_all_clients())]
@@ -3824,6 +3827,7 @@ def add_cliente():
                 "api_error": validation.get("api_error") or (None if validation.get('valid') else msg),
                 "client": record,
                 "timeout": bool(validation.get("timeout")),
+                "validation_pending": bool(validation.get("validation_pending")),
             }), 200
         print(f"❌ [BACKEND] vincular_cliente sem record: {msg}", flush=True)
         return jsonify({
@@ -3920,11 +3924,18 @@ def get_status():
 
         _calcular_pnl_trades()
 
+        # Refresh Bybit em background — nunca bloqueia worker do Gunicorn
         if client_balance_cache.is_expired():
-            _refresh_real_balance_state()
+            _refresh_real_balance_state(force=False)
 
-        _refresh_active_trades_for_status()
-        _refresh_last_sniper_signal()
+        try:
+            _refresh_active_trades_for_status()
+        except Exception as atr_err:
+            print(f"⚠️ [STATUS] active trades: {atr_err}", flush=True)
+        try:
+            _refresh_last_sniper_signal()
+        except Exception:
+            pass
 
         try:
             central_state['trades'] = db.get_recent_trades(20)
@@ -3968,6 +3979,7 @@ def api_cliente_manage(client_id):
                 "msg": v.get('msg') or v.get('api_error') or ('Atualizado' if v.get('valid') else 'Falha ao atualizar'),
                 "api_error": v.get('api_error'),
                 "client": v.get('record'),
+                "validation_pending": bool(v.get('validation_pending')),
             }), (200 if v.get('record') else 400)
         elif request.method == 'DELETE':
             return jsonify({"success": _delete_client_everywhere(client_id)[1]})
@@ -4275,6 +4287,11 @@ def api_market_intelligence():
         return jsonify({"success": False, "error": str(e)}), 500
 
 def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=None, client_id=None, existing_client=None):
+    """
+    Persiste o investidor no SQLite e responde imediatamente.
+    A validação Bybit (query-api + saldo USDT) roda em thread daemon —
+    libera o modal SALVANDO mesmo com radar/Gunicorn ocupados.
+    """
     payload = dict(client_payload or {})
     # Sistema 100% REAL — sempre conta real/mainnet, nunca testnet/demo/paper.
     payload['account_mode'] = 'real'
@@ -4311,11 +4328,11 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
             'is_testnet': False,
         }
 
-    # ── 1) SALVA PRIMEIRO — libera o modal SALVANDO... mesmo se Bybit travar ──
+    # Preserva saldo já sincronizado (ex.: marcio $61.55) até a validação em background
     payload['status'] = 'ativo'
     payload['saldo_base'] = round(float((existing_client or {}).get('saldo_base') or payload.get('saldo_base') or 0.0), 2)
     print(
-        f"💾 [VALIDAR] Salvando investidor ANTES da Bybit: nome={payload.get('nome')}",
+        f"💾 [VALIDAR] Salvando investidor (resposta imediata): nome={payload.get('nome')}",
         flush=True,
     )
     try:
@@ -4360,21 +4377,34 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
     except Exception:
         pass
 
-    # ── 2) Valida Bybit em thread (não bloqueia worker) + timeout 25–30s ──
-    def _try_validate_quick():
-        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+    # Snapshot para a thread de background (não usa request/Flask context)
+    bg_payload = {
+        'id': saved_id,
+        'nome': payload.get('nome'),
+        'bybit_key': str(payload.get('bybit_key') or '').strip(),
+        'bybit_secret': str(payload.get('bybit_secret') or '').strip(),
+        'bybit_endpoint_mode': endpoint_mode,
+        'account_mode': 'real',
+        'is_testnet': False,
+        'balance_source': payload.get('balance_source'),
+        'exchange': 'bybit',
+        'status': 'ativo',
+        'saldo_base': payload['saldo_base'],
+    }
 
-        api_k = str(payload.get('bybit_key') or '').strip()
-        api_s = str(payload.get('bybit_secret') or '').strip()
+    def _background_validate_bybit():
+        validate_timeout = float(os.getenv('BYBIT_VALIDATE_TIMEOUT_SECS', '28'))
+        api_k = bg_payload['bybit_key']
+        api_s = bg_payload['bybit_secret']
         endpoint_url = _endpoint_url_for_mode(endpoint_mode)
         use_testnet = endpoint_mode == 'testnet'
-        # Orçamento total da validação (Bybit lenta / Render acordando)
-        validate_timeout = float(os.getenv('BYBIT_VALIDATE_TIMEOUT_SECS', '28'))
 
         def _run():
-            # Import + CCXT + pybit DENTRO da thread (equivalente a asyncio.to_thread)
             from src.broker.bybit_client import BybitClient
-            print("⚡ [VALIDAR] thread: BybitClient quick + query-api…", flush=True)
+            print(
+                f"⚡ [VALIDAR BG] thread: query-api nome={bg_payload.get('nome')} id={saved_id}",
+                flush=True,
+            )
             broker = BybitClient(
                 api_key=api_k,
                 api_secret=api_s,
@@ -4383,127 +4413,96 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
                 allow_env_credentials=False,
                 quick_validate=True,
             )
-            # Checagem leve: /v5/user/query-api + saldo USDT (com 1 retry interno)
-            result = broker.validate_keys_lightweight()
-            return broker, result
+            return broker.validate_keys_lightweight()
 
-        print(
-            f"⚡ [VALIDAR] lightweight path timeout={validate_timeout:.0f}s endpoint={endpoint_mode}",
-            flush=True,
-        )
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
         pool = ThreadPoolExecutor(max_workers=1)
         try:
-            fut = pool.submit(_run)
-            return fut.result(timeout=validate_timeout)
-        except FuturesTimeout:
-            raise TimeoutError(
-                f'Bybit não respondeu em {validate_timeout:.0f}s. '
-                f'Investidor SALVO — saldo será sincronizado depois.'
+            print(
+                f"⚡ [VALIDAR BG] lightweight timeout={validate_timeout:.0f}s endpoint={endpoint_mode}",
+                flush=True,
             )
+            light = pool.submit(_run).result(timeout=validate_timeout) or {}
+            if not light.get('ok'):
+                err = str(light.get('error') or 'Falha ao validar credenciais')
+                print(f"⚠️ [VALIDAR BG] API falhou id={saved_id}: {err}", flush=True)
+                err_upper = err.upper()
+                if (
+                    'RETCODE=10003' in err_upper
+                    or '"RETCODE":10003' in err_upper
+                    or 'API KEY IS INVALID' in err_upper
+                ):
+                    upd = dict(bg_payload)
+                    upd['status'] = 'erro_api'
+                    try:
+                        _save_client_everywhere(upd)
+                    except Exception as e:
+                        print(f"⚠️ [VALIDAR BG] update erro_api falhou: {e}", flush=True)
+                return
+
+            balance = light.get('balance')
+            if balance is None:
+                balance = 0.0
+            upd = dict(bg_payload)
+            upd['saldo_base'] = round(float(balance), 2)
+            upd['status'] = 'ativo'
+            try:
+                _save_client_everywhere(upd)
+                print(
+                    f"✅ [VALIDAR BG] id={saved_id} saldo=${upd['saldo_base']:.2f} USDT",
+                    flush=True,
+                )
+                try:
+                    client_balance_cache.clear()
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f"⚠️ [VALIDAR BG] update saldo falhou: {e}", flush=True)
+        except FuturesTimeout:
+            print(
+                f"⏱️ [VALIDAR BG] timeout {validate_timeout:.0f}s id={saved_id} "
+                f"(chaves já salvas — dashboard sincroniza depois)",
+                flush=True,
+            )
+        except Exception as e:
+            print(f"⚠️ [VALIDAR BG] exceção id={saved_id}: {e}", flush=True)
         finally:
-            # CRÍTICO: wait=False — senão o request fica preso se a Bybit travar
             try:
                 pool.shutdown(wait=False, cancel_futures=True)
             except TypeError:
                 pool.shutdown(wait=False)
 
     try:
+        threading.Thread(
+            target=_background_validate_bybit,
+            name=f"bybit-validate-{saved_id}",
+            daemon=True,
+        ).start()
         print(
-            f"🔐 [VALIDAR] nome={payload.get('nome')} id={saved_id} "
-            f"endpoint={endpoint_mode} — chaves já persistidas",
+            f"🚀 [VALIDAR] HTTP liberado — validação Bybit em background "
+            f"nome={payload.get('nome')} id={saved_id}",
             flush=True,
         )
-        broker, light = _try_validate_quick()
-        light = light or {}
-        if not light.get('ok') or not getattr(broker, 'authenticated', False):
-            raw_msg = (
-                str(light.get('error') or '').strip()
-                or str(getattr(broker, 'last_auth_error_message', '') or '').strip()
-            )
-            raw_code = str(getattr(broker, 'last_auth_error_code', '') or '').strip()
-            if raw_code:
-                raise RuntimeError(f"Falha na autenticação (retCode={raw_code}): {raw_msg or 'verifique as chaves'}")
-            raise RuntimeError(raw_msg or 'Falha ao validar credenciais')
+    except Exception as thr_err:
+        print(f"⚠️ [VALIDAR] falha ao iniciar thread BG: {thr_err}", flush=True)
 
-        balance = light.get('balance')
-        if balance is None:
-            balance = 0.0
-        payload['saldo_base'] = round(float(balance), 2)
-        payload['status'] = 'ativo'
-        payload['id'] = saved_id
-        try:
-            record2, _, local_synced2 = _save_client_everywhere(payload)
-            if record2:
-                record = record2
-                local_synced = local_synced2
-        except Exception as upd_err:
-            print(f"⚠️ [VALIDAR] saldo OK mas update falhou: {upd_err}", flush=True)
-
-        saved_mode = _resolve_client_account_mode({**payload, 'bybit_endpoint_mode': endpoint_mode})
-        return {
-            'valid': True,
-            'msg': f'Validado OK — saldo ${payload["saldo_base"]:.2f} USDT',
-            'record': record,
-            'synced_to_local': local_synced,
-            'balance': payload['saldo_base'],
-            'account_mode': saved_mode,
-            'exchange': payload['exchange'],
-            'balance_source': payload.get('balance_source'),
-            'is_testnet': saved_mode in ('testnet', 'demo'),
-        }
-    except TimeoutError as te:
-        err_text = str(te)
-        print(f"⏱️ [VALIDAR] timeout (chaves já salvas): {err_text}", flush=True)
-        failed_mode = _resolve_client_account_mode(payload)
-        return {
-            'valid': False,
-            'msg': err_text,
-            'api_error': err_text,
-            'record': record,
-            'synced_to_local': local_synced,
-            'balance': payload['saldo_base'],
-            'account_mode': failed_mode,
-            'exchange': payload['exchange'],
-            'balance_source': payload.get('balance_source'),
-            'is_testnet': failed_mode in ('testnet', 'demo'),
-            'timeout': True,
-        }
-    except Exception as e:
-        err_text = str(e or '')
-        err_upper = err_text.upper()
-        is_invalid_key = (
-            'RETCODE=10003' in err_upper
-            or '"RETCODE":10003' in err_upper
-            or 'API KEY IS INVALID' in err_upper
-        )
-        print(f"⚠️ [VALIDAR] API falhou (chaves já salvas): {err_text}", flush=True)
-        payload['status'] = 'erro_api'
-        payload['id'] = saved_id
-        try:
-            record2, _, local_synced2 = _save_client_everywhere(payload)
-            if record2:
-                record = record2
-                local_synced = local_synced2
-        except Exception as upd_err:
-            print(f"⚠️ [VALIDAR] update status erro_api falhou: {upd_err}", flush=True)
-        if is_invalid_key:
-            err_text = (
-                "Investidor SALVO, mas a Bybit rejeitou a chave (retCode 10003). "
-                "Confirme se a API é de PRODUÇÃO (mainnet) com permissão Wallet/Trade."
-            )
-        failed_mode = _resolve_client_account_mode(payload)
-        return {
-            'valid': False,
-            'msg': err_text,
-            'api_error': err_text,
-            'record': record,
-            'synced_to_local': local_synced,
-            'balance': payload['saldo_base'],
-            'account_mode': failed_mode,
-            'exchange': payload['exchange'],
-            'balance_source': payload.get('balance_source'),
-            'is_testnet': failed_mode in ('testnet', 'demo'),
-        }
+    saved_mode = _resolve_client_account_mode({**payload, 'bybit_endpoint_mode': endpoint_mode})
+    saldo_txt = f"${payload['saldo_base']:.2f}" if payload['saldo_base'] else 'sincronizando'
+    return {
+        'valid': True,
+        'msg': (
+            f'Investidor salvo! Saldo {saldo_txt} USDT — '
+            f'validação Bybit em andamento em background.'
+        ),
+        'record': record,
+        'synced_to_local': local_synced,
+        'balance': payload['saldo_base'],
+        'account_mode': saved_mode,
+        'exchange': payload['exchange'],
+        'balance_source': payload.get('balance_source'),
+        'is_testnet': saved_mode in ('testnet', 'demo'),
+        'validation_pending': True,
+    }
 
 # ==============================================================================
 # 🌍 ROTA PEGA-TUDO DO FRONTEND (OBRIGATORIAMENTE NO FINAL DO ARQUIVO)
