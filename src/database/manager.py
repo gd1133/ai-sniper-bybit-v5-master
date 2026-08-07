@@ -794,6 +794,51 @@ def delete_client(client_id: int) -> bool:
         return False
 
 
+def update_client_saldo_base(client_id: int = None, saldo: float = 0.0, nome: str = None) -> bool:
+    """
+    Atualiza SOMENTE o saldo do investidor (UPDATE).
+    Nunca faz DELETE e nunca cria registro novo — preserva id/chaves do cliente.
+    """
+    try:
+        saldo_val = round(float(saldo or 0.0), 2)
+    except (TypeError, ValueError):
+        return False
+
+    cid = int(client_id or 0)
+    nome_limpo = str(nome or '').strip()
+
+    def _op(cur, conn):
+        if cid > 0:
+            cur.execute(
+                "UPDATE clientes_sniper SET saldo_base=? WHERE id=?",
+                (saldo_val, cid),
+            )
+            return cur.rowcount > 0
+        if nome_limpo:
+            cur.execute(
+                "UPDATE clientes_sniper SET saldo_base=? WHERE LOWER(TRIM(nome))=LOWER(?)",
+                (saldo_val, nome_limpo),
+            )
+            return cur.rowcount > 0
+        return False
+
+    try:
+        ok = bool(_execute_write(
+            f'update_client_saldo_base(id={cid},nome={nome_limpo or "-"})',
+            _op,
+        ))
+        if ok:
+            print(
+                f"✅ [DATABASE] saldo_base=${saldo_val:.2f} atualizado "
+                f"(id={cid or '-'} nome={nome_limpo or '-'})",
+                flush=True,
+            )
+        return ok
+    except Exception as e:
+        print(f"⚠️ Erro ao atualizar saldo do cliente: {e}", flush=True)
+        return False
+
+
 def get_open_trades(limit: int = 50) -> List[Dict[str, Any]]:
     conn = _connect()
     cur = conn.cursor()
