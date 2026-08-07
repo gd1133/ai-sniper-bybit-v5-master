@@ -199,11 +199,20 @@ const getInvestorEnvMeta = (inv) => {
 const normalizeInvestorRecord = (client) => {
   const endpointMode = client?.bybit_endpoint_mode || '';
   const accountMode = normalizeAccountMode(client?.account_mode, client?.is_testnet, endpointMode);
+  // Fallback seguro — nunca zera o card se algum alias vier preenchido
+  const saldoExibido = Number(
+    client?.saldo_usdt ?? client?.saldo ?? client?.balance ?? client?.saldo_real ?? client?.banca ?? client?.saldo_base ?? client?.saldo_configurado ?? 0
+  );
+  const saldoSafe = Number.isFinite(saldoExibido) ? saldoExibido : 0;
   return {
     ...client,
-    banca: client?.saldo_real ?? client?.saldo_base ?? client?.banca ?? 0,
-    saldo_real: client?.saldo_real,
-    saldo_configurado: client?.saldo_base ?? client?.saldo_configurado ?? 0,
+    saldo: saldoSafe,
+    saldo_usdt: saldoSafe,
+    balance: saldoSafe,
+    banca: saldoSafe,
+    saldo_real: saldoSafe,
+    saldo_base: client?.saldo_base ?? client?.saldo_configurado ?? saldoSafe,
+    saldo_configurado: client?.saldo_configurado ?? client?.saldo_base ?? saldoSafe,
     balance_source: client?.balance_source ?? 'broker_real_balance',
     is_fake_balance: Boolean(client?.is_fake_balance) || String(client?.balance_source || '') === 'training_fake_balance',
     mode: accountMode === 'demo' ? 'DEMO' : accountMode === 'testnet' ? 'TESTNET' : 'REAL',
@@ -211,7 +220,8 @@ const normalizeInvestorRecord = (client) => {
     bybit_endpoint_mode: endpointMode,
     is_testnet: accountMode !== 'real',
     storage_source: String(client?.storage_source || client?.source || 'local').toUpperCase(),
-    pnl: client?.pnl ?? '+0.0%',
+    pnl: client?.pnl ?? client?.pnl_ciclo ?? '+0.0%',
+    corretora: client?.corretora || 'BYBIT',
   };
 };
 
@@ -422,7 +432,26 @@ const App = () => {
           return;
         }
         if (mounted) {
-          setInvestidores((result.json || []).map(normalizeInvestorRecord));
+          setInvestidores((prev) => {
+            const next = (result.json || []).map(normalizeInvestorRecord);
+            // Evita flash $0 se o poll vier sem saldo mas o card já tinha valor vivo
+            return next.map((n) => {
+              const old = prev.find((p) => String(p.id) === String(n.id));
+              const novoSaldo = Number(n.saldo_usdt ?? n.saldo ?? n.balance ?? n.saldo_real ?? 0);
+              const antigoSaldo = Number(old?.saldo_usdt ?? old?.saldo ?? old?.balance ?? old?.saldo_real ?? 0);
+              if (old && (!Number.isFinite(novoSaldo) || novoSaldo === 0) && antigoSaldo > 0) {
+                return {
+                  ...n,
+                  saldo: antigoSaldo,
+                  saldo_usdt: antigoSaldo,
+                  balance: antigoSaldo,
+                  saldo_real: antigoSaldo,
+                  banca: antigoSaldo,
+                };
+              }
+              return n;
+            });
+          });
           setInvestidoresLoading(false);
         }
       } catch (e) {
@@ -439,7 +468,8 @@ const App = () => {
     fetchStatus();
     fetchInvestidores();
     const iv = setInterval(fetchStatus, 3000);
-    const iv2 = setInterval(fetchInvestidores, 30000);
+    // Polling investidores 4s — atualiza saldo sem resetar card para zero
+    const iv2 = setInterval(fetchInvestidores, 4000);
     return () => { mounted = false; clearInterval(iv); clearInterval(iv2); };
   }, []);
 
@@ -1391,7 +1421,12 @@ const App = () => {
                           </span>
                         </div>
                       </td>
-                      <td className="p-8 font-mono text-zinc-400 font-bold">${Number(inv.saldo_real ?? inv.banca ?? 0).toLocaleString()}</td>
+                      <td className="p-8 font-mono text-zinc-400 font-bold">
+                        {(() => {
+                          const saldoExibido = inv.saldo_usdt ?? inv.saldo ?? inv.balance ?? inv.saldo_real ?? inv.banca ?? 0;
+                          return `$${Number(saldoExibido || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+                        })()}
+                      </td>
                       <td className="p-8 font-black text-green-500 italic text-lg">{inv.pnl}</td>
                       <td className="p-8">
                         <div className="flex items-center gap-2">

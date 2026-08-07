@@ -1725,13 +1725,20 @@ def _fetch_active_client_balances(force=False):
                     total += balance
             except Exception as e: error = str(e)
             items.append({
-                "id": client.get('id'), "nome": client.get('nome'), "saldo_real": balance,
-                "saldo_base": float(client.get('saldo_base', 0) or 0),
-                "is_testnet": False,
-                "account_mode": "real",
-                "bybit_endpoint_mode": "mainnet",
-                "exchange": str(client.get('exchange') or 'bybit').lower(),
-                "status": client.get('status'), "error": error, "is_fake_balance": False,
+                "id": client.get('id'),
+                "nome": client.get('nome'),
+                **_investor_balance_aliases(
+                    balance if balance is not None else _coerce_balance_usd(client.get('saldo_base'), default=0.0),
+                    status=client.get('status') or 'ativo',
+                    extra={
+                        "is_testnet": False,
+                        "account_mode": "real",
+                        "bybit_endpoint_mode": "mainnet",
+                        "exchange": str(client.get('exchange') or 'bybit').lower(),
+                        "error": error,
+                        "is_fake_balance": False,
+                    },
+                ),
             })
     except Exception: pass
 
@@ -1753,6 +1760,158 @@ def _fetch_active_client_balances(force=False):
 
     return res
 
+
+def _coerce_balance_usd(*values, default=None):
+    """Primeiro valor numérico finito ≥ 0; None se nenhum."""
+    for v in values:
+        if v is None:
+            continue
+        try:
+            n = float(v)
+            if n == n:  # not NaN
+                return round(n, 2)
+        except (TypeError, ValueError):
+            continue
+    return default
+
+
+def _investor_balance_aliases(saldo, *, pnl_ciclo=0.0, status='ativo', corretora='BYBIT', extra=None):
+    """
+    Padroniza todas as chaves de saldo usadas pelo frontend (compatibilidade).
+    """
+    valor = _coerce_balance_usd(saldo, default=0.0)
+    if valor is None:
+        valor = 0.0
+    st = str(status or 'ativo').strip() or 'ativo'
+    row = {
+        'saldo': valor,
+        'saldo_usdt': valor,
+        'balance': valor,
+        'saldo_real': valor,
+        'saldo_base': valor,
+        'banca': valor,
+        'saldo_configurado': valor,
+        'pnl_ciclo': _coerce_balance_usd(pnl_ciclo, default=0.0) or 0.0,
+        'status': st,
+        'corretora': str(corretora or 'BYBIT').upper(),
+    }
+    if isinstance(extra, dict):
+        row.update(extra)
+        # Reafirma aliases após merge (extra não deve zerar o saldo sync)
+        for k in ('saldo', 'saldo_usdt', 'balance', 'saldo_real', 'saldo_base', 'banca', 'saldo_configurado'):
+            row[k] = valor
+    return row
+
+
+def _memory_balance_map():
+    """Mapa id → saldo vivo (cache + central_state.real_client_balances)."""
+    out = {}
+    try:
+        cached = client_balance_cache.get() or {}
+        for item in (cached.get('items') or []):
+            cid = item.get('id')
+            bal = _coerce_balance_usd(item.get('saldo_real'), item.get('saldo'), item.get('balance'))
+            if cid is not None and bal is not None:
+                out[int(cid)] = bal
+    except Exception:
+        pass
+    try:
+        for item in (central_state.get('real_client_balances') or []):
+            cid = item.get('id')
+            bal = _coerce_balance_usd(
+                item.get('saldo_real'), item.get('saldo'), item.get('saldo_usdt'),
+                item.get('balance'), item.get('banca'),
+            )
+            if cid is not None and bal is not None:
+                out[int(cid)] = bal
+    except Exception:
+        pass
+    return out
+
+
+def _persist_live_client_balance(cliente, saldo):
+    """
+    Grava saldo vivo na memória + UPDATE SQLite (sem DELETE/recreate).
+    """
+    saldo_val = _coerce_balance_usd(saldo, default=None)
+    if saldo_val is None:
+        return
+    client_id = int((cliente or {}).get('id') or 0)
+    nome = str((cliente or {}).get('nome') or '').strip()
+
+    # Memória (fonte imediata para /api/investidores e /api/status)
+    items = list(central_state.get('real_client_balances') or [])
+    found = False
+    for i, row in enumerate(items):
+        if int(row.get('id') or 0) == client_id or (
+            nome and str(row.get('nome') or '').strip().lower() == nome.lower()
+        ):
+            merged = dict(row)
+            merged.update(_investor_balance_aliases(
+                saldo_val,
+                status=row.get('status') or (cliente or {}).get('status') or 'ativo',
+                extra={
+                    'id': client_id or row.get('id'),
+                    'nome': nome or row.get('nome'),
+                    'exchange': 'bybit',
+                    'account_mode': 'real',
+                    'is_testnet': False,
+                    'error': None,
+                },
+            ))
+            items[i] = merged
+            found = True
+            break
+    if not found:
+        items.append(_investor_balance_aliases(
+            saldo_val,
+            status=(cliente or {}).get('status') or 'ativo',
+            extra={
+                'id': client_id,
+                'nome': nome,
+                'exchange': 'bybit',
+                'account_mode': 'real',
+                'is_testnet': False,
+                'error': None,
+            },
+        ))
+    central_state['real_client_balances'] = items
+    try:
+        total = sum(
+            float(i.get('saldo_real') or 0)
+            for i in items
+            if i.get('saldo_real') is not None
+        )
+        central_state['balance'] = round(total, 2)
+    except Exception:
+        pass
+
+    # Cache usado por _fetch_active_client_balances / investidores
+    try:
+        cached = client_balance_cache.get() or {"items": [], "total": 0.0}
+        c_items = list(cached.get('items') or [])
+        c_found = False
+        for i, row in enumerate(c_items):
+            if int(row.get('id') or 0) == client_id:
+                c_items[i] = {**row, **_investor_balance_aliases(saldo_val, extra={'id': client_id, 'nome': nome})}
+                c_found = True
+                break
+        if not c_found and client_id:
+            c_items.append(_investor_balance_aliases(saldo_val, extra={'id': client_id, 'nome': nome}))
+        client_balance_cache.set({
+            "items": c_items,
+            "total": round(sum(float(x.get('saldo_real') or 0) for x in c_items), 2),
+        })
+    except Exception:
+        pass
+
+    # SQLite: somente UPDATE de saldo_base
+    try:
+        db.update_client_saldo_base(client_id=client_id or None, saldo=saldo_val, nome=nome or None)
+    except Exception as e:
+        print(f"⚠️ [SALDO] falha UPDATE SQLite id={client_id}: {e}", flush=True)
+
+
 def _build_api_status_payload():
     """
     Payload do `/api/status` — 100% REAL.
@@ -1764,12 +1923,31 @@ def _build_api_status_payload():
     # Soma somente saldos reais lidos das corretoras
     real_client_balances = payload.get('real_client_balances')
     if isinstance(real_client_balances, list) and real_client_balances:
+        normalized_balances = []
+        for c in real_client_balances:
+            saldo = _coerce_balance_usd(
+                c.get('saldo_real'), c.get('saldo'), c.get('saldo_usdt'),
+                c.get('balance'), c.get('banca'), c.get('saldo_base'),
+                default=0.0,
+            )
+            normalized_balances.append({
+                **c,
+                **_investor_balance_aliases(
+                    saldo,
+                    pnl_ciclo=c.get('pnl_ciclo'),
+                    status=c.get('status') or 'ativo',
+                    corretora=c.get('corretora') or 'BYBIT',
+                    extra={
+                        'id': c.get('id'),
+                        'nome': c.get('nome'),
+                        'exchange': c.get('exchange') or 'bybit',
+                        'error': c.get('error'),
+                    },
+                ),
+            })
+        payload['real_client_balances'] = normalized_balances
         balance = round(
-            sum(
-                float(c.get('saldo_real') or 0)
-                for c in real_client_balances
-                if c.get('saldo_real') is not None
-            ),
+            sum(float(c.get('saldo_real') or 0) for c in normalized_balances),
             2,
         )
     else:
@@ -2397,6 +2575,11 @@ def _monitor_dashboard_positions():
                                         f"   💰 [DASHBOARD] {cliente.get('nome')}: saldo disponível UNIFIED ${float(usdt_available):.2f} USDT",
                                         flush=True,
                                     )
+                                    # Persiste saldo vivo (memória + UPDATE SQLite) — nunca DELETE
+                                    try:
+                                        _persist_live_client_balance(cliente, usdt_available)
+                                    except Exception as persist_err:
+                                        print(f"   ⚠️ [DASHBOARD] persist saldo: {persist_err}", flush=True)
                                     # NÃO usar continue aqui — precisa buscar posições abertas abaixo
                                 elif coin_list:
                                     for coin in coin_list:
@@ -2411,6 +2594,10 @@ def _monitor_dashboard_positions():
                                             total_wallet_balance += wallet_balance
                                             client_balance_added = True
                                             print(f"   💰 [DASHBOARD] {cliente.get('nome')}: ${wallet_balance:.2f} USDT", flush=True)
+                                            try:
+                                                _persist_live_client_balance(cliente, wallet_balance)
+                                            except Exception as persist_err:
+                                                print(f"   ⚠️ [DASHBOARD] persist saldo: {persist_err}", flush=True)
                                             break
                         else:
                             print(f"   ⚠️ [DASHBOARD] Erro ao buscar saldo de {cliente.get('nome')}: {err}", flush=True)
@@ -3763,34 +3950,61 @@ def _process_client_orders_background(
 
 @app.route('/api/investidores', methods=['GET'])
 def get_investidores():
+    """
+    Lista investidores com saldo vivo (Bybit/memória), nunca zera o card
+    quando a API ainda não respondeu neste ciclo.
+    """
     try:
         rows = _get_registered_clients(active_only=False)
-        balance_map = {item.get('id'): item for item in _fetch_active_client_balances().get('items', [])}
+        # Prefere memória/dashboard; se cache expirado, dispara refresh BG sem bloquear
+        try:
+            _fetch_active_client_balances(force=False)
+        except Exception:
+            pass
+        live_map = _memory_balance_map()
+        # Fallback do fetch síncrono (se cache quente)
+        try:
+            for item in (_fetch_active_client_balances(force=False).get('items') or []):
+                cid = item.get('id')
+                bal = _coerce_balance_usd(item.get('saldo_real'), item.get('saldo'), item.get('balance'))
+                if cid is not None and bal is not None:
+                    live_map[int(cid)] = bal
+        except Exception:
+            pass
+
         payload = []
         for r in rows:
             client_id = int(r.get('id') or 0)
-            bm = balance_map.get(r.get('id')) or {}
-            payload.append({
-                "id": r.get('id'),
-                "nome": r.get('nome'),
-                "banca": bm.get('saldo_real', r.get('saldo_base', 0)),
-                "saldo_real": bm.get('saldo_real'),
-                "saldo_configurado": r.get('saldo_base', 0),
-                "status": r.get('status'),
-                "mode": "REAL",
-                "account_mode": "real",
-                "bybit_endpoint_mode": "mainnet",
-                "is_testnet": False,
-                "balance_source": "broker_real_balance",
-                "is_fake_balance": False,
-                "error": bm.get('error'),
-                "auth_disabled": _is_client_temporarily_disabled(client_id),
-                "auth_disabled_reason": _get_client_disable_reason(client_id),
-                "storage_source": "local",
-                "exchange": "bybit",
-            })
+            db_saldo = _coerce_balance_usd(r.get('saldo_base'), default=0.0) or 0.0
+            live = live_map.get(client_id)
+            # Nunca usa None: memória → SQLite
+            saldo = _coerce_balance_usd(live, db_saldo, default=0.0) or 0.0
+            status = r.get('status') or 'ativo'
+            aliases = _investor_balance_aliases(
+                saldo,
+                status=status,
+                corretora='BYBIT',
+                extra={
+                    'id': r.get('id'),
+                    'nome': r.get('nome'),
+                    'mode': 'REAL',
+                    'account_mode': 'real',
+                    'bybit_endpoint_mode': 'mainnet',
+                    'is_testnet': False,
+                    'balance_source': 'broker_real_balance',
+                    'is_fake_balance': False,
+                    'auth_disabled': _is_client_temporarily_disabled(client_id),
+                    'auth_disabled_reason': _get_client_disable_reason(client_id),
+                    'storage_source': 'local',
+                    'exchange': 'bybit',
+                    'error': None,
+                },
+            )
+            payload.append(aliases)
         return jsonify(payload), 200
-    except Exception: return jsonify([]), 200
+    except Exception as e:
+        print(f"⚠️ [API] /api/investidores: {e}", flush=True)
+        return jsonify([]), 200
 
 @app.route('/api/vincular_cliente', methods=['POST'])
 def add_cliente():
