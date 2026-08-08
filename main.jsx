@@ -513,16 +513,33 @@ const App = () => {
 
   const handleDeleteInvestor = async (id) => {
     if (!confirm('Confirmar remoção do investidor? Esta ação é irreversível.')) return;
+    const clientId = Number(id);
     try {
-      const res = await fetch(`${API_BASE}/api/cliente/${id}`, { method: 'DELETE' });
-      const json = await res.json();
-      if (res.ok) {
-        setInvestidores(prev => prev.filter(i => i.id !== id));
-        alert(json.msg || 'Removido');
+      console.log(`🗑️ [FRONTEND] DELETE /api/cliente/${clientId}`);
+      const res = await fetch(`${API_BASE}/api/cliente/${clientId}`, { method: 'DELETE' });
+      let json = {};
+      try { json = await res.json(); } catch (_) { json = {}; }
+      if (res.ok && json.success !== false) {
+        // Remove o card imediatamente (comparação numérica evita id string vs number)
+        setInvestidores(prev => prev.filter(i => Number(i.id) !== clientId));
+        // Recarrega a tabela do servidor para confirmar persistência
+        try {
+          const invRes = await fetch(`${API_BASE}/api/investidores`);
+          if (invRes.ok) {
+            const list = await invRes.json();
+            setInvestidores((list || []).map(normalizeInvestorRecord));
+          }
+        } catch (reloadErr) {
+          console.warn('⚠️ [FRONTEND] Reload pós-delete falhou (lista local já atualizada):', reloadErr);
+        }
+        alert(json.message || json.msg || 'Cliente removido com sucesso');
       } else {
-        alert(json.error || 'Erro ao remover');
+        alert(json.message || json.msg || json.error || 'Erro ao remover investidor do banco');
       }
-    } catch (e) { console.error(e); alert('Erro ao remover'); }
+    } catch (e) {
+      console.error('❌ [FRONTEND] Erro ao remover investidor:', e);
+      alert('Erro de conexão ao remover investidor');
+    }
   };
 
   const toggleInvestorBalanceSource = async (inv) => {

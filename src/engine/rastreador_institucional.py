@@ -7,7 +7,7 @@ Detecta entradas institucionais via:
   2. ADX(14) >= 23 (tendência obrigatória)
   3. BB Width(20, 2σ) atual > média das últimas 50 larguras
   4. VWAP diário (linha de equilíbrio)
-  5. Anomalia de volume (média 20 + 2.5× desvio padrão)
+  5. Anomalia de volume (média 20 + 1.8× desvio padrão)
   6. Spread expressivo do candle (evita falsos rompimentos)
 
 Qualquer trava estrutural fechada força Sinal = NEUTRO, inclusive diante de volume extremo.
@@ -118,12 +118,15 @@ class RastreadorInstitucional:
     def __init__(
         self,
         periodo_ma=20,
-        multiplicador_vol=2.5,
+        multiplicador_vol=None,
         multiplicador_spread=1.5,
         amplitude_periods=None,
         amplitude_pct_max=None,
     ):
         self.periodo_ma = int(periodo_ma)
+        # Default 1.8σ — menos extremo que 2.5σ; sobrescreve via PORTA3_VOL_SIGMA
+        if multiplicador_vol is None:
+            multiplicador_vol = _env_float('PORTA3_VOL_SIGMA', 1.8)
         self.multiplicador_vol = float(multiplicador_vol)
         self.multiplicador_spread = float(multiplicador_spread)
         self.amplitude_periods = int(

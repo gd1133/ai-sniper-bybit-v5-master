@@ -781,16 +781,57 @@ def upsert_client_local(data: Dict[str, Any]) -> bool:
 
 
 def delete_client(client_id: int) -> bool:
-    """Remove um cliente e seus trades associados. Commit obrigatório via _execute_write."""
+    """
+    Remove o investidor do SQLite (clientes_sniper) e trades vinculados.
+    Commit físico + verificação pós-DELETE. Nunca retorna sucesso se o ID ainda existir.
+    """
+    try:
+        cid = int(client_id)
+    except (TypeError, ValueError):
+        print(f"⚠️ [DATABASE] delete_client: id inválido={client_id!r}", flush=True)
+        return False
+
+    if cid <= 0:
+        return False
+
     def _op(cur, conn):
-        cur.execute("DELETE FROM trades WHERE client_id = ?", (client_id,))
-        cur.execute("DELETE FROM clientes_sniper WHERE id = ?", (client_id,))
-        return True
+        # Ordem: trades → cliente (evita conflito com FK)
+        cur.execute("DELETE FROM trades WHERE client_id = ?", (cid,))
+        trades_removed = int(cur.rowcount or 0)
+        cur.execute("DELETE FROM clientes_sniper WHERE id = ?", (cid,))
+        clients_removed = int(cur.rowcount or 0)
+        # Compat: se existir tabela legada `clientes`, remove também
+        try:
+            cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='clientes'"
+            )
+            if cur.fetchone():
+                cur.execute("DELETE FROM clientes WHERE id = ?", (cid,))
+        except Exception:
+            pass
+        print(
+            f"🗑️ [DATABASE] DELETE id={cid} clientes_sniper={clients_removed} trades={trades_removed}",
+            flush=True,
+        )
+        return clients_removed > 0
 
     try:
-        return bool(_execute_write(f'delete_client({client_id})', _op))
+        ok = bool(_execute_write(f'delete_client({cid})', _op))
+        if not ok:
+            print(f"⚠️ [DATABASE] delete_client({cid}): nenhuma linha removida", flush=True)
+            return False
+        # Verificação pós-commit: registro não pode mais existir
+        remaining = get_client_by_id(cid)
+        if remaining:
+            print(
+                f"❌ [DATABASE] delete_client({cid}): ainda existe após commit — falha de persistência",
+                flush=True,
+            )
+            return False
+        print(f"✅ [DATABASE] Cliente {cid} removido definitivamente de {DB_PATH}", flush=True)
+        return True
     except Exception as e:
-        print(f"⚠️ Erro ao deletar cliente {client_id}: {e}")
+        print(f"⚠️ Erro ao deletar cliente {cid}: {e}", flush=True)
         return False
 
 
