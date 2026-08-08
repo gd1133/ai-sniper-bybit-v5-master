@@ -269,6 +269,40 @@ def decide_trend_action(
         result['motivo'] = 'Reversão com trailing fraco: ' + ' | '.join(early.get('reasons') or [])
         return result
 
+    # ── 3b) Analista Pessoal — give-back / momentum fade (nunca afrouxa SL) ──
+    try:
+        from src.ai_brain.personal_analyst import refine_exit
+        # peak_roi aproximado pelo extremo de preço vs entrada
+        peak_roi_est = roi
+        if entry > 0 and new_peak > 0:
+            if is_long:
+                peak_move = ((new_peak - entry) / entry) * 100.0
+            else:
+                peak_move = ((entry - new_peak) / entry) * 100.0
+            # ROI margem ~ move% * leverage; usamos ratio relativo se leverage desconhecido
+            # Conservador: escala peak pelo mesmo fator roi/move quando move>0
+            move_now = abs(move) if abs(move) > 1e-9 else 0.0
+            if move_now > 0 and roi != 0:
+                peak_roi_est = max(roi, abs(roi) * (abs(peak_move) / move_now))
+            else:
+                peak_roi_est = max(roi, abs(peak_move) * 10.0)  # ~10x implícito se sem leverage
+
+        analyst_exit = refine_exit(
+            side=side,
+            roi_pct=roi,
+            peak_roi_pct=peak_roi_est,
+            trailing_armed=trailing_armed,
+            breakeven_armed=breakeven_armed,
+            df=df_struct,
+        )
+        if analyst_exit.get('suggest_early_exit'):
+            result['action'] = 'EARLY_EXIT'
+            result['tipo_execucao'] = 'ANALYST_EXIT'
+            result['motivo'] = str(analyst_exit.get('motivo') or 'Analista Pessoal: saída assertiva')
+            return result
+    except Exception:
+        pass
+
     # ── 4) Time-stop / estagnação ──────────────────────────────────────
     stagnant_pnl = roi <= 0 or abs(roi) <= STAGNATION_ROI_ABS
     if age >= MAX_HOLD_SECS and idle >= EXTREME_IDLE_SECS and stagnant_pnl and not trailing_armed:

@@ -3419,6 +3419,71 @@ def sniper_worker_loop():
                         time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
                         continue
 
+                    # ── ANALISTA PESSOAL (Cérebro 3+) — refinador assertivo DyTrade ──
+                    try:
+                        from src.ai_brain.personal_analyst import refine_entry
+                        analyst = refine_entry(
+                            side=side_exec,
+                            probabilidade=prob,
+                            signals=signals,
+                            df=df,
+                            intelligence_context=intel_ctx,
+                            symbol=clean_sym,
+                        )
+                        res['personal_analyst'] = {
+                            'score': analyst.get('score'),
+                            'boost': analyst.get('boost'),
+                            'notes': analyst.get('notes') or [],
+                            'allowed': analyst.get('allowed'),
+                        }
+                        if not analyst.get('allowed', True):
+                            print(
+                                f"   🧠 [ANALISTA] {clean_sym}: BLOQUEADO — {analyst.get('abort_reason')}",
+                                flush=True,
+                            )
+                            try:
+                                from src.database.decision_history import record_ia_decision
+                                record_ia_decision(
+                                    symbol=clean_sym,
+                                    motivo_saida=str(analyst.get('abort_reason') or 'analista'),
+                                    tipo_execucao='PERSONAL_ANALYST_BLOCK',
+                                    action_payload=f"side={side_exec}|prob={prob:.1f}",
+                                )
+                            except Exception:
+                                pass
+                            time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
+                            continue
+                        new_prob = float(analyst.get('probabilidade') or prob)
+                        if abs(new_prob - prob) >= 0.5:
+                            print(
+                                f"   🧠 [ANALISTA] {clean_sym}: score={analyst.get('score')} "
+                                f"prob {prob:.1f}% → {new_prob:.1f}% | "
+                                f"{' | '.join((analyst.get('notes') or [])[:2])}",
+                                flush=True,
+                            )
+                            prob = new_prob
+                            res['probabilidade'] = prob
+                            central_state['confidence'] = round(prob, 2)
+                            if prob < THRESHOLD_ENTRADA:
+                                print(
+                                    f"   🧠 [ANALISTA] {clean_sym}: abaixo do threshold "
+                                    f"após ajuste ({prob:.1f}% < {THRESHOLD_ENTRADA})",
+                                    flush=True,
+                                )
+                                time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
+                                continue
+                        elif analyst.get('notes'):
+                            print(
+                                f"   🧠 [ANALISTA] {clean_sym}: OK score={analyst.get('score')} "
+                                f"| {' | '.join((analyst.get('notes') or [])[:2])}",
+                                flush=True,
+                            )
+                    except Exception as analyst_err:
+                        print(
+                            f"   ⚠️ [ANALISTA] {clean_sym}: fail-open ({analyst_err})",
+                            flush=True,
+                        )
+
                     # ── ENTRADA ASSIMÉTRICA (opinião quant + setups que lucram) ──
                     # SHORT em derretimento = agressivo | LONG = rígido (baleias + vela forte)
                     try:
