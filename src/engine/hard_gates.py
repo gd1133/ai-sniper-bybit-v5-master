@@ -6,7 +6,7 @@ Ordem obrigatória (qualquer falha → NEUTRO e aborta ANTES do Cérebro 3):
 
   Porta 1 — Estrutura: ADX(14) >= 23 + BB Width > média(50)
   Porta 2 — Anti-acumulação: amplitude % dos últimos 20 >= 0.35%
-  Porta 3 — Pegada institucional: Volume > MA(20) + 2.5σ
+  Porta 3 — Pegada institucional: Volume > MA(20) + 1.8σ
   Porta 4 — Lado vs VWAP: COMPRA/VENDA_INSTITUCIONAL
   Porta 5 — Anatomia da vela: cor + close nos 35% + anti-faca caindo
 
@@ -81,7 +81,7 @@ def evaluate_hard_gates(signals: dict | None, df=None) -> dict[str, Any]:
         },
         'porta3_volume': {
             'pass': volume_ok,
-            'rule': 'Volume > MA(20) + 2.5σ (só após Portas 1–2)',
+            'rule': 'Volume > MA(20) + 1.8σ (só após Portas 1–2)',
         },
         'porta4_vwap_lado': {
             'pass': side_ok,
@@ -116,7 +116,7 @@ def evaluate_hard_gates(signals: dict | None, df=None) -> dict[str, Any]:
             f'Porta 2 fechada: amplitude={amplitude:.3f}% < 0.35% (acumulação)',
         )
     if not volume_ok:
-        return _blocked(ports, NEUTRO, 'Porta 3 fechada: sem volume institucional (μ+2.5σ)')
+        return _blocked(ports, NEUTRO, 'Porta 3 fechada: sem volume institucional (μ+1.8σ)')
     if not side_ok:
         return _blocked(ports, NEUTRO, f'Porta 4 fechada: sinal={sinal} (sem lado vs VWAP)')
     if not anatomy_ok:

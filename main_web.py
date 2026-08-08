@@ -1688,8 +1688,48 @@ def _save_client_everywhere(client_data):
     return record, False, True
 
 def _delete_client_everywhere(client_id):
-    _get_broker_manager().invalidate_client(client_id)
-    return True, db.delete_client(client_id)
+    """
+    Remove investidor do SQLite + limpa caches em memória.
+    Retorna (ok: bool, detail: str).
+    """
+    cid = int(client_id or 0)
+    if cid <= 0:
+        return False, 'ID inválido'
+
+    try:
+        _get_broker_manager().invalidate_client(cid)
+    except Exception:
+        pass
+
+    try:
+        with _CLIENT_AUTH_LOCK:
+            _CLIENT_AUTH_RUNTIME.pop(cid, None)
+    except Exception:
+        pass
+
+    # Limpa caches para o card sumir imediatamente no próximo GET
+    try:
+        client_balance_cache.clear()
+    except Exception:
+        pass
+    try:
+        items = list(central_state.get('real_client_balances') or [])
+        central_state['real_client_balances'] = [
+            row for row in items if int(row.get('id') or 0) != cid
+        ]
+    except Exception:
+        pass
+    try:
+        _status_cache.clear()
+    except Exception:
+        pass
+
+    ok = bool(db.delete_client(cid))
+    if ok:
+        print(f"✅ [DELETE] Investidor id={cid} removido do SQLite e caches", flush=True)
+        return True, 'Cliente removido com sucesso'
+    print(f"❌ [DELETE] Falha ao remover investidor id={cid}", flush=True)
+    return False, 'Falha ao remover cliente do banco de dados'
 
 def _fetch_active_client_balances(force=False):
     global _balance_refresh_in_progress
@@ -4196,8 +4236,27 @@ def api_cliente_manage(client_id):
                 "validation_pending": bool(v.get('validation_pending')),
             }), (200 if v.get('record') else 400)
         elif request.method == 'DELETE':
-            return jsonify({"success": _delete_client_everywhere(client_id)[1]})
-    except Exception as e: return jsonify({"error": str(e)}), 400
+            print(f"🗑️ [BACKEND] DELETE /api/cliente/{client_id}", flush=True)
+            ok, detail = _delete_client_everywhere(client_id)
+            if ok:
+                return jsonify({
+                    "success": True,
+                    "message": detail or "Cliente removido com sucesso",
+                    "msg": detail or "Cliente removido com sucesso",
+                    "id": int(client_id),
+                }), 200
+            exists = bool(_get_registered_client_by_id(client_id))
+            status = 404 if not exists else 500
+            return jsonify({
+                "success": False,
+                "message": detail or "Falha ao remover cliente",
+                "msg": detail or "Falha ao remover cliente",
+                "error": detail or "Falha ao remover cliente",
+                "id": int(client_id),
+            }), status
+    except Exception as e:
+        print(f"❌ [BACKEND] Exceção cliente/{client_id}: {e}", flush=True)
+        return jsonify({"success": False, "error": str(e), "message": str(e)}), 400
 
 @app.route('/api/cliente/<int:client_id>/balance-source', methods=['POST'])
 def api_cliente_balance_source(client_id):
