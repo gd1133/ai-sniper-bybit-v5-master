@@ -139,12 +139,18 @@ def detect_market_regime(df: pd.DataFrame, signals: dict | None = None) -> dict:
     Classifica o mercado em TREND ou RANGE (lateral).
 
     Bloqueia entradas quando:
-    - Amplitude % dos últimos X períodos < LATERAL_AMPLITUDE_PCT (padrão 0.35%)
-    - ADX(14) < 23 (trava absoluta)
-    - BB Width atual <= média das últimas 50 larguras (sem expansão)
+    - Amplitude % dos últimos X períodos < LATERAL_AMPLITUDE_PCT (padrão 0.28%)
+    - ADX(14) < STRUCTURE_ADX_MIN (padrão 19)
+    - BB Width sem expansão (só se STRUCTURE_REQUIRE_BB_EXPAND=true)
     - Preço preso na SMA200 (trend NEUTRO) com baixa expansão
     """
     import os
+    from src.engine.structure_config import (
+        STRUCTURE_ADX_MIN,
+        STRUCTURE_REQUIRE_BB_EXPAND,
+        LATERAL_SCORE_BLOCK,
+        DEFAULT_AMPLITUDE_PCT_MAX,
+    )
     signals = signals or {}
     adx = calculate_adx(df)
     choppiness = calculate_choppiness(df)
@@ -152,6 +158,7 @@ def detect_market_regime(df: pd.DataFrame, signals: dict | None = None) -> dict:
     trend = str(signals.get('trend', 'NEUTRO')).upper()
     distance_sma = float(signals.get('distance_from_sma_pct', 0) or 0)
     range_expansion = float(signals.get('range_expansion', 0) or 0)
+    adx_min = float(STRUCTURE_ADX_MIN)
 
     # Amplitude anti-acumulação (configurável via env)
     try:
@@ -159,16 +166,19 @@ def detect_market_regime(df: pd.DataFrame, signals: dict | None = None) -> dict:
     except (TypeError, ValueError):
         amp_periods = 20
     try:
-        amp_max = float(str(os.getenv('LATERAL_AMPLITUDE_PCT', '0.35') or '0.35').replace(',', '.'))
+        amp_max = float(
+            str(os.getenv('LATERAL_AMPLITUDE_PCT', str(DEFAULT_AMPLITUDE_PCT_MAX)) or str(DEFAULT_AMPLITUDE_PCT_MAX))
+            .replace(',', '.')
+        )
     except (TypeError, ValueError):
-        amp_max = 0.35
+        amp_max = float(DEFAULT_AMPLITUDE_PCT_MAX)
     amplitude_pct = calculate_range_amplitude_pct(df, amp_periods)
     amplitude_lateral = amplitude_pct < amp_max
 
     lateral_score = 0.0
     if amplitude_lateral:
         lateral_score += 50  # peso alto: acumulação = bloqueio
-    if adx < 23:
+    if adx < adx_min:
         lateral_score += 35
     if adx < 15:
         lateral_score += 15
@@ -186,19 +196,23 @@ def detect_market_regime(df: pd.DataFrame, signals: dict | None = None) -> dict:
         lateral_score += 10
 
     lateral_score = min(100.0, lateral_score)
-    # Travas absolutas: amplitude, ADX e ausência de expansão das Bandas.
-    structure_blocked = bool(adx < 23 or not bb_expanding)
+    # Trava dura: ADX (+ BB só se exigido). Score soft de lateralidade.
+    structure_blocked = bool(adx < adx_min)
+    if STRUCTURE_REQUIRE_BB_EXPAND and not bb_expanding:
+        structure_blocked = True
     is_lateral = (
         bool(amplitude_lateral)
         or structure_blocked
-        or lateral_score >= 45
+        or lateral_score >= float(LATERAL_SCORE_BLOCK)
     )
 
     if is_lateral:
         regime = 'RANGE'
-        if adx < 23:
-            regime_label = f'LATERAL/SEM TENDÊNCIA — ADX(14) {adx:.2f} < 23 — sinais ignorados'
-        elif not bb_expanding:
+        if adx < adx_min:
+            regime_label = (
+                f'LATERAL/SEM TENDÊNCIA — ADX(14) {adx:.2f} < {adx_min:.0f} — sinais ignorados'
+            )
+        elif STRUCTURE_REQUIRE_BB_EXPAND and not bb_expanding:
             regime_label = (
                 f'LATERAL/SEM EXPANSÃO — BB Width {bb_width:.6f} <= '
                 f'média(50) {bb_width_mean:.6f} — sinais ignorados'
@@ -210,10 +224,10 @@ def detect_market_regime(df: pd.DataFrame, signals: dict | None = None) -> dict:
             )
         else:
             regime_label = 'LATERAL — grandes players em consolidação, sem direção clara'
-    elif trend == 'ALTA' and adx >= 23:
+    elif trend == 'ALTA' and adx >= adx_min:
         regime = 'TREND_UP'
         regime_label = 'TENDÊNCIA DE ALTA — fluxo institucional comprador'
-    elif trend == 'BAIXA' and adx >= 23:
+    elif trend == 'BAIXA' and adx >= adx_min:
         regime = 'TREND_DOWN'
         regime_label = 'TENDÊNCIA DE BAIXA — fluxo institucional vendedor'
     else:
@@ -227,12 +241,14 @@ def detect_market_regime(df: pd.DataFrame, signals: dict | None = None) -> dict:
         'lateral_score': round(lateral_score, 2),
         'adx': round(adx, 2),
         'adx_period': 14,
-        'adx_gate_pass': bool(adx >= 23),
+        'adx_gate_pass': bool(adx >= adx_min),
         'choppiness': round(choppiness, 2),
         'bollinger_bandwidth': round(bb_width, 8),
         'bollinger_bandwidth_mean_50': round(bb_width_mean, 8),
         'bollinger_expanding': bool(bb_expanding),
-        'structure_filters_pass': bool(adx >= 23 and bb_expanding),
+        'structure_filters_pass': bool(
+            adx >= adx_min and (bb_expanding or not STRUCTURE_REQUIRE_BB_EXPAND)
+        ),
         'amplitude_pct': round(amplitude_pct, 4),
         'amplitude_lateral': bool(amplitude_lateral),
         'allow_entry': not is_lateral,

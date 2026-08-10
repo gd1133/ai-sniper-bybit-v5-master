@@ -2,8 +2,8 @@
 """
 Porta 3 adaptativa — multiplica σ do volume conforme volatilidade do mercado (ADX médio).
 
-  • ADX médio (top N) < 20  → consolidação → 1.4σ (mais sensível)
-  • ADX médio >= 20         → tendência    → 1.8σ (padrão)
+  • ADX médio (top N) < 25  → consolidação → 1.0σ (mais sensível)
+  • ADX médio >= 25         → tendência    → 1.25σ (padrão moderado)
 
 Thread-safe; atualizado a cada ciclo do radar.
 """
@@ -15,8 +15,8 @@ import threading
 from typing import Iterable
 
 _lock = threading.Lock()
-_market_avg_adx: float = 25.0
-_last_sigma: float = 1.8
+_market_avg_adx: float = 22.0
+_last_sigma: float = 1.25
 _sample_count: int = 0
 
 
@@ -27,9 +27,9 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-SIGMA_TREND = _env_float('PORTA3_VOL_SIGMA', 1.8)
-SIGMA_CHOP = _env_float('PORTA3_VOL_SIGMA_CHOP', 1.4)
-ADX_CHOP_MAX = _env_float('PORTA3_ADX_CHOP_MAX', 20.0)
+SIGMA_TREND = _env_float('PORTA3_VOL_SIGMA', 1.25)
+SIGMA_CHOP = _env_float('PORTA3_VOL_SIGMA_CHOP', 1.0)
+ADX_CHOP_MAX = _env_float('PORTA3_ADX_CHOP_MAX', 25.0)
 
 
 def set_market_avg_adx(adx: float, samples: int = 0) -> float:

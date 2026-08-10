@@ -4,12 +4,11 @@ Motor Sniper — Portas de filtragem sequencial (Short-Circuit Absoluto).
 
 Ordem obrigatória (qualquer falha → NEUTRO e aborta ANTES do Cérebro 3):
 
-  Porta 1 — Estrutura: ADX(14) >= 23 + BB Width > média(50)
-  Porta 2 — Anti-acumulação: amplitude % dos últimos 20 >= 0.35%
+  Porta 1 — Estrutura: ADX(14) >= STRUCTURE_ADX_MIN (+ BB se exigido)
+  Porta 2 — Anti-acumulação: amplitude % dos últimos 20
   Porta 3 — Pegada institucional: Volume > MA(20) + σ adaptativo
-              (1.4σ se ADX médio mercado < 20; 1.8σ se tendência)
   Porta 4 — Lado vs VWAP: COMPRA/VENDA_INSTITUCIONAL
-  Porta 5 — Anatomia da vela: cor + close nos 35% + anti-faca caindo
+  Porta 5 — Anatomia da vela: cor + close na zona + anti-faca caindo
 
 O surto de volume NUNCA é avaliado se as Portas 1–2 estiverem fechadas.
 """
@@ -17,6 +16,12 @@ O surto de volume NUNCA é avaliado se as Portas 1–2 estiverem fechadas.
 from __future__ import annotations
 
 from typing import Any
+
+from src.engine.structure_config import (
+    STRUCTURE_ADX_MIN,
+    STRUCTURE_REQUIRE_BB_EXPAND,
+    DEFAULT_AMPLITUDE_PCT_MAX,
+)
 
 
 INSTITUTIONAL_BUY = 'COMPRA_INSTITUCIONAL'
@@ -44,16 +49,18 @@ def evaluate_hard_gates(signals: dict | None, df=None) -> dict[str, Any]:
     bb_mean = _f(signals.get('bollinger_bandwidth_mean_50'))
     amplitude = _f(signals.get('amplitude_pct'))
     sinal = str(signals.get('sinal_institucional', NEUTRO) or NEUTRO).upper()
+    adx_min = float(STRUCTURE_ADX_MIN)
+    amp_min = float(DEFAULT_AMPLITUDE_PCT_MAX)
 
-    adx_ok = bool(signals.get('adx_gate_pass')) or adx >= 23.0
-    bb_ok = bool(signals.get('bollinger_expanding'))
+    adx_ok = bool(signals.get('adx_gate_pass')) or adx >= adx_min
+    bb_ok = True if not STRUCTURE_REQUIRE_BB_EXPAND else bool(signals.get('bollinger_expanding'))
     amp_ok = not bool(
         signals.get('is_accumulation')
         or signals.get('is_lateral_amplitude')
         or signals.get('amplitude_lateral')
     )
-    # Se amplitude veio zerada sem flag, ainda exige >= 0.35 quando disponível
-    if amplitude > 0 and amplitude < 0.35:
+    # Se amplitude veio zerada sem flag, ainda exige >= limite quando disponível
+    if amplitude > 0 and amplitude < amp_min:
         amp_ok = False
 
     volume_ok = bool(signals.get('big_player_ativo'))
@@ -66,10 +73,10 @@ def evaluate_hard_gates(signals: dict | None, df=None) -> dict[str, Any]:
             from src.engine.porta3_adaptive import resolve_porta3_sigma
             sigma = resolve_porta3_sigma()
         except Exception:
-            sigma = 1.8
+            sigma = 1.25
     side_ok = sinal in (INSTITUTIONAL_BUY, INSTITUTIONAL_SELL)
 
-    # Porta 5 — anatomia da vela (cor + sombra 35% + falling knife)
+    # Porta 5 — anatomia da vela (cor + sombra + falling knife)
     anatomy = _evaluate_anatomy_gate(signals, sinal, df=df)
     anatomy_ok = bool(anatomy.get('allowed'))
 
@@ -77,18 +84,22 @@ def evaluate_hard_gates(signals: dict | None, df=None) -> dict[str, Any]:
         'porta1_adx': {
             'pass': adx_ok,
             'value': round(adx, 4),
-            'rule': 'ADX(14) >= 23',
+            'rule': f'ADX(14) >= {adx_min:.0f}',
         },
         'porta1_bb_width': {
             'pass': bb_ok,
             'value': round(bb_width, 8),
             'mean_50': round(bb_mean, 8),
-            'rule': 'BB Width atual > média(50)',
+            'rule': (
+                'BB Width atual > média(50)'
+                if STRUCTURE_REQUIRE_BB_EXPAND
+                else 'BB expandindo opcional (STRUCTURE_REQUIRE_BB_EXPAND=false)'
+            ),
         },
         'porta2_amplitude': {
             'pass': amp_ok,
             'value': round(amplitude, 4),
-            'rule': 'amplitude((Hmax-Lmin)/Lmin)*100 >= 0.35%',
+            'rule': f'amplitude((Hmax-Lmin)/Lmin)*100 >= {amp_min}%',
         },
         'porta3_volume': {
             'pass': volume_ok,
@@ -106,7 +117,7 @@ def evaluate_hard_gates(signals: dict | None, df=None) -> dict[str, Any]:
             'falling_knife': anatomy.get('falling_knife'),
             'reason': anatomy.get('abort_reason') or 'ok',
             'rule': (
-                'COMPRA=verde+close 35% topo; VENDA=vermelha+close 35% fundo; '
+                'COMPRA=verde+close zona topo; VENDA=vermelha+close zona fundo; '
                 'bloqueia COMPRA se 2 velas anteriores vermelhas com spread > MA'
             ),
         },
@@ -114,7 +125,7 @@ def evaluate_hard_gates(signals: dict | None, df=None) -> dict[str, Any]:
 
     # Short-circuit na primeira porta fechada (ordem obrigatória)
     if not adx_ok:
-        return _blocked(ports, NEUTRO, f'Porta 1 fechada: ADX(14)={adx:.2f} < 23')
+        return _blocked(ports, NEUTRO, f'Porta 1 fechada: ADX(14)={adx:.2f} < {adx_min:.0f}')
     if not bb_ok:
         return _blocked(
             ports,
@@ -125,7 +136,7 @@ def evaluate_hard_gates(signals: dict | None, df=None) -> dict[str, Any]:
         return _blocked(
             ports,
             NEUTRO,
-            f'Porta 2 fechada: amplitude={amplitude:.3f}% < 0.35% (acumulação)',
+            f'Porta 2 fechada: amplitude={amplitude:.3f}% < {amp_min}% (acumulação)',
         )
     if not volume_ok:
         return _blocked(

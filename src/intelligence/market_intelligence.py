@@ -64,15 +64,19 @@ class MarketIntelligence:
         )
         condicao = market_condition_from_signals(signals, regime)
 
-        # Estrutura: amplitude, ADX e expansão das Bandas são travas absolutas.
+        # Estrutura: amplitude + ADX são travas; BB só se STRUCTURE_REQUIRE_BB_EXPAND.
         # BLOCK_LATERAL_MARKETS controla apenas critérios complementares (chop/range).
+        from src.engine.structure_config import STRUCTURE_ADX_MIN, STRUCTURE_REQUIRE_BB_EXPAND
+        adx_min = float(STRUCTURE_ADX_MIN)
         amplitude_lateral = bool(
             regime.get('amplitude_lateral')
             or signals.get('is_lateral_amplitude')
             or signals.get('is_accumulation')
         )
-        adx_blocked = float(regime.get('adx', 0) or 0) < 23
-        bb_blocked = not bool(regime.get('bollinger_expanding', False))
+        adx_blocked = float(regime.get('adx', 0) or 0) < adx_min
+        bb_blocked = STRUCTURE_REQUIRE_BB_EXPAND and (
+            not bool(regime.get('bollinger_expanding', False))
+        )
         block_lateral = _env_bool('BLOCK_LATERAL_MARKETS', True)  # default ON — anti-acumulação
         hard_veto_reasons = []
         soft_veto_reasons = []
@@ -86,7 +90,7 @@ class MarketIntelligence:
 
         if adx_blocked:
             hard_veto_reasons.append(
-                f"SEM TENDÊNCIA: ADX(14)={regime.get('adx', 0)} < 23 — sinal forçado a NEUTRO"
+                f"SEM TENDÊNCIA: ADX(14)={regime.get('adx', 0)} < {adx_min:.0f} — sinal forçado a NEUTRO"
             )
         if bb_blocked:
             hard_veto_reasons.append(
@@ -226,17 +230,21 @@ class MarketIntelligence:
         }
 
     def _passthrough(self, signals: dict, regime: dict) -> dict:
+        from src.engine.structure_config import STRUCTURE_ADX_MIN, STRUCTURE_REQUIRE_BB_EXPAND
+        adx_min = float(STRUCTURE_ADX_MIN)
         amplitude_blocked = bool(
             regime.get('amplitude_lateral')
             or signals.get('is_lateral_amplitude')
             or signals.get('is_accumulation')
         )
-        adx_blocked = float(regime.get('adx', 0) or 0) < 23
-        bb_blocked = not bool(regime.get('bollinger_expanding', False))
+        adx_blocked = float(regime.get('adx', 0) or 0) < adx_min
+        bb_blocked = STRUCTURE_REQUIRE_BB_EXPAND and (
+            not bool(regime.get('bollinger_expanding', False))
+        )
         structure_blocked = amplitude_blocked or adx_blocked or bb_blocked
         reasons = []
         if adx_blocked:
-            reasons.append(f"ADX(14)={regime.get('adx', 0)} < 23")
+            reasons.append(f"ADX(14)={regime.get('adx', 0)} < {adx_min:.0f}")
         if bb_blocked:
             reasons.append("BB Width sem expansão acima da média(50)")
         if amplitude_blocked:

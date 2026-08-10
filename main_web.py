@@ -456,7 +456,7 @@ LEVERAGE = 10  # Alavancagem padrão (deve coincidir com main.py)
 
 # Constantes do Sniper Worker (ajustadas pelo modo de risco)
 SCAN_TOP_COINS = 40
-THRESHOLD_ENTRADA = 48.0
+THRESHOLD_ENTRADA = 42.0
 COOLDOWN_INSTITUCIONAL_SECS = 5
 SCAN_INTER_SYMBOL_DELAY_SECS = 0.35
 SNIPER_SIGNAL_LOCK = threading.Lock()
@@ -468,12 +468,12 @@ def _apply_risk_mode_scan_params():
     if RISK_MODE == 'aggressive':
         MAX_MOEDAS_ATIVAS = 5
         SCAN_TOP_COINS = 40
-        THRESHOLD_ENTRADA = 48.0  # assertivo — antes 58
+        THRESHOLD_ENTRADA = 42.0  # moderado — mais entradas reais
         SCAN_INTER_SYMBOL_DELAY_SECS = 0.35
     else:
         MAX_MOEDAS_ATIVAS = 1
         SCAN_TOP_COINS = 25
-        THRESHOLD_ENTRADA = 58.0
+        THRESHOLD_ENTRADA = 50.0
         SCAN_INTER_SYMBOL_DELAY_SECS = 0.6
     central_state['risk_mode'] = RISK_MODE
     central_state['max_moedas_ativas'] = MAX_MOEDAS_ATIVAS

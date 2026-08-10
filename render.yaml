@@ -11,8 +11,32 @@ services:
       - key: LATERAL_AMPLITUDE_PERIODS
         value: "20"
       - key: LATERAL_AMPLITUDE_PCT
-        value: "0.35"
+        value: "0.28"
       - key: BLOCK_LATERAL_MARKETS
         value: "true"
+      - key: STRUCTURE_ADX_MIN
+        value: "19"
+      - key: STRUCTURE_REQUIRE_BB_EXPAND
+        value: "false"
+      - key: PORTA3_VOL_SIGMA
+        value: "1.25"
+      - key: PORTA3_VOL_SIGMA_CHOP
+        value: "1.0"
+      - key: PORTA3_ADX_CHOP_MAX
+        value: "25"
+      - key: PORTA3_SPREAD_MULT
+        value: "1.2"
+      - key: ANTI_CHASE_MAX_EXTENSION_PCT
+        value: "2.0"
+      - key: ANTI_CHASE_PULLBACK_TOL_PCT
+        value: "0.90"
+      - key: RIGID_LONG_ENTRIES
+        value: "false"
+      - key: WHALE_SCORE_MIN_LONG
+        value: "28"
+      - key: ANALYST_ENTRY_MIN_SCORE
+        value: "45"
+      - key: CANDLE_CLOSE_ZONE_FRAC
+        value: "0.45"
     buildCommand: pip install -r requirements.txt && npm ci && npm run build
     startCommand: python -m gunicorn main_web:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120 --keep-alive 5

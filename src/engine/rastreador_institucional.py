@@ -4,10 +4,10 @@ Rastreador de Pegadas Institucionais (Smart Money / Big Players)
 
 Detecta entradas institucionais via:
   1. Amplitude percentual (anti-acumulação / mercado lateral)
-  2. ADX(14) >= 23 (tendência obrigatória)
-  3. BB Width(20, 2σ) atual > média das últimas 50 larguras
+  2. ADX(14) >= STRUCTURE_ADX_MIN (padrão 19 — modo moderado)
+  3. BB Width(20, 2σ) atual > média das últimas 50 larguras (opcional)
   4. VWAP diário (linha de equilíbrio)
-  5. Anomalia de volume (média 20 + 1.8× desvio padrão)
+  5. Anomalia de volume (média 20 + σ adaptativo)
   6. Spread expressivo do candle (evita falsos rompimentos)
 
 Qualquer trava estrutural fechada força Sinal = NEUTRO, inclusive diante de volume extremo.
@@ -21,6 +21,12 @@ import pandas as pd
 from src.intelligence.regime_detector import (
     calculate_adx_series,
     calculate_bollinger_bandwidth_series,
+)
+from src.engine.structure_config import (
+    STRUCTURE_ADX_MIN,
+    STRUCTURE_REQUIRE_BB_EXPAND,
+    PORTA3_SPREAD_MULT,
+    DEFAULT_AMPLITUDE_PCT_MAX as CFG_AMPLITUDE_PCT_MAX,
 )
 
 
@@ -46,9 +52,9 @@ def _env_int(name: str, default: int) -> int:
 
 # Amplitude dos últimos X candles: ((High.max - Low.min) / Low.min) * 100
 DEFAULT_AMPLITUDE_PERIODS = 20
-DEFAULT_AMPLITUDE_PCT_MAX = 0.35  # abaixo disso = acumulação / lateral
+DEFAULT_AMPLITUDE_PCT_MAX = float(CFG_AMPLITUDE_PCT_MAX)
 ADX_PERIOD = 14
-ADX_MIN = 23.0
+ADX_MIN = float(STRUCTURE_ADX_MIN)
 BB_PERIOD = 20
 BB_DEVIATIONS = 2.0
 BB_WIDTH_AVERAGE_PERIOD = 50
@@ -119,20 +125,22 @@ class RastreadorInstitucional:
         self,
         periodo_ma=20,
         multiplicador_vol=None,
-        multiplicador_spread=1.5,
+        multiplicador_spread=None,
         amplitude_periods=None,
         amplitude_pct_max=None,
     ):
         self.periodo_ma = int(periodo_ma)
-        # Default adaptativo (1.4σ em consolidação / 1.8σ em tendência)
+        # Default adaptativo (1.0σ em consolidação / 1.25σ em tendência)
         if multiplicador_vol is None:
             try:
                 from src.engine.porta3_adaptive import resolve_porta3_sigma
                 multiplicador_vol = resolve_porta3_sigma()
             except Exception:
-                multiplicador_vol = _env_float('PORTA3_VOL_SIGMA', 1.8)
+                multiplicador_vol = _env_float('PORTA3_VOL_SIGMA', 1.25)
         self.multiplicador_vol = float(multiplicador_vol)
-        self.multiplicador_spread = float(multiplicador_spread)
+        self.multiplicador_spread = float(
+            multiplicador_spread if multiplicador_spread is not None else PORTA3_SPREAD_MULT
+        )
         self.amplitude_periods = int(
             amplitude_periods
             if amplitude_periods is not None
@@ -168,8 +176,9 @@ class RastreadorInstitucional:
         """
         Calcula as travas estruturais antes do volume.
 
-        Liberação = ADX(14) >= 23 E BB Width atual > média móvel das últimas
-        50 larguras. NaN/dados insuficientes falham de forma segura (NEUTRO).
+        Liberação = ADX(14) >= STRUCTURE_ADX_MIN; BB expandindo é opcional
+        (STRUCTURE_REQUIRE_BB_EXPAND). NaN/dados insuficientes falham de forma
+        segura (NEUTRO).
         """
         out = df.copy()
         out['adx'] = calculate_adx_series(out, ADX_PERIOD)
@@ -193,7 +202,10 @@ class RastreadorInstitucional:
             & out['bb_width'].notna()
             & out['bb_width_mean_50'].notna()
         )
-        out['structure_filters_pass'] = out['adx_gate_pass'] & out['bb_expanding']
+        if STRUCTURE_REQUIRE_BB_EXPAND:
+            out['structure_filters_pass'] = out['adx_gate_pass'] & out['bb_expanding']
+        else:
+            out['structure_filters_pass'] = out['adx_gate_pass']
         return out
 
     def analisar_mercado(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -234,7 +246,7 @@ class RastreadorInstitucional:
         if (
             is_acc_now
             or not bool(last.get('adx_gate_pass', False))
-            or not bool(last.get('bb_expanding', False))
+            or (STRUCTURE_REQUIRE_BB_EXPAND and not bool(last.get('bb_expanding', False)))
         ):
             df['amplitude_pct_atual'] = amp_now
             return df
@@ -253,7 +265,7 @@ class RastreadorInstitucional:
             # Travas absolutas avaliadas antes de sequer considerar o volume.
             if not bool(row.get('adx_gate_pass', False)):
                 continue
-            if not bool(row.get('bb_expanding', False)):
+            if STRUCTURE_REQUIRE_BB_EXPAND and not bool(row.get('bb_expanding', False)):
                 continue
 
             volume = float(row['vol'])
