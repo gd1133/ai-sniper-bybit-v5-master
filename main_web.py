@@ -830,23 +830,45 @@ def _start_trend_position_manager():
                             pass
                         note = decision.get('motivo') or action
                         tipo = decision.get('tipo_execucao') or action
+                        if 'SAIDA_REVERSAO' in str(tipo).upper() or 'SAIDA_REVERSAO' in str(note).upper():
+                            tipo = 'SAIDA_REVERSAO_TENDENCIA'
                         _close_open_trades_in_db(
                             client_id, symbol, pnl_pct=roi, profit=unrealised,
                             note_tag=f' | {tipo} {note}',
                         )
                         record_ia_decision(
                             symbol,
-                            motivo_saida=note,
+                            motivo_saida=note if note.startswith('SAIDA_REVERSAO') else (
+                                f'SAIDA_REVERSAO_TENDENCIA: {note}' if tipo == 'SAIDA_REVERSAO_TENDENCIA' else note
+                            ),
                             pnl_garantido_pct=roi,
                             tipo_execucao=tipo,
                             action_payload=f'ACTION: {action}',
                             client_id=client_id,
                         )
+                        # LOSS na saída → cooldown 24h (mesmo se Feedback Loop atrasar)
+                        if float(roi or 0) <= 0 or float(unrealised or 0) < 0:
+                            try:
+                                db.register_symbol_cooldown(
+                                    symbol, hours=24, motivo='STOP_LOSS_RECENTE',
+                                )
+                            except Exception:
+                                pass
                         _push_ia_decision_live(symbol, action, note, roi, tipo)
                         _adaptive_record_outcome(symbol, roi)
                         _sync_active_trades_from_db()
+                        # Atualiza tribunal com ciclo de monitoramento
+                        try:
+                            from src.database.tribunal_debate import save_tribunal_debate
+                            ev = dict(central_state.get('evidence') or {})
+                            if ev:
+                                ev['symbol'] = _limpar_simbolo(symbol)
+                                ev['side'] = side
+                                save_tribunal_debate(ev, ciclo='monitor_posicao')
+                        except Exception:
+                            pass
                         central_state['status'] = (
-                            f"⚡ {action} {_limpar_simbolo(symbol)} — {str(note)[:80]}"
+                            f"⚡ {tipo} {_limpar_simbolo(symbol)} — {str(note)[:80]}"
                         )
 
     get_trend_position_manager().start(cycle_fn=_cycle)
@@ -1284,6 +1306,17 @@ def _publish_ai_tribunal_evidence(symbol, side, tech_data, consensus, intel_ctx=
         central_state['confidence'] = evidence.get('confidence', central_state.get('confidence', 0))
         if evidence.get('symbol'):
             central_state['symbol'] = evidence['symbol']
+
+        # Persistência SQLite — cards do Tribunal sobrevivem restart/Render
+        try:
+            from src.database.tribunal_debate import save_tribunal_debate
+            ciclo = 'scan'
+            if (consensus or {}).get('personal_analyst'):
+                ciclo = 'analyst'
+            save_tribunal_debate(evidence, ciclo=ciclo)
+        except Exception as persist_err:
+            print(f"⚠️ [TRIBUNAL] persist SQLite: {persist_err}", flush=True)
+
         return evidence
     except Exception as err:
         print(f"⚠️ [TRIBUNAL] Falha ao publicar evidência: {err}", flush=True)
@@ -2058,6 +2091,38 @@ def _build_api_status_payload():
     except Exception:
         payload['ia_decisions'] = payload.get('ia_decisions') or []
         payload['historico_decisoes_ia'] = payload['ia_decisions']
+
+    # Tribunal persistido — preenche cards mesmo após restart
+    try:
+        from src.database.tribunal_debate import latest_tribunal_debate, list_tribunal_debates
+        latest = latest_tribunal_debate()
+        debates = list_tribunal_debates(12)
+        payload['tribunal_debates'] = debates
+        if latest:
+            payload['tribunal_latest'] = latest
+            # Se memória vazia, reidrata evidence/ai_tribunal a partir do SQLite
+            if not payload.get('ai_tribunal') or not (payload.get('ai_tribunal') or {}).get('agents'):
+                agents = latest.get('agents') or []
+                payload['ai_tribunal'] = {
+                    'agents': agents,
+                    'dialogue': latest.get('dialogue') or [],
+                    'assertiveness': latest.get('assertiveness'),
+                    'symbol': latest.get('symbol'),
+                    'side': latest.get('side'),
+                }
+                if not payload.get('evidence'):
+                    payload['evidence'] = {
+                        'agents': agents,
+                        'dialogue': latest.get('dialogue') or [],
+                        'assertiveness': latest.get('assertiveness'),
+                        'symbol': latest.get('symbol'),
+                        'side': latest.get('side'),
+                        'confidence': latest.get('confidence'),
+                        'strategic_reason': latest.get('veredito'),
+                    }
+    except Exception:
+        payload['tribunal_debates'] = payload.get('tribunal_debates') or []
+
     return payload
 
 def _refresh_real_balance_state(force=False):
@@ -4227,6 +4292,43 @@ def api_decisoes_ia():
         }), 200
     except Exception as e:
         return jsonify({'status': 'erro', 'msg': str(e), 'decisoes': [], 'live': []}), 200
+
+
+@app.route('/api/tribunal/status', methods=['GET'])
+def api_tribunal_status():
+    """
+    Cards do Tribunal de Debate (Groq / Analista / Neural / Gemini)
+    lidos do SQLite + snapshot em memória.
+    """
+    try:
+        limit = int(request.args.get('limit') or 20)
+        from src.database.tribunal_debate import list_tribunal_debates, latest_tribunal_debate
+        debates = list_tribunal_debates(limit)
+        latest = debates[0] if debates else latest_tribunal_debate()
+        live = {
+            'evidence': central_state.get('evidence'),
+            'ai_tribunal': central_state.get('ai_tribunal'),
+            'ia2_decision': central_state.get('ia2_decision'),
+            'pesos_ia_evolutivo': central_state.get('pesos_ia_evolutivo') or [],
+        }
+        return jsonify({
+            'status': 'ok',
+            'count': len(debates),
+            'latest': latest,
+            'debates': debates,
+            'live': live,
+            'agents': (latest or {}).get('agents') or (live.get('ai_tribunal') or {}).get('agents') or [],
+            'dialogue': (latest or {}).get('dialogue') or (live.get('ai_tribunal') or {}).get('dialogue') or [],
+        }), 200
+    except Exception as e:
+        return jsonify({
+            'status': 'erro',
+            'msg': str(e),
+            'debates': [],
+            'latest': None,
+            'agents': [],
+            'dialogue': [],
+        }), 200
 
 
 @app.route('/api/status', methods=['GET'])

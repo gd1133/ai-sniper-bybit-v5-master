@@ -195,6 +195,42 @@ def detect_early_reversal(df, side: str) -> dict[str, Any]:
     return out
 
 
+def detect_engulfing_reversal(df_fast, df_slow, side: str) -> dict[str, Any]:
+    """
+    Sentinela: engolfo 1m/5m contra a posição + volume expressivo.
+    tipo padronizado: SAIDA_REVERSAO_TENDENCIA
+    """
+    out = {'triggered': False, 'reasons': [], 'tipo': 'SAIDA_REVERSAO_TENDENCIA'}
+    try:
+        from src.engine.candle_patterns import (
+            detect_bearish_engulfing,
+            detect_bullish_engulfing,
+        )
+    except Exception:
+        return out
+
+    long = _is_long(side)
+    min_vol = max(1.35, VOL_EXIT_RATIO * 0.9)
+    hits: list[str] = []
+
+    for label, frame in (('1m', df_fast), ('5m', df_slow)):
+        if frame is None or len(frame) < 4:
+            continue
+        try:
+            vol_r = _vol_ratio(frame)
+            if long and detect_bearish_engulfing(frame) and vol_r >= min_vol:
+                hits.append(f'engolfo de baixa {label} vol×{vol_r:.1f}')
+            if (not long) and detect_bullish_engulfing(frame) and vol_r >= min_vol:
+                hits.append(f'engolfo de alta {label} vol×{vol_r:.1f}')
+        except Exception:
+            continue
+
+    if hits:
+        out['triggered'] = True
+        out['reasons'] = hits
+    return out
+
+
 def decide_trend_action(
     *,
     side: str,
@@ -248,7 +284,19 @@ def decide_trend_action(
         'price_move_pct': move,
     }
 
-    # ── 3) Early exit (prioridade sobre trailing se estrutura quebrou) ──
+    # ── 3a) Engolfo 1m/5m + volume → SAIDA_REVERSAO_TENDENCIA ─────────
+    engolfo = detect_engulfing_reversal(df_fast, df_slow, side)
+    if engolfo.get('triggered'):
+        only_1m = all('1m' in r and '5m' not in r for r in (engolfo.get('reasons') or []))
+        if not (trailing_armed and roi >= 40 and only_1m):
+            result['action'] = 'EARLY_EXIT'
+            result['tipo_execucao'] = 'SAIDA_REVERSAO_TENDENCIA'
+            result['motivo'] = (
+                'SAIDA_REVERSAO_TENDENCIA: ' + ' | '.join(engolfo.get('reasons') or [])
+            )
+            return result
+
+    # ── 3b) Early exit estrutura EMA20 + volume ───────────────────────
     df_struct = df_slow if df_slow is not None and len(df_slow) >= EMA_SLOW + 3 else df_fast
     early = detect_early_reversal(df_struct, side)
     # Em lucro mínimo ou prejuízo: early exit corta o mal pela raiz
@@ -258,18 +306,22 @@ def decide_trend_action(
         # OR if not trailing yet)
         if not trailing_armed or roi < 40:
             result['action'] = 'EARLY_EXIT'
-            result['tipo_execucao'] = 'REVERSAL_EXIT'
-            result['motivo'] = 'Saída antecipada: ' + ' | '.join(early.get('reasons') or [])
+            result['tipo_execucao'] = 'SAIDA_REVERSAO_TENDENCIA'
+            result['motivo'] = (
+                'SAIDA_REVERSAO_TENDENCIA: ' + ' | '.join(early.get('reasons') or [])
+            )
             return result
 
     # Early exit even com trailing se reversão forte + ROI recuando
     if early.get('triggered') and trailing_armed and roi < (TRAIL_ROI_PCT * 0.7):
         result['action'] = 'EARLY_EXIT'
-        result['tipo_execucao'] = 'REVERSAL_EXIT'
-        result['motivo'] = 'Reversão com trailing fraco: ' + ' | '.join(early.get('reasons') or [])
+        result['tipo_execucao'] = 'SAIDA_REVERSAO_TENDENCIA'
+        result['motivo'] = (
+            'SAIDA_REVERSAO_TENDENCIA: ' + ' | '.join(early.get('reasons') or [])
+        )
         return result
 
-    # ── 3b) Analista Pessoal — give-back / momentum fade (nunca afrouxa SL) ──
+    # ── 3c) Analista Pessoal — give-back / momentum fade (nunca afrouxa SL) ──
     try:
         from src.ai_brain.personal_analyst import refine_exit
         # peak_roi aproximado pelo extremo de preço vs entrada
@@ -297,8 +349,11 @@ def decide_trend_action(
         )
         if analyst_exit.get('suggest_early_exit'):
             result['action'] = 'EARLY_EXIT'
-            result['tipo_execucao'] = 'ANALYST_EXIT'
-            result['motivo'] = str(analyst_exit.get('motivo') or 'Analista Pessoal: saída assertiva')
+            result['tipo_execucao'] = 'SAIDA_REVERSAO_TENDENCIA'
+            result['motivo'] = (
+                'SAIDA_REVERSAO_TENDENCIA: '
+                + str(analyst_exit.get('motivo') or 'Analista Pessoal')
+            )
             return result
     except Exception:
         pass
