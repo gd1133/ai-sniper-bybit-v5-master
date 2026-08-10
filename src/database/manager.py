@@ -449,6 +449,35 @@ def init_db():
         ''')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_decisoes_ts ON historico_decisoes_ia(timestamp)')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_decisoes_symbol ON historico_decisoes_ia(symbol)')
+
+        # Tribunal de Debate — pareceres Groq / Analista / Neural / Gemini
+        cur.execute('''
+        CREATE TABLE IF NOT EXISTS tribunal_debate (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT NOT NULL,
+            side TEXT DEFAULT '',
+            ciclo TEXT DEFAULT 'scan',
+            confidence REAL DEFAULT 0,
+            assertiveness REAL DEFAULT 0,
+            veredito TEXT DEFAULT '',
+            groq_parecer TEXT DEFAULT '',
+            groq_score REAL DEFAULT 0,
+            analyst_parecer TEXT DEFAULT '',
+            analyst_score REAL DEFAULT 0,
+            learner_parecer TEXT DEFAULT '',
+            learner_score REAL DEFAULT 0,
+            gemini_parecer TEXT DEFAULT '',
+            gemini_score REAL DEFAULT 0,
+            agents_json TEXT DEFAULT '[]',
+            dialogue_json TEXT DEFAULT '[]',
+            evidence_json TEXT DEFAULT '{}',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        cur.execute(
+            'CREATE INDEX IF NOT EXISTS idx_tribunal_debate_created '
+            'ON tribunal_debate(created_at DESC)'
+        )
         return True
 
     def _run_schema_once():
