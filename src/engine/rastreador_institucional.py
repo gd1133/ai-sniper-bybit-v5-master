@@ -124,9 +124,13 @@ class RastreadorInstitucional:
         amplitude_pct_max=None,
     ):
         self.periodo_ma = int(periodo_ma)
-        # Default 1.8σ — menos extremo que 2.5σ; sobrescreve via PORTA3_VOL_SIGMA
+        # Default adaptativo (1.4σ em consolidação / 1.8σ em tendência)
         if multiplicador_vol is None:
-            multiplicador_vol = _env_float('PORTA3_VOL_SIGMA', 1.8)
+            try:
+                from src.engine.porta3_adaptive import resolve_porta3_sigma
+                multiplicador_vol = resolve_porta3_sigma()
+            except Exception:
+                multiplicador_vol = _env_float('PORTA3_VOL_SIGMA', 1.8)
         self.multiplicador_vol = float(multiplicador_vol)
         self.multiplicador_spread = float(multiplicador_spread)
         self.amplitude_periods = int(

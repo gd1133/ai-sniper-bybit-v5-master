@@ -465,12 +465,20 @@ const App = () => {
       }
     };
 
+    // Expõe reload para ações CRUD (delete/update) sem F5
+    window.__reloadInvestidores = fetchInvestidores;
+
     fetchStatus();
     fetchInvestidores();
     const iv = setInterval(fetchStatus, 3000);
     // Polling investidores 4s — atualiza saldo sem resetar card para zero
     const iv2 = setInterval(fetchInvestidores, 4000);
-    return () => { mounted = false; clearInterval(iv); clearInterval(iv2); };
+    return () => {
+      mounted = false;
+      clearInterval(iv);
+      clearInterval(iv2);
+      try { delete window.__reloadInvestidores; } catch (_) {}
+    };
   }, []);
 
   const openNewInvestorModal = () => {
@@ -511,34 +519,54 @@ const App = () => {
     }
   };
 
-  const handleDeleteInvestor = async (id) => {
-    if (!confirm('Confirmar remoção do investidor? Esta ação é irreversível.')) return;
+  const handleDeleteInvestor = async (id, evt) => {
+    if (evt) {
+      try { evt.preventDefault(); evt.stopPropagation(); } catch (_) {}
+    }
     const clientId = Number(id);
+    if (!Number.isFinite(clientId) || clientId <= 0) {
+      console.error('❌ [FRONTEND] DELETE abortado — id inválido:', id);
+      alert('ID do investidor inválido — atualize a página e tente novamente');
+      return;
+    }
+    if (!confirm('Confirmar remoção do investidor? Esta ação é irreversível.')) return;
+    const url = `${API_BASE}/api/cliente/${clientId}`;
     try {
-      console.log(`🗑️ [FRONTEND] DELETE /api/cliente/${clientId}`);
-      const res = await fetch(`${API_BASE}/api/cliente/${clientId}`, { method: 'DELETE' });
+      console.log('🗑️ [FRONTEND] Enviando DELETE', url);
+      const res = await fetch(url, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        cache: 'no-store',
+      });
       let json = {};
       try { json = await res.json(); } catch (_) { json = {}; }
+      console.log('🗑️ [FRONTEND] Resposta DELETE', res.status, json);
       if (res.ok && json.success !== false) {
-        // Remove o card imediatamente (comparação numérica evita id string vs number)
         setInvestidores(prev => prev.filter(i => Number(i.id) !== clientId));
-        // Recarrega a tabela do servidor para confirmar persistência
+        // Recarrega lista do servidor (confirma persistência no SQLite)
         try {
-          const invRes = await fetch(`${API_BASE}/api/investidores`);
-          if (invRes.ok) {
-            const list = await invRes.json();
-            setInvestidores((list || []).map(normalizeInvestorRecord));
+          if (typeof window.__reloadInvestidores === 'function') {
+            await window.__reloadInvestidores();
+          } else {
+            const invRes = await fetch(`${API_BASE}/api/investidores`, { cache: 'no-store' });
+            if (invRes.ok) {
+              const list = await invRes.json();
+              setInvestidores((list || []).map(normalizeInvestorRecord));
+            }
           }
         } catch (reloadErr) {
-          console.warn('⚠️ [FRONTEND] Reload pós-delete falhou (lista local já atualizada):', reloadErr);
+          console.warn('⚠️ [FRONTEND] Reload pós-delete falhou:', reloadErr);
         }
         alert(json.message || json.msg || 'Cliente removido com sucesso');
       } else {
-        alert(json.message || json.msg || json.error || 'Erro ao remover investidor do banco');
+        alert(json.message || json.msg || json.error || `Erro ao remover (HTTP ${res.status})`);
       }
     } catch (e) {
-      console.error('❌ [FRONTEND] Erro ao remover investidor:', e);
-      alert('Erro de conexão ao remover investidor');
+      console.error('❌ [FRONTEND] Falha na requisição DELETE:', e);
+      alert(`Falha na requisição DELETE: ${e?.message || e}`);
     }
   };
 
@@ -1453,8 +1481,24 @@ const App = () => {
                       </td>
                       <td className="p-8 text-right">
                         <div className="flex justify-end gap-4 text-zinc-700">
-                          <button onClick={() => openEditInvestor(inv.id)} className="hover:text-white transition-colors"><Settings size={18}/></button>
-                          <button onClick={() => handleDeleteInvestor(inv.id)} className="hover:text-red-500 transition-colors"><Trash2 size={18}/></button>
+                          <button
+                            type="button"
+                            onClick={(e) => openEditInvestor(inv.id)}
+                            className="hover:text-white transition-colors"
+                            title="Editar investidor"
+                          >
+                            <Settings size={18}/>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => handleDeleteInvestor(inv.id, e)}
+                            className="hover:text-red-500 transition-colors"
+                            title="Excluir investidor"
+                            data-action="delete-investor"
+                            data-client-id={inv.id}
+                          >
+                            <Trash2 size={18}/>
+                          </button>
                         </div>
                       </td>
                     </tr>
