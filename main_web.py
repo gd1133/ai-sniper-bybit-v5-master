@@ -2123,6 +2123,13 @@ def _build_api_status_payload():
     except Exception:
         payload['tribunal_debates'] = payload.get('tribunal_debates') or []
 
+    # Porta 3 adaptativa (σ volume: 1.4 chop / 1.8 tendência)
+    try:
+        from src.engine.porta3_adaptive import porta3_status
+        payload['porta3'] = payload.get('porta3') or porta3_status()
+    except Exception:
+        pass
+
     return payload
 
 def _refresh_real_balance_state(force=False):
@@ -3332,6 +3339,19 @@ def sniper_worker_loop():
                 f"(não só BTC)…",
                 flush=True,
             )
+            # Porta 3 adaptativa — log do σ vigente (atualizado no ciclo anterior)
+            try:
+                from src.engine.porta3_adaptive import porta3_status, resolve_porta3_sigma
+                _p3 = porta3_status()
+                central_state['porta3'] = _p3
+                print(
+                    f"📊 [PORTA3] regime={_p3.get('regime')} ADX_médio={_p3.get('market_avg_adx')} "
+                    f"→ σ={resolve_porta3_sigma():.1f} ({_p3.get('threshold_rule')})",
+                    flush=True,
+                )
+            except Exception as _p3err:
+                print(f"⚠️ [PORTA3] status: {_p3err}", flush=True)
+
             # #region agent log
             try:
                 from src.debug_agent_log import agent_dbg
@@ -3345,6 +3365,7 @@ def sniper_worker_loop():
                 pass
             # #endregion
 
+            cycle_adx_samples = []
             for t in top_coins:
                 sym = t['symbol']
                 clean_sym = _limpar_simbolo(sym)
@@ -3359,6 +3380,25 @@ def sniper_worker_loop():
                         continue
 
                     signals = IndicatorEngine(df).get_signals()
+                    # Amostra ADX das top moedas → calibra Porta 3 do próximo ciclo
+                    try:
+                        _adx = float(signals.get('adx') or 0)
+                        if _adx > 0 and len(cycle_adx_samples) < 10:
+                            cycle_adx_samples.append(_adx)
+                            if len(cycle_adx_samples) == 10:
+                                from src.engine.porta3_adaptive import (
+                                    update_market_adx_from_samples,
+                                    porta3_status,
+                                )
+                                _sig = update_market_adx_from_samples(cycle_adx_samples)
+                                central_state['porta3'] = porta3_status()
+                                print(
+                                    f"📊 [PORTA3] ADX top10={central_state['porta3'].get('market_avg_adx')} "
+                                    f"→ σ={_sig:.1f} ({central_state['porta3'].get('regime')})",
+                                    flush=True,
+                                )
+                    except Exception:
+                        pass
                     if signals.get('is_lateral') or signals['trend'] == 'NEUTRO':
                         continue
 
@@ -3779,6 +3819,24 @@ def sniper_worker_loop():
                     print(f"   ⚠️ [RADAR] Erro em {sym}: {scan_err}", flush=True)
 
                 time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
+
+            # Fallback: se o ciclo não chegou a 10 ADXs mid-scan, calibra com o que houver
+            if cycle_adx_samples and len(cycle_adx_samples) < 10:
+                try:
+                    from src.engine.porta3_adaptive import (
+                        update_market_adx_from_samples,
+                        porta3_status,
+                    )
+                    _sig = update_market_adx_from_samples(cycle_adx_samples)
+                    central_state['porta3'] = porta3_status()
+                    print(
+                        f"📊 [PORTA3] ADX top{len(cycle_adx_samples)}="
+                        f"{central_state['porta3'].get('market_avg_adx')} "
+                        f"→ σ={_sig:.1f} ({central_state['porta3'].get('regime')})",
+                        flush=True,
+                    )
+                except Exception as _p3fb:
+                    print(f"⚠️ [PORTA3] fallback samples: {_p3fb}", flush=True)
 
             oportunidades_ordenadas = sorted(oportunidades, key=lambda x: x['score'], reverse=True)
             central_state['opportunities'] = [
