@@ -2123,7 +2123,7 @@ def _build_api_status_payload():
     except Exception:
         payload['tribunal_debates'] = payload.get('tribunal_debates') or []
 
-    # Porta 3 adaptativa (σ volume: 1.4 chop / 1.8 tendência)
+    # Porta 3 adaptativa (σ volume: 1.2 consolidação / 1.3 moderado / 1.5 forte)
     try:
         from src.engine.porta3_adaptive import porta3_status
         payload['porta3'] = payload.get('porta3') or porta3_status()

@@ -1,14 +1,17 @@
 # -*- coding: utf-8 -*-
 """
 Filtro de maturidade do ativo — exige histórico mínimo em velas diárias (Bybit V5 intervalo D).
-Moedas recém-listadas (< MIN_DAILY_CANDLES dias) são descartadas antes da análise no radar.
+
+Modo MODERADO: moedas com >= 14 dias de listagem já têm VWAP/MMs úteis no gráfico de 5m.
 """
 from __future__ import annotations
 
 import os
 from typing import Any, Dict
 
-MIN_DAILY_CANDLES = max(1, int(os.getenv('MIN_DAILY_CANDLES', '30')))
+MIN_DAILY_CANDLES = max(1, int(os.getenv('MIN_DAILY_CANDLES', '14')))
+# Alias pedido no enunciado (dias de histórico mínimo)
+min_dias_historico = MIN_DAILY_CANDLES
 
 
 def check_asset_maturity(broker, symbol: str) -> Dict[str, Any]:
@@ -27,7 +30,8 @@ def check_asset_maturity(broker, symbol: str) -> Dict[str, Any]:
                 'reason': 'broker sem suporte a count_daily_candles',
             }
 
-        candle_count = count_fn(symbol)
+        # Pede um pouco acima do mínimo para não truncar a contagem no floor antigo (30).
+        candle_count = count_fn(symbol, limit=max(MIN_DAILY_CANDLES + 5, 20))
         if candle_count is None:
             return {
                 'allowed': False,
@@ -57,3 +61,8 @@ def check_asset_maturity(broker, symbol: str) -> Dict[str, Any]:
             'candle_count': 0,
             'reason': f'erro ao validar maturidade: {err}',
         }
+
+
+def verificar_idade_moeda(broker, symbol: str) -> Dict[str, Any]:
+    """Alias PT-BR de ``check_asset_maturity`` (modo MODERADO: 14 dias)."""
+    return check_asset_maturity(broker, symbol)
