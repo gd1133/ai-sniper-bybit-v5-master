@@ -1132,7 +1132,7 @@ class BybitClient:
     def count_daily_candles(self, symbol, limit=35):
         """
         Conta velas diárias (intervalo D / timeframe 1d) na Bybit V5.
-        Usado pelo filtro de maturidade — mínimo 30 dias de histórico.
+        Usado pelo filtro de maturidade — modo MODERADO: mínimo 14 dias.
         """
         cache_key = f"{symbol}_D"
         if (
@@ -1141,7 +1141,8 @@ class BybitClient:
         ):
             return self.cache_daily_count[cache_key][0]
 
-        fetch_limit = max(30, min(int(limit or 35), 200))
+        # Floor 14 (não 30) para não truncar contagens de ativos jovens maduros.
+        fetch_limit = max(14, min(int(limit or 35), 200))
         v5_symbol = self._normalize_v5_symbol(symbol)
 
         try:

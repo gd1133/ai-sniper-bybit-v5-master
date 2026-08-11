@@ -270,11 +270,13 @@ class IndicatorEngine:
             'chart_reasons': list(chart.get('chart_reasons') or []),
         }
         # Camada incremental: rastreador institucional (VWAP + pegada de volume + spread)
-        # Porta 3 usa σ adaptativo (1.4 em chop / 1.8 em tendência) via porta3_adaptive
+        # Porta 3: σ adaptativo 1.2 / 1.3 / 1.5 conforme ADX médio (modo MODERADO)
         try:
             from src.engine.rastreador_institucional import RastreadorInstitucional
             from src.engine.porta3_adaptive import resolve_porta3_sigma, porta3_status
-            sigma = resolve_porta3_sigma()
+            # Prefere ADX local do ativo quando disponível; senão ADX médio do mercado
+            local_adx = float(signals_out.get('adx') or 0) or None
+            sigma = resolve_porta3_sigma(local_adx) if local_adx else resolve_porta3_sigma()
             inst = RastreadorInstitucional(multiplicador_vol=sigma).get_latest_signal(self.df)
             signals_out.update(inst)
             signals_out['porta3_vol_sigma'] = float(sigma)

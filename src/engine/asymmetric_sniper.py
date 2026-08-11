@@ -23,11 +23,11 @@ from __future__ import annotations
 import os
 from typing import Any
 
-CLOSE_ZONE = float(os.getenv('CANDLE_CLOSE_ZONE_FRAC', '0.35'))
+CLOSE_ZONE = float(os.getenv('CANDLE_CLOSE_ZONE_FRAC', '0.45'))
 MELTDOWN_DROP_PCT = float(os.getenv('MELTDOWN_DROP_PCT', '1.2'))  # queda % em 2–3 velas
 MELTDOWN_BODY_PCT = float(os.getenv('MELTDOWN_BODY_PCT', '55'))   # corpo mínimo da vermelha
-WHALE_SCORE_MIN_LONG = float(os.getenv('WHALE_SCORE_MIN_LONG', '40'))
-RIGID_LONG = str(os.getenv('RIGID_LONG_ENTRIES', 'true')).strip().lower() in {
+WHALE_SCORE_MIN_LONG = float(os.getenv('WHALE_SCORE_MIN_LONG', '28'))
+RIGID_LONG = str(os.getenv('RIGID_LONG_ENTRIES', 'false')).strip().lower() in {
     '1', 'true', 'yes', 'on',
 }
 AGGRESSIVE_MELTDOWN_SHORT = str(os.getenv('AGGRESSIVE_MELTDOWN_SHORT', 'true')).strip().lower() in {

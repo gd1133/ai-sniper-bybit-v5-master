@@ -22,7 +22,7 @@ INSTITUTIONAL_SELL = 'VENDA_INSTITUCIONAL'
 NEUTRO = 'NEUTRO'
 
 # Fração da amplitude onde o close deve estar (35% superiores / inferiores)
-CLOSE_ZONE_FRAC = float(os.getenv('CANDLE_CLOSE_ZONE_FRAC', '0.35'))
+CLOSE_ZONE_FRAC = float(os.getenv('CANDLE_CLOSE_ZONE_FRAC', '0.45'))
 # Lookback para média de spread no falling-knife
 SPREAD_MA_PERIOD = max(5, int(os.getenv('FALLING_KNIFE_SPREAD_MA', '20')))
 

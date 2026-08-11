@@ -31,7 +31,7 @@ def _env_float(name: str, default: float) -> float:
 
 
 ENABLED = _env_bool('ENABLE_PERSONAL_ANALYST', True)
-ENTRY_MIN_SCORE = _env_float('ANALYST_ENTRY_MIN_SCORE', 52.0)
+ENTRY_MIN_SCORE = _env_float('ANALYST_ENTRY_MIN_SCORE', 45.0)
 BOOST_CAP = _env_float('ANALYST_PROB_BOOST_CAP', 8.0)
 PENALTY_CAP = _env_float('ANALYST_PROB_PENALTY_CAP', 12.0)
 EXIT_GIVEBACK_PCT = _env_float('ANALYST_EXIT_GIVEBACK_PCT', 35.0)  # % do pico de ROI
@@ -140,10 +140,12 @@ def refine_entry(
             hard_blocks.append(f'Smart Money contra SHORT ({inst})')
 
         # ── 2) Qualidade ADX / volume (tendência viva) ──
+        from src.engine.structure_config import STRUCTURE_ADX_MIN
+        adx_ok = float(STRUCTURE_ADX_MIN)
         if adx >= 28:
             score += 8
             notes.append(f'ADX forte {adx:.1f}')
-        elif adx >= 23:
+        elif adx >= adx_ok:
             score += 3
             notes.append(f'ADX ok {adx:.1f}')
         else:
