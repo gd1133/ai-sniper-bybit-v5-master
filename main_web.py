@@ -663,7 +663,7 @@ def _push_ia_decision_live(symbol, action, motivo, roi, tipo):
 def _start_trend_position_manager():
     """
     Gestão viva trend-following (~8s):
-      BE +12%ROI → Trailing +25%ROI → Early EMA20 → Stagnation 35min
+      Segue tendência → saída só vela forte+volume 5m → trail/piso a partir de +100% ROI
     """
     from src.risk.trend_position_manager import get_trend_position_manager, get_trend_registry, decide_trend_action
     from src.risk.position_sizing import position_roi_pct
@@ -2309,7 +2309,7 @@ def _monitor_financial_stop_loss():
 
                                 entry_margin = _resolve_entry_margin_for_exit(cliente, symbol, pos=pos)
 
-                                # ── Escada de Lucro: +50% ROI → SL em +20% ROI ──
+                                # ── Proteção em +100% ROI → piso +80% (não realiza) ──
                                 # Se Trend Trailing já está armado, não puxa SL para trás.
                                 try:
                                     from src.risk.trend_position_manager import get_trend_registry
@@ -2355,56 +2355,64 @@ def _monitor_financial_stop_loss():
                                 if not motivo_fechamento:
                                     continue
 
-                                # Lucro sem teto: com trailing armado, ignora TP estático +100%
-                                if motivo_fechamento == "TAKE_PROFIT" and trend_st.get('trailing_armed'):
+                                # Lucro sem teto: +100% NÃO fecha — arma proteção e deixa correr
+                                if motivo_fechamento == "TAKE_PROFIT":
                                     print(
                                         f"   🚀 [LET PROFITS RUN] {symbol} ROI={roi_pct:.1f}% — "
-                                        f"TP estático ignorado (trailing trend ativo)",
+                                        f"alvo 100% atingido; não realiza, forma proteção",
                                         flush=True,
                                     )
-                                    continue
-                                # Aos +100% ainda sem trailing: tenta armar trailing antes de fechar cego
-                                if motivo_fechamento == "TAKE_PROFIT" and not trend_st.get('trailing_armed'):
                                     try:
                                         from src.risk.trend_position_manager import (
+                                            compute_lock_sl_price,
                                             compute_trailing_sl,
                                             get_trend_registry,
                                             ENABLED as TREND_ON,
+                                            LOCK_ROI_PCT,
                                         )
                                         if TREND_ON:
-                                            peak = max(float(trend_st.get('peak') or 0), float(mark_price or 0)) \
-                                                if side in ('buy', 'long', 'comprar') else (
-                                                    min(float(trend_st.get('peak') or mark_price), float(mark_price))
-                                                    if float(trend_st.get('peak') or 0) > 0 else float(mark_price)
-                                                )
+                                            is_long = side in ('buy', 'long', 'comprar')
+                                            peak = float(trend_st.get('peak') or 0) or float(mark_price or 0)
+                                            if is_long:
+                                                peak = max(peak, float(mark_price or 0))
+                                            elif peak > 0:
+                                                peak = min(peak, float(mark_price or 0))
+                                            else:
+                                                peak = float(mark_price or 0)
                                             sl = compute_trailing_sl(
                                                 side=side, peak=peak, mark=mark_price,
                                             )
+                                            lock_sl = compute_lock_sl_price(entry_price, side, LOCK_ROI_PCT)
+                                            if is_long and lock_sl > 0:
+                                                sl = max(sl, lock_sl)
+                                            elif (not is_long) and lock_sl > 0:
+                                                sl = min(sl, lock_sl) if sl > 0 else lock_sl
                                             if sl > 0 and hasattr(broker, 'clear_take_profit_set_trailing_sl'):
-                                                if broker.clear_take_profit_set_trailing_sl(symbol, side, sl):
-                                                    get_trend_registry().update(
-                                                        client_id, symbol,
-                                                        trailing_armed=True, breakeven_armed=True,
-                                                        peak=peak, sl=sl,
-                                                    )
-                                                    print(
-                                                        f"   🚀 [LET PROFITS RUN] {symbol} +100% → "
-                                                        f"trailing SL={sl:.6g} (sem fechar)",
-                                                        flush=True,
-                                                    )
-                                                    continue
+                                                broker.clear_take_profit_set_trailing_sl(symbol, side, sl)
+                                            elif sl > 0 and hasattr(broker, 'update_stop_loss_only'):
+                                                broker.update_stop_loss_only(symbol, side, sl)
+                                            get_trend_registry().update(
+                                                client_id, symbol,
+                                                trailing_armed=True, breakeven_armed=True,
+                                                peak=peak, sl=sl,
+                                            )
+                                            print(
+                                                f"   🛡️ [PROTEÇÃO 100%] {symbol} SL={sl:.6g} "
+                                                f"(piso +{LOCK_ROI_PCT:.0f}% ROI)",
+                                                flush=True,
+                                            )
                                     except Exception as trail_arm_err:
                                         print(
-                                            f"   ⚠️ [LET PROFITS RUN] fallback TP: {trail_arm_err}",
+                                            f"   ⚠️ [LET PROFITS RUN] armar proteção: {trail_arm_err}",
                                             flush=True,
                                         )
+                                    continue
 
-                                if motivo_fechamento == "TAKE_PROFIT":
-                                    print(f"🏆 [TAKE PROFIT] {symbol} atingiu alvo de lucro!", flush=True)
-                                    print(f"   💰 unrealisedPnl: ${unrealised_pnl:.2f} >= Alvo: +${alvo_lucro:.2f}", flush=True)
-                                else:
+                                if motivo_fechamento == "STOP_LOSS":
                                     print(f"🚨 [STOP LOSS] {symbol} atingiu limite de perda!", flush=True)
                                     print(f"   💔 unrealisedPnl: ${unrealised_pnl:.2f} <= Limite: ${alvo_perda:.2f}", flush=True)
+                                else:
+                                    print(f"   ⚠️ [MONITOR] motivo={motivo_fechamento} — fechamento forçado", flush=True)
 
                                 print(f"   🔒 Disparando fechamento forçado...", flush=True)
 
@@ -4080,9 +4088,11 @@ def _process_client_orders_background(
                             # Ignora erros se moeda já estiver na alavancagem desejada
                             print(f"   ⚠️ [LEVERAGE] Erro ao configurar para {ALAVANCAGEM}x (pode já estar neste valor): {lev_err}", flush=True)
 
-                    # 🎯 TP (+100% ROI) e SL (-50% ROI = 2.5% do preço @20x) VINCULADOS à ordem
-                    from src.risk.position_sizing import calculate_tp_sl_prices
+                    # 🎯 SL (−50% ROI) na ordem. TP exchange OFF por padrão (segue tendência após 100%).
+                    from src.risk.position_sizing import attach_exchange_tp, calculate_tp_sl_prices
                     tp_price, sl_price = calculate_tp_sl_prices(entry_price, side.lower(), ALAVANCAGEM)
+                    if not attach_exchange_tp():
+                        tp_price = None
 
                     order_result = broker.execute_market_order(
                         symbol, side.lower(), qty, raise_on_error=True, strict_pct_sizing=True,

@@ -130,6 +130,12 @@ def load_tp_roi_pct() -> float:
     return _env_float('TP_ROI_PCT', DEFAULT_TP_ROI_PCT)
 
 
+def attach_exchange_tp() -> bool:
+    """Se False (padrão), a Bybit só recebe SL −50%; o +100% não fecha a ordem."""
+    raw = os.getenv('ATTACH_EXCHANGE_TP', 'false')
+    return str(raw or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
 def load_sl_roi_pct() -> float:
     raw = _env_float('SL_ROI_PCT', abs(DEFAULT_SL_ROI_PCT))
     return -abs(raw)

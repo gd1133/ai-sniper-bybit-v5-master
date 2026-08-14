@@ -32,8 +32,9 @@ a lógica de decisão, o gerenciamento de risco e as proteções anti-falha do r
                     │  • margem ISOLADA 20x                      │
                     │  • checa posição aberta (has_open_position)│
                     │  • lote = 5% da banca × 20x / preço       │
-                    │  • Escada de Lucro: +50% ROI → SL +20%    │
-                    │  • ordem a mercado + TP/SL inline         │
+                    │  • SL −50% ROI na Bybit (TP exchange OFF)  │
+                    │  • +100% ROI → piso +80% + trailing 2–3%  │
+                    │  • sai só com vela forte 5m + volume contra│
                     └───────────────────────────────────────────┘
 ```
 
@@ -46,7 +47,8 @@ Componentes principais (arquivos):
 | Broker | `src/broker/bybit_client.py` | Chamadas à Bybit V5 (CCXT + pybit): saldo, ordens, margem, TP/SL, posições |
 | Cálculo de ordem | `src/broker/order_calculator.py` | Precisão/step size, arredondamento de lote |
 | Risco | `src/risk/position_sizing.py` | Fórmula de lote (5%), preços de TP/SL, ROI |
-| Escada de Lucro | `src/risk/profit_shield.py` | Em +50% ROI move SL para travar ~+20% ROI (PROTEGIDO_50) |
+| Escada de Lucro | `src/risk/profit_shield.py` | Em +100% ROI move SL para travar ~+80% ROI (`PROTEGIDO_100`) e deixa correr |
+| Gestão viva | `src/risk/trend_position_manager.py` | Segue tendência; sai só com vela forte 5m + volume; trailing após 100% |
 | Risco | `src/risk/entry_viability.py` | Viabilidade da entrada (notional mínimo etc.) |
 | Cérebro 1/2 | `src/engine/confluence_absoluta.py` | Confluência institucional (volume, order book, ADX) |
 | Timing | `src/engine/entry_timing.py` | Confirmação de timing (tendência, pullback, momentum) |
@@ -82,7 +84,7 @@ O `sniper_worker_loop` (em `main_web.py`) executa continuamente:
    5. **Timing de entrada:** `confirmar_timing_entrada` valida tendência/pullback/momentum.
    6. **Cérebro 3 (Validador + ML local):** consolida votos e emite a decisão soberana com
       uma probabilidade.
-4. **Gatilho de entrada:** se `probabilidade ≥ THRESHOLD_ENTRADA` (padrão **48%**) e a decisão
+4. **Gatilho de entrada:** se `probabilidade ≥ THRESHOLD_ENTRADA` (padrão **42%** no modo agressivo) e a decisão
    for `BUY/SELL`, o robô tenta **reservar o slot** do par.
 5. **Reserva de slot (lock):** `_reserve_signal_slot(symbol)` marca o par como
    *processando_entrada*. Se já houver reserva ou o limite `MAX_MOEDAS_ATIVAS` for atingido,
@@ -146,11 +148,12 @@ Se QUALQUER porta falhar → `NEUTRO` e o radar **aborta antes do Cérebro 3**.
 
 | Porta | Regra | Falha |
 |---|---|---|
-| 1a | ADX(14) ≥ 23 | NEUTRO (ignora volume) |
-| 1b | BB Width(20,2σ) > média das últimas 50 larguras | NEUTRO (squeeze) |
-| 2 | Amplitude `((Hmax−Lmin)/Lmin)*100` ≥ 0.35% (20 candles) | NEUTRO (acumulação) |
-| 3 | Volume > MA(20) + 2.5σ | NEUTRO (só após 1–2) |
-| 4 | COMPRA: alta + close > VWAP + spread > 1.5× média; VENDA: espelho | NEUTRO |
+| 1a | ADX(14) ≥ `STRUCTURE_ADX_MIN` (**19**) | NEUTRO |
+| 1b | BB Width expandindo | opcional (`STRUCTURE_REQUIRE_BB_EXPAND=false`) |
+| 2 | Amplitude ≥ `LATERAL_AMPLITUDE_PCT` (**0.28%**) | NEUTRO (acumulação) |
+| 3 | Volume > MA(20) + σ adaptativo (**1.0 chop / 1.25 tendência**) | NEUTRO |
+| 4 | COMPRA: alta + close > VWAP + spread > 1.2× média; VENDA: espelho | NEUTRO |
+| 5 | Anatomia da vela (cor + zona de close + anti-faca) | NEUTRO |
 
 Integração:
 - Radar: short-circuit imediato após `get_signals()` se portas fechadas.
@@ -183,7 +186,7 @@ Confiança mínima do Cérebro 3 local: **62%** (mais seletivo, mirando qualidad
 
 | Componente | Parâmetro | Valor atual | Observação |
 |---|---|---|---|
-| Gatilho de entrada | `THRESHOLD_ENTRADA` | **48%** | probabilidade mínima do validador |
+| Gatilho de entrada | `THRESHOLD_ENTRADA` | **42%** (agressivo) / **50%** (conservador) | probabilidade mínima do validador |
 | ML local | `min_local_confidence` | **52%** | confiança mínima do Cérebro 3 |
 | Validador (compra) | `buy_votes ≥ 2` + prob | **≥ 48%** | votos mínimos + probabilidade |
 | Validador (soberano) | prob soberana | **≥ 52%** | ação BUY/SELL autônoma |
@@ -256,6 +259,41 @@ SELL: tp = preço × (1 - 0.05) ; sl = preço × (1 + 0.025)
 
 ---
 
+## 5.1 Gestão de posição — seguir a tendência (atualização Ago/2026)
+
+O robô **não realiza** no primeiro recuo. Ele acompanha a tendência até haver evidência
+institucional de virada.
+
+### O que NÃO fecha mais a operação
+- Vela vermelha fraca / close abaixo da EMA20
+- Engolfo de **1 minuto** (ruído)
+- Breakeven em +12% ROI / +0.8% de preço
+- Trailing apertado a partir de +25% ROI (0.5–1.0% de preço)
+- Escada antiga (+50% → trava +20%)
+- Analista Pessoal em “give-back” de pullback saudável
+- Time-stop de 35 min com lucro pequeno
+- Take Profit da Bybit em +100% ROI (desligado por padrão)
+
+### Quando SAI
+Única saída discricionária: **vela 5 minutos já fechada**, **forte** (corpo ≥ 55%, close nos
+extremos) **e volume ≥ 2.2×** a média, **contra** a posição (engolfo 5m com os mesmos critérios
+também vale). Tipo: `SAIDA_REVERSAO_TENDENCIA`.
+
+Stop duro de perda continua: **−50% ROI** na Bybit (~−2.5% de preço @20x).
+
+### Alvo 100% e além
+| Evento | Ação |
+|---|---|
+| ROI &lt; 100% | HOLD (recuo pequeno é normal) |
+| ROI ≥ **100%** | **Não fecha.** Remove TP da exchange, arma trailing, piso de SL em **+80% ROI** (`PROTEGIDO_100`) |
+| ROI &gt; 100% | Trailing **2–3% de preço** abaixo/acima do pico; o piso de +80% nunca desce |
+| Vela forte 5m + volume contra | Fecha a mercado |
+
+Arquivos: `src/risk/trend_position_manager.py`, `src/risk/profit_shield.py`,
+`src/broker/bybit_client.py` (`ATTACH_EXCHANGE_TP=false`).
+
+---
+
 ## 6. Segurança Contra Sobrecarga e Duplicação (Anti-Overtrading)
 
 * **Trava de ativo único:** apenas **uma posição aberta por par**. Antes de comprar, o robô
@@ -296,24 +334,27 @@ Valores atuais em `main_web.py` (raiz):
 | `RISK_MODE` | `aggressive` | `conservative` (1 moeda) ou `aggressive` (5 moedas) |
 | `MAX_MOEDAS_ATIVAS` | 5 | Máx. de posições simultâneas |
 | `SCAN_TOP_COINS` | 40 | Ativos por ciclo de radar |
-| `THRESHOLD_ENTRADA` | 48.0 | Probabilidade mínima para entrar |
+| `THRESHOLD_ENTRADA` | 42.0 | Probabilidade mínima para entrar (agressivo) |
 | `SNIPER_POSICAO_UNICA` | False | Permite multi-ativo |
 
-Risco (`src/risk/position_sizing.py`):
+Risco (`src/risk/position_sizing.py` + gestão viva):
 
 | Parâmetro | Valor | Descrição |
 |---|---|---|
 | `DEFAULT_ENTRY_PCT` | 0.05 | 5% da banca por trade |
 | `DEFAULT_ENTRY_AFTER_STOP_PCT` | 0.03 | 3% após stop loss |
-| `PROFIT_SHIELD_TRIGGER_ROI` | 50 | Escada: arma proteção neste ROI % |
-| `PROFIT_SHIELD_LOCK_ROI` | 20 | Escada: SL travado neste ROI % |
-| `DEFAULT_TP_ROI_PCT` | 100.0 | +100% ROI |
+| `PROFIT_SHIELD_TRIGGER_ROI` | **100** | Arma proteção neste ROI % |
+| `PROFIT_SHIELD_LOCK_ROI` | **80** | Piso de SL travado neste ROI % |
+| `TREND_TRAIL_ROI_PCT` | **100** | Trailing só depois do alvo |
+| `TREND_TRAIL_DIST_MIN/MAX_PCT` | **2.0 / 3.0** | Distância do pico (preço) |
+| `TREND_EXIT_VOL_RATIO` | **2.2** | Volume mínimo da vela de saída |
+| `ATTACH_EXCHANGE_TP` | **false** | Bybit não fecha em +100% |
+| `DEFAULT_TP_ROI_PCT` | 100.0 | Referência de alvo (não realiza) |
 | `DEFAULT_SL_ROI_PCT` | -50.0 | -50% ROI (2.5% de preço a 20x) |
 
-Variáveis de ambiente úteis: `RISK_PER_TRADE_PCT`, `ENABLE_NEWS_AI`, `ENABLE_ABSOLUTE_CONFLUENCE`,
-`BLOCK_LATERAL_MARKETS`, `LATERAL_AMPLITUDE_PERIODS` (20), `LATERAL_AMPLITUDE_PCT` (0.35),
-`SQLITE_DB_PATH` (`./data/database.db` — evitar `/tmp` no Render), `USE_TESTNET`,
-credenciais Bybit por cliente (no banco).
+Variáveis de ambiente úteis: `RISK_PER_TRADE_PCT`, `STRUCTURE_ADX_MIN`, `PORTA3_VOL_SIGMA`,
+`BLOCK_LATERAL_MARKETS`, `LATERAL_AMPLITUDE_PCT` (0.28), `SQLITE_DB_PATH` (`./data/database.db`),
+`ATTACH_EXCHANGE_TP`, `TREND_TRAIL_ROI_PCT`, `TREND_LOCK_ROI_PCT`.
 
 **Anti-acumulação:** se `((High.max - Low.min) / Low.min) * 100` nos últimos X períodos
 estiver abaixo de `LATERAL_AMPLITUDE_PCT`, o robô força `NEUTRO` e ignora o sinal.
@@ -379,11 +420,12 @@ Notas de validação (`/api/vincular_cliente`):
 Uma entrada só é enviada quando **todas** as condições abaixo são satisfeitas:
 
 1. ✅ Radar seleciona a moeda (top volume).
-2. ✅ **Hard Gates (Portas 1–4)** liberadas — ADX≥23, BB expandindo, amplitude≥0.35%, volume μ+2.5σ, lado vs VWAP.
-3. ✅ `sinal_institucional` ≠ NEUTRO e Cérebro 3 emite `BUY`/`SELL` **no mesmo lado** do Smart Money (≥48%).
+2. ✅ **Hard Gates (Portas 1–5)** liberadas — ADX≥19, amplitude, volume σ adaptativo, lado vs VWAP, anatomia.
+3. ✅ `sinal_institucional` ≠ NEUTRO e Cérebro 3 emite `BUY`/`SELL` **no mesmo lado** do Smart Money (≥42% agressivo).
 4. ✅ Timing / anti-armadilha confirmado.
 5. ✅ (Se ligada) Confluência Absoluta — filtros técnicos complementares.
 6. ✅ Slot reservado + `MAX_MOEDAS_ATIVAS` + sem posição aberta no par.
-7. ✅ Margem isolada 20x; lote = 5% × 20x / preço; TP +100% ROI / SL −50% ROI inline (`str()` na Bybit V5).
-8. ✅ Escada de Lucro: se ROI ≥ +50%, SL movido para ~+20% ROI (`PROTEGIDO_50`) — evita “quase ganhei”.
-9. ✅ Execução: se sinal estrutural = NEUTRO → `return` imediato (bloqueio absoluto).
+7. ✅ Margem isolada 20x; lote = 5% × 20x / preço; **SL −50% ROI** na Bybit (TP exchange off).
+8. ✅ Em **+100% ROI**: piso **+80%** + trailing 2–3% do pico — **não realiza** o 100%.
+9. ✅ Sai da operação só com **vela forte 5m + volume contra** (ou SL −50%).
+10. ✅ Execução: se sinal estrutural = NEUTRO → `return` imediato (bloqueio absoluto).

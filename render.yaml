@@ -38,5 +38,23 @@ services:
         value: "45"
       - key: CANDLE_CLOSE_ZONE_FRAC
         value: "0.45"
+      - key: TREND_TRAIL_ROI_PCT
+        value: "100"
+      - key: TREND_LOCK_ROI_PCT
+        value: "80"
+      - key: TREND_TRAIL_DIST_MIN_PCT
+        value: "2.0"
+      - key: TREND_TRAIL_DIST_MAX_PCT
+        value: "3.0"
+      - key: TREND_EXIT_VOL_RATIO
+        value: "2.2"
+      - key: PROFIT_SHIELD_TRIGGER_ROI
+        value: "100"
+      - key: PROFIT_SHIELD_LOCK_ROI
+        value: "80"
+      - key: ATTACH_EXCHANGE_TP
+        value: "false"
+      - key: MAX_HOLD_SECS
+        value: "14400"
     buildCommand: pip install -r requirements.txt && npm ci && npm run build
     startCommand: python -m gunicorn main_web:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120 --keep-alive 5
