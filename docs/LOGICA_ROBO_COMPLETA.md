@@ -108,7 +108,7 @@ flowchart TD
 
 | Alvo | Sobre a margem | Exemplo (margem $50) |
 |------|----------------|----------------------|
-| Take Profit | **+100%** | fecha em +$50 unrealised PnL |
+| Take Profit (referência) | **+100%** | **não fecha** — arma piso + trailing |
 | Stop Loss | **-50%** | fecha em -$25 unrealised PnL |
 
 ### Preços na exchange (`set_tp_sl_sniper`)
@@ -130,11 +130,12 @@ Com **10×** (CLI):
 - **Long TP:** entrada × 1.10 (+10% preço)
 - **Long SL:** entrada × 0.95 (-5% preço)
 
-### Monitores de saída (3 camadas)
+### Monitores de saída (camadas vivas)
 
-1. **Exchange TP/SL** — `set_tp_sl_sniper()` na ordem
-2. **Monitor financeiro** — `_monitor_financial_stop_loss()` lê `unrealisedPnl` e usa margem real da posição (do banco ou cálculo nocional/leverage)
-3. **Monitor DB** — `_monitor_sl_tp_automatico()` fecha trades no banco em -50% / +100% PnL %
+1. **SL −50% ROI na exchange** — proteção de capital (sempre)
+2. **TrendPositionManager (~8s)** — HOLD em recuo; sai só vela forte 5m + volume; trailing após +100%
+3. **Monitor financeiro** — em +100% **não fecha**; arma piso +80% e deixa correr. Só força close em −50%
+4. **TP +100% na Bybit** — **desligado** (`ATTACH_EXCHANGE_TP=false`) para não realizar o alvo cedo
 
 ---
 

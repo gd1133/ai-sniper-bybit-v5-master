@@ -1610,9 +1610,9 @@ class BybitClient:
 
     def set_tp_sl_sniper(self, symbol, side, entry_price, position_qty, leverage=None):
         """
-        TP/SL proporcionais à margem com alavancagem (Bybit V5 set_trading_stop):
-        - TP: +100% da margem
-        - SL: -50% da margem
+        Proteção na Bybit V5 (set_trading_stop):
+        - SL: -50% da margem (sempre)
+        - TP: só se ATTACH_EXCHANGE_TP=true (padrão false — deixa correr após 100%)
         """
         try:
             if not self.authenticated:
@@ -1627,30 +1627,38 @@ class BybitClient:
             lev = self._fetch_open_position_leverage(symbol, side)
             if not lev or lev <= 0:
                 lev = float(leverage or getattr(self, 'default_leverage', 20) or 20)
-            from src.risk.position_sizing import calculate_tp_sl_prices
+            from src.risk.position_sizing import attach_exchange_tp, calculate_tp_sl_prices
             tp_price, sl_price = calculate_tp_sl_prices(entry_price, side, lev)
+            use_tp = attach_exchange_tp()
 
             price_to_precision = getattr(self.exchange, 'price_to_precision', None)
             if callable(price_to_precision):
                 try:
-                    tp_price = float(price_to_precision(symbol, tp_price))
+                    if use_tp:
+                        tp_price = float(price_to_precision(symbol, tp_price))
                     sl_price = float(price_to_precision(symbol, sl_price))
                 except Exception as precision_error:
                     print(f"⚠️ [TP/SL] Falha na formatação de casas decimais: {precision_error}")
 
             v5_symbol = self._normalize_v5_symbol(symbol)
             print(f"🛡️  [PROTEÇÃO SNIPER] {v5_symbol} | Entrada: ${entry_price:.8f} | {lev}x | idx={pos_idx}")
-            print(f"   ✅ TP (+100% margem): ${tp_price:.8f} | ❌ SL (-50% margem): ${sl_price:.8f}")
+            if use_tp:
+                print(f"   ✅ TP (+100% margem): ${tp_price:.8f} | ❌ SL (-50% margem): ${sl_price:.8f}")
+            else:
+                print(f"   ❌ SL (-50% margem): ${sl_price:.8f} | TP exchange DESLIGADO (segue tendência após 100%)")
+
+            kwargs = dict(
+                category='linear',
+                symbol=v5_symbol,
+                stopLoss=str(sl_price),
+                positionIdx=pos_idx,
+                tpslMode='Full',
+            )
+            if use_tp:
+                kwargs['takeProfit'] = str(tp_price)
 
             for attempt in range(1, 4):
-                rsp = self.pybit_session.set_trading_stop(
-                    category='linear',
-                    symbol=v5_symbol,
-                    takeProfit=str(tp_price),
-                    stopLoss=str(sl_price),
-                    positionIdx=pos_idx,
-                    tpslMode='Full',
-                )
+                rsp = self.pybit_session.set_trading_stop(**kwargs)
                 ok, err = self._handle_v5_ret_code(rsp, 'set_trading_stop')
                 if ok:
                     print("✅ [TP/SL APLICADO] Alvos registrados na Bybit via set_trading_stop.", flush=True)

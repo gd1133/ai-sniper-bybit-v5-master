@@ -1,15 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-Trailing Profit Shield — Escada de Lucro (proteção dinâmica).
+Trailing Profit Shield — proteção após +100% ROI (deixa correr).
 
-Problema: mirar +100% ROI @20x exige ~5% de preço; o mercado frequentemente
-reverte após ~+50% ROI (~2.5% de preço) e transforma vitória em stop.
-
-Solução (incremental, não remove TP/SL finais):
-  1. Ordem abre com TP +100% ROI e SL −50% ROI (inalterado).
-  2. Quando ROI unrealised >= 50%, move o Stop Loss na Bybit para travar
-     ~+20% ROI (≈ +1% de preço @20x) — "vitória garantida" se reverter.
-  3. Estado PROTEGIDO_50 evita reenviar set_trading_stop a cada ciclo.
+  1. Ordem abre só com SL −50% ROI (TP exchange desligado por padrão).
+  2. Quando ROI >= 100%, move o SL para travar ~+80% ROI (piso) e o
+     TrendPositionManager passa a trailing 2–3% do pico.
+  3. Estado PROTEGIDO_100 evita reenviar set_trading_stop a cada ciclo.
 """
 
 from __future__ import annotations
@@ -36,10 +32,10 @@ def _env_bool(name: str, default: bool = True) -> bool:
     return str(raw).strip().lower() in {'1', 'true', 'yes', 'on'}
 
 
-# Gatilho: ROI da margem >= 50% → arma proteção
-DEFAULT_SHIELD_TRIGGER_ROI = 50.0
-# Lucro travado no SL movido: +20% ROI ≈ 1% de preço @20x
-DEFAULT_SHIELD_LOCK_ROI = 20.0
+# Gatilho: ROI da margem >= 100% → arma proteção e deixa correr
+DEFAULT_SHIELD_TRIGGER_ROI = 100.0
+# Piso travado no SL: +80% ROI (não realiza o 100%; respira pullback)
+DEFAULT_SHIELD_LOCK_ROI = 80.0
 
 
 def load_shield_trigger_roi() -> float:
@@ -164,8 +160,8 @@ def apply_profit_shield_if_needed(
 
     reg = get_profit_shield_registry()
     if reg.is_protected(client_id, symbol):
-        result['reason'] = 'já PROTEGIDO_50'
-        result['status'] = 'PROTEGIDO_50'
+        result['reason'] = 'já PROTEGIDO_100'
+        result['status'] = 'PROTEGIDO_100'
         return result
 
     # Preferir ROI pela margem real (mesma métrica do monitor 100/50)
@@ -225,7 +221,7 @@ def apply_profit_shield_if_needed(
     result['applied'] = True
     result['skipped'] = False
     result['reason'] = f'SL movido para {new_sl} (+{lock_roi:.0f}% ROI travado)'
-    result['status'] = 'PROTEGIDO_50'
+    result['status'] = 'PROTEGIDO_100'
 
     # Best-effort: anota no SQLite local
     try:

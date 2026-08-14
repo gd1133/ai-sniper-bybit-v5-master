@@ -46,12 +46,12 @@ def test_refine_entry_allows_healthy_long_with_boost():
     assert out['probabilidade'] >= 62
 
 
-def test_refine_exit_giveback():
+def test_refine_exit_giveback_does_not_cut_healthy_pullback():
+    """Recuo 45% → 20% NÃO fecha (precisa pico ≥100% e vela forte)."""
     out = refine_exit(
         side='buy',
         roi_pct=20,
         peak_roi_pct=45,
         trailing_armed=False,
     )
-    assert out['suggest_early_exit'] is True
-    assert 'give-back' in (out.get('motivo') or '')
+    assert out['suggest_early_exit'] is False
