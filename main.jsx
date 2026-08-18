@@ -1211,8 +1211,11 @@ const App = () => {
             {(data.segundo_cerebro && (data.segundo_cerebro.liquidity || data.segundo_cerebro.anatomy || data.segundo_cerebro.turtle)) && (
               <div className="bg-[#0d0e12] p-8 rounded-[3rem] border border-white/5">
                 <h4 className="text-[10px] font-black text-zinc-600 uppercase tracking-[0.5em] mb-4 flex items-center gap-3">
-                  <ShieldCheck size={14} /> Segundo Cérebro — Turtle / Liquidez / Anatomia
+                  <ShieldCheck size={14} /> Triplo Cérebro — camada extra (não substitui)
                 </h4>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-3">
+                  C1 tendência/velas + Turtle · C2 volume/VWAP + liquidez · C3 5 estratégias + pesos novos
+                </p>
                 <p className="text-[11px] font-bold uppercase tracking-widest text-zinc-400 mb-3">
                   {data.segundo_cerebro.symbol} • {data.segundo_cerebro.sinal || '—'}
                 </p>

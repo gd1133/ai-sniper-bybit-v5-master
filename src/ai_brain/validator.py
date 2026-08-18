@@ -53,6 +53,15 @@ class DataAnalystAgent:
             score -= 40
             reasons.append('RSI em exaustão extrema - risco de reversão')
 
+        # Camada incremental (Turtle / Ponto Contínuo / anatomia) — NÃO substitui SMA/ST
+        try:
+            from src.engine.triple_brain_layer import incremental_c1_bonus
+            add, extra = incremental_c1_bonus(tech_data)
+            score += add
+            reasons.extend(extra)
+        except Exception:
+            pass
+
         action = 'WAIT'
         trend = tech_data.get('trend', 'NEUTRO')
         st = int(tech_data.get('supertrend_signal', 0) or 0)
@@ -92,6 +101,15 @@ class IntelligenceAgent:
         if timing >= 80:
             score = min(100.0, score + 10)
             reasons.append(f'Timing institucional favorável ({timing:.0f}/100)')
+
+        # Camada incremental (BSL/SSL / FVG) — NÃO substitui volume/VWAP/baleias
+        try:
+            from src.engine.triple_brain_layer import incremental_c2_bonus
+            add, extra = incremental_c2_bonus(tech_data)
+            score = min(100.0, score + add)
+            reasons.extend(extra)
+        except Exception:
+            pass
 
         trend = tech_data.get('trend', 'NEUTRO')
         st = int(tech_data.get('supertrend_signal', 0) or 0)
@@ -355,6 +373,15 @@ class Cerebro3Sovereign:
                 local_score += 10
             elif (trend == 'ALTA' and gt == 'BEARISH') or (trend == 'BAIXA' and gt == 'BULLISH'):
                 local_score -= 15
+        # Camada incremental C3 — Turtle/Fib/liquidez por cima das 5 estratégias clássicas
+        try:
+            from src.engine.triple_brain_layer import incremental_c3_bonus
+            add, extra_c3 = incremental_c3_bonus(enriched)
+            local_score += add
+            if extra_c3:
+                learning_ctx = (learning_ctx or '') + ' | ' + ' ; '.join(extra_c3)
+        except Exception:
+            extra_c3 = []
         local_score = max(0, min(100, local_score))
 
         score_c1 = float(report_c1.get('score', 0) or 0)

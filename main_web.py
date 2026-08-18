@@ -3465,9 +3465,21 @@ def sniper_worker_loop():
                         f"{' | ' + str(signals.get('turtle_reason') or '') if signals.get('turtle_breakout') not in (None, 'NONE', '') else ''}",
                         flush=True,
                     )
+                    print(
+                        f"   🧠 [TRIPLO CÉREBRO] {clean_sym}: camada incremental ON "
+                        f"(C1 Turtle/anatomia · C2 liquidez/FVG · C3 pesos extra) "
+                        f"— não substitui SMA/ST/Portas/VWAP/Groq/Gemini",
+                        flush=True,
+                    )
+                    try:
+                        from src.engine.triple_brain_layer import summarize_incremental
+                        snap = summarize_incremental(signals)
+                    except Exception:
+                        snap = {}
                     central_state['segundo_cerebro'] = {
                         'symbol': clean_sym,
                         'sinal': hard_gate.get('sinal_institucional'),
+                        **snap,
                         'turtle': signals.get('turtle_reason') or signals.get('turtle_breakout'),
                         'liquidity': signals.get('liquidity_log') or signals.get('sweep_reason') or '',
                         'anatomy': signals.get('anatomy_log') or signals.get('candle_anatomy_reason') or '',

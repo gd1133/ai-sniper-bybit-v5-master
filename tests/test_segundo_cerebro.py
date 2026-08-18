@@ -124,3 +124,23 @@ def test_ponto_continuo_requires_ema_and_force_candle():
     pc = evaluate_ponto_continuo(df, 'ALTA')
     assert 'ponto_continuo' in pc
     assert 'ponto_continuo_reason' in pc
+
+
+def test_incremental_layer_does_not_require_replacing_classic_signals():
+    from src.engine.triple_brain_layer import incremental_c1_bonus, incremental_c3_bonus
+    base = {
+        'trend': 'ALTA',
+        'supertrend_signal': 1,
+        'turtle_breakout': 'BUY',
+        'turtle_reason': 'Turtle rompimento de ALTA',
+        'ponto_continuo': True,
+        'liquidity_ok': True,
+        'candle_anatomy_ok': True,
+        'anatomy_log': 'corpo=60%',
+    }
+    s1, r1 = incremental_c1_bonus(base)
+    s3, r3 = incremental_c3_bonus(base)
+    assert s1 > 0 and s3 > 0
+    assert any('Turtle' in x or 'C1+' in x for x in r1)
+    assert base['supertrend_signal'] == 1
+    assert base['trend'] == 'ALTA'
