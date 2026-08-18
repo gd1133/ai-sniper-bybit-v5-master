@@ -640,6 +640,54 @@ class BybitClient:
         normalized = str(side or '').strip().lower()
         return 'Buy' if normalized == 'buy' else 'Sell'
 
+    def _ccxt_market(self, symbol):
+        try:
+            if not getattr(self, 'exchange', None):
+                return {}
+            raw = str(symbol or '')
+            for cand in (raw, raw.replace('USDT', '/USDT:USDT'), raw.replace('USDT', '/USDT')):
+                try:
+                    m = self.exchange.market(cand)
+                    if m:
+                        return m
+                except Exception:
+                    continue
+            markets = getattr(self.exchange, 'markets', None) or {}
+            v5 = self._normalize_v5_symbol(symbol)
+            for key, m in markets.items():
+                if str((m or {}).get('id') or '').upper() == v5:
+                    return m
+                if str(key).replace('/', '').replace(':USDT', '').upper() == v5:
+                    return m
+        except Exception:
+            pass
+        return {}
+
+    def _tick_size(self, symbol) -> float:
+        from src.broker.tpsl_format import tick_size_from_market
+        tick = float(tick_size_from_market(self._ccxt_market(symbol)) or 0)
+        return tick if tick > 0 else 0.0
+
+    def _format_tpsl_prices(self, symbol, side, entry_price, tp_price, sl_price):
+        """takeProfit/stopLoss como string Bybit V5, no tick, lado correto vs entrada."""
+        from src.broker.tpsl_format import format_price_tick, validate_tp_sl_vs_entry
+        tick = self._tick_size(symbol)
+        tp_str, sl_str, notes = validate_tp_sl_vs_entry(
+            side, entry_price, tp_price, sl_price, tick_size=tick,
+        )
+        if not tp_str and tp_price and float(tp_price) > 0:
+            tp_str = format_price_tick(tp_price, tick)
+        if not sl_str and sl_price and float(sl_price) > 0:
+            sl_str = format_price_tick(sl_price, tick)
+        for n in notes:
+            print(f"   ⚠️ [TP/SL] {n}", flush=True)
+        print(
+            f"   🎯 [TP/SL FMT] {self._normalize_v5_symbol(symbol)} tick={tick or 'n/a'} "
+            f"entry={entry_price} TP={tp_str} SL={sl_str} side={side}",
+            flush=True,
+        )
+        return tp_str, sl_str
+
     def calculate_dynamic_order_qty(self, symbol: str, balance=None, leverage=None, after_stop: bool = False):
         """Calcula quantidade com percentual da banca + filtro de viabilidade (7.5%)."""
         from src.risk.entry_viability import (
@@ -1439,14 +1487,18 @@ class BybitClient:
             normalized_qty = self._normalize_order_qty(symbol, qty, strict_pct_sizing=strict_pct_sizing)
             ccxt_qty = float(normalized_qty)
 
-            # Formata TP/SL na precisão de preço da corretora
+            # Formata TP/SL na precisão tickSize (string Bybit, sem notação científica)
             tp_str = sl_str = None
-            price_to_precision = getattr(self.exchange, 'price_to_precision', None)
             try:
-                if tp_price and float(tp_price) > 0:
-                    tp_str = str(price_to_precision(symbol, float(tp_price))) if callable(price_to_precision) else str(tp_price)
-                if sl_price and float(sl_price) > 0:
-                    sl_str = str(price_to_precision(symbol, float(sl_price))) if callable(price_to_precision) else str(sl_price)
+                tp_str, sl_str = self._format_tpsl_prices(symbol, side, 0.0, tp_price, sl_price)
+                # Sem entry ainda (preço de mercado); revalida depois se tivermos last
+                last = 0.0
+                try:
+                    last = float(self.get_last_price(symbol) or 0)
+                except Exception:
+                    last = 0.0
+                if last > 0:
+                    tp_str, sl_str = self._format_tpsl_prices(symbol, side, last, tp_price, sl_price)
             except Exception as prec_err:
                 print(f"   ⚠️ [TP/SL INLINE] Falha na precisão de preço: {prec_err}", flush=True)
                 tp_str = str(tp_price) if tp_price else None
@@ -1476,11 +1528,11 @@ class BybitClient:
                     payload['tpslMode'] = 'Full'
                     if tp_str:
                         payload['takeProfit'] = tp_str
-                        payload['tpTriggerBy'] = 'LastPrice'
+                        payload['tpTriggerBy'] = 'MarkPrice'
                         payload['tpOrderType'] = 'Market'
                     if sl_str:
                         payload['stopLoss'] = sl_str
-                        payload['slTriggerBy'] = 'LastPrice'
+                        payload['slTriggerBy'] = 'MarkPrice'
                         payload['slOrderType'] = 'Market'
                     tp_sl_applied = True
 
@@ -1526,11 +1578,20 @@ class BybitClient:
                 params['tpslMode'] = 'Full'
                 if tp_str:
                     params['takeProfit'] = tp_str
+                    params['takeProfitPrice'] = tp_str
+                    params['tpTriggerBy'] = 'MarkPrice'
                 if sl_str:
                     params['stopLoss'] = sl_str
+                    params['stopLossPrice'] = sl_str
+                    params['slTriggerBy'] = 'MarkPrice'
                 tp_sl_applied = True
-            print(f"   📤 Enviando via CCXT Fallback: {symbol} | qty={normalized_qty} | positionIdx={position_idx}", flush=True)
+            print(
+                f"   📤 Enviando via CCXT Fallback: {symbol} | qty={normalized_qty} | "
+                f"positionIdx={position_idx} | params TP/SL={ {k: params[k] for k in params if 'Profit' in k or 'Loss' in k or 'Trigger' in k or 'tpsl' in k} }",
+                flush=True,
+            )
             order = self.exchange.create_order(symbol, 'market', side, ccxt_qty, params=params)
+            print(f"   📥 Resposta CCXT: {order}", flush=True)
             order_id = order.get('id', 'N/A')
             print(f"✅ [BYBIT CCXT] Ordem preenchida - ID: {order_id}", flush=True)
 
@@ -1610,16 +1671,15 @@ class BybitClient:
 
     def set_tp_sl_sniper(self, symbol, side, entry_price, position_qty, leverage=None):
         """
-        Proteção na Bybit V5 (set_trading_stop):
-        - SL: -50% da margem (sempre)
-        - TP: só se ATTACH_EXCHANGE_TP=true (padrão false — deixa correr após 100%)
+        TP +100% ROI e SL −50% ROI na posição (Bybit V5 set_trading_stop).
+        takeProfit/stopLoss vão como STRING no tickSize — é o que desenha as linhas no gráfico.
         """
         try:
             if not self.authenticated:
-                print("❌ [TP/SL] Não autenticado. Proteção de capital ABORTADA.")
+                print("❌ [TP/SL] Não autenticado. Proteção de capital ABORTADA.", flush=True)
                 return False
             if not self.pybit_session:
-                print("❌ [TP/SL] Sessão pybit indisponível.")
+                print("❌ [TP/SL] Sessão pybit indisponível.", flush=True)
                 return False
 
             side_norm = str(side or '').strip().lower()
@@ -1627,47 +1687,59 @@ class BybitClient:
             lev = self._fetch_open_position_leverage(symbol, side)
             if not lev or lev <= 0:
                 lev = float(leverage or getattr(self, 'default_leverage', 20) or 20)
-            from src.risk.position_sizing import attach_exchange_tp, calculate_tp_sl_prices
+            from src.risk.position_sizing import calculate_tp_sl_prices
             tp_price, sl_price = calculate_tp_sl_prices(entry_price, side, lev)
-            use_tp = attach_exchange_tp()
-
-            price_to_precision = getattr(self.exchange, 'price_to_precision', None)
-            if callable(price_to_precision):
-                try:
-                    if use_tp:
-                        tp_price = float(price_to_precision(symbol, tp_price))
-                    sl_price = float(price_to_precision(symbol, sl_price))
-                except Exception as precision_error:
-                    print(f"⚠️ [TP/SL] Falha na formatação de casas decimais: {precision_error}")
+            tp_str, sl_str = self._format_tpsl_prices(symbol, side, entry_price, tp_price, sl_price)
+            if not tp_str:
+                print(
+                    f"❌ [TP/SL] takeProfit inválido após formatação "
+                    f"(entry={entry_price} tp_raw={tp_price} side={side_norm})",
+                    flush=True,
+                )
+                return False
 
             v5_symbol = self._normalize_v5_symbol(symbol)
-            print(f"🛡️  [PROTEÇÃO SNIPER] {v5_symbol} | Entrada: ${entry_price:.8f} | {lev}x | idx={pos_idx}")
-            if use_tp:
-                print(f"   ✅ TP (+100% margem): ${tp_price:.8f} | ❌ SL (-50% margem): ${sl_price:.8f}")
-            else:
-                print(f"   ❌ SL (-50% margem): ${sl_price:.8f} | TP exchange DESLIGADO (segue tendência após 100%)")
+            print(
+                f"🛡️  [PROTEÇÃO SNIPER] {v5_symbol} | Entrada: {entry_price} | {lev}x | idx={pos_idx}",
+                flush=True,
+            )
+            print(
+                f"   ✅ takeProfit={tp_str} (+100% margem) | stopLoss={sl_str} (−50% margem)",
+                flush=True,
+            )
 
             kwargs = dict(
                 category='linear',
                 symbol=v5_symbol,
-                stopLoss=str(sl_price),
+                takeProfit=str(tp_str),
+                tpTriggerBy='MarkPrice',
                 positionIdx=pos_idx,
                 tpslMode='Full',
             )
-            if use_tp:
-                kwargs['takeProfit'] = str(tp_price)
+            if sl_str:
+                kwargs['stopLoss'] = str(sl_str)
+                kwargs['slTriggerBy'] = 'MarkPrice'
 
+            last_err = ''
             for attempt in range(1, 4):
+                print(f"   📤 [set_trading_stop] tentativa {attempt}/3 payload={kwargs}", flush=True)
                 rsp = self.pybit_session.set_trading_stop(**kwargs)
+                print(f"   📥 [set_trading_stop] resposta Bybit: {rsp}", flush=True)
                 ok, err = self._handle_v5_ret_code(rsp, 'set_trading_stop')
+                last_err = err or ''
                 if ok:
-                    print("✅ [TP/SL APLICADO] Alvos registrados na Bybit via set_trading_stop.", flush=True)
+                    print("✅ [TP/SL APLICADO] takeProfit visível na posição/gráfico Bybit.", flush=True)
                     return True
-                if attempt < 3 and ('position not exists' in err.lower() or '110017' in err):
+                # One-way mode usa positionIdx=0
+                if attempt == 1 and ('position idx' in str(err).lower() or '10001' in str(err) or '110025' in str(err)):
+                    kwargs['positionIdx'] = 0
+                    print("   ↩️ [TP/SL] Retry com positionIdx=0 (one-way)", flush=True)
+                    continue
+                if attempt < 3 and ('position not exists' in str(err).lower() or '110017' in str(err)):
                     time.sleep(1.5)
                     continue
                 print(f"⚠️ [TP/SL FALHOU] {err}", flush=True)
-                return False
+            print(f"❌ [TP/SL] Bybit recusou takeProfit: {last_err}", flush=True)
             return False
 
         except Exception as e:
@@ -1688,25 +1760,25 @@ class BybitClient:
             sl = float(sl_price or 0)
             if sl <= 0:
                 return False
-            price_to_precision = getattr(self.exchange, 'price_to_precision', None)
-            sl_str = str(sl)
-            if callable(price_to_precision):
-                try:
-                    sl_str = str(price_to_precision(symbol, sl))
-                except Exception:
-                    sl_str = str(sl)
+            tick = self._tick_size(symbol)
+            from src.broker.tpsl_format import format_price_tick
+            sl_str = format_price_tick(sl, tick)
             print(
-                f"🛡️  [ESCADA DE LUCRO] {v5_symbol} | novo SL={sl_str} (idx={pos_idx})",
+                f"🛡️  [DEFESA SL] {v5_symbol} | novo stopLoss={sl_str} (idx={pos_idx}) tick={tick}",
                 flush=True,
             )
             for attempt in range(1, 4):
-                rsp = self.pybit_session.set_trading_stop(
+                payload = dict(
                     category='linear',
                     symbol=v5_symbol,
                     stopLoss=sl_str,
+                    slTriggerBy='MarkPrice',
                     positionIdx=pos_idx,
                     tpslMode='Full',
                 )
+                print(f"   📤 [set_trading_stop SL] {payload}", flush=True)
+                rsp = self.pybit_session.set_trading_stop(**payload)
+                print(f"   📥 [set_trading_stop SL] {rsp}", flush=True)
                 ok, err = self._handle_v5_ret_code(rsp, 'set_trading_stop_shield')
                 if ok:
                     print(f"✅ [ESCADA DE LUCRO] SL atualizado para {sl_str}", flush=True)

@@ -53,7 +53,7 @@ services:
       - key: PROFIT_SHIELD_LOCK_ROI
         value: "80"
       - key: ATTACH_EXCHANGE_TP
-        value: "false"
+        value: "true"
       - key: MAX_HOLD_SECS
         value: "14400"
     buildCommand: pip install -r requirements.txt && npm ci && npm run build

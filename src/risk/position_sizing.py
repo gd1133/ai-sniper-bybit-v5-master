@@ -131,8 +131,8 @@ def load_tp_roi_pct() -> float:
 
 
 def attach_exchange_tp() -> bool:
-    """Se False (padrão), a Bybit só recebe SL −50%; o +100% não fecha a ordem."""
-    raw = os.getenv('ATTACH_EXCHANGE_TP', 'false')
+    """Padrão True: Bybit recebe takeProfit +100% ROI (linha no gráfico)."""
+    raw = os.getenv('ATTACH_EXCHANGE_TP', 'true')
     return str(raw or '').strip().lower() in {'1', 'true', 'yes', 'on'}
 
 
