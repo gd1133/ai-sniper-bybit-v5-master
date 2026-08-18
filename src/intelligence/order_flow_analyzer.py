@@ -50,6 +50,7 @@ def _neutral_flow(reason: str = 'fluxo neutro') -> dict[str, Any]:
         'source': 'neutral',
         'reason': reason,
         'available': False,
+        'liquidity_ok': True,
     }
 
 
@@ -155,24 +156,29 @@ def analyze_order_book_flow(
     order_book: dict | None = None,
     signals: dict | None = None,
     aggressions_summary: str = '',
+    df=None,
 ) -> dict[str, Any]:
     """
     Analisa order book via Groq (JSON estrito) com fallback local.
+    Anexa BSL/SSL, sweep e FVG quando há OHLCV.
     Desligável: ENABLE_GROQ_FLOW_AI=false
     """
+    def _finish(payload: dict) -> dict:
+        return enrich_flow_with_liquidity(payload, df=df, signals=signals)
+
     if not _env_bool('ENABLE_GROQ_FLOW_AI', True):
-        return _local_flow_from_book(order_book, signals)
+        return _finish(_local_flow_from_book(order_book, signals))
 
     cache_key = f"{symbol}:{bool(order_book)}"
     now = time.time()
     if cache_key in _CACHE and (now - _CACHE[cache_key][0]) < _CACHE_TTL:
-        return _CACHE[cache_key][1]
+        return _finish(_CACHE[cache_key][1])
 
     local = _local_flow_from_book(order_book, signals)
     groq_key = os.getenv('GROQ_API_KEY', '').strip()
     if not groq_key or Groq is None:
         _CACHE[cache_key] = (now, local)
-        return local
+        return _finish(local)
 
     book_txt = _summarize_order_book(order_book)
     sig = signals or {}
@@ -203,9 +209,60 @@ def analyze_order_book_flow(
                 4,
             )
             _CACHE[cache_key] = (now, parsed)
-            return parsed
+            return _finish(parsed)
     except Exception as exc:
         print(f'⚠️ [GROQ FLOW] indisponível: {exc}', flush=True)
 
     _CACHE[cache_key] = (now, local)
-    return local
+    return _finish(local)
+
+
+def identify_liquidity_zones(df):
+    """BSL acima de swing highs / SSL abaixo de swing lows."""
+    from src.engine.liquidity_smc import identify_liquidity_zones as _zones
+    return _zones(df)
+
+
+def detect_liquidity_sweep(df, zones=None):
+    """Pavio longo além do nível + retorno = grab (invalida breakout)."""
+    from src.engine.liquidity_smc import detect_liquidity_sweep as _sweep
+    return _sweep(df, zones)
+
+
+def detect_fvg_magnets(df):
+    """Fair Value Gaps como zonas ímã de retorno de preço."""
+    from src.engine.liquidity_smc import detect_fair_value_gaps
+    return detect_fair_value_gaps(df)
+
+
+def enrich_flow_with_liquidity(flow: dict | None, df=None, signals: dict | None = None) -> dict[str, Any]:
+    """Anexa zonas SMC ao JSON de fluxo (Groq ou local) para o dashboard."""
+    out = dict(flow or _neutral_flow())
+    if df is None:
+        return out
+    try:
+        from src.engine.liquidity_smc import analyze_smart_money_liquidity
+        liq = analyze_smart_money_liquidity(df, signals)
+        out.update({
+            'bsl': liq.get('bsl'),
+            'ssl': liq.get('ssl'),
+            'sweep_bsl': liq.get('sweep_bsl'),
+            'sweep_ssl': liq.get('sweep_ssl'),
+            'grab_reversal': liq.get('grab_reversal'),
+            'fvg_bullish': liq.get('fvg_bullish'),
+            'fvg_bearish': liq.get('fvg_bearish'),
+            'fvg_magnet': liq.get('fvg_magnet'),
+            'triple_top': liq.get('triple_top'),
+            'liquidity_ok': liq.get('liquidity_ok', True),
+            'liquidity_log': liq.get('liquidity_log') or '',
+        })
+        if liq.get('sweep_reason'):
+            out['reason'] = liq['sweep_reason']
+        if liq.get('alerta_liquidacao') is not None:
+            pass
+        if liq.get('sweep_bsl') or liq.get('sweep_ssl'):
+            out['alerta_liquidacao'] = True
+    except Exception as err:
+        out['liquidity_log'] = f'liquidez indisponível: {err}'
+    return out
+

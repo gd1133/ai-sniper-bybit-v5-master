@@ -40,6 +40,15 @@ class LocalMLEngine:
         if tech_data.get('is_lateral') or str(tech_data.get('trend', '')).upper() == 'NEUTRO':
             return False, "⛔ Mercado LATERAL / sem direção clara — Cérebro 3 aborta", 0
 
+        if tech_data.get('is_doubt_candle') or tech_data.get('candle_anatomy_blocked'):
+            reason = tech_data.get('candle_anatomy_reason') or tech_data.get('anatomy_log') or 'vela de dúvida'
+            return False, f"⛔ Porta 5 / DÚVIDA: {reason}", 0
+
+        if tech_data.get('liquidity_block_long') and str(tech_data.get('trend', '')).upper() == 'ALTA':
+            return False, f"⛔ Liquidez: {tech_data.get('sweep_reason') or 'sweep BSL — não ser a caça de stops'}", 0
+        if tech_data.get('liquidity_block_short') and str(tech_data.get('trend', '')).upper() == 'BAIXA':
+            return False, f"⛔ Liquidez: {tech_data.get('sweep_reason') or 'sweep SSL — não ser a caça de stops'}", 0
+
         # 1. Verificar bloqueio temporário por padrão de falha
         is_blocked, block_reason = self.memory.is_symbol_blocked(symbol)
         if is_blocked:
@@ -74,7 +83,8 @@ class LocalMLEngine:
         Determina QUAIS das 5 estratégias estão ativas/alinhadas à direção do trade.
         Retorna dict {estrategia: bool} usado tanto na pontuação quanto no aprendizado.
 
-        Estratégias: sma, supertrend, fibonacci, volume, support_resistance.
+        Estratégias: sma, supertrend, fibonacci exponencial, volume, S/R,
+        turtle (HHLL 20/55), liquidity (não ser a caça de stops), ponto contínuo.
         """
         trend = str(tech_data.get('trend', '---')).upper()
         supertrend = tech_data.get('supertrend_signal', tech_data.get('supertrend', 0))
@@ -82,20 +92,13 @@ class LocalMLEngine:
         volume_ratio = float(tech_data.get('volume_ratio', 0) or 0)
         structure_bias = str(tech_data.get('structure_bias', 'NEUTRO')).upper()
         chart_score = float(tech_data.get('chart_entry_score', 0) or 0)
+        turtle = str(tech_data.get('turtle_breakout') or 'NONE').upper()
 
-        # 1. SMA 200 — tendência macro definida (acima/abaixo da média)
         sma_ok = trend in ("ALTA", "BAIXA")
-
-        # 2. SuperTrend (pivô) alinhado com a tendência
         st_ok = (trend == "ALTA" and supertrend == 1) or (trend == "BAIXA" and supertrend == -1)
-
-        # 3. Fibonacci — dentro da Golden Zone (0.618)
         fib_ok = 0 < fib_distance <= 1.5
-
-        # 4. Volume institucional
         vol_ok = volume_ratio >= 1.3
 
-        # 5. Suporte/Resistência (pivôs de estrutura) alinhados à direção
         if trend == "ALTA":
             sr_ok = bool(
                 tech_data.get('near_pivot_support')
@@ -113,12 +116,31 @@ class LocalMLEngine:
         if not sr_ok and chart_score >= 40:
             sr_ok = True
 
+        turtle_ok = (
+            (trend == 'ALTA' and turtle == 'BUY')
+            or (trend == 'BAIXA' and turtle == 'SELL')
+        )
+        liq_ok = bool(tech_data.get('liquidity_ok', True)) and not bool(
+            tech_data.get('liquidity_blocked')
+        )
+        if trend == 'ALTA' and tech_data.get('grab_reversal') == 'BUY':
+            liq_ok = True
+        if trend == 'BAIXA' and tech_data.get('grab_reversal') == 'SELL':
+            liq_ok = True
+        if trend == 'ALTA' and (tech_data.get('sweep_bsl') or tech_data.get('liquidity_block_long')):
+            liq_ok = False
+        if trend == 'BAIXA' and (tech_data.get('sweep_ssl') or tech_data.get('liquidity_block_short')):
+            liq_ok = False
+
         return {
             'sma': bool(sma_ok),
             'supertrend': bool(st_ok),
             'fibonacci': bool(fib_ok),
             'volume': bool(vol_ok),
             'support_resistance': bool(sr_ok),
+            'turtle': bool(turtle_ok),
+            'liquidity': bool(liq_ok),
+            'ponto_continuo': bool(tech_data.get('ponto_continuo')),
         }
 
     def _calculate_local_confidence(self, tech_data, intelligence_context=None):
@@ -163,6 +185,17 @@ class LocalMLEngine:
         if trend == 'ALTA' and tech_data.get('strong_bullish_candle'):
             score += 10
         elif trend == 'BAIXA' and tech_data.get('strong_bearish_candle'):
+            score += 10
+
+        if tech_data.get('ponto_continuo'):
+            score += 12
+        if trend == 'ALTA' and str(tech_data.get('turtle_breakout') or '') == 'BUY':
+            score += 8
+        elif trend == 'BAIXA' and str(tech_data.get('turtle_breakout') or '') == 'SELL':
+            score += 8
+        if trend == 'ALTA' and tech_data.get('grab_reversal') == 'BUY':
+            score += 10
+        elif trend == 'BAIXA' and tech_data.get('grab_reversal') == 'SELL':
             score += 10
 
         # RSI (Filtro de Exaustão) - 8 pontos

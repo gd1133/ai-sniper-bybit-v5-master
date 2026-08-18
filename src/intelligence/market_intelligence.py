@@ -54,7 +54,7 @@ class MarketIntelligence:
         news = analyze_news_sentiment(symbol, signals, regime, whale)
 
         # Incremental: Groq fluxo (order book) + Gemini macro (manchetes)
-        flow = analyze_order_book_flow(symbol, order_book=order_book, signals=signals)
+        flow = analyze_order_book_flow(symbol, order_book=order_book, signals=signals, df=df)
         headlines = list(news.get('headlines') or [])
         gemini_macro = analyze_gemini_macro_news(
             symbol,

@@ -44,6 +44,8 @@ python diagnostico_execucao_ordens.py # Diagnostica por que ordens não executam
 ```
 
 📖 **Documentação completa:**
+- `docs/PLANTA_PROJETO_MOTOR_SNIPER.md` — **planta mestre** (escopo, stack, estratégias, histórico e melhorias)
+- `DOCUMENTACAO.md` — detalhe técnico
 - `docs/API_TESTER_GUIA.md` - Guia completo do API Tester
 - `CORRECAO_MODO_REAL_TESTNET.md` - Configuração testnet vs produção
 

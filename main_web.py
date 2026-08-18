@@ -741,6 +741,7 @@ def _start_trend_position_manager():
                     last_extreme_at=st.get('last_extreme_at'),
                     breakeven_armed=bool(st.get('breakeven_armed')),
                     trailing_armed=bool(st.get('trailing_armed')),
+                    partial_tp_done=bool(st.get('partial_tp_done')),
                     df_fast=df_1m,
                     df_slow=df_5m,
                 )
@@ -751,6 +752,7 @@ def _start_trend_position_manager():
                     last_extreme_at=decision.get('last_extreme_at'),
                     breakeven_armed=bool(decision.get('breakeven_armed')),
                     trailing_armed=bool(decision.get('trailing_armed')),
+                    partial_tp_done=bool(decision.get('partial_tp_done') or st.get('partial_tp_done')),
                     sl=float(decision.get('sl_price') or st.get('sl') or 0),
                 )
                 if action == 'HOLD':
@@ -806,6 +808,28 @@ def _start_trend_position_manager():
                         _push_ia_decision_live(symbol, 'EXTEND_TRAILING', decision.get('motivo'), roi, 'TRAILING_PROFIT')
                         central_state['status'] = (
                             f"🚀 Trailing {_limpar_simbolo(symbol)} — SL={sl:.6g}"
+                        )
+                    continue
+
+                if action == 'PARTIAL_TP':
+                    try:
+                        closed = bool(broker.close_partial_position(symbol, side, fraction=0.5))
+                    except Exception as part_err:
+                        print(f"   ⚠️ [TREND MGR] partial TP {symbol}: {part_err}", flush=True)
+                        closed = False
+                    if closed:
+                        reg.update(client_id, symbol, partial_tp_done=True)
+                        record_ia_decision(
+                            symbol,
+                            motivo_saida=decision.get('motivo') or '',
+                            pnl_garantido_pct=roi,
+                            tipo_execucao='FIB_TP1_100',
+                            action_payload='ACTION: PARTIAL_TP',
+                            client_id=client_id,
+                        )
+                        _push_ia_decision_live(symbol, 'PARTIAL_TP', decision.get('motivo'), roi, 'FIB_TP1_100')
+                        central_state['status'] = (
+                            f"🎯 TP parcial Fib 100% {_limpar_simbolo(symbol)}"
                         )
                     continue
 
@@ -1455,18 +1479,22 @@ def _adaptive_record_outcome(symbol, pnl_pct):
     """Ajusta os pesos das estratégias pelo RESULTADO do trade (best-effort)."""
     try:
         pnl = float(pnl_pct or 0)
-        _get_local_ml().weights.record_outcome(symbol, pnl)
+        ml = _get_local_ml()
+        sigs = ml.weights.peek_open_signals(symbol) or {}
+        ml.weights.record_outcome(symbol, pnl)
         try:
             from src.ai_brain.cerebro3_soberano import get_cerebro3_soberano
             resultado = 'GANHOU' if pnl > 0 else 'PERDEU'
-            # Só reforço por condição (global já atualizado acima)
+            usados = sigs if sigs else {
+                'sma200': 1, 'supertrend': 1, 'fibonacci': 1,
+                'volume_climax': 1, 'sup_res': 1,
+            }
             get_cerebro3_soberano().aprender_com_resultado(
                 resultado=resultado,
                 condicao_mercado='NEUTRO',
-                sinais_usados={
-                    'sma200': 1, 'supertrend': 1, 'fibonacci': 1,
-                    'volume_climax': 1, 'sup_res': 1,
-                },
+                sinais_usados=usados,
+                symbol=symbol,
+                pnl_pct=pnl,
             )
         except Exception:
             pass
@@ -2123,12 +2151,14 @@ def _build_api_status_payload():
     except Exception:
         payload['tribunal_debates'] = payload.get('tribunal_debates') or []
 
-    # Porta 3 adaptativa (σ volume: 1.2 consolidação / 1.3 moderado / 1.5 forte)
+    # Porta 3 adaptativa + Segundo Cérebro (Turtle / liquidez / anatomia)
     try:
         from src.engine.porta3_adaptive import porta3_status
         payload['porta3'] = payload.get('porta3') or porta3_status()
     except Exception:
         pass
+    if payload.get('segundo_cerebro') is None:
+        payload['segundo_cerebro'] = (central_state or {}).get('segundo_cerebro') or {}
 
     return payload
 
@@ -3428,9 +3458,24 @@ def sniper_worker_loop():
                         continue
                     print(
                         f"   ✅ [HARD-GATE] {clean_sym}: "
-                        f"{hard_gate.get('sinal_institucional')} — portas 1–5 liberadas",
+                        f"{hard_gate.get('sinal_institucional')} — portas 1–5 liberadas"
+                        f"{' | ' + str(signals.get('liquidity_log') or '') if signals.get('liquidity_log') else ''}"
+                        f"{' | ' + str(signals.get('anatomy_log') or '') if signals.get('anatomy_log') else ''}"
+                        f"{' | ' + str(signals.get('ponto_continuo_reason') or '') if signals.get('ponto_continuo') else ''}"
+                        f"{' | ' + str(signals.get('turtle_reason') or '') if signals.get('turtle_breakout') not in (None, 'NONE', '') else ''}",
                         flush=True,
                     )
+                    central_state['segundo_cerebro'] = {
+                        'symbol': clean_sym,
+                        'sinal': hard_gate.get('sinal_institucional'),
+                        'turtle': signals.get('turtle_reason') or signals.get('turtle_breakout'),
+                        'liquidity': signals.get('liquidity_log') or signals.get('sweep_reason') or '',
+                        'anatomy': signals.get('anatomy_log') or signals.get('candle_anatomy_reason') or '',
+                        'ponto_continuo': signals.get('ponto_continuo_reason') or '',
+                        'fib_depth': signals.get('fib_depth'),
+                        'atr_20': signals.get('atr_20'),
+                        'grab_reversal': signals.get('grab_reversal'),
+                    }
 
                     if validator.local_signal(signals) < 12:
                         continue
@@ -4081,12 +4126,14 @@ def _process_client_orders_background(
                             # Ignora erros se moeda já estiver na alavancagem desejada
                             print(f"   ⚠️ [LEVERAGE] Erro ao configurar para {ALAVANCAGEM}x (pode já estar neste valor): {lev_err}", flush=True)
 
-                    # 🎯 TP (+100% ROI) + SL (−50% ROI) na ordem e na posição (linhas no gráfico)
-                    from src.risk.position_sizing import attach_exchange_tp, calculate_tp_sl_prices
-                    tp_price, sl_price = calculate_tp_sl_prices(entry_price, side.lower(), ALAVANCAGEM)
+                    # 🎯 SL Turtle 2×ATR (teto −50% ROI) + TP Fib 161.8 / +100% ROI
+                    from src.risk.position_sizing import attach_exchange_tp, calculate_dynamic_tp_sl
+                    dyn = calculate_dynamic_tp_sl(entry_price, side.lower(), ALAVANCAGEM, signals)
+                    tp_price, sl_price = dyn.get('tp_price'), dyn.get('sl_price')
                     if not attach_exchange_tp():
                         print("   ⚠️ [TP/SL] ATTACH_EXCHANGE_TP=false — TP não será enviado", flush=True)
                         tp_price = None
+                    print(f"   📐 [TP/SL] {dyn.get('rule')} TP1={dyn.get('tp1_price')}", flush=True)
 
                     order_result = broker.execute_market_order(
                         symbol, side.lower(), qty, raise_on_error=True, strict_pct_sizing=True,
@@ -4131,6 +4178,11 @@ def _process_client_orders_background(
                                     'confidence': confidence,
                                     'structural_signal': structural_signal,
                                     'entry_pct': entry_pct_label,
+                                    'turtle': signals.get('turtle_breakout'),
+                                    'liquidity_log': signals.get('liquidity_log'),
+                                    'anatomy_log': signals.get('anatomy_log'),
+                                    'ponto_continuo': signals.get('ponto_continuo'),
+                                    'strategy_signals': _get_local_ml()._strategy_signals(signals),
                                 },
                             )
                         except Exception as fb_open_err:
@@ -4139,7 +4191,11 @@ def _process_client_orders_background(
                         # Sempre aplica set_trading_stop DEPOIS do fill — é o que desenha TP/SL no gráfico.
                         print("   🎯 [TP/SL] Aplicando takeProfit/stopLoss via set_trading_stop (gráfico Bybit)…", flush=True)
                         time.sleep(0.45)
-                        tp_ok = broker.set_tp_sl_sniper(symbol, side.lower(), entry_price, qty, leverage=ALAVANCAGEM)
+                        tp_ok = broker.set_tp_sl_sniper(
+                            symbol, side.lower(), entry_price, qty,
+                            leverage=ALAVANCAGEM, tp_price=tp_price, sl_price=sl_price,
+                            signals=signals,
+                        )
                         if tp_ok:
                             print("   ✅ [TP/SL] takeProfit + stopLoss confirmados na posição.", flush=True)
                         else:

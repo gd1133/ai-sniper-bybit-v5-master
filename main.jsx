@@ -1208,6 +1208,31 @@ const App = () => {
                </div>
             </div>
 
+            {(data.segundo_cerebro && (data.segundo_cerebro.liquidity || data.segundo_cerebro.anatomy || data.segundo_cerebro.turtle)) && (
+              <div className="bg-[#0d0e12] p-8 rounded-[3rem] border border-white/5">
+                <h4 className="text-[10px] font-black text-zinc-600 uppercase tracking-[0.5em] mb-4 flex items-center gap-3">
+                  <ShieldCheck size={14} /> Segundo Cérebro — Turtle / Liquidez / Anatomia
+                </h4>
+                <p className="text-[11px] font-bold uppercase tracking-widest text-zinc-400 mb-3">
+                  {data.segundo_cerebro.symbol} • {data.segundo_cerebro.sinal || '—'}
+                </p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-[11px] text-zinc-300">
+                  {data.segundo_cerebro.turtle && (
+                    <p><span className="text-zinc-500 font-black uppercase tracking-widest">Turtle </span>{data.segundo_cerebro.turtle}</p>
+                  )}
+                  {data.segundo_cerebro.liquidity && (
+                    <p><span className="text-zinc-500 font-black uppercase tracking-widest">Liquidez </span>{data.segundo_cerebro.liquidity}</p>
+                  )}
+                  {data.segundo_cerebro.anatomy && (
+                    <p><span className="text-zinc-500 font-black uppercase tracking-widest">Anatomia </span>{data.segundo_cerebro.anatomy}</p>
+                  )}
+                  {data.segundo_cerebro.ponto_continuo && (
+                    <p><span className="text-zinc-500 font-black uppercase tracking-widest">Ponto contínuo </span>{data.segundo_cerebro.ponto_continuo}</p>
+                  )}
+                </div>
+              </div>
+            )}
+
             <div className="bg-[#0d0e12] p-8 rounded-[3rem] border border-white/5">
               <div className="flex items-center justify-between mb-6 gap-4 flex-wrap">
                 <h4 className="text-[10px] font-black text-zinc-600 uppercase tracking-[0.5em] flex items-center gap-3">

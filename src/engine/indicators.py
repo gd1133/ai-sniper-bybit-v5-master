@@ -30,12 +30,19 @@ class IndicatorEngine:
         rs = gain / (loss + 1e-9)
         self.df['rsi'] = 100 - (100 / (1 + rs))
         
-        # ATR (14) - Volatilidade
+        # ATR (14) - SuperTrend; ATR (20) - risco Turtle
         high_low = self.df['high'] - self.df['low']
         high_close = abs(self.df['high'] - self.df['close'].shift())
         low_close = abs(self.df['low'] - self.df['close'].shift())
         tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         self.df['atr'] = tr.rolling(window=14, min_periods=1).mean()
+        self.df['atr_20'] = tr.rolling(window=20, min_periods=1).mean()
+
+        # Turtle HH/LL 20 e 55 (rompimentos Donchian)
+        self.df['hh_20'] = self.df['high'].rolling(window=20, min_periods=1).max()
+        self.df['ll_20'] = self.df['low'].rolling(window=20, min_periods=1).min()
+        self.df['hh_55'] = self.df['high'].rolling(window=55, min_periods=1).max()
+        self.df['ll_55'] = self.df['low'].rolling(window=55, min_periods=1).min()
         
         # SuperTrend (10, 3)
         hl_avg = (self.df['high'] + self.df['low']) / 2
@@ -75,10 +82,22 @@ class IndicatorEngine:
                 else:
                     self.df.loc[i, 'supertrend'] = -1
         
-        # Fibonacci Retracement (0.618)
-        high_price = self.df['high'].rolling(window=20).max()
-        low_price = self.df['low'].rolling(window=20).min()
-        self.df['fib_618'] = high_price - (high_price - low_price) * 0.618
+        # Fibonacci Exponencial (EMA de high/low → retração 0.618 + extensões 100/161.8)
+        ema_h = self.df['high'].ewm(span=8, adjust=False).mean()
+        ema_l = self.df['low'].ewm(span=8, adjust=False).mean()
+        exp_high = ema_h.rolling(window=20, min_periods=1).max()
+        exp_low = ema_l.rolling(window=20, min_periods=1).min()
+        exp_rng = (exp_high - exp_low).replace(0, np.nan)
+        self.df['exp_high'] = exp_high
+        self.df['exp_low'] = exp_low
+        self.df['fib_exp_382'] = exp_high - exp_rng * 0.382
+        self.df['fib_exp_500'] = exp_high - exp_rng * 0.500
+        self.df['fib_618'] = exp_high - exp_rng * 0.618
+        self.df['fib_exp_618'] = self.df['fib_618']
+        self.df['fib_ext_100_up'] = exp_high
+        self.df['fib_ext_1618_up'] = exp_low + exp_rng * 1.618
+        self.df['fib_ext_100_down'] = exp_low
+        self.df['fib_ext_1618_down'] = exp_high - exp_rng * 1.618
         
         # Volume Trend
         self.df['vol_ma'] = self.df['vol'].rolling(window=20, min_periods=1).mean()
@@ -121,6 +140,10 @@ class IndicatorEngine:
                 'volume_trend': 'BAIXO',
                 'supertrend_signal': 0,
                 'atr': 0,
+                'atr_20': 0,
+                'hh_20': 0,
+                'll_20': 0,
+                'turtle_breakout': 'NONE',
                 'recent_return_pct': 0,
                 'candle_body_ratio': 0,
                 'range_expansion': 0,
@@ -155,7 +178,13 @@ class IndicatorEngine:
         
         # SuperTrend Signal
         st_signal = int(last['supertrend'])
-        fib_distance_pct = (abs(current_price - last['fib_618']) / current_price * 100) if current_price else 0
+        fib_618 = float(last['fib_618']) if pd.notna(last.get('fib_618')) else 0.0
+        fib_distance_pct = (abs(current_price - fib_618) / current_price * 100) if current_price and fib_618 else 0
+        exp_high = float(last['exp_high']) if 'exp_high' in last and pd.notna(last.get('exp_high')) else 0.0
+        exp_low = float(last['exp_low']) if 'exp_low' in last and pd.notna(last.get('exp_low')) else 0.0
+        exp_rng = max(exp_high - exp_low, 0.0)
+        fib_depth = ((exp_high - current_price) / exp_rng) if exp_rng > 0 else 0.0
+        atr_20 = float(last['atr_20']) if 'atr_20' in last else float(last['atr'])
         reference_close = self.df['close'].iloc[-4] if len(self.df) >= 4 else current_price
         recent_return_pct = ((current_price - reference_close) / reference_close * 100) if reference_close else 0
         candle_range = max(float(last['high'] - last['low']), 1e-9)
@@ -223,12 +252,25 @@ class IndicatorEngine:
             'price': float(current_price),
             'sma_200': float(sma),
             'rsi': float(last['rsi']),
-            'fib_618': float(last['fib_618']),
+            'fib_618': fib_618,
+            'fib_exp_618': fib_618,
+            'fib_ext_100_up': float(last['fib_ext_100_up']) if 'fib_ext_100_up' in last and pd.notna(last.get('fib_ext_100_up')) else 0.0,
+            'fib_ext_1618_up': float(last['fib_ext_1618_up']) if 'fib_ext_1618_up' in last and pd.notna(last.get('fib_ext_1618_up')) else 0.0,
+            'fib_ext_100_down': float(last['fib_ext_100_down']) if 'fib_ext_100_down' in last and pd.notna(last.get('fib_ext_100_down')) else 0.0,
+            'fib_ext_1618_down': float(last['fib_ext_1618_down']) if 'fib_ext_1618_down' in last and pd.notna(last.get('fib_ext_1618_down')) else 0.0,
+            'fib_depth': float(max(0.0, min(1.0, fib_depth))),
+            'exp_high': exp_high,
+            'exp_low': exp_low,
             'volume_trend': vol_trend,
             'volume_ratio': float(last['volume_ratio']),
             'fib_distance_pct': float(fib_distance_pct),
             'supertrend_signal': st_signal,
             'atr': float(last['atr']),
+            'atr_20': atr_20,
+            'hh_20': float(last['hh_20']) if 'hh_20' in last else 0.0,
+            'll_20': float(last['ll_20']) if 'll_20' in last else 0.0,
+            'hh_55': float(last['hh_55']) if 'hh_55' in last else 0.0,
+            'll_55': float(last['ll_55']) if 'll_55' in last else 0.0,
             'recent_return_pct': float(recent_return_pct),
             'candle_body_ratio': float(candle_body_ratio),
             'candle_open': candle_open,
@@ -322,6 +364,10 @@ class IndicatorEngine:
             signals_out['candle_color'] = anatomy.get('candle_color')
             signals_out['candle_anatomy_ok'] = bool(anatomy.get('allowed'))
             signals_out['falling_knife'] = bool(anatomy.get('falling_knife'))
+            signals_out['is_doubt_candle'] = bool(anatomy.get('is_doubt_candle'))
+            signals_out['body_conviction'] = anatomy.get('body_conviction')
+            signals_out['amplitude_dominance'] = anatomy.get('amplitude_dominance')
+            signals_out['anatomy_log'] = anatomy.get('anatomy_log') or ''
             signals_out['candle_anatomy_reason'] = anatomy.get('abort_reason') or ''
             if (
                 str(signals_out.get('sinal_institucional') or '').upper()
@@ -351,12 +397,50 @@ class IndicatorEngine:
         except Exception:
             signals_out.setdefault('meltdown', False)
 
-        # Fair Value Gap (SMC) — confirmação de imbalance institucional
+        # Turtle + Fibonacci exponencial (rompimento / profundidade da correção)
         try:
-            from src.engine.cautious_entry_gate import detect_fair_value_gap
-            signals_out.update(detect_fair_value_gap(self.df))
+            from src.engine.turtle_donchian import detect_turtle_breakout
+            turtle = detect_turtle_breakout(self.df)
+            signals_out['turtle_breakout'] = turtle.get('turtle_breakout') or 'NONE'
+            signals_out['turtle_period'] = int(turtle.get('turtle_period') or 0)
+            signals_out['turtle_reason'] = turtle.get('reason') or ''
+            if turtle.get('hh_20'):
+                signals_out['hh_20'] = float(turtle['hh_20'])
+                signals_out['ll_20'] = float(turtle['ll_20'])
+            if turtle.get('hh_55'):
+                signals_out['hh_55'] = float(turtle['hh_55'])
+                signals_out['ll_55'] = float(turtle['ll_55'])
         except Exception:
-            signals_out.update({'fvg_bullish': False, 'fvg_bearish': False, 'fvg_mid': 0.0})
+            signals_out.setdefault('turtle_breakout', 'NONE')
+
+        try:
+            from src.engine.candle_anatomy import evaluate_ponto_continuo
+            pc = evaluate_ponto_continuo(self.df, signals_out.get('trend'))
+            signals_out.update(pc)
+        except Exception:
+            signals_out.setdefault('ponto_continuo', False)
+
+        # Fair Value Gap + BSL/SSL / Liquidity Sweep
+        try:
+            from src.engine.liquidity_smc import analyze_smart_money_liquidity
+            liq = analyze_smart_money_liquidity(self.df, signals_out)
+            signals_out.update(liq)
+            if liq.get('liquidity_block_long') and str(signals_out.get('sinal_institucional') or '').upper() == 'COMPRA_INSTITUCIONAL':
+                signals_out['sinal_institucional'] = 'NEUTRO'
+                signals_out['money_flow_side'] = 'WAIT'
+                signals_out['liquidity_blocked'] = True
+                print(f"   🚫 [LIQUIDEZ] sweep BSL — COMPRA invalidada: {liq.get('sweep_reason')}", flush=True)
+            if liq.get('liquidity_block_short') and str(signals_out.get('sinal_institucional') or '').upper() == 'VENDA_INSTITUCIONAL':
+                signals_out['sinal_institucional'] = 'NEUTRO'
+                signals_out['money_flow_side'] = 'WAIT'
+                signals_out['liquidity_blocked'] = True
+                print(f"   🚫 [LIQUIDEZ] sweep SSL — VENDA invalidada: {liq.get('sweep_reason')}", flush=True)
+        except Exception:
+            try:
+                from src.engine.cautious_entry_gate import detect_fair_value_gap
+                signals_out.update(detect_fair_value_gap(self.df))
+            except Exception:
+                signals_out.update({'fvg_bullish': False, 'fvg_bearish': False, 'fvg_mid': 0.0})
 
         try:
             from src.engine.market_heat import compute_candle_heat
@@ -381,21 +465,23 @@ class IndicatorEngine:
             return []
         
         zones = []
-        
-        # Identifica os últimos 5 swings para calcular níveis de retração
-        for i in range(len(self.df) - 5, len(self.df)):
-            if i < 20:
-                continue
-            
-            high_20 = self.df['high'].iloc[i-20:i].max()
-            low_20 = self.df['low'].iloc[i-20:i].min()
-            
-            fib_618 = high_20 - (high_20 - low_20) * 0.618
+        try:
+            from src.engine.fibonacci_exponencial import exponential_fib_levels
+            levels = exponential_fib_levels(self.df)
+            fib_618 = float(levels.get('fib_exp_618') or 0)
+        except Exception:
+            levels = {}
+            fib_618 = 0.0
+        if fib_618 <= 0:
+            return []
+        for i in range(max(0, len(self.df) - 5), len(self.df)):
+            close = float(self.df.iloc[i]['close'])
             zones.append({
-                'timestamp': self.df.iloc[i]['ts'],
+                'timestamp': self.df.iloc[i]['ts'] if 'ts' in self.df.columns else i,
                 'fib_618_zone': fib_618,
-                'price': self.df.iloc[i]['close'],
-                'distance_pct': abs(self.df.iloc[i]['close'] - fib_618) / fib_618 * 100
+                'price': close,
+                'distance_pct': abs(close - fib_618) / fib_618 * 100 if fib_618 else 0,
+                'fib_ext_100': float(levels.get('fib_ext_100_up') or 0),
+                'fib_ext_1618': float(levels.get('fib_ext_1618_up') or 0),
             })
-        
-        return zones[-5:] if zones else []  # Últimas 5 zonas
+        return zones[-5:] if zones else []

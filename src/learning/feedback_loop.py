@@ -509,7 +509,7 @@ class FeedbackLoopEvolutivo:
             cur = conn.cursor()
             cur.execute(
                 '''
-                SELECT id, ativo, status, client_id FROM operacoes
+                SELECT id, ativo, status, client_id, sinais_json FROM operacoes
                 WHERE status = 'ABERTA'
                 ORDER BY id DESC
                 LIMIT 200
@@ -693,17 +693,33 @@ class FeedbackLoopEvolutivo:
         self.atualizar_inteligencia_ia(novo_status)
         self._mark_processed(order_id, symbol, closed_pnl, novo_status)
 
-        # Espelha no aprendizado legado (Cérebro 3 / adaptive weights)
+        # Espelha no aprendizado legado (Cérebro 3 / adaptive weights) com as estratégias da entrada
         try:
             from src.ai_brain.cerebro3_soberano import get_cerebro3_soberano
+            from src.ai_brain.adaptive_weights import AdaptiveStrategyWeights
+            raw_sinais = {}
+            try:
+                raw_sinais = json.loads(operacao.get('sinais_json') or '{}') or {}
+            except Exception:
+                raw_sinais = {}
+            usados = raw_sinais.get('strategy_signals') or {
+                'sma200': 1, 'supertrend': 1, 'fibonacci': 1,
+                'volume_climax': 1, 'sup_res': 1,
+                'turtle': 1, 'liquidity': 1, 'ponto_continuo': 1,
+            }
             get_cerebro3_soberano().aprender_com_resultado(
                 resultado='GANHOU' if novo_status == 'WIN' else 'PERDEU',
                 condicao_mercado='NEUTRO',
-                sinais_usados={
-                    'sma200': 1, 'supertrend': 1, 'fibonacci': 1,
-                    'volume_climax': 1, 'sup_res': 1,
-                },
+                sinais_usados=usados,
+                symbol=symbol,
+                pnl_pct=closed_pnl,
             )
+            try:
+                AdaptiveStrategyWeights().record_outcome(
+                    symbol, closed_pnl if novo_status == 'WIN' else -abs(closed_pnl or 1),
+                )
+            except Exception:
+                pass
         except Exception:
             pass
 
