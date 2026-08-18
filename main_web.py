@@ -789,7 +789,7 @@ def _start_trend_position_manager():
                         or ((not is_long) and (prev_sl <= 0 or sl < prev_sl * 0.9999))
                         or not st.get('trailing_armed')
                     )
-                    if improved and _apply_sl(broker, symbol, side, sl, clear_tp=True):
+                    if improved and _apply_sl(broker, symbol, side, sl, clear_tp=False):
                         reg.update(
                             client_id, symbol,
                             trailing_armed=True, breakeven_armed=True, sl=sl,
@@ -2355,58 +2355,45 @@ def _monitor_financial_stop_loss():
                                 if not motivo_fechamento:
                                     continue
 
-                                # Lucro sem teto: +100% NÃO fecha — arma proteção e deixa correr
+                                # +100% ROI: Bybit realiza o TP se estiver no gráfico.
+                                # Se não houver TP na posição, fecha a mercado. Defesa = sobe o SL.
                                 if motivo_fechamento == "TAKE_PROFIT":
-                                    print(
-                                        f"   🚀 [LET PROFITS RUN] {symbol} ROI={roi_pct:.1f}% — "
-                                        f"alvo 100% atingido; não realiza, forma proteção",
-                                        flush=True,
-                                    )
+                                    exchange_tp = 0.0
+                                    try:
+                                        exchange_tp = float(pos.get('takeProfit') or pos.get('tp') or 0)
+                                    except (TypeError, ValueError):
+                                        exchange_tp = 0.0
                                     try:
                                         from src.risk.trend_position_manager import (
                                             compute_lock_sl_price,
-                                            compute_trailing_sl,
                                             get_trend_registry,
-                                            ENABLED as TREND_ON,
                                             LOCK_ROI_PCT,
                                         )
-                                        if TREND_ON:
-                                            is_long = side in ('buy', 'long', 'comprar')
-                                            peak = float(trend_st.get('peak') or 0) or float(mark_price or 0)
-                                            if is_long:
-                                                peak = max(peak, float(mark_price or 0))
-                                            elif peak > 0:
-                                                peak = min(peak, float(mark_price or 0))
-                                            else:
-                                                peak = float(mark_price or 0)
-                                            sl = compute_trailing_sl(
-                                                side=side, peak=peak, mark=mark_price,
-                                            )
-                                            lock_sl = compute_lock_sl_price(entry_price, side, LOCK_ROI_PCT)
-                                            if is_long and lock_sl > 0:
-                                                sl = max(sl, lock_sl)
-                                            elif (not is_long) and lock_sl > 0:
-                                                sl = min(sl, lock_sl) if sl > 0 else lock_sl
-                                            if sl > 0 and hasattr(broker, 'clear_take_profit_set_trailing_sl'):
-                                                broker.clear_take_profit_set_trailing_sl(symbol, side, sl)
-                                            elif sl > 0 and hasattr(broker, 'update_stop_loss_only'):
-                                                broker.update_stop_loss_only(symbol, side, sl)
+                                        lock_sl = compute_lock_sl_price(entry_price, side, LOCK_ROI_PCT)
+                                        if lock_sl > 0 and hasattr(broker, 'update_stop_loss_only'):
+                                            broker.update_stop_loss_only(symbol, side, lock_sl)
                                             get_trend_registry().update(
                                                 client_id, symbol,
-                                                trailing_armed=True, breakeven_armed=True,
-                                                peak=peak, sl=sl,
+                                                trailing_armed=True, breakeven_armed=True, sl=lock_sl,
                                             )
                                             print(
-                                                f"   🛡️ [PROTEÇÃO 100%] {symbol} SL={sl:.6g} "
-                                                f"(piso +{LOCK_ROI_PCT:.0f}% ROI)",
+                                                f"   🛡️ [DEFESA] {symbol} SL piso +{LOCK_ROI_PCT:.0f}% ROI "
+                                                f"SL={lock_sl:.6g} (TP Bybit permanece)",
                                                 flush=True,
                                             )
-                                    except Exception as trail_arm_err:
+                                    except Exception as def_err:
+                                        print(f"   ⚠️ [DEFESA] {symbol}: {def_err}", flush=True)
+                                    if exchange_tp > 0:
                                         print(
-                                            f"   ⚠️ [LET PROFITS RUN] armar proteção: {trail_arm_err}",
+                                            f"   🎯 [TAKE PROFIT] {symbol} ROI={roi_pct:.1f}% — "
+                                            f"TP na Bybit={exchange_tp} (aguarda fill no gráfico)",
                                             flush=True,
                                         )
-                                    continue
+                                        continue
+                                    print(
+                                        f"🏆 [TAKE PROFIT] {symbol} alvo 100% sem TP na corretora — fechando a mercado",
+                                        flush=True,
+                                    )
 
                                 if motivo_fechamento == "STOP_LOSS":
                                     print(f"🚨 [STOP LOSS] {symbol} atingiu limite de perda!", flush=True)
@@ -3408,6 +3395,12 @@ def sniper_worker_loop():
                     except Exception:
                         pass
                     if signals.get('is_lateral') or signals['trend'] == 'NEUTRO':
+                        print(
+                            f"   ⏸️ [LATERAL] {clean_sym}: "
+                            f"trend={signals.get('trend')} lateral={signals.get('is_lateral')} "
+                            f"ADX={signals.get('adx')} — sem movimento, skip",
+                            flush=True,
+                        )
                         continue
 
                     # ══════════════════════════════════════════════════════════
@@ -4088,10 +4081,11 @@ def _process_client_orders_background(
                             # Ignora erros se moeda já estiver na alavancagem desejada
                             print(f"   ⚠️ [LEVERAGE] Erro ao configurar para {ALAVANCAGEM}x (pode já estar neste valor): {lev_err}", flush=True)
 
-                    # 🎯 SL (−50% ROI) na ordem. TP exchange OFF por padrão (segue tendência após 100%).
+                    # 🎯 TP (+100% ROI) + SL (−50% ROI) na ordem e na posição (linhas no gráfico)
                     from src.risk.position_sizing import attach_exchange_tp, calculate_tp_sl_prices
                     tp_price, sl_price = calculate_tp_sl_prices(entry_price, side.lower(), ALAVANCAGEM)
                     if not attach_exchange_tp():
+                        print("   ⚠️ [TP/SL] ATTACH_EXCHANGE_TP=false — TP não será enviado", flush=True)
                         tp_price = None
 
                     order_result = broker.execute_market_order(
@@ -4142,13 +4136,14 @@ def _process_client_orders_background(
                         except Exception as fb_open_err:
                             print(f"   ⚠️ [FEEDBACK LOOP] ABERTA não registrada: {fb_open_err}", flush=True)
 
-                        # TP/SL já foram vinculados à ordem principal. Só usa a rota
-                        # separada (set_trading_stop) como fallback se o inline falhou.
-                        if not order_result.get('tp_sl_applied'):
-                            print("   ↩️ [TP/SL] Inline indisponível — aplicando via set_trading_stop (fallback).", flush=True)
-                            broker.set_tp_sl_sniper(symbol, side.lower(), entry_price, qty, leverage=ALAVANCAGEM)
+                        # Sempre aplica set_trading_stop DEPOIS do fill — é o que desenha TP/SL no gráfico.
+                        print("   🎯 [TP/SL] Aplicando takeProfit/stopLoss via set_trading_stop (gráfico Bybit)…", flush=True)
+                        time.sleep(0.45)
+                        tp_ok = broker.set_tp_sl_sniper(symbol, side.lower(), entry_price, qty, leverage=ALAVANCAGEM)
+                        if tp_ok:
+                            print("   ✅ [TP/SL] takeProfit + stopLoss confirmados na posição.", flush=True)
                         else:
-                            print("   ✅ [TP/SL] Alvos vinculados à ordem principal (Bybit V5).", flush=True)
+                            print("   ❌ [TP/SL] set_trading_stop falhou — veja retCode/retMsg acima.", flush=True)
 
                         # 2. DEPURAÇÃO ATIVA + 3. HIGIENIZAÇÃO DE ENVIO
                         if client_tk and client_chat:

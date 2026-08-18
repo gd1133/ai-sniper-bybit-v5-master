@@ -32,7 +32,7 @@ a lógica de decisão, o gerenciamento de risco e as proteções anti-falha do r
                     │  • margem ISOLADA 20x                      │
                     │  • checa posição aberta (has_open_position)│
                     │  • lote = 5% da banca × 20x / preço       │
-                    │  • SL −50% ROI na Bybit (TP exchange OFF)  │
+                    │  • SL −50% ROI + TP +100% ROI na Bybit (linhas no gráfico) │
                     │  • +100% ROI → piso +80% + trailing 2–3%  │
                     │  • sai só com vela forte 5m + volume contra│
                     └───────────────────────────────────────────┘
@@ -290,7 +290,7 @@ Stop duro de perda continua: **−50% ROI** na Bybit (~−2.5% de preço @20x).
 | Vela forte 5m + volume contra | Fecha a mercado |
 
 Arquivos: `src/risk/trend_position_manager.py`, `src/risk/profit_shield.py`,
-`src/broker/bybit_client.py` (`ATTACH_EXCHANGE_TP=false`).
+`src/broker/bybit_client.py` (`ATTACH_EXCHANGE_TP=true` — `takeProfit` string no tickSize).
 
 ---
 
@@ -348,7 +348,7 @@ Risco (`src/risk/position_sizing.py` + gestão viva):
 | `TREND_TRAIL_ROI_PCT` | **100** | Trailing só depois do alvo |
 | `TREND_TRAIL_DIST_MIN/MAX_PCT` | **2.0 / 3.0** | Distância do pico (preço) |
 | `TREND_EXIT_VOL_RATIO` | **2.2** | Volume mínimo da vela de saída |
-| `ATTACH_EXCHANGE_TP` | **false** | Bybit não fecha em +100% |
+| `ATTACH_EXCHANGE_TP` | **true** | Envia `takeProfit` na Bybit (linha no gráfico, +100% ROI) |
 | `DEFAULT_TP_ROI_PCT` | 100.0 | Referência de alvo (não realiza) |
 | `DEFAULT_SL_ROI_PCT` | -50.0 | -50% ROI (2.5% de preço a 20x) |
 
@@ -425,7 +425,7 @@ Uma entrada só é enviada quando **todas** as condições abaixo são satisfeit
 4. ✅ Timing / anti-armadilha confirmado.
 5. ✅ (Se ligada) Confluência Absoluta — filtros técnicos complementares.
 6. ✅ Slot reservado + `MAX_MOEDAS_ATIVAS` + sem posição aberta no par.
-7. ✅ Margem isolada 20x; lote = 5% × 20x / preço; **SL −50% ROI** na Bybit (TP exchange off).
+7. ✅ Margem isolada 20x; lote = 5% × 20x / preço; **SL −50%** e **TP +100%** na Bybit (`takeProfit` string).
 8. ✅ Em **+100% ROI**: piso **+80%** + trailing 2–3% do pico — **não realiza** o 100%.
 9. ✅ Sai da operação só com **vela forte 5m + volume contra** (ou SL −50%).
 10. ✅ Execução: se sinal estrutural = NEUTRO → `return` imediato (bloqueio absoluto).
