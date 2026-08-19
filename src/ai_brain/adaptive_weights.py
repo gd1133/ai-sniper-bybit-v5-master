@@ -24,8 +24,11 @@ import time
 import json
 from datetime import datetime
 
-# Ordem canônica das 5 estratégias
-STRATEGIES = ['sma', 'supertrend', 'fibonacci', 'volume', 'support_resistance']
+# Ordem canônica das estratégias (legado + Segundo Cérebro)
+STRATEGIES = [
+    'sma', 'supertrend', 'fibonacci', 'volume', 'support_resistance',
+    'turtle', 'liquidity', 'ponto_continuo',
+]
 
 # Pesos base (usados até haver aprendizado suficiente)
 BASE_WEIGHTS = {
@@ -34,6 +37,9 @@ BASE_WEIGHTS = {
     'fibonacci': 13.0,
     'volume': 10.0,
     'support_resistance': 12.0,
+    'turtle': 12.0,
+    'liquidity': 10.0,
+    'ponto_continuo': 10.0,
 }
 
 MIN_SAMPLES = 10   # nº de resultados por estratégia antes de ajustar o peso
@@ -172,6 +178,24 @@ class AdaptiveStrategyWeights:
 
         self._write_with_retry("log_entry", _op)
         return sig
+
+    def peek_open_signals(self, symbol):
+        """Lê sinais da entrada ainda OPEN (não consome a pendência)."""
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT signals_json FROM strategy_signal_log WHERE symbol = ? AND status = 'OPEN' ORDER BY id DESC LIMIT 1",
+                (symbol,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return {}
+            return json.loads(row['signals_json'] or '{}')
+        except Exception:
+            return {}
+        finally:
+            conn.close()
 
     def record_outcome(self, symbol, pnl_pct):
         """

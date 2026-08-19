@@ -181,6 +181,83 @@ def position_roi_pct(unrealised_pnl: float, margin: float) -> float:
     return (float(unrealised_pnl or 0) / margin) * 100.0
 
 
+def turtle_atr_stop(entry_price: float, side: str, atr: float, multiplier: float = 2.0) -> float:
+    """SL inicial Turtle: 2 × ATR(20) a partir da entrada."""
+    entry = float(entry_price or 0)
+    atr_v = max(float(atr or 0), 0.0)
+    mult = max(float(multiplier or 2.0), 0.1)
+    if entry <= 0 or atr_v <= 0:
+        return 0.0
+    dist = atr_v * mult
+    if str(side or '').strip().lower() in ('buy', 'long', 'comprar'):
+        return entry - dist
+    return entry + dist
+
+
+def calculate_dynamic_tp_sl(
+    entry_price: float,
+    side: str,
+    leverage: float,
+    signals: dict | None = None,
+    *,
+    atr: float | None = None,
+    atr_mult: float | None = None,
+) -> dict:
+    """
+    SL: o mais apertado entre 2×ATR (corta perda rápido) e −50% ROI (teto duro).
+    TP total: o mais longe entre extensão Fib 161.8% e +100% ROI (deixa o lucro fluir).
+    TP parcial: extensão Fib 100%.
+    """
+    signals = signals or {}
+    entry = float(entry_price or 0)
+    lev = max(float(leverage or 1), 1.0)
+    roi_tp, roi_sl = calculate_tp_sl_prices(entry, side, lev)
+    atr_v = float(atr if atr is not None else (signals.get('atr_20') or signals.get('atr') or 0) or 0)
+    mult = float(atr_mult if atr_mult is not None else _env_float('TURTLE_ATR_MULT', 2.0))
+    atr_sl = turtle_atr_stop(entry, side, atr_v, mult)
+
+    is_long = str(side or '').strip().lower() in ('buy', 'long', 'comprar')
+    if is_long:
+        fib_tp1 = float(signals.get('fib_ext_100_up') or 0)
+        fib_tp2 = float(signals.get('fib_ext_1618_up') or 0)
+        sl = max(p for p in (atr_sl, roi_sl) if p > 0) if (atr_sl > 0 or roi_sl > 0) else 0.0
+        # se ATR stop ficou do lado errado, cai no ROI
+        if sl >= entry:
+            sl = roi_sl
+        tp_candidates = [p for p in (roi_tp, fib_tp2) if p > entry]
+        tp = max(tp_candidates) if tp_candidates else roi_tp
+        tp1_candidates = [p for p in (fib_tp1,) if p > entry]
+        tp1 = min(tp1_candidates) if tp1_candidates else (entry + (tp - entry) * 0.5 if tp > entry else 0.0)
+        if tp1 >= tp > 0:
+            tp1 = entry + (tp - entry) * 0.5
+    else:
+        fib_tp1 = float(signals.get('fib_ext_100_down') or 0)
+        fib_tp2 = float(signals.get('fib_ext_1618_down') or 0)
+        stops = [p for p in (atr_sl, roi_sl) if p > entry]
+        sl = min(stops) if stops else roi_sl
+        tp_candidates = [p for p in (roi_tp, fib_tp2) if 0 < p < entry]
+        tp = min(tp_candidates) if tp_candidates else roi_tp
+        tp1_candidates = [p for p in (fib_tp1,) if 0 < p < entry]
+        tp1 = max(tp1_candidates) if tp1_candidates else (entry - (entry - tp) * 0.5 if 0 < tp < entry else 0.0)
+        if 0 < tp1 <= tp < entry:
+            tp1 = entry - (entry - tp) * 0.5
+
+    return {
+        'tp_price': float(tp or 0),
+        'sl_price': float(sl or 0),
+        'tp1_price': float(tp1 or 0),
+        'tp2_price': float(tp or 0),
+        'atr_20': atr_v,
+        'atr_sl': float(atr_sl or 0),
+        'roi_tp': float(roi_tp or 0),
+        'roi_sl': float(roi_sl or 0),
+        'rule': (
+            f'SL=min(2×ATR={atr_sl:.6g}, ROI-50%={roi_sl:.6g}) '
+            f'TP=max(Fib161.8, +100% ROI) TP1=Fib100%'
+        ),
+    }
+
+
 def evaluate_position_exit(unrealised_pnl: float, margin: float) -> Tuple[str | None, float]:
     """
     Protocolo 100/50 sobre o valor da entrada (margem = 5% ou 3% da banca):

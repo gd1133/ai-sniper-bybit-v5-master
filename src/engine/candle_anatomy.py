@@ -25,6 +25,11 @@ NEUTRO = 'NEUTRO'
 CLOSE_ZONE_FRAC = float(os.getenv('CANDLE_CLOSE_ZONE_FRAC', '0.45'))
 # Lookback para média de spread no falling-knife
 SPREAD_MA_PERIOD = max(5, int(os.getenv('FALLING_KNIFE_SPREAD_MA', '20')))
+# Porta 5 — dúvida: corpo baixo + sombras altas + amplitude fraca vs ATR
+DOUBT_BODY_MAX = float(os.getenv('CANDLE_DOUBT_BODY_MAX', '0.35'))
+DOUBT_WICK_MIN = float(os.getenv('CANDLE_DOUBT_WICK_MIN', '0.55'))
+DOUBT_ATR_FRAC = float(os.getenv('CANDLE_DOUBT_ATR_FRAC', '0.70'))
+PONTO_CONTINUO_EMA_PCT = float(os.getenv('PONTO_CONTINUO_EMA_PCT', '0.45'))
 
 
 def _f(value: Any, default: float = 0.0) -> float:
@@ -139,6 +144,8 @@ def evaluate_candle_anatomy(
     highs=None,
     lows=None,
     closes=None,
+    atr: float = 0.0,
+    fib_depth: float = 0.0,
 ) -> dict[str, Any]:
     """
     Avalia anatomia da vela atual vs sinal institucional.
@@ -168,6 +175,10 @@ def evaluate_candle_anatomy(
         'falling_knife': False,
         'abort_reason': '',
         'checks': {},
+        'body_conviction': 0.0,
+        'amplitude_dominance': 0.0,
+        'is_doubt_candle': False,
+        'anatomy_log': '',
     }
 
     if sinal not in (INSTITUTIONAL_BUY, INSTITUTIONAL_SELL):
@@ -215,6 +226,40 @@ def evaluate_candle_anatomy(
         return out
     out['checks']['close_zone'] = True
 
+    body = abs(c - o)
+    body_frac = body / spread if spread > 0 else 0.0
+    wick_frac = max(0.0, 1.0 - body_frac)
+    atr_v = _f(atr)
+    if atr_v <= 0 and df is not None and 'atr_20' in getattr(df, 'columns', []):
+        atr_v = _f(df['atr_20'].iloc[-1])
+    if atr_v <= 0 and df is not None and 'atr' in getattr(df, 'columns', []):
+        atr_v = _f(df['atr'].iloc[-1])
+    dominance = (spread / atr_v) if atr_v > 0 else 1.0
+    out['body_conviction'] = round(body_frac, 4)
+    out['amplitude_dominance'] = round(dominance, 4)
+
+    # Correção profunda no Fibonacci exige vela mais larga (menos ambiguidade)
+    min_dom = DOUBT_ATR_FRAC
+    depth = _f(fib_depth)
+    if depth >= 0.75:
+        min_dom = max(min_dom, 1.00)
+    elif depth >= 0.50:
+        min_dom = max(min_dom, 0.80)
+
+    is_doubt = body_frac < DOUBT_BODY_MAX and wick_frac >= DOUBT_WICK_MIN and dominance < min_dom
+    out['is_doubt_candle'] = bool(is_doubt)
+    out['anatomy_log'] = (
+        f'corpo={body_frac * 100:.0f}% sombras={wick_frac * 100:.0f}% '
+        f'amp={dominance:.2f}×ATR fib_depth={depth:.2f}'
+    )
+    if is_doubt:
+        out['abort_reason'] = (
+            f'DÚVIDA: {out["anatomy_log"]} — bloqueia entrada mesmo com setup técnico'
+        )
+        out['checks']['doubt'] = False
+        return out
+    out['checks']['doubt'] = True
+
     # --- Falling knife (só bloqueia COMPRA) ---
     knife = {'falling_knife': False, 'reason': 'skipped'}
     try:
@@ -255,6 +300,19 @@ def analyze_from_dataframe(df, sinal_institucional: str) -> dict[str, Any]:
             'checks': {},
         }
     last = df.iloc[-1]
+    atr_v = 0.0
+    if 'atr_20' in df.columns:
+        atr_v = _f(last['atr_20'])
+    elif 'atr' in df.columns:
+        atr_v = _f(last['atr'])
+    fib_depth = 0.0
+    if 'exp_high' in df.columns and 'exp_low' in df.columns:
+        eh = _f(last['exp_high'])
+        el = _f(last['exp_low'])
+        rng = max(eh - el, 0.0)
+        close = _f(last['close'])
+        if rng > 0:
+            fib_depth = max(0.0, min(1.0, (eh - close) / rng))
     return evaluate_candle_anatomy(
         sinal_institucional=sinal_institucional,
         open_p=_f(last.get('open') if hasattr(last, 'get') else last['open']),
@@ -262,4 +320,58 @@ def analyze_from_dataframe(df, sinal_institucional: str) -> dict[str, Any]:
         low=_f(last.get('low') if hasattr(last, 'get') else last['low']),
         close=_f(last.get('close') if hasattr(last, 'get') else last['close']),
         df=df,
+        atr=atr_v,
+        fib_depth=fib_depth,
     )
+
+
+def evaluate_ponto_continuo(df, trend: str | None = None) -> dict[str, Any]:
+    """
+    Ponto Contínuo: preço na EMA 21 inclinada + vela de força a favor da tendência.
+    Confirmação de entrada (não substitui as Portas 1–5).
+    """
+    out = {
+        'ponto_continuo': False,
+        'ema21_slope': 0.0,
+        'ponto_continuo_reason': '',
+    }
+    if df is None or len(df) < 8 or 'close' not in getattr(df, 'columns', []):
+        out['ponto_continuo_reason'] = 'histórico insuficiente para Ponto Contínuo'
+        return out
+
+    close = df['close'].astype(float)
+    ema21 = close.ewm(span=21, adjust=False).mean() if 'ema_21' not in df.columns else df['ema_21'].astype(float)
+    last_c = _f(close.iloc[-1])
+    last_e = _f(ema21.iloc[-1])
+    prev_e = _f(ema21.iloc[-4] if len(ema21) >= 4 else ema21.iloc[0])
+    slope = last_e - prev_e
+    out['ema21_slope'] = round(slope, 8)
+    dist_pct = abs(last_c - last_e) / last_e * 100.0 if last_e else 999.0
+    last = df.iloc[-1]
+    o = _f(last['open'])
+    h = _f(last['high'])
+    l = _f(last['low'])
+    c = _f(last['close'])
+    spread = max(h - l, 1e-12)
+    body_frac = abs(c - o) / spread
+    close_pos = (c - l) / spread
+    trend_u = str(trend or '').upper()
+    near = dist_pct <= PONTO_CONTINUO_EMA_PCT
+    force_up = c > o and body_frac >= 0.55 and close_pos >= 0.60 and slope > 0
+    force_dn = c < o and body_frac >= 0.55 and close_pos <= 0.40 and slope < 0
+
+    if trend_u == 'ALTA' and near and force_up:
+        out['ponto_continuo'] = True
+        out['ponto_continuo_reason'] = (
+            f'Ponto Contínuo LONG: EMA21 inclinada↑ dist={dist_pct:.2f}% corpo={body_frac*100:.0f}%'
+        )
+    elif trend_u == 'BAIXA' and near and force_dn:
+        out['ponto_continuo'] = True
+        out['ponto_continuo_reason'] = (
+            f'Ponto Contínuo SHORT: EMA21 inclinada↓ dist={dist_pct:.2f}% corpo={body_frac*100:.0f}%'
+        )
+    else:
+        out['ponto_continuo_reason'] = (
+            f'sem Ponto Contínuo (dist EMA21={dist_pct:.2f}% slope={slope:.6g} corpo={body_frac*100:.0f}%)'
+        )
+    return out

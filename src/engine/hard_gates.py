@@ -115,10 +115,13 @@ def evaluate_hard_gates(signals: dict | None, df=None) -> dict[str, Any]:
             'pass': anatomy_ok,
             'candle_color': anatomy.get('candle_color'),
             'falling_knife': anatomy.get('falling_knife'),
-            'reason': anatomy.get('abort_reason') or 'ok',
+            'is_doubt_candle': anatomy.get('is_doubt_candle'),
+            'body_conviction': anatomy.get('body_conviction'),
+            'amplitude_dominance': anatomy.get('amplitude_dominance'),
+            'reason': anatomy.get('abort_reason') or anatomy.get('anatomy_log') or 'ok',
             'rule': (
-                'COMPRA=verde+close zona topo; VENDA=vermelha+close zona fundo; '
-                'bloqueia COMPRA se 2 velas anteriores vermelhas com spread > MA'
+                'Amplitude (dominância vs ATR) + corpo (convicção); '
+                'bloqueia vela de DÚVIDA; COMPRA=verde zona topo; VENDA=vermelha zona fundo'
             ),
         },
     }
@@ -149,6 +152,14 @@ def evaluate_hard_gates(signals: dict | None, df=None) -> dict[str, Any]:
     if not anatomy_ok:
         reason = anatomy.get('abort_reason') or 'anatomia da vela inválida'
         return _blocked(ports, NEUTRO, f'Porta 5 fechada: {reason}')
+
+    # Liquidez: não ser a caça de stops (sweep BSL/SSL no sentido da entrada)
+    if sinal == INSTITUTIONAL_BUY and signals.get('liquidity_block_long'):
+        reason = signals.get('sweep_reason') or 'sweep BSL — não comprar o rompimento falso'
+        return _blocked(ports, NEUTRO, f'Liquidez: {reason}')
+    if sinal == INSTITUTIONAL_SELL and signals.get('liquidity_block_short'):
+        reason = signals.get('sweep_reason') or 'sweep SSL — não vender o breakdown falso'
+        return _blocked(ports, NEUTRO, f'Liquidez: {reason}')
 
     return {
         'allowed': True,
@@ -192,6 +203,8 @@ def _evaluate_anatomy_gate(signals: dict, sinal: str, df=None) -> dict[str, Any]
         highs=signals.get('candle_highs'),
         lows=signals.get('candle_lows'),
         closes=signals.get('candle_closes'),
+        atr=_f(signals.get('atr_20') or signals.get('atr')),
+        fib_depth=_f(signals.get('fib_depth')),
     )
 
 

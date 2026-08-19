@@ -34,6 +34,10 @@ EMA_FAST = int(os.getenv('TREND_TRAIL_EMA', '8'))
 EMA_SLOW = int(os.getenv('TREND_EXIT_EMA', '20'))
 VOL_EXIT_RATIO = float(os.getenv('TREND_EXIT_VOL_RATIO', '2.2'))
 STRONG_EXIT_BODY_PCT = float(os.getenv('TREND_EXIT_BODY_PCT', '55'))
+ENABLE_FIB_PARTIAL_TP = str(os.getenv('ENABLE_FIB_PARTIAL_TP', 'true')).strip().lower() in {
+    '1', 'true', 'yes', 'on',
+}
+FIB_PARTIAL_FRACTION = float(os.getenv('FIB_PARTIAL_FRACTION', '0.5'))
 MAX_HOLD_SECS = float(os.getenv('MAX_HOLD_SECS', str(4 * 3600)))
 STAGNATION_ROI_ABS = float(os.getenv('STAGNATION_ROI_ABS', '0'))
 EXTREME_IDLE_SECS = float(os.getenv('STAGNATION_NO_EXTREME_SECS', str(4 * 3600)))
@@ -278,6 +282,7 @@ def decide_trend_action(
     last_extreme_at: float | None = None,
     breakeven_armed: bool = False,
     trailing_armed: bool = False,
+    partial_tp_done: bool = False,
     df_fast=None,
     df_slow=None,
     now: float | None = None,
@@ -316,6 +321,7 @@ def decide_trend_action(
         'sl_price': 0.0,
         'breakeven_armed': bool(breakeven_armed),
         'trailing_armed': bool(trailing_armed),
+        'partial_tp_done': bool(partial_tp_done),
         'roi_pct': roi,
         'price_move_pct': move,
     }
@@ -329,6 +335,32 @@ def decide_trend_action(
             'SAIDA_REVERSAO_TENDENCIA: ' + ' | '.join(engolfo.get('reasons') or [])
         )
         return result
+
+    # ── 1b) TP parcial Fib 100% (realiza metade, resto corre até 161.8 / reversão)
+    df_struct = df_slow if df_slow is not None and len(df_slow) >= 10 else df_fast
+    if ENABLE_FIB_PARTIAL_TP and not partial_tp_done and 20 <= roi < TRAIL_ROI_PCT and df_struct is not None:
+        try:
+            from src.engine.fibonacci_exponencial import exponential_fib_levels, fib_targets_for_side
+            targets = fib_targets_for_side(exponential_fib_levels(df_struct), side)
+            tp1 = _f(targets.get('tp1'))
+            min_ext = entry * 0.025  # ignora “100%” que ainda é ruído de consolidação
+            hit = (
+                is_long and tp1 >= entry + min_ext and mark >= tp1
+            ) or (
+                (not is_long) and 0 < tp1 <= entry - min_ext and mark <= tp1
+            )
+            if hit:
+                result['action'] = 'PARTIAL_TP'
+                result['tipo_execucao'] = 'FIB_TP1_100'
+                result['partial_tp_done'] = True
+                result['tp1_price'] = tp1
+                result['motivo'] = (
+                    f'TP parcial Fib 100% @ {tp1:.6g} — realiza {FIB_PARTIAL_FRACTION*100:.0f}%, '
+                    f'resto corre até Fib 161.8% / reversão 5m'
+                )
+                return result
+        except Exception:
+            pass
 
     df_struct = df_slow if df_slow is not None and len(df_slow) >= 10 else df_fast
     early = detect_early_reversal(df_struct, side)
@@ -354,16 +386,29 @@ def decide_trend_action(
         )
         return result
 
-    # ── 3) Trailing + piso: arma em +100% ROI e deixa correr ───────────
+    # ── 3) Trailing Turtle (LL20 long / HH10 short) + piso +80% — deixa o lucro fluir
     if roi >= TRAIL_ROI_PCT or trailing_armed:
-        sl = compute_trailing_sl(
-            side=side, peak=new_peak, mark=mark, df_fast=df_fast, df_slow=df_slow,
-        )
         lock_sl = compute_lock_sl_price(entry, side, LOCK_ROI_PCT)
-        if is_long and lock_sl > 0:
-            sl = max(sl, lock_sl)
-        elif (not is_long) and lock_sl > 0:
-            sl = min(sl, lock_sl) if sl > 0 else lock_sl
+        turtle_sl = 0.0
+        turtle_rule = ''
+        try:
+            from src.engine.turtle_donchian import turtle_exit_stop
+            td = turtle_exit_stop(df_struct if df_struct is not None else df_slow, side)
+            turtle_sl = _f(td.get('sl_price'))
+            turtle_rule = td.get('rule') or 'Turtle'
+        except Exception:
+            turtle_sl = 0.0
+
+        if is_long:
+            parts = [x for x in (lock_sl, turtle_sl) if x > 0]
+            sl = max(parts) if parts else compute_trailing_sl(
+                side=side, peak=new_peak, mark=mark, df_fast=df_fast, df_slow=df_slow,
+            )
+        else:
+            parts = [x for x in (lock_sl, turtle_sl) if x > 0]
+            sl = min(parts) if parts else compute_trailing_sl(
+                side=side, peak=new_peak, mark=mark, df_fast=df_fast, df_slow=df_slow,
+            )
 
         hit = (is_long and mark <= sl) or ((not is_long) and mark >= sl)
         if hit and trailing_armed:
@@ -381,8 +426,8 @@ def decide_trend_action(
         result['trailing_armed'] = True
         result['breakeven_armed'] = True
         result['motivo'] = (
-            f'Trailing vivo ROI={roi:.0f}% peak={new_peak:.6g} SL={sl:.6g} '
-            f'(dist~{compute_trail_distance_pct(df_fast, df_slow):.2f}% piso +{LOCK_ROI_PCT:.0f}% ROI)'
+            f'Trailing Turtle {turtle_rule or "Donchian"} ROI={roi:.0f}% '
+            f'peak={new_peak:.6g} SL={sl:.6g} (piso +{LOCK_ROI_PCT:.0f}% ROI — sem scalp 2-3%)'
         )
         return result
 
@@ -417,6 +462,7 @@ class TrendStateRegistry:
                     'last_extreme_at': now,
                     'breakeven_armed': False,
                     'trailing_armed': False,
+                    'partial_tp_done': False,
                     'sl': 0.0,
                 }
                 self._states[k] = st
@@ -431,6 +477,7 @@ class TrendStateRegistry:
                 'last_extreme_at': time.time(),
                 'breakeven_armed': False,
                 'trailing_armed': False,
+                'partial_tp_done': False,
                 'sl': 0.0,
             }
             st.update(kwargs)

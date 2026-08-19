@@ -1669,10 +1669,12 @@ class BybitClient:
             pass
         return None
 
-    def set_tp_sl_sniper(self, symbol, side, entry_price, position_qty, leverage=None):
+    def set_tp_sl_sniper(self, symbol, side, entry_price, position_qty, leverage=None,
+                         tp_price=None, sl_price=None, signals=None):
         """
-        TP +100% ROI e SL −50% ROI na posição (Bybit V5 set_trading_stop).
-        takeProfit/stopLoss vão como STRING no tickSize — é o que desenha as linhas no gráfico.
+        TP/SL na posição (Bybit V5 set_trading_stop).
+        Padrão: SL Turtle 2×ATR (teto −50% ROI) e TP Fib 161.8% ou +100% ROI.
+        takeProfit/stopLoss vão como STRING no tickSize — desenha as linhas no gráfico.
         """
         try:
             if not self.authenticated:
@@ -1687,8 +1689,14 @@ class BybitClient:
             lev = self._fetch_open_position_leverage(symbol, side)
             if not lev or lev <= 0:
                 lev = float(leverage or getattr(self, 'default_leverage', 20) or 20)
-            from src.risk.position_sizing import calculate_tp_sl_prices
-            tp_price, sl_price = calculate_tp_sl_prices(entry_price, side, lev)
+            from src.risk.position_sizing import calculate_dynamic_tp_sl, calculate_tp_sl_prices
+            if tp_price is None or sl_price is None:
+                dyn = calculate_dynamic_tp_sl(entry_price, side, lev, signals or {})
+                tp_price = tp_price if tp_price is not None else dyn.get('tp_price')
+                sl_price = sl_price if sl_price is not None else dyn.get('sl_price')
+                print(f"   📐 [TP/SL DINÂMICO] {dyn.get('rule')}", flush=True)
+            if not tp_price or not sl_price:
+                tp_price, sl_price = calculate_tp_sl_prices(entry_price, side, lev)
             tp_str, sl_str = self._format_tpsl_prices(symbol, side, entry_price, tp_price, sl_price)
             if not tp_str:
                 print(
@@ -1704,7 +1712,7 @@ class BybitClient:
                 flush=True,
             )
             print(
-                f"   ✅ takeProfit={tp_str} (+100% margem) | stopLoss={sl_str} (−50% margem)",
+                f"   ✅ takeProfit={tp_str} (Fib 161.8 / +100% ROI) | stopLoss={sl_str} (2×ATR / −50% ROI)",
                 flush=True,
             )
 
@@ -1852,6 +1860,58 @@ class BybitClient:
             return False
         except Exception as e:
             print(f"⚠️ [TRAILING TREND] erro: {e}", flush=True)
+            return False
+
+    def close_partial_position(self, symbol, position_side, fraction: float = 0.5):
+        """Fecha uma fração da posição (TP parcial Fib 100%)."""
+        try:
+            if not self.authenticated or not self.pybit_session:
+                return False
+            frac = min(max(float(fraction or 0.5), 0.1), 0.9)
+            requested_side = str(position_side or '').strip().lower()
+            want_long = requested_side in ('buy', 'long', 'comprar')
+            v5_symbol = self._normalize_v5_symbol(symbol)
+            rsp = self.pybit_session.get_positions(
+                category='linear', symbol=v5_symbol, settleCoin='USDT',
+            )
+            ok, err = self._handle_v5_ret_code(rsp, 'get_positions')
+            if not ok:
+                print(f"⚠️ [PARTIAL TP] get_positions: {err}", flush=True)
+                return False
+            for pos in (rsp.get('result') or {}).get('list', []):
+                size = float(pos.get('size') or 0)
+                if size <= 0:
+                    continue
+                pos_side = str(pos.get('side') or '').lower()
+                is_long = pos_side in ('buy', 'long')
+                if want_long != is_long:
+                    continue
+                qty_raw = size * frac
+                qty = self._normalize_order_qty(v5_symbol, qty_raw)
+                if float(qty or 0) <= 0:
+                    return False
+                pos_idx = int(pos.get('positionIdx') or (1 if is_long else 2))
+                close_side = 'Sell' if is_long else 'Buy'
+                order = self.pybit_session.place_order(
+                    category='linear',
+                    symbol=v5_symbol,
+                    side=close_side,
+                    orderType='Market',
+                    qty=str(qty),
+                    reduceOnly=True,
+                    positionIdx=pos_idx,
+                )
+                ok_o, err_o = self._handle_v5_ret_code(order, 'place_order')
+                if ok_o:
+                    print(
+                        f"✅ [PARTIAL TP] {v5_symbol} fechou {frac*100:.0f}% qty={qty}",
+                        flush=True,
+                    )
+                    return True
+                print(f"⚠️ [PARTIAL TP] falhou: {err_o}", flush=True)
+            return False
+        except Exception as err:
+            print(f"⚠️ [PARTIAL TP] {err}", flush=True)
             return False
 
     def close_position_with_sl(self, symbol, position_side):
