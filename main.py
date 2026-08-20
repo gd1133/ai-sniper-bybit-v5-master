@@ -773,6 +773,15 @@ def run_sniper(symbol: str = SYMBOL):
                 continue
 
             intel_ctx = get_market_intelligence().evaluate(symbol, df, tech_data, {})
+            if intel_ctx.get('groq_flow_degraded'):
+                flow_src = (intel_ctx.get('groq_flow') or {}).get('source', 'local')
+                print(
+                    f"⚠️ [GROQ FLOW] {symbol}: API degradada → fallback {flow_src} "
+                    f"(execução continua se estrutura OK)"
+                )
+                intel_ctx = dict(intel_ctx)
+                intel_ctx['allow_entry'] = True
+                intel_ctx['autonomous_mode'] = True
             tech_data = dict(tech_data)
             tech_data['sentiment_score'] = intel_ctx.get('sentiment_score')
             tech_data['global_trend'] = intel_ctx.get('global_trend')
@@ -784,6 +793,7 @@ def run_sniper(symbol: str = SYMBOL):
                     intel_ctx.get('ai_assistants_unavailable')
                     or intel_ctx.get('soft_ai_veto_only')
                     or intel_ctx.get('cloud_news_degraded')
+                    or intel_ctx.get('groq_flow_degraded')
                     or intel_ctx.get('autonomous_mode')
                 )):
                     print(f"🔒 [IA INSTITUCIONAL] Entrada bloqueada: {' | '.join(hard)}")
@@ -793,6 +803,7 @@ def run_sniper(symbol: str = SYMBOL):
                     intel_ctx.get('ai_assistants_unavailable')
                     or intel_ctx.get('autonomous_mode')
                     or intel_ctx.get('cloud_news_degraded')
+                    or intel_ctx.get('groq_flow_degraded')
                     or intel_ctx.get('soft_ai_veto_only')
                 ):
                     # Soft/API/cooldown: Cérebro 3 assume — nunca bypass de lateral

@@ -4,6 +4,9 @@ Subsistema Groq — análise de fluxo ultra-rápido (Order Book + agressões).
 
 Incremental: não substitui whale_detector nem confluence_absoluta.
 Retorna JSON estrito para o Cérebro 3 modular a probabilidade (peso ~20%).
+
+Resiliência: Groq → Gemini (opcional) → order book local → sinais técnicos.
+Falha de IA NUNCA aborta ordem se hard-gates (Portas 1–5) já aprovaram.
 """
 
 from __future__ import annotations
@@ -14,10 +17,9 @@ import re
 import time
 from typing import Any
 
-try:
-    from groq import Groq
-except Exception:
-    Groq = None
+import requests
+
+from src.intelligence.groq_client import groq_chat_completion, log_groq_degraded
 
 _CACHE: dict[str, tuple[float, dict]] = {}
 _CACHE_TTL = 45.0  # fluxo muda rápido
@@ -51,6 +53,7 @@ def _neutral_flow(reason: str = 'fluxo neutro') -> dict[str, Any]:
         'reason': reason,
         'available': False,
         'liquidity_ok': True,
+        'groq_degraded': False,
     }
 
 
@@ -99,6 +102,7 @@ def _local_flow_from_book(order_book: dict | None, signals: dict | None) -> dict
             'forca_agressao': min(100.0, max(0.0, (vol_r - 1.0) * 40)),
             'source': 'local_volume',
             'available': True,
+            'groq_degraded': True,
         }
 
     bids = list(order_book.get('bids') or [])[:15]
@@ -117,10 +121,35 @@ def _local_flow_from_book(order_book: dict | None, signals: dict | None) -> dict
         'source': 'local_order_book',
         'reason': f'imbalance local {imb:+.3f}',
         'available': True,
+        'groq_degraded': True,
     }
 
 
-def _parse_flow_json(text: str) -> dict | None:
+def _technical_flow_from_signals(signals: dict | None) -> dict[str, Any]:
+    """Fallback puro das Portas 1–5 / sinais técnicos quando cloud indisponível."""
+    signals = signals or {}
+    trend = str(signals.get('trend', 'NEUTRO')).upper()
+    vol_r = float(signals.get('volume_ratio', 1) or 1)
+    adx = float(signals.get('adx', 0) or 0)
+    score = 0.0
+    if trend == 'ALTA' and vol_r >= 1.2:
+        score = 0.15 + min(0.35, (vol_r - 1.0) * 0.2)
+    elif trend == 'BAIXA' and vol_r >= 1.2:
+        score = -(0.15 + min(0.35, (vol_r - 1.0) * 0.2))
+    force = min(100.0, max(0.0, vol_r * 25 + adx * 0.5))
+    return {
+        'score_fluxo': round(max(-1.0, min(1.0, score)), 4),
+        'forca_agressao': round(force, 2),
+        'zona_defesa_institucional': bool(signals.get('sinal_institucional')),
+        'alerta_liquidacao': bool(signals.get('grab_reversal')),
+        'source': 'technical_gates',
+        'reason': f'fallback técnico trend={trend} vol×={vol_r:.2f} ADX={adx:.0f}',
+        'available': True,
+        'groq_degraded': True,
+    }
+
+
+def _parse_flow_json(text: str, source: str = 'groq') -> dict | None:
     text = (text or '').strip()
     text = re.sub(r'^```json\s*|\s*```$', '', text, flags=re.IGNORECASE).strip()
     try:
@@ -143,12 +172,70 @@ def _parse_flow_json(text: str) -> dict | None:
             'forca_agressao': force,
             'zona_defesa_institucional': bool(data.get('zona_defesa_institucional', False)),
             'alerta_liquidacao': bool(data.get('alerta_liquidacao', False)),
-            'source': 'groq',
-            'reason': 'Groq order-flow JSON',
+            'source': source,
+            'reason': f'{source} order-flow JSON',
             'available': True,
+            'groq_degraded': source != 'groq',
         }
     except (TypeError, ValueError):
         return None
+
+
+def _gemini_flow_fallback(symbol: str, user_payload: str) -> dict | None:
+    """Segundo tier cloud — Gemini analisa order book quando Groq falha."""
+    if not _env_bool('ENABLE_GEMINI_FLOW_FALLBACK', True):
+        return None
+    gemini_key = os.getenv('GEMINI_API_KEY', '').strip()
+    if not gemini_key:
+        return None
+    try:
+        model = os.getenv('GEMINI_FLOW_MODEL', os.getenv('GEMINI_MACRO_MODEL', 'gemini-2.0-flash'))
+        url = (
+            'https://generativelanguage.googleapis.com/v1beta/models/'
+            f'{model}:generateContent?key={gemini_key}'
+        )
+        prompt = f'{GROQ_FLOW_SYSTEM}\n\nSímbolo: {symbol}\n{user_payload}'
+        rsp = requests.post(
+            url,
+            json={
+                'contents': [{'parts': [{'text': prompt}]}],
+                'generationConfig': {'temperature': 0.1, 'maxOutputTokens': 220},
+            },
+            timeout=12,
+        )
+        if rsp.status_code != 200:
+            return None
+        parts = (rsp.json().get('candidates') or [{}])[0].get('content', {}).get('parts') or []
+        text = ' '.join(str(p.get('text', '')) for p in parts).strip()
+        parsed = _parse_flow_json(text, source='gemini_flow')
+        if parsed:
+            parsed['groq_degraded'] = True
+            parsed['reason'] = f'Gemini fallback (Groq indisponível) — {parsed.get("reason", "")}'
+        return parsed
+    except Exception as exc:
+        print(f'⚠️ [GROQ FLOW] Gemini fallback indisponível: {exc}', flush=True)
+        return None
+
+
+def _call_groq_flow(symbol: str, user_payload: str) -> dict | None:
+    result = groq_chat_completion(
+        messages=[
+            {'role': 'system', 'content': GROQ_FLOW_SYSTEM},
+            {'role': 'user', 'content': user_payload},
+        ],
+        purpose='flow',
+        temperature=0.1,
+        max_tokens=220,
+    )
+    if result.get('ok'):
+        parsed = _parse_flow_json(result.get('content') or '', source='groq')
+        if parsed:
+            parsed['groq_model'] = result.get('model')
+            parsed['groq_degraded'] = False
+            return parsed
+        return None
+    log_groq_degraded('GROQ FLOW', result, symbol=symbol)
+    return None
 
 
 def analyze_order_book_flow(
@@ -157,26 +244,44 @@ def analyze_order_book_flow(
     signals: dict | None = None,
     aggressions_summary: str = '',
     df=None,
+    hard_gates_approved: bool = False,
 ) -> dict[str, Any]:
     """
-    Analisa order book via Groq (JSON estrito) com fallback local.
+    Analisa order book via Groq (JSON estrito) com fallback Gemini → local → técnico.
     Anexa BSL/SSL, sweep e FVG quando há OHLCV.
     Desligável: ENABLE_GROQ_FLOW_AI=false
+
+    hard_gates_approved: quando True, falha de IA nunca retorna available=False.
     """
     def _finish(payload: dict) -> dict:
-        return enrich_flow_with_liquidity(payload, df=df, signals=signals)
+        out = enrich_flow_with_liquidity(payload, df=df, signals=signals)
+        if hard_gates_approved and not out.get('available', True):
+            tech = _technical_flow_from_signals(signals)
+            out.update(tech)
+            out['reason'] = f"hard-gates OK — {out.get('reason', tech.get('reason', ''))}"
+        return out
 
     if not _env_bool('ENABLE_GROQ_FLOW_AI', True):
-        return _finish(_local_flow_from_book(order_book, signals))
+        local = _local_flow_from_book(order_book, signals)
+        local['groq_degraded'] = True
+        local['reason'] = 'ENABLE_GROQ_FLOW_AI=false — fluxo local'
+        return _finish(local)
 
     cache_key = f"{symbol}:{bool(order_book)}"
     now = time.time()
     if cache_key in _CACHE and (now - _CACHE[cache_key][0]) < _CACHE_TTL:
-        return _finish(_CACHE[cache_key][1])
+        cached = dict(_CACHE[cache_key][1])
+        cached['from_cache'] = True
+        return _finish(cached)
 
     local = _local_flow_from_book(order_book, signals)
     groq_key = os.getenv('GROQ_API_KEY', '').strip()
-    if not groq_key or Groq is None:
+    if not groq_key:
+        print(
+            f'⚠️ [GROQ FLOW] {symbol}: GROQ_API_KEY ausente → fallback local '
+            f'(execução continua se hard-gates OK)',
+            flush=True,
+        )
         _CACHE[cache_key] = (now, local)
         return _finish(local)
 
@@ -190,31 +295,42 @@ def analyze_order_book_flow(
         f'{book_txt}\n'
         f'Agressões recentes: {aggressions_summary or "n/d"}'
     )
-    try:
-        client = Groq(api_key=groq_key)
-        rsp = client.chat.completions.create(
-            model=os.getenv('GROQ_FLOW_MODEL', 'llama-3.3-70b-versatile'),
-            messages=[
-                {'role': 'system', 'content': GROQ_FLOW_SYSTEM},
-                {'role': 'user', 'content': user_payload},
-            ],
-            temperature=0.1,
-            max_tokens=220,
-        )
-        parsed = _parse_flow_json((rsp.choices[0].message.content or ''))
-        if parsed:
-            # Mistura leve com local para estabilidade
-            parsed['score_fluxo'] = round(
-                0.75 * float(parsed['score_fluxo']) + 0.25 * float(local.get('score_fluxo', 0)),
-                4,
-            )
-            _CACHE[cache_key] = (now, parsed)
-            return _finish(parsed)
-    except Exception as exc:
-        print(f'⚠️ [GROQ FLOW] indisponível: {exc}', flush=True)
 
-    _CACHE[cache_key] = (now, local)
-    return _finish(local)
+    parsed = _call_groq_flow(symbol, user_payload)
+    if parsed:
+        parsed['score_fluxo'] = round(
+            0.75 * float(parsed['score_fluxo']) + 0.25 * float(local.get('score_fluxo', 0)),
+            4,
+        )
+        _CACHE[cache_key] = (now, parsed)
+        return _finish(parsed)
+
+    # Groq falhou — tenta Gemini
+    gemini_parsed = _gemini_flow_fallback(symbol, user_payload)
+    if gemini_parsed:
+        gemini_parsed['score_fluxo'] = round(
+            0.70 * float(gemini_parsed['score_fluxo'])
+            + 0.30 * float(local.get('score_fluxo', 0)),
+            4,
+        )
+        print(
+            f'⚠️ [GROQ FLOW] {symbol}: Groq indisponível — usando Gemini fallback '
+            f'(execução continua se hard-gates OK)',
+            flush=True,
+        )
+        _CACHE[cache_key] = (now, gemini_parsed)
+        return _finish(gemini_parsed)
+
+    # Fallback final: order book local ou sinais técnicos das portas
+    fallback = local if order_book else _technical_flow_from_signals(signals)
+    print(
+        f'⚠️ [GROQ FLOW] {symbol}: cloud indisponível → '
+        f"fallback {fallback.get('source')} score={fallback.get('score_fluxo'):+.2f} "
+        f'(execução continua se hard-gates OK)',
+        flush=True,
+    )
+    _CACHE[cache_key] = (now, fallback)
+    return _finish(fallback)
 
 
 def identify_liquidity_zones(df):
@@ -258,11 +374,8 @@ def enrich_flow_with_liquidity(flow: dict | None, df=None, signals: dict | None 
         })
         if liq.get('sweep_reason'):
             out['reason'] = liq['sweep_reason']
-        if liq.get('alerta_liquidacao') is not None:
-            pass
         if liq.get('sweep_bsl') or liq.get('sweep_ssl'):
             out['alerta_liquidacao'] = True
     except Exception as err:
         out['liquidity_log'] = f'liquidez indisponível: {err}'
     return out
-

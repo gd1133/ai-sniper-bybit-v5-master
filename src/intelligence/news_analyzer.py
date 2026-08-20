@@ -118,7 +118,6 @@ def _ai_analyze_with_groq(symbol: str, tech_summary: str, groq_key: str) -> dict
             f'Groq em cooldown — sentimento NEUTRO para {symbol} (assistente degradado)'
         )
     try:
-        client = Groq(api_key=groq_key)
         prompt = f"""Você é analista institucional de criptomoedas. Avalie {symbol} para trading de futuros.
 
 Dados técnicos e de fluxo:
@@ -133,13 +132,17 @@ Responda APENAS em JSON válido:
   "block_trade": false,
   "reason": "resumo em português de 1-2 frases"
 }}"""
-        rsp = client.chat.completions.create(
-            model='llama-3.3-70b-versatile',
+        from src.intelligence.groq_client import groq_chat_completion, log_groq_degraded
+        result = groq_chat_completion(
             messages=[{'role': 'user', 'content': prompt}],
+            purpose='news',
             temperature=0.2,
             max_tokens=300,
         )
-        text = (rsp.choices[0].message.content or '').strip()
+        if not result.get('ok'):
+            log_groq_degraded('NEWS AI', result, symbol=symbol)
+            raise RuntimeError(result.get('error') or 'Groq news indisponível')
+        text = (result.get('content') or '').strip()
         text = re.sub(r'^```json\s*|\s*```$', '', text, flags=re.IGNORECASE).strip()
         _GROQ_FAIL_STREAK = 0
         return json.loads(text)

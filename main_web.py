@@ -3500,6 +3500,16 @@ def sniper_worker_loop():
                         order_book = None
 
                     intel_ctx = market_intel.evaluate(sym, df, signals, t, order_book=order_book)
+                    if intel_ctx.get('groq_flow_degraded') and hard_gate.get('allowed'):
+                        flow_src = (intel_ctx.get('groq_flow') or {}).get('source', 'local')
+                        print(
+                            f"   ⚠️ [GROQ FLOW] {clean_sym}: API degradada → fallback {flow_src} "
+                            f"(portas 1–5 OK — execução continua)",
+                            flush=True,
+                        )
+                        intel_ctx = dict(intel_ctx)
+                        intel_ctx['allow_entry'] = True
+                        intel_ctx['autonomous_mode'] = True
                     # Injeta notícias/heat/fluxo nos sinais para o Cérebro 3
                     signals = dict(signals)
                     signals['sentiment_score'] = intel_ctx.get('sentiment_score')
@@ -3515,7 +3525,7 @@ def sniper_worker_loop():
                         soft = list(intel_ctx.get('soft_veto_reasons') or [])
                         # Veto duro (lateral / vela contrária) NUNCA é bypass — só soft/news/API
                         lateral_hard = any('LATERAL' in str(h).upper() for h in hard) or bool(signals.get('is_lateral'))
-                        if lateral_hard or (hard and not intel_ctx.get('soft_ai_veto_only') and not intel_ctx.get('cloud_news_degraded') and not intel_ctx.get('autonomous_mode')):
+                        if lateral_hard or (hard and not intel_ctx.get('soft_ai_veto_only') and not intel_ctx.get('cloud_news_degraded') and not intel_ctx.get('autonomous_mode') and not intel_ctx.get('groq_flow_degraded')):
                             print(
                                 f"   🚫 [IA] {clean_sym} bloqueado (veto duro): "
                                 f"{' | '.join(hard or intel_ctx.get('veto_reasons', []))}",
@@ -3526,6 +3536,7 @@ def sniper_worker_loop():
                             intel_ctx.get('soft_ai_veto_only')
                             or soft
                             or intel_ctx.get('cloud_news_degraded')
+                            or intel_ctx.get('groq_flow_degraded')
                             or intel_ctx.get('autonomous_mode')
                         ):
                             # Soft news / cloud degradado: Cérebro 3 assume — sem 🚫
