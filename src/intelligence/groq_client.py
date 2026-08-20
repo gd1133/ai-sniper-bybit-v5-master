@@ -16,12 +16,34 @@ try:
 except Exception:
     Groq = None
 
-DEFAULT_GROQ_MODEL = 'llama-3.1-70b-versatile'
+# Groq desligou llama-3.3-70b-versatile e llama-3.1-8b-instant em 16/08/2026.
+# Fontes: https://console.groq.com/docs/deprecations e /docs/models
+DEFAULT_GROQ_MODEL = 'openai/gpt-oss-20b'
 DEFAULT_GROQ_FALLBACK_CHAIN = (
-    'llama-3.1-70b-versatile',
-    'llama-3.1-8b-instant',
-    'llama3-70b-8192',
+    'openai/gpt-oss-20b',
+    'qwen/qwen3.6-27b',
+    'openai/gpt-oss-120b',
 )
+_DEPRECATED_GROQ_MODELS = {
+    'llama-3.3-70b-versatile': DEFAULT_GROQ_MODEL,
+    'llama-3.1-70b-versatile': DEFAULT_GROQ_MODEL,
+    'llama-3.1-8b-instant': DEFAULT_GROQ_MODEL,
+    'llama-3.1-70b-specdec': DEFAULT_GROQ_MODEL,
+    'llama3-70b-8192': DEFAULT_GROQ_MODEL,
+    'llama3-8b-8192': DEFAULT_GROQ_MODEL,
+}
+
+
+def _remap_groq_model(model: str) -> str:
+    key = (model or '').strip()
+    replacement = _DEPRECATED_GROQ_MODELS.get(key)
+    if replacement:
+        print(
+            f'⚠️ [GROQ] modelo descontinuado `{key}` → `{replacement}`',
+            flush=True,
+        )
+        return replacement
+    return key
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -42,7 +64,7 @@ def get_groq_model_chain(purpose: str = 'flow') -> list[str]:
         'tribunal': 'GROQ_TRIBUNAL_MODEL',
     }
     primary_env = env_map.get(purpose, 'GROQ_FLOW_MODEL')
-    primary = (
+    primary = _remap_groq_model(
         os.getenv(primary_env, '').strip()
         or os.getenv('GROQ_MODEL', '').strip()
         or DEFAULT_GROQ_MODEL
@@ -51,7 +73,7 @@ def get_groq_model_chain(purpose: str = 'flow') -> list[str]:
     extra = os.getenv('GROQ_FALLBACK_MODELS', '').strip()
     if extra:
         for m in extra.split(','):
-            m = m.strip()
+            m = _remap_groq_model(m.strip())
             if m and m not in chain:
                 chain.append(m)
     for fb in DEFAULT_GROQ_FALLBACK_CHAIN:
@@ -121,13 +143,27 @@ def groq_chat_completion(
 
     for model in models:
         try:
-            rsp = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-            content = (rsp.choices[0].message.content or '').strip()
+            create_kwargs = {
+                'model': model,
+                'messages': messages,
+                'temperature': temperature,
+                'max_tokens': max_tokens,
+            }
+            try:
+                rsp = client.chat.completions.create(
+                    **create_kwargs,
+                    include_reasoning=False,
+                )
+            except TypeError:
+                rsp = client.chat.completions.create(**create_kwargs)
+            msg = rsp.choices[0].message
+            content = (getattr(msg, 'content', None) or '').strip()
+            if not content:
+                content = (getattr(msg, 'reasoning', None) or '').strip()
+            if not content:
+                last_type = 'other'
+                last_err = RuntimeError(f'resposta vazia de {model}')
+                continue
             return {
                 'ok': True,
                 'content': content,
@@ -139,6 +175,10 @@ def groq_chat_completion(
         except Exception as exc:
             last_err = exc
             last_type = classify_groq_error(exc)
+            print(
+                f'⚠️ [GROQ] {purpose} falhou em `{model}` ({last_type}): {str(exc)[:180]}',
+                flush=True,
+            )
             # 404 → tenta próximo modelo; 429/connection → para cadeia (cooldown)
             if last_type in ('rate_limit', 'connection'):
                 break

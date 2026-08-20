@@ -15,10 +15,21 @@ def test_groq_model_chain_defaults():
     with patch.dict(os.environ, {}, clear=False):
         os.environ.pop('GROQ_FLOW_MODEL', None)
         os.environ.pop('GROQ_MODEL', None)
+        os.environ.pop('GROQ_FALLBACK_MODELS', None)
         chain = get_groq_model_chain('flow')
         assert chain[0] == DEFAULT_GROQ_MODEL
-        assert 'llama-3.1-70b-versatile' in chain
-        assert 'llama-3.1-8b-instant' in chain
+        assert 'openai/gpt-oss-20b' in chain
+        assert 'qwen/qwen3.6-27b' in chain
+        assert 'llama-3.3-70b-versatile' not in chain
+
+
+def test_deprecated_llama_model_is_remapped():
+    from src.intelligence.groq_client import get_groq_model_chain
+
+    with patch.dict(os.environ, {'GROQ_FLOW_MODEL': 'llama-3.3-70b-versatile'}):
+        chain = get_groq_model_chain('flow')
+        assert chain[0] == 'openai/gpt-oss-20b'
+        assert 'llama-3.3-70b-versatile' not in chain
 
 
 def test_classify_groq_error_model_not_found():
@@ -47,7 +58,7 @@ def test_groq_chat_tries_fallback_on_404():
     with patch.dict(os.environ, {
         'GROQ_API_KEY': 'test-key',
         'GROQ_FLOW_MODEL': 'bad-model',
-        'GROQ_FALLBACK_MODELS': 'llama-3.1-8b-instant',
+        'GROQ_FALLBACK_MODELS': 'qwen/qwen3.6-27b',
     }):
         with patch.object(groq_client, 'Groq', return_value=mock_client):
             result = groq_client.groq_chat_completion(
@@ -56,7 +67,7 @@ def test_groq_chat_tries_fallback_on_404():
             )
     assert result['ok'] is True
     assert 'bad-model' in calls
-    assert 'llama-3.1-8b-instant' in calls
+    assert 'qwen/qwen3.6-27b' in calls
 
 
 def test_order_flow_fallback_when_groq_fails():
