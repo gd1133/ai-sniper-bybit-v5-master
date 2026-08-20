@@ -18,8 +18,12 @@ import io
 import math
 from datetime import datetime, timedelta
 
-if sys.platform == 'win32':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+# Evita quebrar captura do pytest no Windows (I/O on closed file)
+if sys.platform == 'win32' and 'pytest' not in sys.modules:
+    try:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    except Exception:
+        pass
 
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
@@ -381,7 +385,60 @@ ENV_CONFIG = get_environment_config()
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _DIST_DIR = os.path.join(_BASE_DIR, 'dist')
 app = Flask(__name__, static_folder=_DIST_DIR, static_url_path='')
-CORS(app)
+# CORS irrestrito — dashboard e API no mesmo host (Render) ou origem cruzada
+CORS(
+    app,
+    resources={r'/*': {'origins': '*'}},
+    supports_credentials=True,
+    allow_headers='*',
+    methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+    expose_headers='*',
+)
+
+
+@app.after_request
+def _api_no_cache_headers(response):
+    """Evita cache travado no browser/CDN para JSON da API."""
+    try:
+        if request.path.startswith('/api/'):
+            response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+            response.headers['Pragma'] = 'no-cache'
+            response.headers['Expires'] = '0'
+    except Exception:
+        pass
+    return response
+
+
+@app.errorhandler(Exception)
+def _api_global_error_handler(err):
+    """Nunca devolve HTML 500 genérico para rotas /api/* — JSON fallback HTTP 200."""
+    try:
+        from werkzeug.exceptions import HTTPException
+        if isinstance(err, HTTPException):
+            # Mantém 404/405 etc. (exceto se for /api e quisermos JSON)
+            if request.path.startswith('/api/'):
+                return jsonify({
+                    'ok': False,
+                    'status': 'error',
+                    'error': err.description or str(err),
+                    'path': request.path,
+                }), 200
+            return err
+    except Exception:
+        pass
+    try:
+        if request.path.startswith('/api/'):
+            print(f'⚠️ [API] erro global em {request.path}: {err}', flush=True)
+            return jsonify({
+                'ok': False,
+                'status': 'degraded',
+                'error': str(err)[:200],
+                'path': request.path,
+            }), 200
+    except Exception:
+        pass
+    print(f'⚠️ [HTTP] erro não-API: {err}', flush=True)
+    return _emergency_dashboard_html(), 200, {'Content-Type': 'text/html; charset=utf-8'}
 
 if db is not None:
     try:
@@ -629,21 +686,50 @@ def _preload_runtime_modules():
     except Exception as e:
         print(f"⚠️ [BOOT] preload intel/timing adiado: {e}", flush=True)
 
+def _boot_background_workers():
+    """
+    Pré-carga pesada + workers do robô — SEMPRE em thread daemon.
+    Nunca bloqueia o bind do Gunicorn/Uvicorn nem as rotas HTTP.
+    """
+    try:
+        _preload_runtime_modules()
+    except Exception as preload_err:
+        print(f'⚠️ [BOOT] preload parcial: {preload_err}', flush=True)
+    threading.Thread(
+        target=sniper_worker_loop, name='sniper-worker', daemon=True,
+    ).start()
+    threading.Thread(
+        target=_monitor_financial_stop_loss, name='monitor-financial-sl', daemon=True,
+    ).start()
+    threading.Thread(
+        target=_fetch_active_client_balances,
+        kwargs={'force': True},
+        name='balance-refresh',
+        daemon=True,
+    ).start()
+    threading.Thread(
+        target=_monitor_dashboard_positions, name='monitor-positions', daemon=True,
+    ).start()
+    try:
+        _start_trend_position_manager()
+    except Exception as trend_boot_err:
+        print(f'⚠️ [BOOT] TrendPositionManager adiado: {trend_boot_err}', flush=True)
+    print('✅ [BOOT] Workers do robô ativos em threads daemon (HTTP livre)', flush=True)
+
+
 def start_runtime_services():
+    """Marca runtime e dispara boot em background — retorno imediato para o Gunicorn."""
     global RUNTIME_STARTED
     with RUNTIME_START_LOCK:
-        if RUNTIME_STARTED: return False
-        # Pré-carrega módulos pesados antes de iniciar threads (anti import parcial/circular)
-        _preload_runtime_modules()
-        threading.Thread(target=sniper_worker_loop, daemon=True).start()
-        threading.Thread(target=_monitor_financial_stop_loss, daemon=True).start()
-        threading.Thread(target=_fetch_active_client_balances, kwargs={'force': True}, daemon=True).start()
-        threading.Thread(target=_monitor_dashboard_positions, daemon=True).start()
-        try:
-            _start_trend_position_manager()
-        except Exception as trend_boot_err:
-            print(f"⚠️ [BOOT] TrendPositionManager adiado: {trend_boot_err}", flush=True)
+        if RUNTIME_STARTED:
+            return False
         RUNTIME_STARTED = True
+        threading.Thread(
+            target=_boot_background_workers,
+            name='runtime-boot',
+            daemon=True,
+        ).start()
+        print('⚡ [BOOT] start_runtime_services: HTTP liberado; workers em background', flush=True)
         return True
 
 
@@ -4263,7 +4349,7 @@ def _process_client_orders_background(
 # 🎛️ ENDPOINTS DA API REST (FLASK)
 # ==============================================================================
 
-@app.route('/api/investidores', methods=['GET'])
+@app.route('/api/investidores', methods=['GET', 'OPTIONS'])
 def get_investidores():
     """
     Lista investidores com saldo vivo (Bybit/memória), nunca zera o card
@@ -4473,45 +4559,137 @@ def api_tribunal_status():
         }), 200
 
 
-@app.route('/api/status', methods=['GET'])
-def get_status():
+@app.route('/api/health', methods=['GET', 'OPTIONS'])
+def api_health():
+    """Healthcheck leve para Render — nunca chama Bybit/SQLite pesado."""
     try:
-        cached = _status_cache.get()
-        if cached:
-            return jsonify(cached), 200
+        return jsonify({
+            'ok': True,
+            'status': 'alive',
+            'runtime_started': bool(RUNTIME_STARTED),
+            'ts': time.time(),
+        }), 200
+    except Exception as e:
+        return jsonify({'ok': True, 'status': 'degraded', 'error': str(e)[:120]}), 200
 
+
+@app.route('/api/posicoes', methods=['GET', 'OPTIONS'])
+def api_posicoes():
+    """Posições ativas do dashboard (memória + SQLite) — JSON estável para o frontend."""
+    try:
+        trades = list(central_state.get('active_trades') or [])
+        if not trades:
+            try:
+                open_rows = db.get_open_trades(50) if db is not None else []
+                trades = [
+                    {
+                        'id': t.get('id'),
+                        'symbol': t.get('pair') or t.get('symbol'),
+                        'side': t.get('side'),
+                        'entry_price': t.get('entry_price') or t.get('price'),
+                        'status': t.get('status') or 'open',
+                    }
+                    for t in (open_rows or [])
+                    if str(t.get('status') or '').lower() == 'open'
+                ]
+            except Exception:
+                trades = []
+        return jsonify({
+            'posicoes': trades,
+            'active_trades': trades,
+            'count': len(trades),
+            'updated_at': time.strftime('%H:%M:%S'),
+        }), 200
+    except Exception as e:
+        print(f'⚠️ [API] /api/posicoes: {e}', flush=True)
+        return jsonify({'posicoes': [], 'active_trades': [], 'count': 0, 'error': str(e)[:160]}), 200
+
+
+_STATUS_REFRESH_LOCK = threading.Lock()
+_STATUS_REFRESH_IN_PROGRESS = False
+
+
+def _refresh_status_payload_background():
+    """Atualiza cache de /api/status fora do worker HTTP (anti timeout/502)."""
+    global _STATUS_REFRESH_IN_PROGRESS
+    try:
         try:
             _repair_open_trades()
         except Exception as repair_err:
-            print(f"⚠️ [STATUS] Erro ao reparar trades abertos: {repair_err}", flush=True)
-
-        _calcular_pnl_trades()
-
-        # Refresh Bybit em background — nunca bloqueia worker do Gunicorn
+            print(f'⚠️ [STATUS BG] repair: {repair_err}', flush=True)
+        try:
+            _calcular_pnl_trades()
+        except Exception:
+            pass
         if client_balance_cache.is_expired():
-            _refresh_real_balance_state(force=False)
-
+            try:
+                _refresh_real_balance_state(force=False)
+            except Exception:
+                pass
         try:
             _refresh_active_trades_for_status()
         except Exception as atr_err:
-            print(f"⚠️ [STATUS] active trades: {atr_err}", flush=True)
+            print(f'⚠️ [STATUS BG] active trades: {atr_err}', flush=True)
         try:
             _refresh_last_sniper_signal()
         except Exception:
             pass
-
         try:
-            central_state['trades'] = db.get_recent_trades(20)
+            central_state['trades'] = db.get_recent_trades(20) if db is not None else []
         except Exception as trades_err:
-            print(f"⚠️ [STATUS] Erro ao ler trades recentes: {trades_err}", flush=True)
+            print(f'⚠️ [STATUS BG] trades: {trades_err}', flush=True)
             central_state['trades'] = central_state.get('trades') or []
-
         payload = _build_api_status_payload()
         _status_cache.set(payload)
+    except Exception as err:
+        print(f'⚠️ [STATUS BG] falha: {err}', flush=True)
+    finally:
+        with _STATUS_REFRESH_LOCK:
+            _STATUS_REFRESH_IN_PROGRESS = False
+
+
+def _schedule_status_refresh():
+    global _STATUS_REFRESH_IN_PROGRESS
+    with _STATUS_REFRESH_LOCK:
+        if _STATUS_REFRESH_IN_PROGRESS:
+            return
+        _STATUS_REFRESH_IN_PROGRESS = True
+    threading.Thread(
+        target=_refresh_status_payload_background,
+        name='status-refresh',
+        daemon=True,
+    ).start()
+
+
+@app.route('/api/status', methods=['GET', 'OPTIONS'])
+def get_status():
+    """
+    Sempre responde rápido a partir do cache/memória.
+    Refresh pesado (Bybit/PnL) roda em thread — evita 502/timeout no Render.
+    """
+    try:
+        cached = _status_cache.get()
+        if cached:
+            _schedule_status_refresh()
+            return jsonify(cached), 200
+
+        # Cold start: devolve snapshot imediato da memória e agenda refresh
+        payload = _build_api_status_payload()
+        _status_cache.set(payload)
+        _schedule_status_refresh()
         return jsonify(payload), 200
     except Exception as status_err:
-        print(f"⚠️ [STATUS] Erro geral: {status_err}", flush=True)
-        return jsonify(_build_api_status_payload()), 200
+        print(f'⚠️ [STATUS] Erro geral: {status_err}', flush=True)
+        try:
+            return jsonify(_build_api_status_payload()), 200
+        except Exception:
+            return jsonify({
+                'status': 'Backend online (modo degradado)',
+                'balance': 0.0,
+                'active_trades': [],
+                'posicoes': [],
+                'error': str(status_err)[:160],
+            }), 200
 
 @app.route('/api/dashboard/balance', methods=['GET'])
 def update_dashboard_balance():
@@ -5095,17 +5273,28 @@ def serve_frontend(path):
     # Nunca intercepta API (segurança de rota)
     if path.startswith('api/') or path == 'api':
         return jsonify({"status": "erro", "msg": "Rota API não encontrada"}), 404
-    if _frontend_asset_exists(path):
-        return send_from_directory(app.static_folder, path)
-    if _frontend_is_built():
-        return send_from_directory(app.static_folder, 'index.html')
-    # Evita tela preta: painel de emergência com status da API
-    return _emergency_dashboard_html(), 200, {'Content-Type': 'text/html; charset=utf-8'}
+    try:
+        if _frontend_asset_exists(path):
+            resp = send_from_directory(app.static_folder, path)
+            # Assets com hash do Vite podem cachear; index não
+            if path.startswith('assets/'):
+                resp.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
+            return resp
+        if _frontend_is_built():
+            resp = send_from_directory(app.static_folder, 'index.html')
+            resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+            return resp
+        # Evita tela preta: painel de emergência com status da API
+        return _emergency_dashboard_html(), 200, {'Content-Type': 'text/html; charset=utf-8'}
+    except Exception as serve_err:
+        print(f'⚠️ [FRONTEND] serve falhou: {serve_err}', flush=True)
+        return _emergency_dashboard_html(), 200, {'Content-Type': 'text/html; charset=utf-8'}
 
 print("⚡ [MAESTRO CORE] Forçando inicialização dos serviços em background...", flush=True)
 start_runtime_services()
 
 if __name__ == "__main__":
-    render_port = int(os.getenv("PORT", "5000"))
+    render_port = int(os.environ.get("PORT", os.getenv("PORT", "10000")))
     start_runtime_services()
-    app.run(host='0.0.0.0', port=render_port, debug=False, use_reloader=False)
+    print(f"🌐 [HTTP] bind 0.0.0.0:{render_port}", flush=True)
+    app.run(host='0.0.0.0', port=render_port, debug=False, use_reloader=False, threaded=True)
