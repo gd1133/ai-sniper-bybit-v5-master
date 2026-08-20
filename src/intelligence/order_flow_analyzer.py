@@ -248,6 +248,7 @@ def analyze_order_book_flow(
 ) -> dict[str, Any]:
     """
     Analisa order book via Groq (JSON estrito) com fallback Gemini → local → técnico.
+    Anexa BSL/SSL, sweep e FVG quando há OHLCV.
     Desligável: ENABLE_GROQ_FLOW_AI=false
 
     hard_gates_approved: quando True, falha de IA nunca retorna available=False.
