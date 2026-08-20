@@ -53,8 +53,6 @@ class MarketIntelligence:
         # Notícias legado (assistente) — desligado por padrão via ENABLE_NEWS_AI
         news = analyze_news_sentiment(symbol, signals, regime, whale)
 
-        # Incremental: Groq fluxo (order book) + Gemini macro (manchetes)
-        flow = analyze_order_book_flow(symbol, order_book=order_book, signals=signals, df=df)
         headlines = list(news.get('headlines') or [])
         gemini_macro = analyze_gemini_macro_news(
             symbol,
@@ -81,12 +79,30 @@ class MarketIntelligence:
         hard_veto_reasons = []
         soft_veto_reasons = []
         ai_assistants_unavailable = False
+        groq_flow_degraded = False
         cloud_news_degraded = bool(
             news.get('cloud_ai_degraded')
             or news.get('ai_unavailable')
             or str(news.get('ai_status', '')).lower() in ('degradado', 'disabled')
             or str(news.get('source', '')).lower() == 'disabled'
         )
+
+        # Incremental: Groq fluxo (order book) + Gemini macro (manchetes)
+        hard_gates_ok = bool(
+            signals.get('sinal_institucional')
+            and str(signals.get('trend', 'NEUTRO')).upper() in ('ALTA', 'BAIXA')
+            and not signals.get('is_lateral')
+        )
+        flow = analyze_order_book_flow(
+            symbol,
+            order_book=order_book,
+            signals=signals,
+            df=df,
+            hard_gates_approved=hard_gates_ok,
+        )
+        groq_flow_degraded = bool(flow.get('groq_degraded'))
+        if groq_flow_degraded:
+            ai_assistants_unavailable = True
 
         if adx_blocked:
             hard_veto_reasons.append(
@@ -175,7 +191,12 @@ class MarketIntelligence:
 
         # Assertivo: libera com score baixo; Cérebro 3 soberano
         allow_entry = len(hard_veto_reasons) == 0 and intelligence_score >= 32
-        autonomous_mode = True
+        # Groq degradado NÃO bloqueia — assistente opcional; técnica manda
+        if groq_flow_degraded and len(hard_veto_reasons) == 0:
+            allow_entry = True
+            autonomous_mode = True
+        else:
+            autonomous_mode = True
 
         # Sentimento derivado do Gemini macro (não zera o contrato legado)
         sent_macro = float(gemini_macro.get('score_sentimento_noticias', 0) or 0)
@@ -196,8 +217,9 @@ class MarketIntelligence:
             'soft_veto_reasons': soft_veto_reasons,
             'soft_ai_veto_only': soft_ai_veto_only,
             'ai_assistants_unavailable': ai_assistants_unavailable,
+            'groq_flow_degraded': groq_flow_degraded,
             'cloud_news_degraded': cloud_news_degraded,
-            'autonomous_mode': autonomous_mode or ai_assistants_unavailable,
+            'autonomous_mode': autonomous_mode or ai_assistants_unavailable or groq_flow_degraded,
             'market_regime': regime.get('market_regime'),
             'regime_label': regime.get('regime_label'),
             'is_lateral': regime.get('is_lateral'),

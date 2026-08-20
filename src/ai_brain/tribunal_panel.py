@@ -158,18 +158,21 @@ def _cloud_groq_comment(symbol: str, side: str, tech_summary: str) -> str | None
     if not key or Groq is None or not _env_bool('ENABLE_AI_TRIBUNAL_CLOUD', True):
         return None
     try:
-        client = Groq(api_key=key)
         prompt = (
             f'Você é o analista Groq tático do Motor Sniper. Em 2 frases curtas em português, '
             f'debata a entrada {side} em {symbol} com foco em timing/volume/risco.\n{tech_summary}'
         )
-        rsp = client.chat.completions.create(
-            model='llama-3.3-70b-versatile',
+        from src.intelligence.groq_client import groq_chat_completion, log_groq_degraded
+        result = groq_chat_completion(
             messages=[{'role': 'user', 'content': prompt}],
+            purpose='tribunal',
             temperature=0.3,
             max_tokens=180,
         )
-        text = (rsp.choices[0].message.content or '').strip()
+        if not result.get('ok'):
+            log_groq_degraded('TRIBUNAL', result, symbol=symbol)
+            return None
+        text = (result.get('content') or '').strip()
         return text[:320] or None
     except Exception as exc:
         print(f'⚠️ [TRIBUNAL] Groq indisponível: {exc}', flush=True)
