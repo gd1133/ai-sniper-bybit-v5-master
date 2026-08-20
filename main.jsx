@@ -20,13 +20,19 @@ import {
 } from 'lucide-react';
 
 const getApiBase = () => {
+  // URLs relativas no mesmo host (Render) — evita CORS/mixed-content e timeout
   const configuredBase = import.meta.env.VITE_API_BASE?.trim();
   if (configuredBase) return configuredBase.replace(/\/$/, '');
-  if (typeof window !== 'undefined') return window.location.origin;
-  return 'http://localhost:5000';
+  // Mesmo origin → path relativo (fetch('/api/status'))
+  return '';
 };
 
 const API_BASE = getApiBase();
+
+const apiUrl = (path) => {
+  const p = path.startsWith('/') ? path : `/${path}`;
+  return `${API_BASE}${p}`;
+};
 
 const AGENT_THEME = {
   gemini: { accent: 'text-sky-300', border: 'border-sky-500/30', bg: 'bg-sky-500/10', chip: 'GEMINI' },
@@ -371,11 +377,15 @@ const App = () => {
       }
     };
 
-    const fetchJson = async (path, timeoutMs = 12000) => {
+    const fetchJson = async (path, timeoutMs = 10000) => {
       const ctrl = new AbortController();
       const timeoutId = setTimeout(() => ctrl.abort('timeout'), timeoutMs);
       try {
-        const res = await fetch(`${API_BASE}${path}`, { signal: ctrl.signal });
+        const res = await fetch(apiUrl(path), {
+          signal: ctrl.signal,
+          cache: 'no-store',
+          headers: { Accept: 'application/json' },
+        });
         if (!res.ok) {
           return { ok: false, status: res.status, json: null };
         }
@@ -471,12 +481,21 @@ const App = () => {
     fetchStatus();
     fetchInvestidores();
     const iv = setInterval(fetchStatus, 3000);
-    // Polling investidores 4s — atualiza saldo sem resetar card para zero
     const iv2 = setInterval(fetchInvestidores, 4000);
+    // Reconexão agressiva se o backend voltar após 502/timeout
+    const ivHealth = setInterval(async () => {
+      try {
+        const r = await fetchJson('/api/health', 5000);
+        if (r.ok && mounted) {
+          fetchStatus();
+        }
+      } catch (_) { /* silencioso */ }
+    }, 15000);
     return () => {
       mounted = false;
       clearInterval(iv);
       clearInterval(iv2);
+      clearInterval(ivHealth);
       try { delete window.__reloadInvestidores; } catch (_) {}
     };
   }, []);
@@ -490,7 +509,7 @@ const App = () => {
   const openEditInvestor = async (id) => {
     try {
       console.log(`🔵 [FRONTEND] Carregando dados do cliente ID: ${id}`);
-      const res = await fetch(`${API_BASE}/api/cliente/${id}`);
+      const res = await fetch(apiUrl(`/api/cliente/${id}`));
       if (!res.ok) {
         console.error(`❌ [FRONTEND] Erro ao buscar cliente ${id}: ${res.status}`);
         alert(`Erro ao carregar dados do investidor (status ${res.status})`);
@@ -530,7 +549,7 @@ const App = () => {
       return;
     }
     if (!confirm('Confirmar remoção do investidor? Esta ação é irreversível.')) return;
-    const url = `${API_BASE}/api/cliente/${clientId}`;
+    const url = apiUrl(`/api/cliente/${clientId}`);
     try {
       console.log('🗑️ [FRONTEND] Enviando DELETE', url);
       const res = await fetch(url, {
@@ -551,7 +570,7 @@ const App = () => {
           if (typeof window.__reloadInvestidores === 'function') {
             await window.__reloadInvestidores();
           } else {
-            const invRes = await fetch(`${API_BASE}/api/investidores`, { cache: 'no-store' });
+            const invRes = await fetch(apiUrl('/api/investidores'), { cache: 'no-store' });
             if (invRes.ok) {
               const list = await invRes.json();
               setInvestidores((list || []).map(normalizeInvestorRecord));
@@ -575,7 +594,7 @@ const App = () => {
     const current = String(inv.balance_source || 'broker_real_balance');
     const next = current === 'training_fake_balance' ? 'broker_real_balance' : 'training_fake_balance';
     try {
-      const res = await fetch(`${API_BASE}/api/cliente/${inv.id}/balance-source`, {
+      const res = await fetch(apiUrl(`/api/cliente/${inv.id}/balance-source`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ balance_source: next }),
@@ -594,7 +613,7 @@ const App = () => {
 
   const refreshStatusSnapshot = async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/status`);
+      const res = await fetch(apiUrl('/api/status'));
       if (!res.ok) return;
       const json = await res.json();
       setData(prev => ({
@@ -617,7 +636,7 @@ const App = () => {
     if (modeUpdating || normalizeOperationMode(mode) === currentOperationMode) return;
     try {
       setModeUpdating(true);
-      const res = await fetch(`${API_BASE}/api/mode/toggle`, {
+      const res = await fetch(apiUrl('/api/mode/toggle'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mode }),
@@ -640,7 +659,7 @@ const App = () => {
     if (riskModeUpdating || newMode === data.risk_mode) return;
     try {
       setRiskModeUpdating(true);
-      const res = await fetch(`${API_BASE}/api/config/risk-mode`, {
+      const res = await fetch(apiUrl('/api/config/risk-mode'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mode: newMode }),
@@ -672,7 +691,7 @@ const App = () => {
 
     try {
       setManualClosingSymbol(String(trade.symbol || symbol).toUpperCase());
-      const res = await fetch(`${API_BASE}/api/trade/manual-close`, {
+      const res = await fetch(apiUrl('/api/trade/manual-close'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ symbol, ...(side ? { side } : {}) }),
@@ -705,7 +724,7 @@ const App = () => {
     setManualEntryAnalysis(null);
 
     try {
-      const res = await fetch(`${API_BASE}/api/trade/manual-entry`, {
+      const res = await fetch(`/api/trade/manual-entry`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -745,7 +764,7 @@ const App = () => {
     setManualEntryLoading(true);
 
     try {
-      const res = await fetch(`${API_BASE}/api/trade/manual-entry`, {
+      const res = await fetch(`/api/trade/manual-entry`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1603,7 +1622,7 @@ const App = () => {
                   // Se id definido, atualiza; caso contrário cria novo
                   if (addFormFields.id) {
                     console.log('🔵 [FRONTEND] Atualizando cliente existente ID:', addFormFields.id);
-                    const res = await fetch(`${API_BASE}/api/cliente/${addFormFields.id}`, { ...fetchOpts, method: 'PUT' });
+                    const res = await fetch(`/api/cliente/${addFormFields.id}`, { ...fetchOpts, method: 'PUT' });
                     console.log('🔵 [FRONTEND] Resposta do servidor (PUT):', res.status, res.statusText);
                      const json = await res.json();
                      console.log('🔵 [FRONTEND] JSON recebido (PUT):', json);
@@ -1617,14 +1636,14 @@ const App = () => {
                          ? `Salvo, mas API inválida: ${json.api_error || json.msg || 'verifique as chaves'}`
                          : (json.msg || 'Investidor atualizado');
                        setAddFormMsg({ type: json.valid === false ? 'error' : 'success', text: msgAtualiza });
-                        const invRes = await fetch(`${API_BASE}/api/investidores`); if (invRes.ok) setInvestidores((await invRes.json()).map(normalizeInvestorRecord));
+                        const invRes = await fetch(`/api/investidores`); if (invRes.ok) setInvestidores((await invRes.json()).map(normalizeInvestorRecord));
                      } else {
                       console.error('❌ [FRONTEND] Erro na resposta do servidor:', json);
                       setAddFormMsg({ type: 'error', text: json.msg || json.api_error || json.error || 'Erro ao atualizar' });
                     }
                   } else {
                     console.log('🔵 [FRONTEND] Criando novo cliente via /api/vincular_cliente');
-                    const res = await fetch(`${API_BASE}/api/vincular_cliente`, { ...fetchOpts, method: 'POST' });
+                    const res = await fetch(`/api/vincular_cliente`, { ...fetchOpts, method: 'POST' });
                     console.log('🔵 [FRONTEND] Resposta do servidor (POST):', res.status, res.statusText);
                      const json = await res.json();
                      console.log('🔵 [FRONTEND] JSON recebido (POST):', json);
@@ -1647,7 +1666,7 @@ const App = () => {
                          type: (json.valid === false && !json.timeout) ? 'error' : 'success',
                          text: msgSalvo,
                        });
-                        try { const invRes = await fetch(`${API_BASE}/api/investidores`); if (invRes.ok) setInvestidores((await invRes.json()).map(normalizeInvestorRecord)); } catch (e) { console.error('❌ [FRONTEND] Erro ao recarregar lista:', e); }
+                        try { const invRes = await fetch(`/api/investidores`); if (invRes.ok) setInvestidores((await invRes.json()).map(normalizeInvestorRecord)); } catch (e) { console.error('❌ [FRONTEND] Erro ao recarregar lista:', e); }
                      } else {
                       console.error('❌ [FRONTEND] Erro na resposta do servidor:', json);
                       // Mostra a causa real (auth Bybit / banco / import) em vez de genérico
