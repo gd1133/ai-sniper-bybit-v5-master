@@ -312,7 +312,7 @@ class IndicatorEngine:
             'chart_reasons': list(chart.get('chart_reasons') or []),
         }
         # Camada incremental: rastreador institucional (VWAP + pegada de volume + spread)
-        # Porta 3: σ adaptativo 1.2 / 1.3 / 1.5 conforme ADX médio (modo MODERADO)
+        # Porta 3: σ adaptativo 1.3 / 1.15 / 1.0 conforme ADX (modo ASSERTIVO)
         try:
             from src.engine.rastreador_institucional import RastreadorInstitucional
             from src.engine.porta3_adaptive import resolve_porta3_sigma, porta3_status
