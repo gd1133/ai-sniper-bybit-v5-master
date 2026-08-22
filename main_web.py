@@ -3619,14 +3619,35 @@ def sniper_worker_loop():
                                 )
                     except Exception:
                         pass
-                    if signals.get('is_lateral') or signals['trend'] == 'NEUTRO':
+                    # Skip só lateral real OU NEUTRO sem força (ADX fraco).
+                    # Antes: trend==NEUTRO (perto da SMA200) cegava ADX 30–46
+                    # e o robô nunca chegava nas Portas / volume.
+                    from src.engine.structure_config import STRUCTURE_ADX_MIN
+                    try:
+                        _adx_sym = float(signals.get('adx') or 0)
+                    except (TypeError, ValueError):
+                        _adx_sym = 0.0
+                    _truly_lateral = bool(signals.get('is_lateral'))
+                    _weak_neutro = (
+                        str(signals.get('trend') or '').upper() == 'NEUTRO'
+                        and _adx_sym < float(STRUCTURE_ADX_MIN)
+                    )
+                    if _truly_lateral or _weak_neutro:
+                        _tag = 'LATERAL' if _truly_lateral else 'NEUTRO-FRACO'
                         print(
-                            f"   ⏸️ [LATERAL] {clean_sym}: "
+                            f"   ⏸️ [{_tag}] {clean_sym}: "
                             f"trend={signals.get('trend')} lateral={signals.get('is_lateral')} "
-                            f"ADX={signals.get('adx')} — sem movimento, skip",
+                            f"ADX={signals.get('adx')} short={signals.get('short_trend')} "
+                            f"— sem movimento, skip",
                             flush=True,
                         )
                         continue
+                    if str(signals.get('trend') or '').upper() == 'NEUTRO' and _adx_sym >= float(STRUCTURE_ADX_MIN):
+                        print(
+                            f"   🔎 [FORCA] {clean_sym}: trend=NEUTRO mas ADX={_adx_sym:.1f} "
+                            f"short={signals.get('short_trend')} — avalia Portas (assertivo)",
+                            flush=True,
+                        )
 
                     # ══════════════════════════════════════════════════════════
                     # SHORT-CIRCUIT ABSOLUTO (Cérebro 2) — ANTES do Cérebro 3

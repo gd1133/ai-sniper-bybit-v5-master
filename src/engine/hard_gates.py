@@ -73,7 +73,7 @@ def evaluate_hard_gates(signals: dict | None, df=None) -> dict[str, Any]:
             from src.engine.porta3_adaptive import resolve_porta3_sigma
             sigma = resolve_porta3_sigma()
         except Exception:
-            sigma = 1.25
+            sigma = 1.15
     side_ok = sinal in (INSTITUTIONAL_BUY, INSTITUTIONAL_SELL)
 
     # Porta 5 — anatomia da vela (cor + sombra + falling knife)

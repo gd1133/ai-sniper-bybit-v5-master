@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-Porta 3 adaptativa — multiplica σ do volume conforme ADX médio do mercado.
+Porta 3 adaptativa — multiplica σ do volume conforme ADX (mercado ou ativo).
 
-Modo MODERADO (defaults):
-  • ADX < 15              → consolidação      → 1.2σ
-  • 15 <= ADX < 25        → tendência moderada → 1.3σ
-  • ADX >= 25             → tendência forte    → 1.5σ
+Modo ASSERTIVO (defaults):
+  • ADX < 15              → consolidação      → 1.3σ (exige volume claro)
+  • 15 <= ADX < 25        → tendência moderada → 1.15σ
+  • ADX >= 25             → tendência forte    → 1.0σ (mais oportunidades)
 
+Em tendência forte o robô fica assertivo: μ+1.0σ basta (antes 1.5σ cegava o radar).
 Thread-safe; atualizado a cada ciclo do radar.
-Não usa o antigo PORTA3_VOL_SIGMA único (evita Render preso em 1.8σ).
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from typing import Iterable, Optional
 
 _lock = threading.Lock()
 _market_avg_adx: float = 22.0
-_last_sigma: float = 1.3
+_last_sigma: float = 1.15
 _sample_count: int = 0
 
 
@@ -30,10 +30,10 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-# Degraus MODERADOS (podem sobrescrever via env no Render)
-SIGMA_CONSOLIDATION = _env_float('PORTA3_SIGMA_CONSOLIDATION', 1.2)
-SIGMA_MODERATE = _env_float('PORTA3_SIGMA_MODERATE', 1.3)
-SIGMA_STRONG = _env_float('PORTA3_SIGMA_STRONG', 1.5)
+# Degraus ASSERTIVOS (podem sobrescrever via env no Render)
+SIGMA_CONSOLIDATION = _env_float('PORTA3_SIGMA_CONSOLIDATION', 1.3)
+SIGMA_MODERATE = _env_float('PORTA3_SIGMA_MODERATE', 1.15)
+SIGMA_STRONG = _env_float('PORTA3_SIGMA_STRONG', 1.0)
 
 ADX_CONSOLIDATION_MAX = _env_float('PORTA3_ADX_CONSOLIDATION_MAX', 15.0)
 ADX_MODERATE_MAX = _env_float('PORTA3_ADX_MODERATE_MAX', 25.0)
