@@ -550,6 +550,8 @@ const App = () => {
     }
     if (!confirm('Confirmar remoção do investidor? Esta ação é irreversível.')) return;
     const url = apiUrl(`/api/cliente/${clientId}`);
+    const ctrl = new AbortController();
+    const timeoutId = setTimeout(() => ctrl.abort('timeout'), 6000);
     try {
       console.log('🗑️ [FRONTEND] Enviando DELETE', url);
       const res = await fetch(url, {
@@ -559,13 +561,13 @@ const App = () => {
           Accept: 'application/json',
         },
         cache: 'no-store',
+        signal: ctrl.signal,
       });
       let json = {};
       try { json = await res.json(); } catch (_) { json = {}; }
       console.log('🗑️ [FRONTEND] Resposta DELETE', res.status, json);
       if (res.ok && json.success !== false) {
         setInvestidores(prev => prev.filter(i => Number(i.id) !== clientId));
-        // Recarrega lista do servidor (confirma persistência no SQLite)
         try {
           if (typeof window.__reloadInvestidores === 'function') {
             await window.__reloadInvestidores();
@@ -585,7 +587,12 @@ const App = () => {
       }
     } catch (e) {
       console.error('❌ [FRONTEND] Falha na requisição DELETE:', e);
-      alert(`Falha na requisição DELETE: ${e?.message || e}`);
+      const isTimeout = e?.name === 'AbortError' || /aborted|timeout/i.test(String(e?.message || e));
+      alert(isTimeout
+        ? 'Timeout ao excluir (6s). Tente novamente — a exclusão é só no SQLite, sem Bybit.'
+        : `Falha na requisição DELETE: ${e?.message || e}`);
+    } finally {
+      clearTimeout(timeoutId);
     }
   };
 
@@ -1610,19 +1617,37 @@ const App = () => {
                   api_base: API_BASE,
                 });
                 try {
+                  const ctrl = new AbortController();
+                  const timeoutMs = 6000; // 6s max — servidor deve responder sem esperar Bybit
+                  const timeoutId = setTimeout(() => ctrl.abort('timeout'), timeoutMs);
                   const fetchOpts = {
                     method: undefined,
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
                     body: JSON.stringify(payload),
-                    // Save responde em <2s; Bybit valida em background
-                    signal: (typeof AbortSignal !== 'undefined' && AbortSignal.timeout)
-                      ? AbortSignal.timeout(15000)
-                      : undefined,
+                    signal: ctrl.signal,
+                    cache: 'no-store',
+                  };
+                  const reloadLista = async () => {
+                    try {
+                      if (typeof window.__reloadInvestidores === 'function') {
+                        await window.__reloadInvestidores();
+                        return;
+                      }
+                      const invRes = await fetch(`/api/investidores`, { cache: 'no-store' });
+                      if (invRes.ok) setInvestidores((await invRes.json()).map(normalizeInvestorRecord));
+                    } catch (e) {
+                      console.error('❌ [FRONTEND] Erro ao recarregar lista:', e);
+                    }
                   };
                   // Se id definido, atualiza; caso contrário cria novo
                   if (addFormFields.id) {
                     console.log('🔵 [FRONTEND] Atualizando cliente existente ID:', addFormFields.id);
-                    const res = await fetch(`/api/cliente/${addFormFields.id}`, { ...fetchOpts, method: 'PUT' });
+                    let res;
+                    try {
+                      res = await fetch(`/api/cliente/${addFormFields.id}`, { ...fetchOpts, method: 'PUT' });
+                    } finally {
+                      clearTimeout(timeoutId);
+                    }
                     console.log('🔵 [FRONTEND] Resposta do servidor (PUT):', res.status, res.statusText);
                      const json = await res.json();
                      console.log('🔵 [FRONTEND] JSON recebido (PUT):', json);
@@ -1632,22 +1657,28 @@ const App = () => {
                          upsertInvestor(json.client);
                          setAddFormFields(prev => ({ ...prev, id: json.client.id, saldo_base: json.client.saldo_base ?? prev.saldo_base }));
                        }
+                       const isWarn = json.status === 'warning' || json.validation_pending;
                        const msgAtualiza = json.valid === false
                          ? `Salvo, mas API inválida: ${json.api_error || json.msg || 'verifique as chaves'}`
-                         : (json.msg || 'Investidor atualizado');
-                       setAddFormMsg({ type: json.valid === false ? 'error' : 'success', text: msgAtualiza });
-                        const invRes = await fetch(`/api/investidores`); if (invRes.ok) setInvestidores((await invRes.json()).map(normalizeInvestorRecord));
+                         : (json.message || json.msg || 'Investidor atualizado');
+                       setAddFormMsg({ type: (json.valid === false && !isWarn) ? 'error' : (isWarn ? 'success' : 'success'), text: msgAtualiza });
+                       await reloadLista();
                      } else {
                       console.error('❌ [FRONTEND] Erro na resposta do servidor:', json);
                       setAddFormMsg({ type: 'error', text: json.msg || json.api_error || json.error || 'Erro ao atualizar' });
                     }
                   } else {
                     console.log('🔵 [FRONTEND] Criando novo cliente via /api/vincular_cliente');
-                    const res = await fetch(`/api/vincular_cliente`, { ...fetchOpts, method: 'POST' });
+                    let res;
+                    try {
+                      res = await fetch(`/api/vincular_cliente`, { ...fetchOpts, method: 'POST' });
+                    } finally {
+                      clearTimeout(timeoutId);
+                    }
                     console.log('🔵 [FRONTEND] Resposta do servidor (POST):', res.status, res.statusText);
                      const json = await res.json();
                      console.log('🔵 [FRONTEND] JSON recebido (POST):', json);
-                     if (res.ok && json.status === 'sucesso') {
+                     if (res.ok && (json.status === 'sucesso' || json.status === 'warning' || json.client)) {
                        if (json.client) {
                          console.log('✅ [FRONTEND] Cliente criado com sucesso:', json.client);
                          upsertInvestor(json.client);
@@ -1655,35 +1686,39 @@ const App = () => {
                        } else {
                          console.warn('⚠️ [FRONTEND] Sucesso mas sem dados do cliente na resposta');
                        }
-                       const msgSalvo = json.validation_pending
-                         ? (json.msg || 'Investidor salvo! Validação Bybit em andamento…')
+                       const msgSalvo = json.validation_pending || json.status === 'warning'
+                         ? (json.message || json.msg || 'Investidor salvo! Validação Bybit em andamento…')
                          : (json.valid === false
                            ? (json.timeout
                              ? (json.msg || json.api_error || 'Salvo; Bybit lenta — saldo sincroniza depois')
-                             : `Salvo, mas API inválida: ${json.api_error || 'verifique as chaves'}`)
+                             : `Salvo, mas chave Bybit inválida/expirada: ${json.api_error || 'verifique as chaves'}`)
                            : (json.msg || 'Investidor salvo com sucesso'));
                        setAddFormMsg({
-                         type: (json.valid === false && !json.timeout) ? 'error' : 'success',
+                         type: (json.valid === false && !json.timeout && json.status !== 'warning') ? 'error' : 'success',
                          text: msgSalvo,
                        });
-                        try { const invRes = await fetch(`/api/investidores`); if (invRes.ok) setInvestidores((await invRes.json()).map(normalizeInvestorRecord)); } catch (e) { console.error('❌ [FRONTEND] Erro ao recarregar lista:', e); }
+                       await reloadLista();
                      } else {
                       console.error('❌ [FRONTEND] Erro na resposta do servidor:', json);
-                      // Mostra a causa real (auth Bybit / banco / import) em vez de genérico
-                      const detail = json.msg || json.api_error || json.error || 'Erro ao salvar investidor';
+                      const detail = json.msg || json.message || json.api_error || json.error || 'Erro ao salvar investidor';
                       setAddFormMsg({ type: 'error', text: detail });
-                      // Se o servidor salvou o cliente mesmo com API inválida, atualiza a lista
                       if (json.client) {
                         upsertInvestor(json.client);
                         setAddFormFields(prev => ({ ...prev, id: json.client.id, saldo_base: json.client.saldo_base ?? prev.saldo_base }));
+                        await reloadLista();
                       }
                     }
-                  }                } catch (err) {
+                  }
+                } catch (err) {
                   console.error('❌ [FRONTEND] Erro de rede ou exceção ao vincular:', err);
-                  const errorMsg = err.name === 'TimeoutError' || /aborted|timeout/i.test(String(err.message || err))
-                    ? 'Timeout ao falar com o servidor (Bybit lenta ou Render acordando). Tente novamente em alguns segundos.'
+                  const errorMsg = err.name === 'TimeoutError' || err.name === 'AbortError' || /aborted|timeout/i.test(String(err.message || err))
+                    ? 'Servidor demorou mais de 6s. O investidor pode ter sido salvo — atualize a lista. Se a chave Bybit estiver expirada (33004), corrija e salve de novo.'
                     : (err.message || String(err));
                   setAddFormMsg({ type: 'error', text: `Erro de conexão: ${errorMsg}` });
+                  // Tenta atualizar lista mesmo em timeout (salvamento pode ter ocorrido)
+                  try {
+                    if (typeof window.__reloadInvestidores === 'function') await window.__reloadInvestidores();
+                  } catch (_) {}
                 }
                 setAddFormSaving(false);
                 // NÃO fecha automaticamente o modal — o usuário pode revisar/editar ou fechar manualmente
