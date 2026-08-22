@@ -524,11 +524,15 @@ def init_db():
 
 
 def get_active_clients() -> List[Dict[str, Any]]:
-    """Retorna apenas clientes cadastrados com status ativo"""
+    """Retorna apenas clientes com status ativo (ignora inativo/erro_autenticacao)."""
     try:
         conn = _connect()
         cur = conn.cursor()
-        cur.execute("SELECT * FROM clientes_sniper WHERE status='ativo' ORDER BY created_at DESC")
+        cur.execute(
+            "SELECT * FROM clientes_sniper "
+            "WHERE LOWER(COALESCE(status,'ativo')) = 'ativo' "
+            "ORDER BY created_at DESC"
+        )
         rows = cur.fetchall()
         clients = [dict(r) for r in rows]
         conn.close()
@@ -536,6 +540,27 @@ def get_active_clients() -> List[Dict[str, Any]]:
     except Exception as e:
         print(f"⚠️ Erro ao buscar clientes ativos: {e}")
         return []
+
+
+def set_client_status(client_id: int, status: str) -> bool:
+    """Atualiza apenas o campo status (ex.: erro_autenticacao / inativo)."""
+    cid = int(client_id or 0)
+    st = str(status or '').strip() or 'inativo'
+    if cid <= 0:
+        return False
+
+    def _op(cur, conn):
+        cur.execute(
+            "UPDATE clientes_sniper SET status=? WHERE id=?",
+            (st, cid),
+        )
+        return cur.rowcount > 0
+
+    try:
+        return bool(_execute_write(f'set_client_status({cid},{st})', _op))
+    except Exception as e:
+        print(f"⚠️ [DATABASE] set_client_status({cid}): {e}", flush=True)
+        return False
 
 
 def get_all_clients() -> List[Dict[str, Any]]:
