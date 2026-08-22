@@ -127,6 +127,105 @@ def _handle_invalid_api_key_10003_for_client(client, source_label='bybit'):
         client,
         reason=f"bybit retCode=10003 (API key is invalid) detectado em {source_label}",
     )
+    # Persistência: não fica tentando a cada ciclo do monitor
+    try:
+        _mark_client_auth_error(
+            client,
+            reason=f'retCode=10003 em {source_label}',
+            status='erro_autenticacao',
+        )
+    except Exception:
+        pass
+
+
+def _is_bybit_auth_error(err) -> bool:
+    """Detecta 10003 / 33004 / chave expirada ou inválida."""
+    text = str(err or '').upper()
+    if not text:
+        return False
+    markers = (
+        '33004',
+        '10003',
+        'API KEY HAS EXPIRED',
+        'API KEY IS INVALID',
+        'INVALID API KEY',
+        'API_KEY_EXPIRED',
+        'PERMISSION DENIED',
+        'RETCODE=33004',
+        'RETCODE=10003',
+        '"RETCODE":33004',
+        '"RETCODE":10003',
+    )
+    return any(m in text for m in markers)
+
+
+def _mark_client_auth_error(client, reason: str = '', status: str = 'erro_autenticacao') -> bool:
+    """
+    Marca investidor como inativo/erro_autenticacao no SQLite e no runtime.
+    Evita spam de logs e travamento do loop pelos demais clientes.
+    """
+    client_id = int((client or {}).get('id') or 0)
+    if client_id <= 0:
+        return False
+    nome = (client or {}).get('nome') or f'id={client_id}'
+    # Silencia se já desativado recentemente
+    with _CLIENT_AUTH_LOCK:
+        entry = _CLIENT_AUTH_RUNTIME.get(client_id) or {}
+        if entry.get('auth_error_logged') and entry.get('status') in (
+            'erro_autenticacao', 'inativo', 'erro_api',
+        ):
+            return False
+        _CLIENT_AUTH_RUNTIME[client_id] = {
+            'authenticated': False,
+            'disabled_until': time.time() + 24 * 3600,
+            'reason': str(reason or 'chave Bybit inválida/expirada'),
+            'status': status,
+            'auth_error_logged': True,
+        }
+    print(
+        f"🔒 [AUTH] {nome}: {reason or 'chave Bybit inválida/expirada'} "
+        f"→ status={status} (ignorado nos próximos ciclos)",
+        flush=True,
+    )
+    try:
+        if hasattr(db, 'set_client_status') and db.set_client_status(client_id, status):
+            try:
+                client_balance_cache.clear()
+            except Exception:
+                pass
+            return True
+        existing = _get_registered_client_by_id(client_id) or dict(client or {})
+        existing['status'] = status
+        existing['id'] = client_id
+        db.update_client(client_id, existing)
+        try:
+            client_balance_cache.clear()
+        except Exception:
+            pass
+        return True
+    except Exception as e:
+        print(f"⚠️ [AUTH] falha ao persistir status={status} id={client_id}: {e}", flush=True)
+        return False
+
+
+def _handle_bybit_auth_failure(client, err, source_label='bybit'):
+    """Cooldowna 10003/33004: desativa conta no DB e no runtime (sem spam)."""
+    if not _is_bybit_auth_error(err):
+        return False
+    code = _extract_bybit_ret_code_from_error(err) or (
+        '33004' if '33004' in str(err) else '10003'
+    )
+    _disable_client_temporarily(
+        client,
+        reason=f"bybit retCode={code} detectado em {source_label}",
+        cooldown_seconds=24 * 3600,
+    )
+    _mark_client_auth_error(
+        client,
+        reason=f'retCode={code} em {source_label}: {str(err)[:120]}',
+        status='erro_autenticacao',
+    )
+    return True
 
 # 🔧 CONFIGURAÇÃO DE GERENCIAMENTO DE RISCO MOTOR SNIPER V60.7
 # Entrada = percentual da banca (NÃO o mínimo da moeda na exchange)
@@ -1837,12 +1936,14 @@ def _save_client_everywhere(client_data):
 def _delete_client_everywhere(client_id):
     """
     Remove investidor do SQLite + limpa caches em memória.
+    NUNCA consulta Bybit (saldo/posições) — exclusão local imediata.
     Retorna (ok: bool, detail: str).
     """
     cid = int(client_id or 0)
     if cid <= 0:
         return False, 'ID inválido'
 
+    # Limpa cache de broker em memória (sem I/O de rede)
     try:
         _get_broker_manager().invalidate_client(cid)
     except Exception:
@@ -1871,9 +1972,14 @@ def _delete_client_everywhere(client_id):
     except Exception:
         pass
 
-    ok = bool(db.delete_client(cid))
+    try:
+        ok = bool(db.delete_client(cid))
+    except Exception as e:
+        print(f"❌ [DELETE] Exceção SQLite id={cid}: {e}", flush=True)
+        return False, f'Falha SQLite ao remover: {e}'
+
     if ok:
-        print(f"✅ [DELETE] Investidor id={cid} removido do SQLite e caches", flush=True)
+        print(f"✅ [DELETE] Investidor id={cid} removido do SQLite e caches (sem Bybit)", flush=True)
         return True, 'Cliente removido com sucesso'
     print(f"❌ [DELETE] Falha ao remover investidor id={cid}", flush=True)
     return False, 'Falha ao remover cliente do banco de dados'
@@ -1910,6 +2016,12 @@ def _fetch_active_client_balances(force=False):
                     code = str(getattr(broker, 'last_auth_error_code', '') or '')
                     if code == '10003' and balance is None:
                         _handle_invalid_api_key_10003_for_client(client, source_label='fetch_balance')
+                    elif balance is None and _is_bybit_auth_error(getattr(broker, 'last_auth_error', '') or code):
+                        _handle_bybit_auth_failure(
+                            client,
+                            getattr(broker, 'last_auth_error', None) or code,
+                            source_label='fetch_balance',
+                        )
                 if balance is not None:
                     balance = round(float(balance), 2)
                     total += balance
@@ -2404,8 +2516,8 @@ def _monitor_financial_stop_loss():
                         ok, err = broker._handle_v5_ret_code(positions_response, 'get_positions')
 
                         if not ok:
-                            if str(_extract_bybit_ret_code_from_error(err)) == '10003' or 'retCode=10003' in str(err):
-                                _handle_invalid_api_key_10003_for_client(cliente, source_label='MONITOR FINANCEIRO:get_positions')
+                            if _is_bybit_auth_error(err) or str(_extract_bybit_ret_code_from_error(err)) in ('10003', '33004'):
+                                _handle_bybit_auth_failure(cliente, err, source_label='MONITOR FINANCEIRO:get_positions')
                             continue
 
                         positions_list = (positions_response.get('result') or {}).get('list', [])
@@ -2595,9 +2707,7 @@ def _monitor_financial_stop_loss():
                                 continue
 
                     except Exception as fetch_err:
-                        code = _extract_bybit_ret_code_from_error(fetch_err)
-                        if str(code) == '10003' or 'API key is invalid' in str(fetch_err):
-                            _handle_invalid_api_key_10003_for_client(cliente, source_label='MONITOR FINANCEIRO:exception')
+                        if _handle_bybit_auth_failure(cliente, fetch_err, source_label='MONITOR FINANCEIRO:exception'):
                             continue
                         print(f"   ⚠️ [MONITOR] Erro ao buscar posições do cliente {cliente.get('nome')}: {fetch_err}", flush=True)
                         continue
@@ -2828,13 +2938,12 @@ def _monitor_dashboard_positions():
                         else:
                             print(f"   ⚠️ [DASHBOARD] Erro ao buscar saldo de {cliente.get('nome')}: {err}", flush=True)
                             code = _extract_bybit_ret_code_from_error(err)
-                            if not client_balance_added and str(code or '') == '10003':
-                                _handle_invalid_api_key_10003_for_client(cliente, source_label='DASHBOARD:get_wallet_balance')
+                            if not client_balance_added and _is_bybit_auth_error(err):
+                                _handle_bybit_auth_failure(cliente, err, source_label='DASHBOARD:get_wallet_balance')
                     except Exception as wallet_err:
                         print(f"   ⚠️ [DASHBOARD] Exceção ao buscar saldo: {wallet_err}", flush=True)
-                        code = _extract_bybit_ret_code_from_error(wallet_err)
-                        if str(code or '') == '10003':
-                            _handle_invalid_api_key_10003_for_client(cliente, source_label='DASHBOARD:get_wallet_balance:exception')
+                        if _handle_bybit_auth_failure(cliente, wallet_err, source_label='DASHBOARD:get_wallet_balance:exception'):
+                            pass
 
                     # 2️⃣ BUSCA POSIÇÕES ABERTAS COM PARÂMETROS CORRETOS
                     client_positions_ok = False
@@ -4431,10 +4540,11 @@ def add_cliente():
         )
         # Sempre devolve a mensagem real (auth/API/banco) — nunca esconde atrás de 500 genérico
         if record:
-            # Persistiu no banco → HTTP 200 (valid=false cobre API inválida/timeout sem travar o modal)
+            # Persistiu no banco → HTTP 200 imediato (Bybit valida em BG ≤4s)
             return jsonify({
-                "status": "sucesso",
+                "status": validation.get("status") or "warning",
                 "msg": msg,
+                "message": validation.get("message") or msg,
                 "valid": bool(validation.get("valid")),
                 "api_error": validation.get("api_error") or (None if validation.get('valid') else msg),
                 "client": record,
@@ -4699,8 +4809,25 @@ def update_dashboard_balance():
     except Exception as e: return jsonify({"balance": 0.0, "status": f"Erro: {e}"}), 200
 
 @app.route('/api/cliente/<int:client_id>', methods=['GET', 'PUT', 'DELETE'])
-def api_cliente_manage(client_id):
+@app.route('/api/investidores/<int:client_id>', methods=['DELETE'])
+@app.route('/api/deletar_investidor', methods=['POST', 'DELETE'])
+def api_cliente_manage(client_id=None):
     try:
+        # Alias POST /api/deletar_investidor {id: N}
+        if request.path.rstrip('/').endswith('deletar_investidor'):
+            data = request.json or {}
+            client_id = int(data.get('id') or data.get('client_id') or client_id or 0)
+            if client_id <= 0:
+                return jsonify({"success": False, "msg": "Informe id do investidor"}), 400
+            print(f"🗑️ [BACKEND] DELETE alias /api/deletar_investidor id={client_id}", flush=True)
+            ok, detail = _delete_client_everywhere(client_id)
+            return jsonify({
+                "success": bool(ok),
+                "message": detail,
+                "msg": detail,
+                "id": int(client_id),
+            }), (200 if ok else 404)
+
         if request.method == 'GET':
             c = _get_registered_client_by_id(client_id)
             return jsonify(c) if c else (jsonify({"error": "Não encontrado"}), 404)
@@ -4716,14 +4843,16 @@ def api_cliente_manage(client_id):
             ) or {}
             return jsonify({
                 "success": bool(v.get('record')),
+                "status": v.get('status') or ('warning' if v.get('validation_pending') else 'sucesso'),
                 "valid": bool(v.get('valid')),
                 "msg": v.get('msg') or v.get('api_error') or ('Atualizado' if v.get('valid') else 'Falha ao atualizar'),
+                "message": v.get('message') or v.get('msg'),
                 "api_error": v.get('api_error'),
                 "client": v.get('record'),
                 "validation_pending": bool(v.get('validation_pending')),
             }), (200 if v.get('record') else 400)
         elif request.method == 'DELETE':
-            print(f"🗑️ [BACKEND] DELETE /api/cliente/{client_id}", flush=True)
+            print(f"🗑️ [BACKEND] DELETE /api/cliente/{client_id} (SQLite only — sem Bybit)", flush=True)
             ok, detail = _delete_client_everywhere(client_id)
             if ok:
                 return jsonify({
@@ -4743,7 +4872,7 @@ def api_cliente_manage(client_id):
             }), status
     except Exception as e:
         print(f"❌ [BACKEND] Exceção cliente/{client_id}: {e}", flush=True)
-        return jsonify({"success": False, "error": str(e), "message": str(e)}), 400
+        return jsonify({"success": False, "error": str(e), "message": str(e), "msg": str(e)}), 200
 
 @app.route('/api/cliente/<int:client_id>/balance-source', methods=['POST'])
 def api_cliente_balance_source(client_id):
@@ -5153,7 +5282,8 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
     }
 
     def _background_validate_bybit():
-        validate_timeout = float(os.getenv('BYBIT_VALIDATE_TIMEOUT_SECS', '28'))
+        # Timeout curto (4s) — nunca segura worker HTTP; chave ruim → status erro_autenticacao
+        validate_timeout = float(os.getenv('BYBIT_VALIDATE_TIMEOUT_SECS', '4'))
         api_k = bg_payload['bybit_key']
         api_s = bg_payload['bybit_secret']
         endpoint_url = _endpoint_url_for_mode(endpoint_mode)
@@ -5186,18 +5316,20 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
             if not light.get('ok'):
                 err = str(light.get('error') or 'Falha ao validar credenciais')
                 print(f"⚠️ [VALIDAR BG] API falhou id={saved_id}: {err}", flush=True)
-                err_upper = err.upper()
-                if (
-                    'RETCODE=10003' in err_upper
-                    or '"RETCODE":10003' in err_upper
-                    or 'API KEY IS INVALID' in err_upper
-                ):
-                    upd = dict(bg_payload)
-                    upd['status'] = 'erro_api'
-                    try:
-                        _save_client_everywhere(upd)
-                    except Exception as e:
-                        print(f"⚠️ [VALIDAR BG] update erro_api falhou: {e}", flush=True)
+                status_fail = (
+                    'erro_autenticacao' if _is_bybit_auth_error(err) else 'erro_api'
+                )
+                upd = dict(bg_payload)
+                upd['status'] = status_fail
+                try:
+                    _save_client_everywhere(upd)
+                    _disable_client_temporarily(
+                        {'id': saved_id, 'nome': bg_payload.get('nome')},
+                        reason=err[:180],
+                        cooldown_seconds=24 * 3600,
+                    )
+                except Exception as e:
+                    print(f"⚠️ [VALIDAR BG] update {status_fail} falhou: {e}", flush=True)
                 return
 
             balance = light.get('balance')
@@ -5216,16 +5348,31 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
                     client_balance_cache.clear()
                 except Exception:
                     pass
+                with _CLIENT_AUTH_LOCK:
+                    _CLIENT_AUTH_RUNTIME.pop(int(saved_id), None)
             except Exception as e:
                 print(f"⚠️ [VALIDAR BG] update saldo falhou: {e}", flush=True)
         except FuturesTimeout:
             print(
                 f"⏱️ [VALIDAR BG] timeout {validate_timeout:.0f}s id={saved_id} "
-                f"(chaves já salvas — dashboard sincroniza depois)",
+                f"— mantém registro; status=erro_autenticacao até nova tentativa",
                 flush=True,
             )
+            try:
+                upd = dict(bg_payload)
+                upd['status'] = 'erro_autenticacao'
+                _save_client_everywhere(upd)
+            except Exception:
+                pass
         except Exception as e:
             print(f"⚠️ [VALIDAR BG] exceção id={saved_id}: {e}", flush=True)
+            if _is_bybit_auth_error(e):
+                try:
+                    upd = dict(bg_payload)
+                    upd['status'] = 'erro_autenticacao'
+                    _save_client_everywhere(upd)
+                except Exception:
+                    pass
         finally:
             try:
                 pool.shutdown(wait=False, cancel_futures=True)
@@ -5250,9 +5397,15 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
     saldo_txt = f"${payload['saldo_base']:.2f}" if payload['saldo_base'] else 'sincronizando'
     return {
         'valid': True,
+        'status': 'warning',
         'msg': (
             f'Investidor salvo! Saldo {saldo_txt} USDT — '
-            f'validação Bybit em andamento em background.'
+            f'validação Bybit em andamento (timeout 4s). '
+            f'Se a chave estiver expirada (33004), o status vira erro_autenticacao.'
+        ),
+        'message': (
+            'Investidor salvo; validação Bybit em background. '
+            'Se a chave estiver expirada/inválida, ficará como erro_autenticacao.'
         ),
         'record': record,
         'synced_to_local': local_synced,
@@ -5262,6 +5415,7 @@ def validar_e_salvar_cliente(api_key, api_secret, is_testnet, *, client_payload=
         'balance_source': payload.get('balance_source'),
         'is_testnet': saved_mode in ('testnet', 'demo'),
         'validation_pending': True,
+        'timeout': False,
     }
 
 # ==============================================================================
