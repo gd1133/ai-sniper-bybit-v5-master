@@ -159,6 +159,36 @@ def _is_bybit_auth_error(err) -> bool:
     return any(m in text for m in markers)
 
 
+def _push_user_alert(alert_type: str, title: str, message: str, *, client_id=None, nome=None):
+    """Publica alerta no dashboard (/api/status → user_alerts)."""
+    try:
+        alerts = list(central_state.get('user_alerts') or [])
+    except Exception:
+        alerts = []
+    entry = {
+        'id': f"{alert_type}-{int(client_id or 0)}-{int(time.time())}",
+        'type': str(alert_type or 'info'),
+        'title': str(title or ''),
+        'message': str(message or ''),
+        'client_id': client_id,
+        'nome': nome,
+        'ts': time.time(),
+        'dismissed': False,
+    }
+    # Evita spam: mesma conta + mesmo tipo nos últimos 30 min
+    cutoff = time.time() - 1800
+    alerts = [
+        a for a in alerts
+        if not (
+            str(a.get('type')) == entry['type']
+            and int(a.get('client_id') or 0) == int(client_id or 0)
+            and float(a.get('ts') or 0) >= cutoff
+        )
+    ]
+    alerts.insert(0, entry)
+    central_state['user_alerts'] = alerts[:20]
+
+
 def _mark_client_auth_error(client, reason: str = '', status: str = 'erro_autenticacao') -> bool:
     """
     Marca investidor como inativo/erro_autenticacao no SQLite e no runtime.
@@ -186,6 +216,17 @@ def _mark_client_auth_error(client, reason: str = '', status: str = 'erro_autent
         f"🔒 [AUTH] {nome}: {reason or 'chave Bybit inválida/expirada'} "
         f"→ status={status} (ignorado nos próximos ciclos)",
         flush=True,
+    )
+    _push_user_alert(
+        'api_expirada',
+        f'API Bybit expirada — {nome}',
+        (
+            f'A chave API da conta "{nome}" expirou ou foi rejeitada pela Bybit '
+            f'(erro 33004/10003). Crie uma nova API em Bybit → API Management, '
+            f'atualize Key/Secret no painel e salve o investidor de novo.'
+        ),
+        client_id=client_id,
+        nome=nome,
     )
     try:
         if hasattr(db, 'set_client_status') and db.set_client_status(client_id, status):
@@ -691,6 +732,7 @@ central_state = {
     "entry_sizing": None,
     "proxima_entrada": None,
     "ia_decisions": [],
+    "user_alerts": [],
 }
 
 def _is_rate_limit_error(err: Exception) -> bool:
@@ -2310,6 +2352,25 @@ def _build_api_status_payload():
         }
     payload['entry_sizing'] = entry_sizing
     payload['proxima_entrada'] = entry_sizing
+    # Alertas ao usuário (API expirada, etc.)
+    try:
+        alerts = list(central_state.get('user_alerts') or [])
+        payload['user_alerts'] = [a for a in alerts if not a.get('dismissed')][:10]
+    except Exception:
+        payload['user_alerts'] = []
+    # Espelha status de auth nas bancas (dashboard)
+    try:
+        bal_list = payload.get('real_client_balances')
+        if isinstance(bal_list, list):
+            for c in bal_list:
+                cid = int(c.get('id') or 0)
+                st = str(c.get('status') or '').lower()
+                if st in ('erro_autenticacao', 'erro_api', 'inativo') or '33004' in str(c.get('error') or ''):
+                    c['auth_disabled'] = True
+                    c['api_expired'] = True
+                    c['status_label'] = 'API EXPIRADA — crie nova na Bybit'
+    except Exception:
+        pass
     try:
         from src.database.decision_history import list_ia_decisions
         payload['ia_decisions'] = list_ia_decisions(20) or payload.get('ia_decisions') or []
@@ -3653,7 +3714,39 @@ def sniper_worker_loop():
                     # SHORT-CIRCUIT ABSOLUTO (Cérebro 2) — ANTES do Cérebro 3
                     # Portas: ADX≥23 → BB → amplitude → volume → VWAP → anatomia vela
                     # Qualquer falha → NEUTRO e aborta (não gasta ML / não abre ordem).
+                    # EXCEÇÃO: queda livre com volume → faixa DUMP SHORT (assertiva).
                     # ══════════════════════════════════════════════════════════
+                    dump_lane = False
+                    try:
+                        from src.engine.asymmetric_sniper import detect_meltdown as _detect_melt_pre
+                        _melt_lane = _detect_melt_pre(df, signals)
+                        if (
+                            _melt_lane.get('prefer_short')
+                            and _melt_lane.get('volume_on_dump')
+                            and (
+                                _melt_lane.get('freefall')
+                                or _melt_lane.get('second_red_entry')
+                                or float(_melt_lane.get('strength') or 0) >= 55
+                            )
+                            and _adx_sym >= float(STRUCTURE_ADX_MIN)
+                        ):
+                            dump_lane = True
+                            signals = dict(signals)
+                            signals['meltdown'] = True
+                            signals['meltdown_strength'] = float(_melt_lane.get('strength') or 0)
+                            signals['second_red_entry'] = bool(_melt_lane.get('second_red_entry'))
+                            signals['freefall'] = bool(_melt_lane.get('freefall'))
+                            signals['dump_lane'] = True
+                            signals['sinal_institucional'] = 'VENDA_INSTITUCIONAL'
+                            signals['big_player_ativo'] = True
+                            print(
+                                f"   🧊 [DUMP-LANE] {clean_sym}: {_melt_lane.get('reason')} "
+                                f"— Portas volume/VWAP flexíveis (queda+volume)",
+                                flush=True,
+                            )
+                    except Exception:
+                        dump_lane = False
+
                     try:
                         from src.engine.hard_gates import institutional_entry_allowed
                         hard_gate = institutional_entry_allowed(signals, df=df)
@@ -3665,16 +3758,31 @@ def sniper_worker_loop():
                         time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
                         continue
                     if not hard_gate.get('allowed'):
-                        print(
-                            f"   🚫 [HARD-GATE] {clean_sym}: {hard_gate.get('abort_reason')} "
-                            f"→ NEUTRO (abort antes Cérebro 3)",
-                            flush=True,
-                        )
-                        time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
-                        continue
+                        _gate_abort = hard_gate.get('abort_reason') or 'volume/VWAP'
+                        if dump_lane:
+                            hard_gate = {
+                                'allowed': True,
+                                'sinal_institucional': 'VENDA_INSTITUCIONAL',
+                                'abort_reason': '',
+                                'dump_lane_bypass': True,
+                            }
+                            print(
+                                f"   ⚡ [DUMP-LANE] {clean_sym}: bypass Portas "
+                                f"({_gate_abort}) — SHORT dump",
+                                flush=True,
+                            )
+                        else:
+                            print(
+                                f"   🚫 [HARD-GATE] {clean_sym}: {_gate_abort} "
+                                f"→ NEUTRO (abort antes Cérebro 3)",
+                                flush=True,
+                            )
+                            time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
+                            continue
                     print(
                         f"   ✅ [HARD-GATE] {clean_sym}: "
                         f"{hard_gate.get('sinal_institucional')} — portas 1–5 liberadas"
+                        f"{' | DUMP-LANE' if dump_lane else ''}"
                         f"{' | ' + str(signals.get('liquidity_log') or '') if signals.get('liquidity_log') else ''}"
                         f"{' | ' + str(signals.get('anatomy_log') or '') if signals.get('anatomy_log') else ''}"
                         f"{' | ' + str(signals.get('ponto_continuo_reason') or '') if signals.get('ponto_continuo') else ''}"
@@ -3788,6 +3896,19 @@ def sniper_worker_loop():
                         continue
 
                     side_exec = 'sell' if decisao in ('SELL', 'VENDER') else 'buy'
+                    # Dump lane: força SHORT (queda livre + volume) — não compra faca
+                    if signals.get('dump_lane') or signals.get('freefall') or (
+                        signals.get('meltdown') and signals.get('prefer_short')
+                    ):
+                        if side_exec != 'sell':
+                            print(
+                                f"   🧊 [DUMP-LANE] {clean_sym}: Cérebro={side_exec} → força SELL "
+                                f"(queda+volume)",
+                                flush=True,
+                            )
+                        side_exec = 'sell'
+                        signals = dict(signals)
+                        signals['sinal_institucional'] = 'VENDA_INSTITUCIONAL'
                     # Short-circuit: Cérebro 3 deve concordar com o lado institucional já liberado
                     from src.engine.hard_gates import side_matches_institutional
                     inst_sig_early = str(signals.get('sinal_institucional', 'NEUTRO') or 'NEUTRO').upper()
@@ -3800,10 +3921,19 @@ def sniper_worker_loop():
                         time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
                         continue
                     trend_now = str(signals.get('trend', 'NEUTRO')).upper()
+                    short_now = str(signals.get('short_trend', '') or '').upper()
+                    # Dump / meltdown SHORT: permite se short_trend BAIXA ou dump_lane
                     if side_exec == 'sell' and trend_now != 'BAIXA':
-                        print(f"   🚫 [TENDÊNCIA] {clean_sym}: VENDA bloqueada — tendência={trend_now}", flush=True)
-                        time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
-                        continue
+                        if signals.get('dump_lane') or signals.get('meltdown') or short_now == 'BAIXA':
+                            print(
+                                f"   ⚡ [DUMP/SHORT] {clean_sym}: macro={trend_now} "
+                                f"short={short_now} — libera SHORT assertivo",
+                                flush=True,
+                            )
+                        else:
+                            print(f"   🚫 [TENDÊNCIA] {clean_sym}: VENDA bloqueada — tendência={trend_now}", flush=True)
+                            time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
+                            continue
                     if side_exec == 'buy' and trend_now != 'ALTA':
                         print(f"   🚫 [TENDÊNCIA] {clean_sym}: COMPRA bloqueada — tendência={trend_now}", flush=True)
                         time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)

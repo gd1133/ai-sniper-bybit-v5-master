@@ -228,6 +228,13 @@ const normalizeInvestorRecord = (client) => {
     storage_source: String(client?.storage_source || client?.source || 'local').toUpperCase(),
     pnl: client?.pnl ?? client?.pnl_ciclo ?? '+0.0%',
     corretora: client?.corretora || 'BYBIT',
+    auth_disabled: Boolean(client?.auth_disabled) || Boolean(client?.api_expired) || ['erro_autenticacao', 'erro_api'].includes(String(client?.status || '').toLowerCase()),
+    api_expired: Boolean(client?.api_expired) || String(client?.status || '').toLowerCase() === 'erro_autenticacao',
+    status_label: client?.status_label || (
+      String(client?.status || '').toLowerCase() === 'erro_autenticacao'
+        ? 'API EXPIRADA — crie nova na Bybit'
+        : client?.status
+    ),
   };
 };
 
@@ -353,10 +360,12 @@ const App = () => {
     evidence: null,
     max_moedas_ativas: 1,
     risk_mode: 'conservative',
+    user_alerts: [],
     ia2_decision: {
       motivo: "Aguardando conexão com o servidor..."
     }
   });
+  const [dismissedAlerts, setDismissedAlerts] = useState(() => new Set());
 
   // Polling do backend para manter o dashboard atualizado
   useEffect(() => {
@@ -922,6 +931,10 @@ const App = () => {
     ? `${monitorTrades.map((trade) => trade.symbol).slice(0, 5).join(' • ')}`
     : `RIGOR ${evidence.threshold || 60}% • ${data.risk_mode === 'aggressive' ? '5 moedas simultâneas' : '1 moeda por vez'}`;
 
+  const visibleAlerts = (Array.isArray(data.user_alerts) ? data.user_alerts : []).filter(
+    (a) => a && !dismissedAlerts.has(String(a.id || ''))
+  );
+
   return (
     <div className="min-h-screen bg-[#050505] text-white font-sans selection:bg-green-500/30">
       
@@ -968,6 +981,33 @@ const App = () => {
            </div>
         </div>
       </header>
+
+      {visibleAlerts.length > 0 ? (
+        <div className="px-8 pt-4 max-w-[1800px] mx-auto space-y-3">
+          {visibleAlerts.map((alert) => (
+            <div
+              key={String(alert.id)}
+              className="flex items-start gap-4 p-4 rounded-2xl border border-amber-500/40 bg-amber-500/10 text-amber-100"
+            >
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-black uppercase tracking-wide text-amber-300">
+                  {alert.title || 'Alerta'}
+                </p>
+                <p className="text-xs mt-1 text-amber-100/90 leading-relaxed">
+                  {alert.message}
+                </p>
+              </div>
+              <button
+                type="button"
+                className="text-[10px] font-black uppercase tracking-widest text-amber-200/80 hover:text-white shrink-0"
+                onClick={() => setDismissedAlerts((prev) => new Set([...prev, String(alert.id)]))}}
+              >
+                Fechar
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
 
       <main className="p-8 max-w-[1800px] mx-auto">
         
@@ -1510,9 +1550,9 @@ const App = () => {
                           <span className={`px-3 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest ${envMeta.className}`}>
                             {envMeta.label}
                           </span>
-                          {inv.auth_disabled ? (
+                          {inv.auth_disabled || inv.api_expired ? (
                             <span className="px-3 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest bg-red-500/10 border-red-500/30 text-red-300">
-                              API inválida
+                              API expirada — crie nova na Bybit
                             </span>
                           ) : null}
                           <span className="px-3 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest bg-yellow-500/10 border-yellow-500/30 text-yellow-300">
@@ -1530,7 +1570,9 @@ const App = () => {
                       <td className="p-8">
                         <div className="flex items-center gap-2">
                            <div className={`w-1.5 h-1.5 rounded-full ${String(inv.status || '').toLowerCase() === 'ativo' ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
-                           <span className="text-[10px] font-black uppercase tracking-widest text-zinc-500">{inv.status}</span>
+                           <span className="text-[10px] font-black uppercase tracking-widest text-zinc-500">
+                             {inv.status_label || inv.status}
+                           </span>
                         </div>
                       </td>
                       <td className="p-8 text-right">

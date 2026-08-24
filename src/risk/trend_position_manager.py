@@ -32,8 +32,12 @@ TRAIL_MAX_PCT = float(os.getenv('TREND_TRAIL_DIST_MAX_PCT', '3.0'))
 LOCK_ROI_PCT = float(os.getenv('TREND_LOCK_ROI_PCT', '80'))
 EMA_FAST = int(os.getenv('TREND_TRAIL_EMA', '8'))
 EMA_SLOW = int(os.getenv('TREND_EXIT_EMA', '20'))
-VOL_EXIT_RATIO = float(os.getenv('TREND_EXIT_VOL_RATIO', '2.2'))
-STRONG_EXIT_BODY_PCT = float(os.getenv('TREND_EXIT_BODY_PCT', '55'))
+VOL_EXIT_RATIO = float(os.getenv('TREND_EXIT_VOL_RATIO', '1.65'))
+STRONG_EXIT_BODY_PCT = float(os.getenv('TREND_EXIT_BODY_PCT', '48'))
+# Saída “humana”: volume vira contra a tendência com vela direcional (mesmo em lucro)
+VOL_FLIP_RATIO = float(os.getenv('TREND_VOL_FLIP_RATIO', '1.45'))
+VOL_FLIP_BODY_PCT = float(os.getenv('TREND_VOL_FLIP_BODY_PCT', '42'))
+VOL_FLIP_MIN_ROI = float(os.getenv('TREND_VOL_FLIP_MIN_ROI', '15'))
 ENABLE_FIB_PARTIAL_TP = str(os.getenv('ENABLE_FIB_PARTIAL_TP', 'true')).strip().lower() in {
     '1', 'true', 'yes', 'on',
 }
@@ -228,6 +232,50 @@ def detect_early_reversal(df, side: str) -> dict[str, Any]:
     return out
 
 
+def detect_volume_flip_exit(df, side: str, roi_pct: float = 0.0) -> dict[str, Any]:
+    """
+    Como um trader: acompanha a tendência e sai quando o VOLUME muda contra ela.
+
+    Exige ROI mínimo (default 15%) para não sair em ruído no começo do trade.
+    Barra 5m fechada, corpo direcional + volume acima da média.
+    """
+    out = {'triggered': False, 'reasons': [], 'tipo': 'SAIDA_VOLUME_CONTRA'}
+    if _f(roi_pct) < VOL_FLIP_MIN_ROI:
+        return out
+    work = _closed_ohlcv(df)
+    if work is None or len(work) < 8 or 'close' not in getattr(work, 'columns', []):
+        return out
+    last = work.iloc[-1]
+    close = _f(last['close'])
+    open_ = _f(last['open'])
+    high = _f(last['high'])
+    low = _f(last['low'])
+    rng = max(high - low, 1e-9)
+    body = abs(close - open_) / rng * 100.0
+    close_pos = (close - low) / rng
+    vol_r = _vol_ratio(work)
+    if vol_r < VOL_FLIP_RATIO or body < VOL_FLIP_BODY_PCT:
+        return out
+
+    if _is_long(side):
+        # Comprado: volume sobe em vela vermelha = distribuição
+        if close < open_ and close_pos <= 0.40:
+            out['triggered'] = True
+            out['reasons'] = [
+                f'volume contra LONG: vermelha corpo={body:.0f}% vol×{vol_r:.1f} '
+                f'(ROI={_f(roi_pct):.0f}%)'
+            ]
+    else:
+        # Short: volume sobe em vela verde = cobertura / compra agressiva
+        if close > open_ and close_pos >= 0.60:
+            out['triggered'] = True
+            out['reasons'] = [
+                f'volume contra SHORT: verde corpo={body:.0f}% vol×{vol_r:.1f} '
+                f'(ROI={_f(roi_pct):.0f}%)'
+            ]
+    return out
+
+
 def detect_engulfing_reversal(df_fast, df_slow, side: str) -> dict[str, Any]:
     """
     Sentinela: engolfo 5m FECHADO contra a posição + vela forte + volume.
@@ -333,6 +381,17 @@ def decide_trend_action(
         result['tipo_execucao'] = 'SAIDA_REVERSAO_TENDENCIA'
         result['motivo'] = (
             'SAIDA_REVERSAO_TENDENCIA: ' + ' | '.join(engolfo.get('reasons') or [])
+        )
+        return result
+
+    df_struct = df_slow if df_slow is not None and len(df_slow) >= 10 else df_fast
+    # Volume muda contra a tendência (trader humano) — antes do Fib parcial
+    vol_flip = detect_volume_flip_exit(df_struct, side, roi_pct=roi)
+    if vol_flip.get('triggered'):
+        result['action'] = 'EARLY_EXIT'
+        result['tipo_execucao'] = 'SAIDA_VOLUME_CONTRA'
+        result['motivo'] = (
+            'SAIDA_VOLUME_CONTRA: ' + ' | '.join(vol_flip.get('reasons') or [])
         )
         return result
 
@@ -512,7 +571,7 @@ class TrendPositionManager:
         def _run():
             print(
                 f'🫀 [TREND MGR] Ativo — segue tendência | trail @{TRAIL_ROI_PCT:.0f}% ROI '
-                f'(piso +{LOCK_ROI_PCT:.0f}%) | saída só vela forte+vol×{VOL_EXIT_RATIO:.1f} '
+                f'(piso +{LOCK_ROI_PCT:.0f}%) | saída vol×{VOL_EXIT_RATIO:.1f} / flip×{VOL_FLIP_RATIO:.1f} '
                 f'| MaxHold {MAX_HOLD_SECS/60:.0f}min · poll {POLL_SECS:.0f}s',
                 flush=True,
             )
