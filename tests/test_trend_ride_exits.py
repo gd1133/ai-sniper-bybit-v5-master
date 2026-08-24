@@ -9,6 +9,7 @@ from src.risk.trend_position_manager import (
     compute_lock_sl_price,
     decide_trend_action,
     detect_early_reversal,
+    detect_volume_flip_exit,
 )
 
 
@@ -80,3 +81,27 @@ def test_stagnation_ignores_small_green_roi():
         opened_at=0, last_extreme_at=0, now=10 * 3600,
     )
     assert d['action'] == 'HOLD'
+
+
+def test_volume_flip_exits_short_when_green_volume():
+    # Short em lucro: vela verde forte + volume = cobertura
+    df = _ohlcv(
+        last_close=101.8, last_open=99.5, last_high=101.9, last_low=99.4, last_vol=350.0,
+    )
+    flip = detect_volume_flip_exit(df, 'sell', roi_pct=40)
+    assert flip['triggered'] is True
+    d = decide_trend_action(
+        side='sell', roi_pct=40, entry_price=102.0, mark_price=100.0,
+        df_slow=df, df_fast=df,
+    )
+    assert d['action'] == 'EARLY_EXIT'
+    assert d['tipo_execucao'] in ('SAIDA_VOLUME_CONTRA', 'SAIDA_REVERSAO_TENDENCIA')
+
+
+def test_volume_flip_ignores_low_roi():
+    df = _ohlcv(
+        last_close=99.2, last_open=101.0, last_high=101.1, last_low=99.1, last_vol=400.0,
+    )
+    flip = detect_volume_flip_exit(df, 'buy', roi_pct=5)
+    assert flip['triggered'] is False
+

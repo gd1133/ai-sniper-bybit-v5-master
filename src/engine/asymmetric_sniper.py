@@ -24,10 +24,14 @@ import os
 from typing import Any
 
 CLOSE_ZONE = float(os.getenv('CANDLE_CLOSE_ZONE_FRAC', '0.45'))
-MELTDOWN_DROP_PCT = float(os.getenv('MELTDOWN_DROP_PCT', '1.2'))  # queda % em 2–3 velas
-MELTDOWN_BODY_PCT = float(os.getenv('MELTDOWN_BODY_PCT', '55'))   # corpo mínimo da vermelha
+# Assertivo em dump: queda um pouco mais cedo + volume na queda
+MELTDOWN_DROP_PCT = float(os.getenv('MELTDOWN_DROP_PCT', '0.9'))  # queda % em 2–3 velas
+MELTDOWN_BODY_PCT = float(os.getenv('MELTDOWN_BODY_PCT', '50'))   # corpo mínimo da vermelha
+MELTDOWN_VOL_RATIO = float(os.getenv('MELTDOWN_VOL_RATIO', '1.35'))  # volume na queda
+FREEFALL_DROP_PCT = float(os.getenv('FREEFALL_DROP_PCT', '2.0'))  # queda livre 3–4 velas
+FREEFALL_VOL_RATIO = float(os.getenv('FREEFALL_VOL_RATIO', '1.5'))
 WHALE_SCORE_MIN_LONG = float(os.getenv('WHALE_SCORE_MIN_LONG', '28'))
-RIGID_LONG = str(os.getenv('RIGID_LONG_ENTRIES', 'false')).strip().lower() in {
+RIGID_LONG = str(os.getenv('RIGID_LONG_ENTRIES', 'true')).strip().lower() in {
     '1', 'true', 'yes', 'on',
 }
 AGGRESSIVE_MELTDOWN_SHORT = str(os.getenv('AGGRESSIVE_MELTDOWN_SHORT', 'true')).strip().lower() in {
@@ -80,11 +84,13 @@ def detect_meltdown(df, signals: dict | None = None) -> dict[str, Any]:
     out = {
         'meltdown': False,
         'second_red_entry': False,
+        'freefall': False,
         'red_streak': 0,
         'drop_pct': 0.0,
         'strength': 0.0,
         'reason': '',
         'prefer_short': False,
+        'volume_on_dump': False,
     }
     if df is None or len(df) < 4:
         out['reason'] = 'histórico insuficiente'
@@ -125,6 +131,9 @@ def detect_meltdown(df, signals: dict | None = None) -> dict[str, Any]:
     trend = str(signals.get('trend', '') or '').upper()
     st = int(signals.get('supertrend_signal', 0) or 0)
 
+    volume_on_dump = vol_ratio >= MELTDOWN_VOL_RATIO and _is_red(o0, c0)
+    out['volume_on_dump'] = bool(volume_on_dump)
+
     # Caso A: exatamente 2 vermelhas — entrada na 2ª (regra do operador)
     second_red = (
         reds == 2
@@ -132,7 +141,7 @@ def detect_meltdown(df, signals: dict | None = None) -> dict[str, Any]:
         and _is_red(o1, c1)
         and (body0 >= MELTDOWN_BODY_PCT * 0.85 or strong_bear)
         and (lower0 or lower1)
-        and (wide0 or wide1 or vol_ratio >= 1.3)
+        and (wide0 or wide1 or volume_on_dump)
         and drop_pct >= MELTDOWN_DROP_PCT * 0.7
     )
 
@@ -142,7 +151,7 @@ def detect_meltdown(df, signals: dict | None = None) -> dict[str, Any]:
         and _is_red(o0, c0)
         and body0 >= MELTDOWN_BODY_PCT
         and lower0
-        and (wide0 or vol_ratio >= 1.8)
+        and (wide0 or vol_ratio >= max(1.6, MELTDOWN_VOL_RATIO))
         and drop_pct >= MELTDOWN_DROP_PCT
     )
 
@@ -150,7 +159,21 @@ def detect_meltdown(df, signals: dict | None = None) -> dict[str, Any]:
     knife = bool(signals.get('falling_knife'))
     knife_short = knife and trend == 'BAIXA' and _is_red(o0, c0)
 
-    meltdown = bool(second_red or single_blast or knife_short)
+    # Caso D: QUEDA LIVRE — 3+ vermelhas OU queda >= FREEFALL% com volume na queda
+    # (edge principal pedido pelo operador: dump com volume)
+    freefall = (
+        _is_red(o0, c0)
+        and lower0
+        and volume_on_dump
+        and vol_ratio >= FREEFALL_VOL_RATIO
+        and (
+            (reds >= 3 and drop_pct >= MELTDOWN_DROP_PCT)
+            or drop_pct >= FREEFALL_DROP_PCT
+        )
+    )
+    out['freefall'] = bool(freefall)
+
+    meltdown = bool(second_red or single_blast or knife_short or freefall)
     out['meltdown'] = meltdown
     out['second_red_entry'] = bool(second_red)
     out['prefer_short'] = meltdown and AGGRESSIVE_MELTDOWN_SHORT
@@ -162,13 +185,20 @@ def detect_meltdown(df, signals: dict | None = None) -> dict[str, Any]:
             drop_pct * 12
             + body0 * 0.35
             + (20 if second_red else 0)
+            + (22 if freefall else 0)
+            + (18 if volume_on_dump else 0)
             + (15 if vol_ratio >= 1.5 else 0)
             + (10 if trend == 'BAIXA' else 0)
             + (10 if st == -1 else 0),
         )
     out['strength'] = round(strength, 1)
 
-    if second_red:
+    if freefall:
+        out['reason'] = (
+            f'QUEDA LIVRE: dump {drop_pct:.2f}% com volume×{vol_ratio:.1f} '
+            f'({reds} vermelhas) — SHORT agressivo'
+        )
+    elif second_red:
         out['reason'] = (
             f'DERRETIMENTO: 2ª vela vermelha forte (corpo={body0:.0f}%) '
             f'queda={drop_pct:.2f}% — entrada SHORT na metade da 2ª'
@@ -234,20 +264,28 @@ def evaluate_asymmetric_entry(
             result['abort_reason'] = 'SHORT fraco — close fora dos 35% inferiores (sem derretimento)'
             return result
 
-        # Meltdown: libera com força (tese principal de lucro)
+        # Meltdown / queda livre: libera com força (tese principal de lucro)
         if melt['prefer_short']:
+            boost = 18.0 + min(14.0, melt['strength'] * 0.14)
+            if melt.get('freefall'):
+                boost += 6.0
+            if melt.get('volume_on_dump'):
+                boost += 4.0
             result['allowed'] = True
-            result['score_boost'] = 18.0 + min(12.0, melt['strength'] * 0.12)
+            result['score_boost'] = boost
             result['pleno_notes'] = [
-                'Pleno SHORT: derretimento detectado — edge histórico favorável',
+                'Pleno SHORT: derretimento/queda livre — edge em dump com volume',
                 melt['reason'],
-                'Groq/Analista: priorizar venda em panic sell, não chase de alta',
+                'Groq/Analista: priorizar venda em panic sell; sair se volume virar contra',
             ]
             return result
 
-        # SHORT normal: ainda exige pressão real
-        if trend != 'BAIXA':
-            result['abort_reason'] = f'SHORT sem meltdown exige tendência BAIXA (agora={trend})'
+        # SHORT normal: tendência BAIXA ou short_trend BAIXA (assertivo)
+        short_trend = str(signals.get('short_trend', '') or '').upper()
+        if trend != 'BAIXA' and short_trend != 'BAIXA':
+            result['abort_reason'] = (
+                f'SHORT sem meltdown exige tendência BAIXA (agora={trend}/{short_trend})'
+            )
             return result
         if not (strong_red or melt['red_streak'] >= 2):
             result['abort_reason'] = 'SHORT sem vela forte vermelha / 2ª vermelha'
