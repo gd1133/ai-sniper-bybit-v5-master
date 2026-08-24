@@ -210,8 +210,11 @@ class Cerebro2BookVolume:
 
     def generate_report(self, tech_data, symbol, intelligence_context=None) -> dict:
         ctx = intelligence_context or {}
-        # Se a camada cloud/news já sinalizou indisponibilidade, propaga relatório padrão
-        if ctx.get('ai_assistants_unavailable'):
+        # Só força offline se explicitamente pedido. Groq cloud down + order book
+        # local OK deve continuar gerando relatório de livro/volume.
+        if ctx.get('force_assistants_unavailable') or (
+            ctx.get('ai_assistants_unavailable') and not ctx.get('groq_flow') and not tech_data
+        ):
             # #region agent log
             try:
                 from src.debug_agent_log import agent_dbg
@@ -231,6 +234,26 @@ class Cerebro2BookVolume:
                 'action': 'WAIT',
                 'report': AI_UNAVAILABLE_REPORT,
             }
+
+        # Se cloud marcou unavailable mas há fluxo local, usa livro/volume local
+        if ctx.get('ai_assistants_unavailable') and ctx.get('groq_flow_degraded'):
+            flow = ctx.get('groq_flow') or ctx.get('order_flow') or {}
+            if flow.get('available'):
+                score_f = float(flow.get('score_fluxo', 0) or 0)
+                volume_ratio = float((tech_data or {}).get('volume_ratio', 0) or 0)
+                action = 'BUY' if score_f > 0.15 else ('SELL' if score_f < -0.15 else 'WAIT')
+                score = min(100.0, abs(score_f) * 80 + min(20.0, volume_ratio * 8))
+                return {
+                    'brain': 2,
+                    'role': 'Livro e Volume',
+                    'available': True,
+                    'score': float(score),
+                    'action': action,
+                    'report': (
+                        f"Fluxo local ({flow.get('source', 'local')}) score={score_f:+.2f} "
+                        f"| Volume×={volume_ratio:.2f} | Groq cloud degradado — C2 local OK"
+                    ),
+                }
 
         score, action, motivo = self.intelligence.get_signal(
             tech_data, symbol, intelligence_context,
@@ -334,7 +357,8 @@ class Cerebro3Sovereign:
                 final_action = direction
 
             print(
-                f"🚀 [CÉREBRO 3] Decisão tomada de forma independente para o ativo [{clean}].",
+                f"🚀 [CÉREBRO 3] Decisão autônoma [{clean}]: {final_action} "
+                f"prob={confidence:.1f}% | {reason_dir} | {reason_entry}",
                 flush=True,
             )
             if headlines:
@@ -515,14 +539,21 @@ class GroqValidator:
             }
 
         ctx = dict(intelligence_context or {})
-        assistants_unavailable = bool(ctx.get('ai_assistants_unavailable') or ctx.get('autonomous_mode'))
+        # autonomous_mode sozinho NÃO desliga C2 — só force / unavailable real
+        assistants_unavailable = bool(
+            ctx.get('force_assistants_unavailable')
+            or (
+                ctx.get('ai_assistants_unavailable')
+                and not (ctx.get('groq_flow') or {}).get('available')
+            )
+        )
 
         # Vetos duros (ex.: mercado lateral) ainda bloqueiam.
         # Vetos soft / API indisponível NÃO travam — Cérebro 3 assume.
-        if ctx and not ctx.get('allow_entry', True) and not assistants_unavailable:
+        if ctx and not ctx.get('allow_entry', True):
             hard = ctx.get('hard_veto_reasons') or ctx.get('veto_reasons', [])
             soft_only = bool(ctx.get('soft_ai_veto_only'))
-            if hard and not soft_only:
+            if hard and not soft_only and not assistants_unavailable and not ctx.get('autonomous_mode'):
                 return {
                     'probabilidade': 0,
                     'decisao': 'WAIT',
@@ -530,9 +561,12 @@ class GroqValidator:
                     'intelligence': ctx,
                     'agents': [],
                 }
-            # Soft veto → ativa autonomia do Cérebro 3
-            ctx['ai_assistants_unavailable'] = True
-            assistants_unavailable = True
+            # Soft veto / cloud down → autonomia; C2 local só se fluxo disponível
+            ctx['autonomous_mode'] = True
+            if not (ctx.get('groq_flow') or {}).get('available'):
+                ctx['ai_assistants_unavailable'] = True
+                ctx['force_assistants_unavailable'] = True
+                assistants_unavailable = True
 
         # ── Cérebro 1 (Tendência e Velas) — isolado ──────────────────────────
         try:

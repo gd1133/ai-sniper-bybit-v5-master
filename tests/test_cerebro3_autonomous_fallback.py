@@ -46,6 +46,7 @@ def test_cerebro3_autonomous_when_assistants_unavailable():
         intelligence_context={
             'allow_entry': True,
             'ai_assistants_unavailable': True,
+            'force_assistants_unavailable': True,
             'autonomous_mode': True,
             'intelligence_score': 40,
             'timing_score': 50,
@@ -59,6 +60,33 @@ def test_cerebro3_autonomous_when_assistants_unavailable():
     # Não trava o ativo: probabilidade vem da matemática local / histórico
     assert float(res.get('probabilidade', 0)) >= 0
     assert res.get('decisao') in ('BUY', 'SELL', 'WAIT')
+
+
+def test_local_order_book_keeps_c2_available():
+    """Groq cloud down + order book local → C2 NÃO fica 'limites de API'."""
+    res = GroqValidator().consensus_predict(
+        _tech_alta(),
+        'SNXX/USDT:USDT',
+        intelligence_context={
+            'allow_entry': True,
+            'ai_assistants_unavailable': False,
+            'groq_flow_degraded': True,
+            'autonomous_mode': False,
+            'groq_flow': {
+                'available': True,
+                'score_fluxo': -0.4,
+                'source': 'local_order_book',
+                'groq_degraded': True,
+            },
+            'intelligence_score': 55,
+            'timing_score': 60,
+            'global_trend': 'BEARISH',
+        },
+    )
+    c2 = res['cerebro_reports']['cerebro2']
+    assert c2.get('available') is True
+    assert AI_UNAVAILABLE_REPORT not in str(c2.get('report', ''))
+    assert res.get('autonomous_mode') is False
 
 
 def test_hard_veto_still_blocks():
@@ -78,13 +106,14 @@ def test_hard_veto_still_blocks():
 
 
 def test_api_soft_path_does_not_hard_block_in_consensus():
-    """allow_entry=False + autonomous_mode → Cérebro 3 assume, não retorna 0 cego."""
+    """allow_entry=False + soft veto → Cérebro 3 assume, não retorna 0 cego."""
     res = GroqValidator().consensus_predict(
         _tech_alta(),
         'XRP/USDT:USDT',
         intelligence_context={
             'allow_entry': False,
             'ai_assistants_unavailable': True,
+            'force_assistants_unavailable': True,
             'autonomous_mode': True,
             'veto_reasons': ['Notícias/sentimento'],
             'hard_veto_reasons': [],

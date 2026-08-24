@@ -101,8 +101,14 @@ class MarketIntelligence:
             hard_gates_approved=hard_gates_ok,
         )
         groq_flow_degraded = bool(flow.get('groq_degraded'))
-        if groq_flow_degraded:
+        # Cloud Groq caiu mas fallback local OK → NÃO desliga Cérebro 2
+        # (antes: groq_degraded forçava ai_assistants_unavailable e C2 virava
+        # "limites de API" mesmo com order book local válido).
+        local_flow_ok = bool(flow.get('available', False))
+        if groq_flow_degraded and not local_flow_ok:
             ai_assistants_unavailable = True
+        elif groq_flow_degraded and local_flow_ok:
+            ai_assistants_unavailable = False
 
         if adx_blocked:
             hard_veto_reasons.append(
@@ -191,12 +197,12 @@ class MarketIntelligence:
 
         # Assertivo: libera com score baixo; Cérebro 3 soberano
         allow_entry = len(hard_veto_reasons) == 0 and intelligence_score >= 32
-        # Groq degradado NÃO bloqueia — assistente opcional; técnica manda
+        # Modo autônomo só quando cloud realmente sumiu SEM fallback local
+        autonomous_mode = bool(ai_assistants_unavailable) or (
+            groq_flow_degraded and not local_flow_ok
+        )
         if groq_flow_degraded and len(hard_veto_reasons) == 0:
             allow_entry = True
-            autonomous_mode = True
-        else:
-            autonomous_mode = True
 
         # Sentimento derivado do Gemini macro (não zera o contrato legado)
         sent_macro = float(gemini_macro.get('score_sentimento_noticias', 0) or 0)
@@ -219,7 +225,7 @@ class MarketIntelligence:
             'ai_assistants_unavailable': ai_assistants_unavailable,
             'groq_flow_degraded': groq_flow_degraded,
             'cloud_news_degraded': cloud_news_degraded,
-            'autonomous_mode': autonomous_mode or ai_assistants_unavailable or groq_flow_degraded,
+            'autonomous_mode': bool(autonomous_mode or ai_assistants_unavailable),
             'market_regime': regime.get('market_regime'),
             'regime_label': regime.get('regime_label'),
             'is_lateral': regime.get('is_lateral'),

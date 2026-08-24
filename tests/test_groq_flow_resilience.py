@@ -159,4 +159,6 @@ def test_market_intel_allows_entry_when_groq_degraded_no_hard_veto():
 
     assert ctx.get('groq_flow_degraded') is True
     assert ctx.get('allow_entry') is True
-    assert ctx.get('autonomous_mode') is True
+    # Fallback local disponível → não força modo autônomo cego
+    assert ctx.get('ai_assistants_unavailable') is False
+    assert ctx.get('autonomous_mode') is False
