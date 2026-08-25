@@ -1000,7 +1000,9 @@ const App = () => {
               <button
                 type="button"
                 className="text-[10px] font-black uppercase tracking-widest text-amber-200/80 hover:text-white shrink-0"
-                onClick={() => setDismissedAlerts((prev) => new Set([...prev, String(alert.id)]))}}
+                onClick={() => {
+                  setDismissedAlerts((prev) => new Set([...prev, String(alert.id)]));
+                }}
               >
                 Fechar
               </button>
