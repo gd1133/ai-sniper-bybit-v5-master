@@ -3892,6 +3892,12 @@ def sniper_worker_loop():
                     central_state['confidence'] = round(prob, 2)
 
                     if prob < THRESHOLD_ENTRADA or decisao not in ['COMPRAR', 'VENDER', 'BUY', 'SELL']:
+                        print(
+                            f"   ⏸️ [C3] {clean_sym}: decisão={decisao} prob={prob:.1f}% "
+                            f"(limiar={THRESHOLD_ENTRADA}) — "
+                            f"{(res.get('motivo') or 'sem confluência')[:120]}",
+                            flush=True,
+                        )
                         time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
                         continue
 
