@@ -653,7 +653,7 @@ LEVERAGE = 10  # Alavancagem padrão (deve coincidir com main.py)
 
 # Constantes do Sniper Worker (ajustadas pelo modo de risco)
 SCAN_TOP_COINS = 40
-THRESHOLD_ENTRADA = 42.0
+THRESHOLD_ENTRADA = 36.0
 COOLDOWN_INSTITUCIONAL_SECS = 5
 SCAN_INTER_SYMBOL_DELAY_SECS = 0.35
 SNIPER_SIGNAL_LOCK = threading.Lock()
@@ -665,7 +665,7 @@ def _apply_risk_mode_scan_params():
     if RISK_MODE == 'aggressive':
         MAX_MOEDAS_ATIVAS = 5
         SCAN_TOP_COINS = 40
-        THRESHOLD_ENTRADA = 42.0  # moderado — mais entradas reais
+        THRESHOLD_ENTRADA = 36.0  # agressivo — entradas reais mais rápidas
         SCAN_INTER_SYMBOL_DELAY_SECS = 0.35
     else:
         MAX_MOEDAS_ATIVAS = 1
@@ -3689,9 +3689,15 @@ def sniper_worker_loop():
                     except (TypeError, ValueError):
                         _adx_sym = 0.0
                     _truly_lateral = bool(signals.get('is_lateral'))
+                    _short_trend = str(signals.get('short_trend') or '').upper()
+                    _micro_trend = _short_trend in ('ALTA', 'BAIXA')
+                    # Micro-tendência ativa: não descarta só por lateral soft
+                    if _truly_lateral and _adx_sym >= float(STRUCTURE_ADX_MIN) and _micro_trend:
+                        _truly_lateral = False
                     _weak_neutro = (
                         str(signals.get('trend') or '').upper() == 'NEUTRO'
                         and _adx_sym < float(STRUCTURE_ADX_MIN)
+                        and not _micro_trend
                     )
                     if _truly_lateral or _weak_neutro:
                         _tag = 'LATERAL' if _truly_lateral else 'NEUTRO-FRACO'

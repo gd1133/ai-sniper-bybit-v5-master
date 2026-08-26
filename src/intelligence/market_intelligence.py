@@ -196,7 +196,7 @@ class MarketIntelligence:
             soft_ai_veto_only = True
 
         # Assertivo: libera com score baixo; Cérebro 3 soberano
-        allow_entry = len(hard_veto_reasons) == 0 and intelligence_score >= 32
+        allow_entry = len(hard_veto_reasons) == 0 and intelligence_score >= 26
         # Modo autônomo só quando cloud realmente sumiu SEM fallback local
         autonomous_mode = bool(ai_assistants_unavailable) or (
             groq_flow_degraded and not local_flow_ok
