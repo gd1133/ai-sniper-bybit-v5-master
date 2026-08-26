@@ -31,7 +31,7 @@ def _env_float(name: str, default: float) -> float:
 
 
 ENABLED = _env_bool('ENABLE_PERSONAL_ANALYST', True)
-ENTRY_MIN_SCORE = _env_float('ANALYST_ENTRY_MIN_SCORE', 45.0)
+ENTRY_MIN_SCORE = _env_float('ANALYST_ENTRY_MIN_SCORE', 40.0)
 BOOST_CAP = _env_float('ANALYST_PROB_BOOST_CAP', 8.0)
 PENALTY_CAP = _env_float('ANALYST_PROB_PENALTY_CAP', 12.0)
 EXIT_GIVEBACK_PCT = _env_float('ANALYST_EXIT_GIVEBACK_PCT', 70.0)
@@ -126,12 +126,28 @@ def refine_entry(
         vwap = _f(signals.get('vwap'))
         fib_dist = _f(signals.get('fib_distance_pct'), 99.0)
         money_flow = str(signals.get('money_flow_side') or '').upper()
+        breakout_momentum = bool(
+            signals.get('big_player_ativo')
+            or signals.get('strong_bullish_candle')
+            or signals.get('strong_bearish_candle')
+            or str(signals.get('turtle_breakout') or 'NONE').upper() not in ('', 'NONE')
+            or vol_ratio >= 1.75
+        )
 
         # ── 1) Alinhamento estrutura (EMA + tendência + Smart Money) ──
+        short_trend = str(signals.get('short_trend') or '').upper()
         if long and trend != 'ALTA':
-            hard_blocks.append(f'tendência={trend} ≠ ALTA')
+            if inst == 'COMPRA_INSTITUCIONAL' and short_trend == 'ALTA':
+                score += 4
+                notes.append('macro NEUTRO mas short=ALTA + Smart Money COMPRA')
+            else:
+                hard_blocks.append(f'tendência={trend} ≠ ALTA')
         if (not long) and trend != 'BAIXA':
-            hard_blocks.append(f'tendência={trend} ≠ BAIXA')
+            if inst == 'VENDA_INSTITUCIONAL' and short_trend == 'BAIXA':
+                score += 4
+                notes.append('macro NEUTRO mas short=BAIXA + Smart Money VENDA')
+            else:
+                hard_blocks.append(f'tendência={trend} ≠ BAIXA')
         if long and inst not in ('COMPRA_INSTITUCIONAL', 'NEUTRO'):
             # NEUTRO já teria sido filtrado pelas portas; reforço se VENDA
             if 'VENDA' in inst:
@@ -169,22 +185,28 @@ def refine_entry(
             score -= 6
             notes.append(f'longe da Fib ({fib_dist:.2f}%)')
 
-        # ── 4) RSI — evita extremos (complementa anti-chase) ──
+        # ── 4) RSI — evita extremos (libera rompimento institucional/Turtle) ──
         if long:
-            if rsi >= 72:
-                hard_blocks.append(f'RSI sobrecomprado {rsi:.1f}')
-            elif rsi >= 65:
-                score -= 6
+            if rsi >= 88 and not breakout_momentum:
+                hard_blocks.append(f'RSI sobrecomprado extremo {rsi:.1f}')
+            elif rsi >= 72 and not breakout_momentum:
+                score -= 8
                 notes.append(f'RSI alto {rsi:.1f}')
+            elif rsi >= 72 and breakout_momentum:
+                score += 3
+                notes.append(f'RSI alto {rsi:.1f} mas rompimento institucional/Turtle')
             elif 45 <= rsi <= 62:
                 score += 5
                 notes.append(f'RSI saudável {rsi:.1f}')
         else:
-            if rsi <= 28:
-                hard_blocks.append(f'RSI sobrevendido {rsi:.1f}')
-            elif rsi <= 35:
-                score -= 6
+            if rsi <= 12 and not breakout_momentum:
+                hard_blocks.append(f'RSI sobrevendido extremo {rsi:.1f}')
+            elif rsi <= 28 and not breakout_momentum:
+                score -= 8
                 notes.append(f'RSI baixo {rsi:.1f}')
+            elif rsi <= 28 and breakout_momentum:
+                score += 3
+                notes.append(f'RSI baixo {rsi:.1f} mas dump institucional')
             elif 38 <= rsi <= 55:
                 score += 5
                 notes.append(f'RSI saudável {rsi:.1f}')
@@ -192,12 +214,12 @@ def refine_entry(
         # ── 5) Preço vs EMA20 / VWAP (lado a favor do fluxo) ──
         if price > 0 and ema20 > 0:
             ext_ema = ((price - ema20) / ema20) * 100.0
-            if long and ext_ema > 1.4:
+            if long and ext_ema > 2.2 and not breakout_momentum:
                 hard_blocks.append(f'estirado +{ext_ema:.2f}% vs EMA20')
             elif long and -0.35 <= ext_ema <= 0.55:
                 score += 6
                 notes.append('pullback EMA20 ok')
-            elif (not long) and ext_ema < -1.4:
+            elif (not long) and ext_ema < -2.2 and not breakout_momentum:
                 hard_blocks.append(f'estirado {ext_ema:.2f}% vs EMA20')
             elif (not long) and -0.55 <= ext_ema <= 0.35:
                 score += 6
@@ -392,15 +414,22 @@ def refine_exit(
         except Exception:
             pass
 
-        # 3) Volume de distribuição contra a posição com lucro
+        # 3) Volume de distribuição contra a posição — só com lucro relevante
         sig = signals or {}
         vol_ratio = _f(sig.get('volume_ratio'), 1.0)
         rsi = _f(sig.get('rsi'), 50.0)
-        if roi >= EXIT_MOMENTUM_FADE_ROI and vol_ratio >= 1.6:
-            if long and rsi >= 70:
+        news_risk = str(sig.get('news_risk') or '').upper()
+        if roi >= max(25.0, EXIT_MOMENTUM_FADE_ROI * 0.85) and vol_ratio >= 1.7:
+            if long and rsi >= 68:
                 reasons.append(f'distribuição no topo (RSI {rsi:.0f}, vol x{vol_ratio:.1f})')
-            if (not long) and rsi <= 30:
+            if (not long) and rsi <= 32:
                 reasons.append(f'captação no fundo (RSI {rsi:.0f}, vol x{vol_ratio:.1f})')
+        if news_risk == 'HIGH' and roi >= 30:
+            gt = str(sig.get('global_trend') or 'NEUTRAL').upper()
+            if long and gt == 'BEARISH':
+                reasons.append('sentimento/notícia BEARISH contra LONG')
+            if (not long) and gt == 'BULLISH':
+                reasons.append('sentimento/notícia BULLISH contra SHORT')
 
         # Com trailing armado, só sugere saída se give-back for evidente
         if trailing_armed and reasons:

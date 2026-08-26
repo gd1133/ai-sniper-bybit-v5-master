@@ -35,9 +35,9 @@ EMA_SLOW = int(os.getenv('TREND_EXIT_EMA', '20'))
 VOL_EXIT_RATIO = float(os.getenv('TREND_EXIT_VOL_RATIO', '1.65'))
 STRONG_EXIT_BODY_PCT = float(os.getenv('TREND_EXIT_BODY_PCT', '48'))
 # Saída “humana”: volume vira contra a tendência com vela direcional (mesmo em lucro)
-VOL_FLIP_RATIO = float(os.getenv('TREND_VOL_FLIP_RATIO', '1.45'))
-VOL_FLIP_BODY_PCT = float(os.getenv('TREND_VOL_FLIP_BODY_PCT', '42'))
-VOL_FLIP_MIN_ROI = float(os.getenv('TREND_VOL_FLIP_MIN_ROI', '15'))
+VOL_FLIP_RATIO = float(os.getenv('TREND_VOL_FLIP_RATIO', '1.55'))
+VOL_FLIP_BODY_PCT = float(os.getenv('TREND_VOL_FLIP_BODY_PCT', '45'))
+VOL_FLIP_MIN_ROI = float(os.getenv('TREND_VOL_FLIP_MIN_ROI', '22'))
 ENABLE_FIB_PARTIAL_TP = str(os.getenv('ENABLE_FIB_PARTIAL_TP', 'true')).strip().lower() in {
     '1', 'true', 'yes', 'on',
 }
