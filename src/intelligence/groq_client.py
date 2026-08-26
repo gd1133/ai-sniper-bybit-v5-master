@@ -7,8 +7,10 @@ Evita abortar ordens quando um modelo é descontinuado (404) ou há rate-limit (
 
 from __future__ import annotations
 
+import datetime
 import os
 import re
+import time
 from typing import Any
 
 try:
@@ -32,6 +34,11 @@ _DEPRECATED_GROQ_MODELS = {
     'llama3-70b-8192': DEFAULT_GROQ_MODEL,
     'llama3-8b-8192': DEFAULT_GROQ_MODEL,
 }
+
+# Cooldown global — compartilhado por flow, news e tribunal (evita spam 429/TPD).
+_groq_cooldown_until: float = 0.0
+_groq_cooldown_reason: str = ''
+_groq_cooldown_logged_until: float = 0.0
 
 
 def _remap_groq_model(model: str) -> str:
@@ -105,6 +112,80 @@ def extract_rate_limit_wait(exc: BaseException, default_secs: float = 180.0) -> 
     return default_secs
 
 
+def is_groq_tpd_error(exc: BaseException | str) -> bool:
+    """Cota diária (TPD) esgotada — tentar outros modelos não ajuda."""
+    err = str(exc).lower()
+    return any(
+        token in err
+        for token in (
+            'tokens per day',
+            'tpd',
+            'token per day',
+            'per day (tpd)',
+            'daily token',
+        )
+    )
+
+
+def cooldown_secs_for_rate_limit(exc: BaseException) -> float:
+    """Duração do cooldown: TPD até meia-noite UTC; RPM pelo header/mensagem."""
+    if is_groq_tpd_error(exc):
+        now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+        midnight = (now + datetime.timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0,
+        )
+        return max(3600.0, (midnight - now).total_seconds())
+    default = float(os.getenv('GROQ_RATE_LIMIT_COOLDOWN_SECS', '180') or 180)
+    return extract_rate_limit_wait(exc, default_secs=default)
+
+
+def is_groq_in_cooldown() -> bool:
+    return time.time() < _groq_cooldown_until
+
+
+def get_groq_cooldown_info() -> dict[str, Any]:
+    now = time.time()
+    remaining = max(0.0, _groq_cooldown_until - now)
+    return {
+        'in_cooldown': remaining > 0,
+        'remaining_secs': round(remaining, 1),
+        'reason': _groq_cooldown_reason,
+        'until': _groq_cooldown_until,
+    }
+
+
+def set_groq_cooldown(seconds: float, reason: str, *, error_msg: str = '') -> None:
+    """Ativa cooldown global — uma chamada bloqueia flow/news/tribunal."""
+    global _groq_cooldown_until, _groq_cooldown_reason, _groq_cooldown_logged_until
+    secs = max(60.0, float(seconds or 60.0))
+    new_until = time.time() + secs
+    if new_until <= _groq_cooldown_until:
+        return
+    _groq_cooldown_until = new_until
+    _groq_cooldown_reason = reason
+    if time.time() >= _groq_cooldown_logged_until:
+        err_bit = f' — {error_msg[:140]}' if error_msg else ''
+        print(
+            f'⚠️ [GROQ] Cooldown global {secs / 3600:.1f}h ({reason}){err_bit} '
+            f'→ fallback local até reset',
+            flush=True,
+        )
+        _groq_cooldown_logged_until = new_until
+
+
+def _log_groq_cooldown_skip(purpose: str) -> None:
+    global _groq_cooldown_logged_until
+    if time.time() < _groq_cooldown_logged_until:
+        return
+    info = get_groq_cooldown_info()
+    print(
+        f'⚠️ [GROQ] {purpose}: API em cooldown ({info["reason"]}, '
+        f'{info["remaining_secs"]:.0f}s restantes) → fallback local',
+        flush=True,
+    )
+    _groq_cooldown_logged_until = info['until']
+
+
 def groq_chat_completion(
     messages: list[dict[str, str]],
     *,
@@ -134,6 +215,19 @@ def groq_chat_completion(
             'error_type': 'no_client',
             'error': 'GROQ_API_KEY ausente ou pacote groq indisponível',
             'models_tried': [],
+        }
+
+    if is_groq_in_cooldown():
+        _log_groq_cooldown_skip(purpose)
+        info = get_groq_cooldown_info()
+        return {
+            'ok': False,
+            'content': None,
+            'model': None,
+            'error_type': 'rate_limit',
+            'error': f'Groq em cooldown ({info["reason"]})',
+            'models_tried': [],
+            'cooldown': True,
         }
 
     models = get_groq_model_chain(purpose)
@@ -175,12 +269,21 @@ def groq_chat_completion(
         except Exception as exc:
             last_err = exc
             last_type = classify_groq_error(exc)
+            if last_type == 'rate_limit':
+                wait_secs = cooldown_secs_for_rate_limit(exc)
+                reason = 'TPD esgotado' if is_groq_tpd_error(exc) else 'rate_limit RPM'
+                set_groq_cooldown(wait_secs, reason, error_msg=str(exc))
+                break
             print(
                 f'⚠️ [GROQ] {purpose} falhou em `{model}` ({last_type}): {str(exc)[:180]}',
                 flush=True,
             )
-            # 404 → tenta próximo modelo; 429/connection → para cadeia (cooldown)
-            if last_type in ('rate_limit', 'connection'):
+            if last_type == 'connection':
+                set_groq_cooldown(
+                    float(os.getenv('GROQ_CONNECTION_COOLDOWN_SECS', '90') or 90),
+                    'connection',
+                    error_msg=str(exc),
+                )
                 break
             continue
 

@@ -19,10 +19,17 @@ from typing import Any
 
 import requests
 
-from src.intelligence.groq_client import groq_chat_completion, log_groq_degraded
+from src.intelligence.groq_client import (
+    get_groq_cooldown_info,
+    groq_chat_completion,
+    is_groq_in_cooldown,
+    log_groq_degraded,
+)
 
 _CACHE: dict[str, tuple[float, dict]] = {}
 _CACHE_TTL = 45.0  # fluxo muda rápido
+_CACHE_TTL_DEGRADED = 120.0  # menos chamadas quando Groq em cooldown
+_FLOW_DEGRADED_LOGGED_UNTIL = 0.0
 
 GROQ_FLOW_SYSTEM = """Você é o subsistema de análise de fluxo ultra-rápido do Motor Sniper. Sua função é analisar o Order Book (Livro de Ordens) e as últimas agressões de mercado enviadas pelo usuário.
 Identifique onde os investidores estão empurrando o preço através de ordens a mercado (agressão) ou defendendo posições (absorção).
@@ -218,6 +225,8 @@ def _gemini_flow_fallback(symbol: str, user_payload: str) -> dict | None:
 
 
 def _call_groq_flow(symbol: str, user_payload: str) -> dict | None:
+    if is_groq_in_cooldown():
+        return None
     result = groq_chat_completion(
         messages=[
             {'role': 'system', 'content': GROQ_FLOW_SYSTEM},
@@ -225,7 +234,7 @@ def _call_groq_flow(symbol: str, user_payload: str) -> dict | None:
         ],
         purpose='flow',
         temperature=0.1,
-        max_tokens=220,
+        max_tokens=int(os.getenv('GROQ_FLOW_MAX_TOKENS', '150') or 150),
     )
     if result.get('ok'):
         parsed = _parse_flow_json(result.get('content') or '', source='groq')
@@ -234,8 +243,18 @@ def _call_groq_flow(symbol: str, user_payload: str) -> dict | None:
             parsed['groq_degraded'] = False
             return parsed
         return None
-    log_groq_degraded('GROQ FLOW', result, symbol=symbol)
+    if not result.get('cooldown'):
+        log_groq_degraded('GROQ FLOW', result, symbol=symbol)
     return None
+
+
+def _log_flow_degraded_once(message: str) -> None:
+    global _FLOW_DEGRADED_LOGGED_UNTIL
+    now = time.time()
+    if now < _FLOW_DEGRADED_LOGGED_UNTIL:
+        return
+    print(message, flush=True)
+    _FLOW_DEGRADED_LOGGED_UNTIL = now + 300.0
 
 
 def analyze_order_book_flow(
@@ -269,18 +288,40 @@ def analyze_order_book_flow(
 
     cache_key = f"{symbol}:{bool(order_book)}"
     now = time.time()
-    if cache_key in _CACHE and (now - _CACHE[cache_key][0]) < _CACHE_TTL:
+    ttl = _CACHE_TTL_DEGRADED if is_groq_in_cooldown() else _CACHE_TTL
+    if cache_key in _CACHE and (now - _CACHE[cache_key][0]) < ttl:
         cached = dict(_CACHE[cache_key][1])
         cached['from_cache'] = True
         return _finish(cached)
 
     local = _local_flow_from_book(order_book, signals)
     groq_key = os.getenv('GROQ_API_KEY', '').strip()
+
+    # Sem hard-gates: não gasta tokens Groq — fluxo local basta para o radar.
+    if not hard_gates_approved:
+        local['groq_degraded'] = True
+        local['reason'] = 'hard-gates pendentes — fluxo local (economia Groq)'
+        _CACHE[cache_key] = (now, local)
+        return _finish(local)
+
+    if is_groq_in_cooldown():
+        info = get_groq_cooldown_info()
+        fallback = local if order_book else _technical_flow_from_signals(signals)
+        fallback['reason'] = (
+            f"Groq cooldown ({info.get('reason', 'rate_limit')}) — "
+            f"{fallback.get('reason', fallback.get('source', 'local'))}"
+        )
+        _log_flow_degraded_once(
+            f'⚠️ [GROQ FLOW] API em cooldown ({info.get("remaining_secs", 0):.0f}s) '
+            f'→ fallback {fallback.get("source")} (hard-gates OK)'
+        )
+        _CACHE[cache_key] = (now, fallback)
+        return _finish(fallback)
+
     if not groq_key:
-        print(
-            f'⚠️ [GROQ FLOW] {symbol}: GROQ_API_KEY ausente → fallback local '
-            f'(execução continua se hard-gates OK)',
-            flush=True,
+        _log_flow_degraded_once(
+            f'⚠️ [GROQ FLOW] GROQ_API_KEY ausente → fallback local '
+            f'(execução continua se hard-gates OK)'
         )
         _CACHE[cache_key] = (now, local)
         return _finish(local)
@@ -305,29 +346,28 @@ def analyze_order_book_flow(
         _CACHE[cache_key] = (now, parsed)
         return _finish(parsed)
 
-    # Groq falhou — tenta Gemini
-    gemini_parsed = _gemini_flow_fallback(symbol, user_payload)
+    # Groq falhou — tenta Gemini (só se Groq não estiver em cooldown TPD)
+    gemini_parsed = None
+    if not is_groq_in_cooldown():
+        gemini_parsed = _gemini_flow_fallback(symbol, user_payload)
     if gemini_parsed:
         gemini_parsed['score_fluxo'] = round(
             0.70 * float(gemini_parsed['score_fluxo'])
             + 0.30 * float(local.get('score_fluxo', 0)),
             4,
         )
-        print(
-            f'⚠️ [GROQ FLOW] {symbol}: Groq indisponível — usando Gemini fallback '
-            f'(execução continua se hard-gates OK)',
-            flush=True,
+        _log_flow_degraded_once(
+            f'⚠️ [GROQ FLOW] Groq indisponível — usando Gemini fallback '
+            f'(execução continua se hard-gates OK)'
         )
         _CACHE[cache_key] = (now, gemini_parsed)
         return _finish(gemini_parsed)
 
     # Fallback final: order book local ou sinais técnicos das portas
     fallback = local if order_book else _technical_flow_from_signals(signals)
-    print(
-        f'⚠️ [GROQ FLOW] {symbol}: cloud indisponível → '
-        f"fallback {fallback.get('source')} score={fallback.get('score_fluxo'):+.2f} "
-        f'(execução continua se hard-gates OK)',
-        flush=True,
+    _log_flow_degraded_once(
+        f'⚠️ [GROQ FLOW] cloud indisponível → fallback {fallback.get("source")} '
+        f'score={fallback.get("score_fluxo"):+.2f} (hard-gates OK)'
     )
     _CACHE[cache_key] = (now, fallback)
     return _finish(fallback)

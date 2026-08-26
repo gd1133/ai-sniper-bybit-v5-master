@@ -19,7 +19,6 @@ except Exception:
 
 _CACHE: dict[str, tuple[float, dict]] = {}
 _CACHE_TTL_SECS = 300
-_GROQ_COOLDOWN_UNTIL = 0.0  # instrumentation / future cooldown gate
 _GROQ_FAIL_STREAK = 0
 
 
@@ -95,17 +94,20 @@ def _neutral_degraded_payload(reason: str) -> dict:
 
 
 def _ai_analyze_with_groq(symbol: str, tech_summary: str, groq_key: str) -> dict | None:
-    global _GROQ_FAIL_STREAK, _GROQ_COOLDOWN_UNTIL
+    global _GROQ_FAIL_STREAK
+    from src.intelligence.groq_client import get_groq_cooldown_info, is_groq_in_cooldown
+
     if not groq_key or Groq is None:
         return None
     now = time.time()
-    in_cooldown = now < _GROQ_COOLDOWN_UNTIL
+    in_cooldown = is_groq_in_cooldown()
+    cooldown_info = get_groq_cooldown_info()
     # #region agent log
     try:
         from src.debug_agent_log import agent_dbg
         agent_dbg('B', 'news_analyzer.py:_ai_analyze_with_groq', 'groq_call_attempt', {
             'symbol': str(symbol)[:40],
-            'cooldown_until': _GROQ_COOLDOWN_UNTIL,
+            'cooldown_until': cooldown_info.get('until', 0),
             'in_cooldown': in_cooldown,
             'fail_streak': _GROQ_FAIL_STREAK,
         })
@@ -140,7 +142,8 @@ Responda APENAS em JSON válido:
             max_tokens=300,
         )
         if not result.get('ok'):
-            log_groq_degraded('NEWS AI', result, symbol=symbol)
+            if not result.get('cooldown'):
+                log_groq_degraded('NEWS AI', result, symbol=symbol)
             raise RuntimeError(result.get('error') or 'Groq news indisponível')
         text = (result.get('content') or '').strip()
         text = re.sub(r'^```json\s*|\s*```$', '', text, flags=re.IGNORECASE).strip()
@@ -148,27 +151,18 @@ Responda APENAS em JSON válido:
         return json.loads(text)
     except Exception as exc:
         err = str(exc)
-        is_429 = '429' in err or 'rate_limit' in err.lower()
+        is_429 = '429' in err or 'rate_limit' in err.lower() or 'cooldown' in err.lower()
         _GROQ_FAIL_STREAK += 1
-        if is_429:
-            # ~3 min default; tenta extrair "try again in XmYs" se existir
-            wait_secs = 180.0
-            m = re.search(r'try again in\s+(\d+)m([\d.]+)s', err, flags=re.IGNORECASE)
-            if m:
-                wait_secs = int(m.group(1)) * 60 + float(m.group(2))
-            else:
-                m2 = re.search(r'try again in\s+([\d.]+)s', err, flags=re.IGNORECASE)
-                if m2:
-                    wait_secs = float(m2.group(1))
-            _GROQ_COOLDOWN_UNTIL = time.time() + max(60.0, wait_secs)
+        # Cooldown global é definido em groq_client.groq_chat_completion
         # #region agent log
         try:
             from src.debug_agent_log import agent_dbg
+            from src.intelligence.groq_client import get_groq_cooldown_info
             agent_dbg('A', 'news_analyzer.py:_ai_analyze_with_groq', 'groq_call_failed', {
                 'symbol': str(symbol)[:40],
                 'is_429': is_429,
                 'fail_streak': _GROQ_FAIL_STREAK,
-                'cooldown_until': _GROQ_COOLDOWN_UNTIL,
+                'cooldown_until': get_groq_cooldown_info().get('until', 0),
                 'err_prefix': err[:120],
             })
         except Exception:
