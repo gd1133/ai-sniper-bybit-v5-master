@@ -334,6 +334,9 @@ def decide_trend_action(
     df_fast=None,
     df_slow=None,
     now: float | None = None,
+    symbol: str | None = None,
+    signals: dict | None = None,
+    intel_ctx: dict | None = None,
 ) -> dict[str, Any]:
     """
     Orquestra decisão viva.
@@ -373,6 +376,61 @@ def decide_trend_action(
         'roi_pct': roi,
         'price_move_pct': move,
     }
+
+    # ── 0) Cérebro 3 — gestão ativa de saída (HOLD / CLOSE / TRAIL) ────────
+    _c3_exit_enabled = str(os.getenv('ENABLE_CEREBRO3_EXIT', 'true')).strip().lower() in {
+        '1', 'true', 'yes', 'on',
+    }
+    if _c3_exit_enabled and signals and (df_slow is not None or df_fast is not None):
+        try:
+            from src.engine.context_enrichment import (
+                build_cerebro1_payload,
+                build_cerebro2_payload,
+                evaluate_gates_advisory,
+                merge_context_for_cerebro3,
+            )
+            from src.ai_brain.cerebro3_decisor import evaluate_exit
+
+            df_ctx = df_slow if df_slow is not None and len(df_slow) >= 10 else df_fast
+            gates = evaluate_gates_advisory(signals, df=df_ctx)
+            c1 = build_cerebro1_payload(signals, df=df_ctx, gates=gates)
+            c2 = build_cerebro2_payload(signals, intel_ctx=intel_ctx or {})
+            context = merge_context_for_cerebro3(
+                symbol or '', signals, gates, c1, c2, intel_ctx or {},
+            )
+            context['price'] = mark
+            position_state = {
+                'side': side,
+                'entry_price': entry,
+                'mark_price': mark,
+                'roi_pct': roi,
+                'age_secs': age,
+                'trailing_armed': trailing_armed,
+                'sl_price': result.get('sl_price'),
+            }
+            c3_exit = evaluate_exit(context, position_state)
+            c3_action = str(c3_exit.get('action', 'HOLD')).upper()
+            if c3_action == 'CLOSE':
+                result['action'] = 'EARLY_EXIT'
+                result['tipo_execucao'] = 'C3_EXIT_CLOSE'
+                result['motivo'] = f"C3 CLOSE: {c3_exit.get('rationale', '')[:200]}"
+                result['cerebro3_exit'] = c3_exit
+                return result
+            if c3_action == 'TRAIL' or (
+                c3_exit.get('stop_loss') and _f(c3_exit.get('stop_loss')) > 0
+            ):
+                sl_c3 = _f(c3_exit.get('stop_loss'))
+                if sl_c3 > 0:
+                    result['sl_price'] = sl_c3
+                    result['trailing_armed'] = True
+                    result['action'] = 'EXTEND_TRAILING'
+                    result['tipo_execucao'] = 'C3_TRAIL'
+                    result['motivo'] = f"C3 TRAIL: {c3_exit.get('rationale', '')[:160]}"
+                    result['cerebro3_exit'] = c3_exit
+                    if trailing_armed:
+                        return result
+        except Exception as c3_err:
+            result['c3_exit_error'] = str(c3_err)[:120]
 
     # ── 1) Única saída discricionária: vela forte + volume contra (5m) ─
     engolfo = detect_engulfing_reversal(df_fast, df_slow, side)
