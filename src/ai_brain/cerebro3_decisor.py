@@ -130,37 +130,86 @@ def _normalize_decision(raw: dict | None, price: float, *, exit_mode: bool = Fal
 
 
 def _local_entry_decision(context: dict[str, Any]) -> dict[str, Any]:
-    """Fallback matemático quando LLM indisponível."""
+    """Fallback matemático com confiança dinâmica 35%–75%."""
     c1 = context.get('cerebro1') or {}
     gates = context.get('gates_advisory') or {}
+    snap = context.get('signals_snapshot') or {}
     price = _f(context.get('price'))
     trend = str((c1.get('trend') or {}).get('macro', 'NEUTRO')).upper()
     short = str((c1.get('trend') or {}).get('short', 'NEUTRO')).upper()
+    st = int((c1.get('trend') or {}).get('supertrend_signal', 0) or 0)
     rsi = _f((c1.get('momentum') or {}).get('rsi'), 50)
     adx = _f((c1.get('structure') or {}).get('adx'))
     vol_score = gates.get('volume_score', 'Normal')
     is_lateral = bool(gates.get('is_lateral'))
     atr = _f((c1.get('volatility_volume') or {}).get('atr'), price * 0.01)
+    levels = c1.get('levels') or {}
+    near_support = bool(levels.get('near_support'))
+    near_resistance = bool(levels.get('near_resistance'))
 
     action = 'HOLD'
     strat = 'TREND'
     confidence = 0.35
 
-    if is_lateral or adx < 20:
-        strat = 'RANGE_BOUNCE'
-        if rsi <= 32 and (c1.get('levels') or {}).get('near_support'):
-            action, confidence = 'BUY', 0.52
-        elif rsi >= 68 and (c1.get('levels') or {}).get('near_resistance'):
-            action, confidence = 'SELL', 0.52
-    elif trend == 'ALTA' and short == 'ALTA' and vol_score in ('Normal', 'Institucional'):
-        action, confidence, strat = 'BUY', 0.58, 'TREND'
-    elif trend == 'BAIXA' and short == 'BAIXA' and vol_score in ('Normal', 'Institucional'):
-        action, confidence, strat = 'SELL', 0.58, 'TREND'
-    elif vol_score == 'Institucional' and adx >= 22:
-        if trend == 'ALTA':
-            action, confidence, strat = 'BUY', 0.50, 'BREAKOUT'
-        elif trend == 'BAIXA':
-            action, confidence, strat = 'SELL', 0.50, 'BREAKOUT'
+    # ── Dump / derretimento → SHORT prioritário ──────────────────────────
+    meltdown = bool(snap.get('meltdown') or snap.get('dump_lane') or snap.get('freefall'))
+    melt_str = _f(snap.get('meltdown_strength'))
+    if meltdown or melt_str >= 40:
+        action, strat = 'SELL', 'BREAKOUT'
+        confidence = min(0.75, 0.58 + min(0.12, melt_str / 500))
+        if vol_score == 'Institucional':
+            confidence = min(0.75, confidence + 0.06)
+        rationale_extra = f' dump/meltdown str={melt_str:.0f}'
+    else:
+        rationale_extra = ''
+        use_range = is_lateral or adx < 22
+        if use_range:
+            strat = 'RANGE_BOUNCE'
+            if rsi <= 30:
+                action = 'BUY'
+                confidence = 0.55 + min(0.10, (30 - rsi) / 30 * 0.10)
+                if near_support:
+                    confidence += 0.08
+            elif rsi >= 70:
+                action = 'SELL'
+                confidence = 0.55 + min(0.10, (rsi - 70) / 30 * 0.10)
+                if near_resistance:
+                    confidence += 0.08
+            elif rsi <= 35:
+                action = 'BUY'
+                confidence = 0.48 + (35 - rsi) * 0.012
+                if near_support:
+                    confidence += 0.06
+            elif rsi >= 65:
+                action = 'SELL'
+                confidence = 0.48 + (rsi - 65) * 0.012
+                if near_resistance:
+                    confidence += 0.06
+            if vol_score == 'Institucional' and action != 'HOLD':
+                confidence = min(0.75, confidence + 0.05)
+        else:
+            strat = 'TREND'
+            ema_aligned_long = trend == 'ALTA' and st >= 0
+            ema_aligned_short = trend == 'BAIXA' and st <= 0
+            if adx > 22 and ema_aligned_long and short in ('ALTA', 'NEUTRO'):
+                action, confidence = 'BUY', 0.60
+            elif adx > 22 and ema_aligned_short and short in ('BAIXA', 'NEUTRO'):
+                action, confidence = 'SELL', 0.60
+            elif trend == 'ALTA' and short == 'ALTA' and vol_score in ('Normal', 'Institucional'):
+                action, confidence = 'BUY', 0.58
+            elif trend == 'BAIXA' and short == 'BAIXA' and vol_score in ('Normal', 'Institucional'):
+                action, confidence = 'SELL', 0.58
+            elif adx >= 22:
+                if trend == 'BAIXA' and rsi < 45:
+                    action, confidence = 'SELL', 0.56
+                elif trend == 'ALTA' and rsi > 55:
+                    action, confidence = 'BUY', 0.56
+            if vol_score == 'Institucional' and action != 'HOLD':
+                confidence = min(0.75, confidence + 0.04)
+            if adx >= 35 and action != 'HOLD':
+                confidence = min(0.75, confidence + 0.05)
+
+    confidence = max(0.35, min(0.75, confidence))
 
     sl_dist = max(atr * 1.5, price * 0.012)
     tp_dist = sl_dist * 2.2
@@ -169,12 +218,16 @@ def _local_entry_decision(context: dict[str, Any]) -> dict[str, Any]:
         sl, tp1, tp2 = price - sl_dist, price + tp_dist, price + tp_dist * 1.6
     elif action == 'SELL':
         sl, tp1, tp2 = price + sl_dist, price - tp_dist, price - tp_dist * 1.6
+        if meltdown:
+            vwap = _f(snap.get('vwap') or levels.get('vwap'))
+            pivot_high = _f(levels.get('pivot_high') or price)
+            sl = max(sl, vwap * 1.002 if vwap > 0 else 0, pivot_high * 1.001 if pivot_high > 0 else 0)
     else:
         sl = tp1 = tp2 = price
 
     return {
         'action': action,
-        'confidence': confidence,
+        'confidence': round(confidence, 4),
         'strategy_type': strat,
         'entry_price': round(price, 8),
         'stop_loss': round(sl, 8),
@@ -183,10 +236,83 @@ def _local_entry_decision(context: dict[str, Any]) -> dict[str, Any]:
         'invalidation_reason': '',
         'rationale': (
             f'Fallback local C3 | {strat} trend={trend} RSI={rsi:.0f} '
-            f'ADX={adx:.0f} vol={vol_score}'
+            f'ADX={adx:.0f} vol={vol_score} conf={confidence*100:.1f}%{rationale_extra}'
         ),
         'source': 'local_fallback',
     }
+
+
+def apply_dump_lane_override(
+    res: dict[str, Any],
+    signals: dict | None,
+    prob: float,
+) -> dict[str, Any]:
+    """
+    Inverte BUY → SELL quando dump/meltdown ativo.
+    SL curto acima de VWAP/topo para SHORT.
+    """
+    signals = dict(signals or {})
+    decisao = str(res.get('decisao', 'WAIT')).upper()
+    side = 'sell' if decisao in ('SELL', 'VENDER') else (
+        'buy' if decisao in ('BUY', 'COMPRAR') else 'wait'
+    )
+
+    meltdown = bool(
+        signals.get('meltdown')
+        or signals.get('dump_lane')
+        or signals.get('freefall')
+    )
+    prefer_short = bool(signals.get('prefer_short')) or _f(signals.get('meltdown_strength')) >= 40
+    if not meltdown and not prefer_short:
+        return {'side': side, 'decisao': decisao, 'prob': prob, 'res': res, 'inverted': False}
+
+    price = _f(signals.get('price') or res.get('entry_price'))
+    vwap = _f(signals.get('vwap'))
+    pivot_high = _f(signals.get('pivot_high') or signals.get('candle_high') or price)
+    atr = _f(signals.get('atr_20') or signals.get('atr'), price * 0.01)
+
+    if side == 'buy' or decisao in ('BUY', 'COMPRAR'):
+        sl_short = price + max(atr * 1.2, price * 0.008)
+        if vwap > price:
+            sl_short = max(sl_short, vwap * 1.003)
+        if pivot_high > price:
+            sl_short = max(sl_short, pivot_high * 1.001)
+        tp_dist = max(atr * 2.0, price * 0.015)
+        new_dec = 'SELL'
+        new_prob = max(prob, 55.0)
+        c3 = dict(res.get('cerebro3_decision') or {})
+        c3.update({
+            'action': 'SELL',
+            'decisao': 'SELL',
+            'strategy_type': 'BREAKOUT',
+            'confidence': new_prob / 100.0,
+            'stop_loss': round(sl_short, 8),
+            'take_profit_1': round(price - tp_dist, 8),
+            'take_profit_2': round(price - tp_dist * 1.5, 8),
+            'rationale': (
+                f'DUMP-LANE: inversão BUY→SHORT | meltdown={meltdown} '
+                f'str={_f(signals.get("meltdown_strength")):.0f}'
+            ),
+            'source': 'dump_lane_override',
+        })
+        new_res = dict(res)
+        new_res.update({
+            'decisao': new_dec,
+            'probabilidade': new_prob,
+            'motivo': c3['rationale'],
+            'cerebro3_decision': c3,
+            'strategy_type': 'BREAKOUT',
+            'stop_loss': c3['stop_loss'],
+        })
+        return {
+            'side': 'sell',
+            'decisao': new_dec,
+            'prob': new_prob,
+            'res': new_res,
+            'inverted': True,
+        }
+
+    return {'side': side, 'decisao': decisao, 'prob': prob, 'res': res, 'inverted': False}
 
 
 def _local_exit_decision(context: dict[str, Any], position: dict) -> dict[str, Any]:

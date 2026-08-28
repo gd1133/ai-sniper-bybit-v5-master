@@ -55,9 +55,73 @@ def test_cerebro3_local_fallback_range_bounce():
     }
     with patch.dict(os.environ, {'ENABLE_CEREBRO3_LLM': 'false'}):
         dec = decide_entry(context)
-    assert dec['action'] in ('BUY', 'SELL', 'HOLD')
+    assert dec['action'] == 'BUY'
     assert dec['strategy_type'] == 'RANGE_BOUNCE'
-    assert 0 <= dec['confidence'] <= 1.0
+    assert dec['confidence'] >= 0.55
+
+
+def test_c3_fallback_pengu_oversold():
+    """RSI 28 lateral — não deve ficar preso em 35% WAIT."""
+    from src.ai_brain.cerebro3_decisor import decide_entry
+
+    context = {
+        'price': 0.01,
+        'gates_advisory': {'is_lateral': True, 'volume_score': 'Baixo'},
+        'cerebro1': {
+            'trend': {'macro': 'NEUTRO', 'short': 'NEUTRO', 'supertrend_signal': 0},
+            'structure': {'adx': 16, 'is_lateral': True},
+            'momentum': {'rsi': 28},
+            'levels': {'near_support': False},
+            'volatility_volume': {'atr': 0.0002},
+        },
+        'cerebro2': {},
+    }
+    with patch.dict(os.environ, {'ENABLE_CEREBRO3_LLM': 'false'}):
+        dec = decide_entry(context)
+    assert dec['action'] == 'BUY'
+    assert dec['probabilidade'] >= 55.0
+
+
+def test_dump_lane_inverts_buy_to_short():
+    from src.ai_brain.cerebro3_decisor import apply_dump_lane_override
+
+    res = {'decisao': 'BUY', 'probabilidade': 45, 'cerebro3_decision': {}}
+    signals = {
+        'meltdown': True,
+        'meltdown_strength': 62,
+        'price': 1.0,
+        'vwap': 1.02,
+        'pivot_high': 1.015,
+    }
+    out = apply_dump_lane_override(res, signals, 45.0)
+    assert out['inverted'] is True
+    assert out['side'] == 'sell'
+    assert out['prob'] >= 55.0
+
+
+def test_anti_chase_soft_when_c3_high_confidence():
+    from src.engine.anti_chase_gate import evaluate_anti_chase_entry
+    import pandas as pd
+    import numpy as np
+
+    n = 80
+    closes = np.linspace(100, 130, n)
+    df = pd.DataFrame({
+        'open': closes,
+        'high': closes + 1,
+        'low': closes - 1,
+        'close': closes,
+    })
+    anti = evaluate_anti_chase_entry(
+        side='buy',
+        mark_price=130.0,
+        df_1m=df,
+        df_5m=df,
+        signals={'price': 130.0, 'rsi': 72, 'atr_pct': 1.5},
+        c3_confidence_pct=58.0,
+    )
+    assert anti.get('allowed') is True
+    assert anti.get('soft_override') is True
 
 
 def test_sovereign_predict_no_neutro_block():
