@@ -3660,6 +3660,16 @@ def sniper_worker_loop():
                     if df is None or len(df) < 200:
                         continue
 
+                    from src.engine.context_enrichment import check_operational_abort
+                    _op = check_operational_abort(ticker=t, df=df)
+                    if _op.get('abort'):
+                        print(
+                            f"   🚫 [OP] {clean_sym}: {_op.get('reason')} — único abort pré-C3",
+                            flush=True,
+                        )
+                        time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
+                        continue
+
                     signals = IndicatorEngine(df).get_signals()
                     # Amostra ADX das top moedas → calibra Porta 3 do próximo ciclo
                     try:
@@ -3680,48 +3690,27 @@ def sniper_worker_loop():
                                 )
                     except Exception:
                         pass
-                    # Skip só lateral real OU NEUTRO sem força (ADX fraco).
-                    # Antes: trend==NEUTRO (perto da SMA200) cegava ADX 30–46
-                    # e o robô nunca chegava nas Portas / volume.
+                    # Contexto lateral/neutro → Cérebro 3 (RANGE_BOUNCE / reversão) — sem skip
                     from src.engine.structure_config import STRUCTURE_ADX_MIN
                     try:
                         _adx_sym = float(signals.get('adx') or 0)
                     except (TypeError, ValueError):
                         _adx_sym = 0.0
-                    _truly_lateral = bool(signals.get('is_lateral'))
-                    _short_trend = str(signals.get('short_trend') or '').upper()
-                    _micro_trend = _short_trend in ('ALTA', 'BAIXA')
-                    # Micro-tendência ativa: não descarta só por lateral soft
-                    if _truly_lateral and _adx_sym >= float(STRUCTURE_ADX_MIN) and _micro_trend:
-                        _truly_lateral = False
-                    _weak_neutro = (
-                        str(signals.get('trend') or '').upper() == 'NEUTRO'
-                        and _adx_sym < float(STRUCTURE_ADX_MIN)
-                        and not _micro_trend
-                    )
-                    if _truly_lateral or _weak_neutro:
-                        _tag = 'LATERAL' if _truly_lateral else 'NEUTRO-FRACO'
+                    if bool(signals.get('is_lateral')) or _adx_sym < 20:
                         print(
-                            f"   ⏸️ [{_tag}] {clean_sym}: "
-                            f"trend={signals.get('trend')} lateral={signals.get('is_lateral')} "
-                            f"ADX={signals.get('adx')} short={signals.get('short_trend')} "
-                            f"— sem movimento, skip",
+                            f"   📊 [CONTEXTO] {clean_sym}: lateral={signals.get('is_lateral')} "
+                            f"ADX={_adx_sym:.1f} trend={signals.get('trend')} "
+                            f"→ C3 avalia RANGE_BOUNCE",
                             flush=True,
                         )
-                        continue
-                    if str(signals.get('trend') or '').upper() == 'NEUTRO' and _adx_sym >= float(STRUCTURE_ADX_MIN):
+                    elif str(signals.get('trend') or '').upper() == 'NEUTRO' and _adx_sym >= float(STRUCTURE_ADX_MIN):
                         print(
-                            f"   🔎 [FORCA] {clean_sym}: trend=NEUTRO mas ADX={_adx_sym:.1f} "
-                            f"short={signals.get('short_trend')} — avalia Portas (assertivo)",
+                            f"   🔎 [CONTEXTO] {clean_sym}: trend=NEUTRO ADX={_adx_sym:.1f} "
+                            f"short={signals.get('short_trend')} → C3 decide",
                             flush=True,
                         )
 
-                    # ══════════════════════════════════════════════════════════
-                    # SHORT-CIRCUIT ABSOLUTO (Cérebro 2) — ANTES do Cérebro 3
-                    # Portas: ADX≥23 → BB → amplitude → volume → VWAP → anatomia vela
-                    # Qualquer falha → NEUTRO e aborta (não gasta ML / não abre ordem).
-                    # EXCEÇÃO: queda livre com volume → faixa DUMP SHORT (assertiva).
-                    # ══════════════════════════════════════════════════════════
+                    # Portas 1–5 consultivas (métricas → Cérebro 3)
                     dump_lane = False
                     try:
                         from src.engine.asymmetric_sniper import detect_meltdown as _detect_melt_pre
@@ -3758,41 +3747,18 @@ def sniper_worker_loop():
                         hard_gate = institutional_entry_allowed(signals, df=df)
                     except Exception as gate_err:
                         print(
-                            f"   🚫 [HARD-GATE] {clean_sym}: falha ao avaliar portas ({gate_err}) → NEUTRO",
+                            f"   ⚠️ [GATES] {clean_sym}: erro métricas ({gate_err}) — segue para C3",
                             flush=True,
                         )
-                        time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
-                        continue
-                    if not hard_gate.get('allowed'):
-                        _gate_abort = hard_gate.get('abort_reason') or 'volume/VWAP'
-                        if dump_lane:
-                            hard_gate = {
-                                'allowed': True,
-                                'sinal_institucional': 'VENDA_INSTITUCIONAL',
-                                'abort_reason': '',
-                                'dump_lane_bypass': True,
-                            }
-                            print(
-                                f"   ⚡ [DUMP-LANE] {clean_sym}: bypass Portas "
-                                f"({_gate_abort}) — SHORT dump",
-                                flush=True,
-                            )
-                        else:
-                            print(
-                                f"   🚫 [HARD-GATE] {clean_sym}: {_gate_abort} "
-                                f"→ NEUTRO (abort antes Cérebro 3)",
-                                flush=True,
-                            )
-                            time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
-                            continue
+                        from src.engine.context_enrichment import evaluate_gates_advisory
+                        hard_gate = evaluate_gates_advisory(signals, df=df)
+
+                    _vol_sc = hard_gate.get('volume_score', 'n/d')
+                    _notes = '; '.join(hard_gate.get('advisory_notes') or [])[:120]
                     print(
-                        f"   ✅ [HARD-GATE] {clean_sym}: "
-                        f"{hard_gate.get('sinal_institucional')} — portas 1–5 liberadas"
-                        f"{' | DUMP-LANE' if dump_lane else ''}"
-                        f"{' | ' + str(signals.get('liquidity_log') or '') if signals.get('liquidity_log') else ''}"
-                        f"{' | ' + str(signals.get('anatomy_log') or '') if signals.get('anatomy_log') else ''}"
-                        f"{' | ' + str(signals.get('ponto_continuo_reason') or '') if signals.get('ponto_continuo') else ''}"
-                        f"{' | ' + str(signals.get('turtle_reason') or '') if signals.get('turtle_breakout') not in (None, 'NONE', '') else ''}",
+                        f"   📋 [GATES→C3] {clean_sym}: regime={hard_gate.get('market_regime')} "
+                        f"vol={_vol_sc} sinal={hard_gate.get('sinal_institucional')} "
+                        f"{(' | ' + _notes) if _notes else ''}",
                         flush=True,
                     )
                     print(
@@ -3819,10 +3785,7 @@ def sniper_worker_loop():
                         'grab_reversal': signals.get('grab_reversal'),
                     }
 
-                    if validator.local_signal(signals) < 12:
-                        continue
-
-                    # Order book antes do Cérebro 3 — alimenta Groq fluxo (incremental)
+                    # C1/C2 coletam → C3 decide (sem skip por local_signal)
                     order_book = None
                     try:
                         order_book = radar_broker.fetch_order_book(sym, limit=20)
@@ -3830,17 +3793,20 @@ def sniper_worker_loop():
                         order_book = None
 
                     intel_ctx = market_intel.evaluate(sym, df, signals, t, order_book=order_book)
-                    if intel_ctx.get('groq_flow_degraded') and hard_gate.get('allowed'):
+                    intel_ctx = dict(intel_ctx)
+                    intel_ctx['gates_advisory'] = hard_gate
+                    intel_ctx['order_book'] = order_book
+                    intel_ctx['ticker'] = t
+                    if intel_ctx.get('groq_flow_degraded'):
                         flow_src = (intel_ctx.get('groq_flow') or {}).get('source', 'local')
                         print(
                             f"   ⚠️ [GROQ FLOW] {clean_sym}: API degradada → fallback {flow_src} "
                             f"(portas 1–5 OK — execução continua)",
                             flush=True,
                         )
-                        intel_ctx = dict(intel_ctx)
                         intel_ctx['allow_entry'] = True
                         intel_ctx['autonomous_mode'] = True
-                    # Injeta notícias/heat/fluxo nos sinais para o Cérebro 3
+                    # Injetar notícias/heat/fluxo nos sinais para o Cérebro 3
                     signals = dict(signals)
                     signals['sentiment_score'] = intel_ctx.get('sentiment_score')
                     signals['global_trend'] = intel_ctx.get('global_trend')
@@ -3850,44 +3816,12 @@ def sniper_worker_loop():
                         intel_ctx = dict(intel_ctx)
                         intel_ctx['headlines'] = intel_ctx.get('headlines') or (intel_ctx.get('news') or {}).get('headlines')
 
-                    if not intel_ctx.get('allow_entry'):
-                        hard = list(intel_ctx.get('hard_veto_reasons') or [])
-                        soft = list(intel_ctx.get('soft_veto_reasons') or [])
-                        # Veto duro (lateral / vela contrária) NUNCA é bypass — só soft/news/API
-                        lateral_hard = any('LATERAL' in str(h).upper() for h in hard) or bool(signals.get('is_lateral'))
-                        if lateral_hard or (hard and not intel_ctx.get('soft_ai_veto_only') and not intel_ctx.get('cloud_news_degraded') and not intel_ctx.get('autonomous_mode') and not intel_ctx.get('groq_flow_degraded')):
-                            print(
-                                f"   🚫 [IA] {clean_sym} bloqueado (veto duro): "
-                                f"{' | '.join(hard or intel_ctx.get('veto_reasons', []))}",
-                                flush=True,
-                            )
-                            continue
-                        if (
-                            intel_ctx.get('soft_ai_veto_only')
-                            or soft
-                            or intel_ctx.get('cloud_news_degraded')
-                            or intel_ctx.get('groq_flow_degraded')
-                            or intel_ctx.get('autonomous_mode')
-                        ):
-                            # Soft news / cloud degradado: Cérebro 3 assume — sem 🚫
-                            if intel_ctx.get('cloud_news_degraded'):
-                                print(
-                                    f"   ⚠️ [ASSISTENTE IA] Notícias indisponíveis para {clean_sym}. "
-                                    f"Passando comando para análise técnica do Cérebro 3.",
-                                    flush=True,
-                                )
-                            intel_ctx = dict(intel_ctx)
-                            intel_ctx['allow_entry'] = True
-                            intel_ctx['autonomous_mode'] = True
-                            intel_ctx['ai_assistants_unavailable'] = False
-                            intel_ctx['news_block_trade'] = False
-                        else:
-                            print(
-                                f"   🚫 [IA] {clean_sym} bloqueado: "
-                                f"{' | '.join(intel_ctx.get('veto_reasons', []))}",
-                                flush=True,
-                            )
-                            continue
+                    if intel_ctx.get('advisory_flags'):
+                        print(
+                            f"   📋 [C2→C3] {clean_sym}: flags="
+                            f"{'; '.join(intel_ctx.get('advisory_flags', [])[:3])}",
+                            flush=True,
+                        )
 
                     res = validator.consensus_predict(
                         signals, sym, force_local_only=True, intelligence_context=intel_ctx,
@@ -3897,61 +3831,59 @@ def sniper_worker_loop():
                     central_state['symbol'] = clean_sym
                     central_state['confidence'] = round(prob, 2)
 
+                    _c3 = res.get('cerebro3_decision') or res.get('cerebro_reports', {}).get('cerebro3') or {}
+                    _strat = _c3.get('strategy_type', res.get('strategy_type', 'n/d'))
                     if prob < THRESHOLD_ENTRADA or decisao not in ['COMPRAR', 'VENDER', 'BUY', 'SELL']:
                         print(
-                            f"   ⏸️ [C3] {clean_sym}: decisão={decisao} prob={prob:.1f}% "
-                            f"(limiar={THRESHOLD_ENTRADA}) — "
-                            f"{(res.get('motivo') or 'sem confluência')[:120]}",
+                            f"   ⏸️ [C3] {clean_sym}: {decisao} conf={prob:.1f}% "
+                            f"strat={_strat} (limiar={THRESHOLD_ENTRADA}) — "
+                            f"{(res.get('motivo') or '')[:100]}",
                             flush=True,
                         )
                         time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
                         continue
+
+                    print(
+                        f"   ✅ [C3 DECISOR] {clean_sym}: {decisao} conf={prob:.1f}% "
+                        f"strat={_strat} SL={_c3.get('stop_loss')} TP1={_c3.get('take_profit_1')} "
+                        f"| {(res.get('motivo') or '')[:80]}",
+                        flush=True,
+                    )
 
                     side_exec = 'sell' if decisao in ('SELL', 'VENDER') else 'buy'
-                    # Dump lane: força SHORT (queda livre + volume) — não compra faca
-                    if signals.get('dump_lane') or signals.get('freefall') or (
-                        signals.get('meltdown') and signals.get('prefer_short')
-                    ):
+                    if _c3.get('entry_price'):
+                        signals = dict(signals)
+                        signals['c3_entry_price'] = _c3.get('entry_price')
+                        signals['c3_stop_loss'] = _c3.get('stop_loss')
+                        signals['c3_take_profit_1'] = _c3.get('take_profit_1')
+                        signals['c3_strategy_type'] = _strat
+                    # Dump lane: reforço SHORT em queda livre (C3 já decidiu; só alinha sinal)
+                    if signals.get('dump_lane') or signals.get('freefall'):
                         if side_exec != 'sell':
                             print(
-                                f"   🧊 [DUMP-LANE] {clean_sym}: Cérebro={side_exec} → força SELL "
-                                f"(queda+volume)",
+                                f"   🧊 [DUMP-LANE] {clean_sym}: C3={side_exec} — dump ativo, "
+                                f"preferência SHORT",
                                 flush=True,
                             )
-                        side_exec = 'sell'
                         signals = dict(signals)
-                        signals['sinal_institucional'] = 'VENDA_INSTITUCIONAL'
-                    # Short-circuit: Cérebro 3 deve concordar com o lado institucional já liberado
-                    from src.engine.hard_gates import side_matches_institutional
-                    inst_sig_early = str(signals.get('sinal_institucional', 'NEUTRO') or 'NEUTRO').upper()
-                    if not side_matches_institutional(side_exec, inst_sig_early):
+                        signals['sinal_institucional'] = signals.get('sinal_institucional') or 'VENDA_INSTITUCIONAL'
+
+                    # C3 é decisor — sem re-validação Smart Money / tendência macro
+                    trend_now = str(signals.get('trend', 'NEUTRO')).upper()
+                    if side_exec == 'sell' and trend_now != 'BAIXA' and _strat == 'TREND':
                         print(
-                            f"   🚫 [HARD-GATE] {clean_sym}: Cérebro 3={side_exec} "
-                            f"≠ Smart Money={inst_sig_early} — abort antes de timing/execução",
+                            f"   ℹ️ [C3] {clean_sym}: SHORT com macro={trend_now} "
+                            f"(estratégia={_strat})",
                             flush=True,
                         )
-                        time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
-                        continue
-                    trend_now = str(signals.get('trend', 'NEUTRO')).upper()
-                    short_now = str(signals.get('short_trend', '') or '').upper()
-                    # Dump / meltdown SHORT: permite se short_trend BAIXA ou dump_lane
-                    if side_exec == 'sell' and trend_now != 'BAIXA':
-                        if signals.get('dump_lane') or signals.get('meltdown') or short_now == 'BAIXA':
-                            print(
-                                f"   ⚡ [DUMP/SHORT] {clean_sym}: macro={trend_now} "
-                                f"short={short_now} — libera SHORT assertivo",
-                                flush=True,
-                            )
-                        else:
-                            print(f"   🚫 [TENDÊNCIA] {clean_sym}: VENDA bloqueada — tendência={trend_now}", flush=True)
-                            time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
-                            continue
-                    if side_exec == 'buy' and trend_now != 'ALTA':
-                        print(f"   🚫 [TENDÊNCIA] {clean_sym}: COMPRA bloqueada — tendência={trend_now}", flush=True)
-                        time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
-                        continue
+                    elif side_exec == 'buy' and trend_now != 'ALTA' and _strat == 'TREND':
+                        print(
+                            f"   ℹ️ [C3] {clean_sym}: LONG com macro={trend_now} "
+                            f"(estratégia={_strat})",
+                            flush=True,
+                        )
 
-                    # ── ANALISTA PESSOAL (Cérebro 3+) — refinador assertivo DyTrade ──
+                    # ── ANALISTA PESSOAL — consultivo (não bloqueia C3) ──
                     try:
                         from src.ai_brain.personal_analyst import refine_entry
                         analyst = refine_entry(
@@ -3970,40 +3902,10 @@ def sniper_worker_loop():
                         }
                         if not analyst.get('allowed', True):
                             print(
-                                f"   🧠 [ANALISTA] {clean_sym}: BLOQUEADO — {analyst.get('abort_reason')}",
+                                f"   🧠 [ANALISTA] {clean_sym}: aviso — {analyst.get('abort_reason')} "
+                                f'(consultivo — C3 decide)',
                                 flush=True,
                             )
-                            try:
-                                from src.database.decision_history import record_ia_decision
-                                record_ia_decision(
-                                    symbol=clean_sym,
-                                    motivo_saida=str(analyst.get('abort_reason') or 'analista'),
-                                    tipo_execucao='PERSONAL_ANALYST_BLOCK',
-                                    action_payload=f"side={side_exec}|prob={prob:.1f}",
-                                )
-                            except Exception:
-                                pass
-                            time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
-                            continue
-                        new_prob = float(analyst.get('probabilidade') or prob)
-                        if abs(new_prob - prob) >= 0.5:
-                            print(
-                                f"   🧠 [ANALISTA] {clean_sym}: score={analyst.get('score')} "
-                                f"prob {prob:.1f}% → {new_prob:.1f}% | "
-                                f"{' | '.join((analyst.get('notes') or [])[:2])}",
-                                flush=True,
-                            )
-                            prob = new_prob
-                            res['probabilidade'] = prob
-                            central_state['confidence'] = round(prob, 2)
-                            if prob < THRESHOLD_ENTRADA:
-                                print(
-                                    f"   🧠 [ANALISTA] {clean_sym}: abaixo do threshold "
-                                    f"após ajuste ({prob:.1f}% < {THRESHOLD_ENTRADA})",
-                                    flush=True,
-                                )
-                                time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
-                                continue
                         elif analyst.get('notes'):
                             print(
                                 f"   🧠 [ANALISTA] {clean_sym}: OK score={analyst.get('score')} "
@@ -4040,38 +3942,32 @@ def sniper_worker_loop():
                         )
                         if not asym.get('allowed'):
                             print(
-                                f"   🚫 [ASSIMÉTRICO] {clean_sym} {side_exec.upper()}: "
-                                f"{asym.get('abort_reason')}",
+                                f"   ℹ️ [ASSIMÉTRICO] {clean_sym} {side_exec.upper()}: "
+                                f"{asym.get('abort_reason')} (consultivo)",
                                 flush=True,
                             )
-                            time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
-                            continue
-                        for note in pleno_study_notes(side_exec, asym, signals)[:2]:
-                            print(f"   🧠 [PLENO] {clean_sym}: {note}", flush=True)
-                        signals['asymmetric_boost'] = float(asym.get('score_boost') or 0)
-                        signals['asymmetric_ok'] = True
+                        else:
+                            for note in pleno_study_notes(side_exec, asym, signals)[:2]:
+                                print(f"   🧠 [PLENO] {clean_sym}: {note}", flush=True)
+                            signals['asymmetric_boost'] = float(asym.get('score_boost') or 0)
+                            signals['asymmetric_ok'] = True
                     except Exception as asym_err:
                         print(
-                            f"   ⚠️ [ASSIMÉTRICO] {clean_sym}: falha ({asym_err}) — "
-                            f"fail-closed em LONG, libera SHORT só com tendência",
+                            f"   ⚠️ [ASSIMÉTRICO] {clean_sym}: {asym_err} (consultivo)",
                             flush=True,
                         )
-                        if side_exec == 'buy':
-                            time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
-                            continue
 
                     signals_timing = dict(signals)
                     signals_timing['whale_aligned'] = bool(intel_ctx.get('whale_aligned'))
                     timing_ok, timing_reasons = confirmar_timing_entrada(side_exec, df, signals_timing)
                     if not timing_ok:
                         print(
-                            f"   ⏳ [TIMING] {clean_sym} aguardando fim de repique: "
+                            f"   ⏳ [TIMING] {clean_sym} (consultivo): "
                             f"{' | '.join(timing_reasons)}",
                             flush=True,
                         )
-                        time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
-                        continue
-                    print(f"   ✅ [TIMING] {clean_sym}: {' | '.join(timing_reasons)}", flush=True)
+                    else:
+                        print(f"   ✅ [TIMING] {clean_sym}: {' | '.join(timing_reasons)}", flush=True)
 
                     # ── ANTI-CHASE: RSI / extensão EMA-VWAP / pullback EMA8 ──
                     # Bloqueia entrada no topo/fundo esticado ANTES da ordem a mercado.
@@ -4100,49 +3996,24 @@ def sniper_worker_loop():
                             signals=signals,
                         )
                         if not anti.get('allowed'):
-                            code = anti.get('code') or 'REJECTED'
-                            reason = anti.get('abort_reason') or code
+                            reason = anti.get('abort_reason') or anti.get('code') or 'REJECTED'
                             print(
-                                f"   🚫 [ANTI-CHASE] {clean_sym} {side_exec.upper()}: {reason}",
+                                f"   ℹ️ [ANTI-CHASE] {clean_sym} {side_exec.upper()}: "
+                                f"{reason} (consultivo — C3 decidiu)",
                                 flush=True,
                             )
-                            try:
-                                from src.database.decision_history import record_ia_decision
-                                record_ia_decision(
-                                    sym,
-                                    motivo_saida=reason,
-                                    pnl_garantido_pct=0.0,
-                                    tipo_execucao='ENTRY_REJECTED',
-                                    action_payload=str(code),
-                                    client_id=0,
-                                )
-                                _push_ia_decision_live(
-                                    clean_sym, str(code), reason, 0.0, 'ENTRY_REJECTED',
-                                )
-                            except Exception as log_err:
-                                print(
-                                    f"   ⚠️ [ANTI-CHASE] log SQLite: {log_err}",
-                                    flush=True,
-                                )
-                            central_state['status'] = (
-                                f"🚫 Anti-chase {clean_sym}: {str(code)[:48]}"
+                        else:
+                            print(
+                                f"   ✅ [ANTI-CHASE] {clean_sym}: {anti.get('abort_reason')}",
+                                flush=True,
                             )
-                            time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
-                            continue
-                        print(
-                            f"   ✅ [ANTI-CHASE] {clean_sym}: {anti.get('abort_reason')}",
-                            flush=True,
-                        )
                     except Exception as anti_err:
-                        # Fail-closed: não chasear se o filtro quebrar
                         print(
-                            f"   🚫 [ANTI-CHASE] {clean_sym}: falha no filtro ({anti_err}) — abort",
+                            f"   ⚠️ [ANTI-CHASE] {clean_sym}: {anti_err} (consultivo)",
                             flush=True,
                         )
-                        time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
-                        continue
 
-                    # Confluência Absoluta — Concordância Total (5 filtros). Um falso = aborta.
+                    # Confluência Absoluta — consultiva (C3 já decidiu)
                     try:
                         from src.engine.confluence_absoluta import (
                             absolute_confluence_enabled,
@@ -4164,20 +4035,17 @@ def sniper_worker_loop():
                             )
                             if not confluence.get('aprovado'):
                                 print(
-                                    f"   ❌ [SINAL REJEITADO] {clean_sym}: Falha na Confluência Total. "
-                                    f"Fatores não se alinharam: {confluence.get('failed')}",
+                                    f"   ℹ️ [CONFLUÊNCIA] {clean_sym}: fatores={confluence.get('failed')} "
+                                    f"(consultivo)",
                                     flush=True,
                                 )
-                                time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
-                                continue
-                            print(f"   ✅ [CONFLUÊNCIA ABSOLUTA] {clean_sym}: Concordância Total OK", flush=True)
+                            else:
+                                print(
+                                    f"   ✅ [CONFLUÊNCIA] {clean_sym}: concordância OK",
+                                    flush=True,
+                                )
                     except Exception as conf_err:
-                        print(
-                            f"   ❌ [SINAL REJEITADO] {clean_sym}: erro na Confluência Absoluta ({conf_err})",
-                            flush=True,
-                        )
-                        time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
-                        continue
+                        print(f"   ⚠️ [CONFLUÊNCIA] {clean_sym}: {conf_err}", flush=True)
 
                     money_flow = _build_money_flow_metrics(signals, t, decisao)
                     edge = _get_symbol_trade_edge(sym, decisao)
@@ -4194,18 +4062,8 @@ def sniper_worker_loop():
                             f"   🔥 [SHORT DUMP] {clean_sym}: prioridade de score em derretimento",
                             flush=True,
                         )
-                    # BLOQUEIO ABSOLUTO de lado: Cérebro 3 só opera a favor do Smart Money
-                    from src.engine.hard_gates import side_matches_institutional
                     inst_sig = str(signals.get('sinal_institucional', 'NEUTRO') or 'NEUTRO').upper()
-                    if not side_matches_institutional(side_exec, inst_sig):
-                        print(
-                            f"   🚫 [HARD-GATE] {clean_sym}: decisão={side_exec} "
-                            f"≠ fluxo institucional={inst_sig} — abortando",
-                            flush=True,
-                        )
-                        time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
-                        continue
-                    chart_bonus += 12.0
+                    chart_bonus += 12.0 if inst_sig in ('COMPRA_INSTITUCIONAL', 'VENDA_INSTITUCIONAL') else 0.0
                     print(
                         f"   🏦 [INSTITUCIONAL] {clean_sym}: {inst_sig} "
                         f"(VWAP={float(signals.get('vwap', 0) or 0):.4f}, "

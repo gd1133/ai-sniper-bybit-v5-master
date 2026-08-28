@@ -1,20 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-Motor Sniper — Portas de filtragem sequencial (Short-Circuit Absoluto).
+Motor Sniper — Portas de filtragem sequencial.
 
-Ordem obrigatória (qualquer falha → NEUTRO e aborta ANTES do Cérebro 3):
-
-  Porta 1 — Estrutura: ADX(14) >= STRUCTURE_ADX_MIN (+ BB se exigido)
-  Porta 2 — Anti-acumulação: amplitude % dos últimos 20
-  Porta 3 — Pegada institucional: Volume > MA(20) + σ adaptativo
-  Porta 4 — Lado vs VWAP: COMPRA/VENDA_INSTITUCIONAL
-  Porta 5 — Anatomia da vela: cor + close na zona + anti-faca caindo
-
-O surto de volume NUNCA é avaliado se as Portas 1–2 estiverem fechadas.
+Modo consultivo (default): métricas descritivas → Cérebro 3 decide.
+Modo legado (ADVISORY_GATES=false): short-circuit absoluto Portas 1–5.
 """
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from src.engine.structure_config import (
@@ -22,6 +16,10 @@ from src.engine.structure_config import (
     STRUCTURE_REQUIRE_BB_EXPAND,
     DEFAULT_AMPLITUDE_PCT_MAX,
 )
+
+
+def _advisory_mode() -> bool:
+    return str(os.getenv('ADVISORY_GATES', 'true')).strip().lower() in {'1', 'true', 'yes', 'on'}
 
 
 INSTITUTIONAL_BUY = 'COMPRA_INSTITUCIONAL'
@@ -38,11 +36,17 @@ def _f(value: Any, default: float = 0.0) -> float:
 
 def evaluate_hard_gates(signals: dict | None, df=None) -> dict[str, Any]:
     """
-    Avalia as 5 portas a partir do dict já calculado por IndicatorEngine /
-    RastreadorInstitucional. Fail-closed: dado ausente = porta fechada.
-
-    ``df`` (OHLC) é opcional mas recomendado para Porta 5 (falling knife).
+    Avalia portas. Modo consultivo (default): nunca bloqueia — só métricas.
+    Modo legado: short-circuit na primeira porta fechada.
     """
+    if _advisory_mode():
+        from src.engine.context_enrichment import evaluate_gates_advisory
+        return evaluate_gates_advisory(signals, df=df)
+
+    return _evaluate_hard_gates_legacy(signals, df=df)
+
+
+def _evaluate_hard_gates_legacy(signals: dict | None, df=None) -> dict[str, Any]:
     signals = signals or {}
     adx = _f(signals.get('adx'))
     bb_width = _f(signals.get('bollinger_bandwidth'))

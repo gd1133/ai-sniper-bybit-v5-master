@@ -88,7 +88,9 @@ class MarketIntelligence:
         )
 
         # Incremental: Groq fluxo (order book) + Gemini macro (manchetes)
-        hard_gates_ok = bool(
+        import os
+        advisory = str(os.getenv('ADVISORY_GATES', 'true')).strip().lower() in {'1', 'true', 'yes', 'on'}
+        hard_gates_ok = True if advisory else bool(
             signals.get('sinal_institucional')
             and str(signals.get('trend', 'NEUTRO')).upper() in ('ALTA', 'BAIXA')
             and not signals.get('is_lateral')
@@ -195,13 +197,22 @@ class MarketIntelligence:
             )
             soft_ai_veto_only = True
 
-        # Assertivo: libera com score baixo; Cérebro 3 soberano
-        allow_entry = len(hard_veto_reasons) == 0 and intelligence_score >= 26
+        # Modo consultivo: Cérebro 3 decide — flags viram contexto, não veto
+        import os
+        advisory = str(os.getenv('ADVISORY_GATES', 'true')).strip().lower() in {'1', 'true', 'yes', 'on'}
+        advisory_flags = list(hard_veto_reasons) + list(soft_veto_reasons)
+        if advisory:
+            allow_entry = True
+            hard_veto_reasons = []  # não bloqueia radar
+            veto_reasons = list(advisory_flags)
+        else:
+            allow_entry = len(hard_veto_reasons) == 0 and intelligence_score >= 26
+            veto_reasons = list(hard_veto_reasons)
         # Modo autônomo só quando cloud realmente sumiu SEM fallback local
         autonomous_mode = bool(ai_assistants_unavailable) or (
             groq_flow_degraded and not local_flow_ok
         )
-        if groq_flow_degraded and len(hard_veto_reasons) == 0:
+        if groq_flow_degraded and (advisory or len(hard_veto_reasons) == 0):
             allow_entry = True
 
         # Sentimento derivado do Gemini macro (não zera o contrato legado)
@@ -254,6 +265,7 @@ class MarketIntelligence:
             'groq_flow': flow,
             'gemini_macro': gemini_macro,
             'condicao_mercado': condicao,
+            'advisory_flags': advisory_flags,
             'summary': self._build_summary(regime, whale, news, timing_score, allow_entry, flow, gemini_macro),
         }
 

@@ -529,6 +529,12 @@ class GroqValidator:
         return min(100, score)
 
     def consensus_predict(self, tech_data, symbol, force_local_only=True, intelligence_context=None):
+        """Pipeline soberano: C1/C2 coletam contexto → C3 decide."""
+        import os
+        advisory = str(os.getenv('ADVISORY_GATES', 'true')).strip().lower() in {'1', 'true', 'yes', 'on'}
+        if advisory:
+            return self._sovereign_predict(tech_data, symbol, intelligence_context=intelligence_context)
+
         trend = tech_data.get('trend', 'NEUTRO')
         if trend == 'NEUTRO':
             return {
@@ -751,4 +757,33 @@ class GroqValidator:
         }
         if ctx:
             result['intelligence'] = ctx
+        return result
+
+    def _sovereign_predict(self, tech_data, symbol, intelligence_context=None):
+        """C1/C2 consultivos + C3 decisor (sem bloqueio por tendência neutra/lateral)."""
+        from src.engine.context_enrichment import (
+            build_cerebro1_payload,
+            build_cerebro2_payload,
+            evaluate_gates_advisory,
+            merge_context_for_cerebro3,
+        )
+        from src.ai_brain.cerebro3_decisor import decide_entry, decision_to_consensus
+
+        ctx = dict(intelligence_context or {})
+        gates = ctx.get('gates_advisory') or evaluate_gates_advisory(tech_data)
+        report_c1 = build_cerebro1_payload(tech_data, gates=gates)
+        report_c2 = build_cerebro2_payload(
+            tech_data,
+            intel_ctx=ctx,
+            order_book=ctx.get('order_book'),
+            ticker=ctx.get('ticker'),
+        )
+        context = merge_context_for_cerebro3(symbol, tech_data, gates, report_c1, report_c2, ctx)
+        decision = decide_entry(context)
+        result = decision_to_consensus(decision, context, report_c1, report_c2)
+        result['votes'] = {
+            'buy': 1 if result.get('decisao') == 'BUY' else 0,
+            'sell': 1 if result.get('decisao') == 'SELL' else 0,
+        }
+        result['intelligence'] = ctx
         return result
