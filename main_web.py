@@ -3850,23 +3850,36 @@ def sniper_worker_loop():
                         flush=True,
                     )
 
-                    side_exec = 'sell' if decisao in ('SELL', 'VENDER') else 'buy'
-                    if _c3.get('entry_price'):
+                    from src.ai_brain.cerebro3_decisor import apply_dump_lane_override
+                    _dump_ov = apply_dump_lane_override(res, signals, prob)
+                    res = _dump_ov['res']
+                    prob = float(_dump_ov['prob'])
+                    decisao = str(_dump_ov['decisao']).upper()
+                    if _dump_ov.get('inverted'):
+                        _c3 = res.get('cerebro3_decision') or _c3
+                        _strat = _c3.get('strategy_type', 'BREAKOUT')
+                        print(
+                            f"   🧊 [DUMP-LANE] {clean_sym}: BUY anulado → SHORT "
+                            f"conf={prob:.1f}% SL={_c3.get('stop_loss')}",
+                            flush=True,
+                        )
+                        central_state['confidence'] = round(prob, 2)
+
+                    side_exec = _dump_ov['side'] if _dump_ov['side'] != 'wait' else (
+                        'sell' if decisao in ('SELL', 'VENDER') else 'buy'
+                    )
+                    if _c3.get('entry_price') or res.get('entry_price'):
                         signals = dict(signals)
                         signals['c3_entry_price'] = _c3.get('entry_price')
                         signals['c3_stop_loss'] = _c3.get('stop_loss')
                         signals['c3_take_profit_1'] = _c3.get('take_profit_1')
                         signals['c3_strategy_type'] = _strat
-                    # Dump lane: reforço SHORT em queda livre (C3 já decidiu; só alinha sinal)
-                    if signals.get('dump_lane') or signals.get('freefall'):
-                        if side_exec != 'sell':
-                            print(
-                                f"   🧊 [DUMP-LANE] {clean_sym}: C3={side_exec} — dump ativo, "
-                                f"preferência SHORT",
-                                flush=True,
-                            )
+                        if _c3.get('stop_loss'):
+                            signals['c3_stop_loss'] = _c3.get('stop_loss')
+                            signals['institutional_sl_price'] = _c3.get('stop_loss')
+                    if signals.get('dump_lane') or signals.get('meltdown'):
                         signals = dict(signals)
-                        signals['sinal_institucional'] = signals.get('sinal_institucional') or 'VENDA_INSTITUCIONAL'
+                        signals['sinal_institucional'] = 'VENDA_INSTITUCIONAL'
 
                     # C3 é decisor — sem re-validação Smart Money / tendência macro
                     trend_now = str(signals.get('trend', 'NEUTRO')).upper()
@@ -4176,13 +4189,23 @@ def sniper_worker_loop():
                     except Exception:
                         df_5m_x = None
                     mark_x = float(signals.get('price') or 0)
+                    _c3_prob = float(melhor.get('probabilidade') or res.get('probabilidade') or 0)
                     anti_x = evaluate_anti_chase_entry(
                         side=side_best,
                         mark_price=mark_x,
                         df_1m=df_1m_x if df_1m_x is not None else df_exec,
                         df_5m=df_5m_x if df_5m_x is not None else df_exec,
                         signals=signals,
+                        c3_confidence_pct=_c3_prob,
                     )
+                    if anti_x.get('soft_override'):
+                        print(
+                            f"   ⚠️ [ANTI-CHASE EXEC] {melhor['clean_symbol']}: soft C3 "
+                            f"({anti_x.get('abort_reason', '')[:100]})",
+                            flush=True,
+                        )
+                        if anti_x.get('sl_tighten_pct') and signals.get('c3_stop_loss'):
+                            signals['c3_stop_loss_tighten_pct'] = anti_x['sl_tighten_pct']
                     if not anti_x.get('allowed'):
                         code = anti_x.get('code') or 'REJECTED'
                         reason = anti_x.get('abort_reason') or code
@@ -4208,13 +4231,21 @@ def sniper_worker_loop():
                         time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
                         continue
                 except Exception as anti_exec_err:
-                    print(
-                        f"   🚫 [ANTI-CHASE EXEC] {melhor['clean_symbol']}: "
-                        f"falha ({anti_exec_err}) — abort",
-                        flush=True,
-                    )
-                    time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
-                    continue
+                    _c3_prob_exec = float(melhor.get('probabilidade') or 0)
+                    if _c3_prob_exec >= 50:
+                        print(
+                            f"   ⚠️ [ANTI-CHASE EXEC] {melhor['clean_symbol']}: "
+                            f"falha ({anti_exec_err}) — C3 conf>=50% segue",
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            f"   🚫 [ANTI-CHASE EXEC] {melhor['clean_symbol']}: "
+                            f"falha ({anti_exec_err}) — abort",
+                            flush=True,
+                        )
+                        time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
+                        continue
 
                 # 🧠 Aprendizado: registra as estratégias ativas nesta entrada
                 _adaptive_log_entry(sym, signals, intel_ctx)

@@ -305,6 +305,11 @@ def merge_context_for_cerebro3(
             'is_lateral': gates.get('is_lateral'),
             'turtle_breakout': signals.get('turtle_breakout'),
             'meltdown': signals.get('meltdown'),
+            'dump_lane': signals.get('dump_lane'),
+            'freefall': signals.get('freefall'),
+            'meltdown_strength': signals.get('meltdown_strength'),
+            'prefer_short': signals.get('prefer_short'),
+            'vwap': signals.get('vwap'),
         },
     }
 

@@ -28,7 +28,9 @@ RSI_5M_LONG_MAX = float(os.getenv('ANTI_CHASE_RSI_5M_LONG_MAX', '68'))
 RSI_1M_LONG_MAX = float(os.getenv('ANTI_CHASE_RSI_1M_LONG_MAX', '75'))
 RSI_5M_SHORT_MIN = float(os.getenv('ANTI_CHASE_RSI_5M_SHORT_MIN', '32'))
 RSI_1M_SHORT_MIN = float(os.getenv('ANTI_CHASE_RSI_1M_SHORT_MIN', '25'))
-MAX_EXTENSION_PCT = float(os.getenv('ANTI_CHASE_MAX_EXTENSION_PCT', '2.0'))
+MAX_EXTENSION_PCT = float(os.getenv('ANTI_CHASE_MAX_EXTENSION_PCT', '3.5'))
+ATR_EXTENSION_MULT = float(os.getenv('ANTI_CHASE_ATR_MULT', '2.0'))
+C3_SOFT_CONFIDENCE_PCT = float(os.getenv('C3_SOFT_FILTER_MIN_CONF', '50'))
 PULLBACK_TOL_PCT = float(os.getenv('ANTI_CHASE_PULLBACK_TOL_PCT', '0.90'))
 EMA_FAST = int(os.getenv('ANTI_CHASE_EMA_FAST', '8'))
 EMA_SLOW = int(os.getenv('ANTI_CHASE_EMA_SLOW', '20'))
@@ -187,6 +189,7 @@ def evaluate_anti_chase_entry(
     df_1m=None,
     df_5m=None,
     signals: dict | None = None,
+    c3_confidence_pct: float | None = None,
 ) -> dict[str, Any]:
     """
     Avalia os 3 filtros. Fail-closed se dados essenciais faltarem (quando habilitado).
@@ -208,6 +211,28 @@ def evaluate_anti_chase_entry(
 
     mark = _f(mark_price) or _f(signals.get('price'))
     is_long = _is_long(side)
+    c3_soft = c3_confidence_pct is not None and float(c3_confidence_pct) >= C3_SOFT_CONFIDENCE_PCT
+
+    def _soft_allow(blocked: dict) -> dict:
+        """C3 >= 50%: não aborta — aperta gestão de risco."""
+        if not c3_soft or blocked.get('allowed'):
+            return blocked
+        out = dict(blocked)
+        out['allowed'] = True
+        out['code'] = 'SOFT_PASS_C3'
+        out['soft_override'] = True
+        prev = out.get('abort_reason') or out.get('code') or ''
+        out['abort_reason'] = (
+            f'C3 conf={float(c3_confidence_pct):.1f}% — anti-chase soft (ajuste SL): {prev}'
+        )
+        atr_pct = _f(signals.get('atr_pct'))
+        if atr_pct <= 0 and mark > 0:
+            atr_abs = _f(signals.get('atr_20') or signals.get('atr'))
+            if atr_abs > 0:
+                atr_pct = (atr_abs / mark) * 100.0
+        tighten = max(0.8, min(2.5, atr_pct * 0.5)) if atr_pct > 0 else 1.2
+        out['sl_tighten_pct'] = round(tighten, 3)
+        return out
 
     # ── RSI 1m / 5m ────────────────────────────────────────────────────
     rsi_1m = 50.0
@@ -230,22 +255,26 @@ def evaluate_anti_chase_entry(
 
     if is_long:
         if rsi_5m > RSI_5M_LONG_MAX or rsi_1m > RSI_1M_LONG_MAX:
-            result['allowed'] = False
-            result['code'] = 'REJECTED: OVERBOUGHT_RSI'
-            result['abort_reason'] = (
-                f'REJECTED: OVERBOUGHT_RSI — RSI5m={rsi_5m:.1f} '
-                f'(lim {RSI_5M_LONG_MAX:.0f}) RSI1m={rsi_1m:.1f} (lim {RSI_1M_LONG_MAX:.0f})'
-            )
-            return result
+            return _soft_allow({
+                'allowed': False,
+                'code': 'REJECTED: OVERBOUGHT_RSI',
+                'abort_reason': (
+                    f'REJECTED: OVERBOUGHT_RSI — RSI5m={rsi_5m:.1f} '
+                    f'(lim {RSI_5M_LONG_MAX:.0f}) RSI1m={rsi_1m:.1f} (lim {RSI_1M_LONG_MAX:.0f})'
+                ),
+                'details': dict(result['details']),
+            })
     else:
         if rsi_5m < RSI_5M_SHORT_MIN or rsi_1m < RSI_1M_SHORT_MIN:
-            result['allowed'] = False
-            result['code'] = 'REJECTED: OVERSOLD_RSI'
-            result['abort_reason'] = (
-                f'REJECTED: OVERSOLD_RSI — RSI5m={rsi_5m:.1f} '
-                f'(lim {RSI_5M_SHORT_MIN:.0f}) RSI1m={rsi_1m:.1f} (lim {RSI_1M_SHORT_MIN:.0f})'
-            )
-            return result
+            return _soft_allow({
+                'allowed': False,
+                'code': 'REJECTED: OVERSOLD_RSI',
+                'abort_reason': (
+                    f'REJECTED: OVERSOLD_RSI — RSI5m={rsi_5m:.1f} '
+                    f'(lim {RSI_5M_SHORT_MIN:.0f}) RSI1m={rsi_1m:.1f} (lim {RSI_1M_SHORT_MIN:.0f})'
+                ),
+                'details': dict(result['details']),
+            })
 
     # ── Extensão EMA20 / VWAP ───────────────────────────────────────────
     ema20 = 0.0
@@ -267,32 +296,66 @@ def evaluate_anti_chase_entry(
     result['details']['extension_ema_pct'] = round(dist_ema, 3)
     result['details']['extension_vwap_pct'] = round(dist_vwap, 3)
 
-    if ema20 > 0 and dist_ema > MAX_EXTENSION_PCT:
-        result['allowed'] = False
-        result['code'] = 'REJECTED: PRICE_TOO_EXTENDED'
-        result['abort_reason'] = (
-            f'REJECTED: PRICE_TOO_EXTENDED — |preço-EMA20|/EMA20='
-            f'{dist_ema:.2f}% > {MAX_EXTENSION_PCT:.1f}% (preço={mark:.6g} ema20={ema20:.6g})'
-        )
+    atr_pct = _f(signals.get('atr_pct'))
+    if atr_pct <= 0 and mark > 0:
+        atr_abs = _f(signals.get('atr_20') or signals.get('atr'))
+        if atr_abs > 0:
+            atr_pct = (atr_abs / mark) * 100.0
+    max_ext = MAX_EXTENSION_PCT
+    if atr_pct > 0:
+        max_ext = max(MAX_EXTENSION_PCT, atr_pct * ATR_EXTENSION_MULT)
+    result['details']['max_extension_pct'] = round(max_ext, 3)
+
+    if ema20 > 0 and dist_ema > max_ext:
+        blocked = {
+            'allowed': False,
+            'code': 'REJECTED: PRICE_TOO_EXTENDED',
+            'abort_reason': (
+                f'REJECTED: PRICE_TOO_EXTENDED — |preço-EMA20|/EMA20='
+                f'{dist_ema:.2f}% > {max_ext:.1f}% (preço={mark:.6g} ema20={ema20:.6g})'
+            ),
+            'details': dict(result['details']),
+        }
+        soft = _soft_allow(blocked)
+        if soft.get('allowed'):
+            result.update(soft)
+            return result
+        result.update(blocked)
         return result
-    if vwap > 0 and dist_vwap > MAX_EXTENSION_PCT:
-        result['allowed'] = False
-        result['code'] = 'REJECTED: PRICE_TOO_EXTENDED'
-        result['abort_reason'] = (
-            f'REJECTED: PRICE_TOO_EXTENDED — |preço-VWAP|/VWAP='
-            f'{dist_vwap:.2f}% > {MAX_EXTENSION_PCT:.1f}%'
-        )
+    if vwap > 0 and dist_vwap > max_ext:
+        blocked = {
+            'allowed': False,
+            'code': 'REJECTED: PRICE_TOO_EXTENDED',
+            'abort_reason': (
+                f'REJECTED: PRICE_TOO_EXTENDED — |preço-VWAP|/VWAP='
+                f'{dist_vwap:.2f}% > {max_ext:.1f}%'
+            ),
+            'details': dict(result['details']),
+        }
+        soft = _soft_allow(blocked)
+        if soft.get('allowed'):
+            result.update(soft)
+            return result
+        result.update(blocked)
         return result
 
     # ── Pullback EMA8/EMA20 (pivô) ─────────────────────────────────────
     pull = evaluate_pullback_pivot(side=side, df_1m=df_1m, mark_price=mark)
     result['details']['pullback'] = pull
     if not pull.get('ok'):
-        result['allowed'] = False
-        result['code'] = 'REJECTED: WAIT_PULLBACK_EMA'
-        result['abort_reason'] = (
-            f"REJECTED: WAIT_PULLBACK_EMA — {pull.get('reason') or 'aguardar zona EMA'}"
-        )
+        blocked = {
+            'allowed': False,
+            'code': 'REJECTED: WAIT_PULLBACK_EMA',
+            'abort_reason': (
+                f"REJECTED: WAIT_PULLBACK_EMA — {pull.get('reason') or 'aguardar zona EMA'}"
+            ),
+            'details': dict(result['details']),
+        }
+        soft = _soft_allow(blocked)
+        if soft.get('allowed'):
+            result.update(soft)
+            return result
+        result.update(blocked)
         return result
 
     result['abort_reason'] = (
