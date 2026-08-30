@@ -3493,6 +3493,7 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
                 res_ia.get('probabilidade', 70),
                 res_ia.get('motivo', ''),
                 structural_signal,
+                tech,
             ),
             daemon=True
         ).start()
@@ -4028,10 +4029,10 @@ def sniper_worker_loop():
                             signals=signals,
                         )
                         if not anti.get('allowed'):
-                            reason = anti.get('abort_reason') or anti.get('code') or 'REJECTED'
+                            reason = anti.get('abort_reason') or anti.get('code') or 'aviso'
                             print(
                                 f"   ℹ️ [ANTI-CHASE] {clean_sym} {side_exec.upper()}: "
-                                f"{reason} (consultivo — C3 decidiu)",
+                                f"{reason} (consultivo — C3 decidiu, não bloqueia)",
                                 flush=True,
                             )
                         else:
@@ -4282,7 +4283,8 @@ def sniper_worker_loop():
                     },
                 )
                 time.sleep(COOLDOWN_INSTITUCIONAL_SECS)
-        except Exception: pass
+        except Exception as loop_err:
+            print(f"   ❌ [RADAR LOOP] {type(loop_err).__name__}: {loop_err}", flush=True)
         time.sleep(15)
 
 def _process_client_orders_background(
@@ -4292,12 +4294,14 @@ def _process_client_orders_background(
     confidence,
     reason,
     structural_signal='NEUTRO',
+    signals=None,
 ):
     """
     Loop assíncrono de execução Bybit V5 (mainnet).
 
     C3 soberano: NEUTRO é remapeado pelo lado da ordem (não aborta execução).
     """
+    signals = dict(signals or {})
     try:
         from src.engine.hard_gates import is_neutro_signal, side_matches_institutional
 
@@ -4407,46 +4411,90 @@ def _process_client_orders_background(
                     client_context=c,
                 )
 
-                if qty > 0 and _is_order_execution_enabled(None):
+                if qty <= 0:
                     print(
-                        f"🔮 Enviando Ordem Real: Cliente={c.get('nome')} | Margem={margem} | Par={symbol}",
+                        f"   🚫 [EXEC] {c.get('nome')} {symbol}: qty=0 "
+                        f"(banca=${saldo_atualizado:.2f} / viabilidade) — sem ordem",
                         flush=True,
                     )
-                    # 🔧 CONFIGURAÇÃO AUTOMÁTICA DE ALAVANCAGEM (VARIÁVEL)
-                    # Define alavancagem conforme ALAVANCAGEM global antes de enviar ordem
-                    if broker.pybit_session:
-                        try:
-                            v5_symbol = broker._normalize_v5_symbol(symbol)
-                            leverage_str = str(ALAVANCAGEM)
-                            rsp_leverage = broker.pybit_session.set_leverage(
-                                category='linear',
-                                symbol=v5_symbol,
-                                buyLeverage=leverage_str,
-                                sellLeverage=leverage_str
-                            )
-                            ok, err = broker._handle_v5_ret_code(rsp_leverage, 'set_leverage')
-                            if ok or 'leverage not modified' in err.lower():
-                                print(f"   ✅ [LEVERAGE] {v5_symbol} configurado para {ALAVANCAGEM}x", flush=True)
-                            else:
-                                print(f"   ⚠️ [LEVERAGE] Aviso ao definir alavancagem: {err}", flush=True)
-                        except Exception as lev_err:
-                            # Ignora erros se moeda já estiver na alavancagem desejada
-                            print(f"   ⚠️ [LEVERAGE] Erro ao configurar para {ALAVANCAGEM}x (pode já estar neste valor): {lev_err}", flush=True)
+                    continue
 
-                    # 🎯 SL Turtle 2×ATR (teto −50% ROI) + TP Fib 161.8 / +100% ROI
-                    from src.risk.position_sizing import attach_exchange_tp, calculate_dynamic_tp_sl
-                    dyn = calculate_dynamic_tp_sl(entry_price, side.lower(), ALAVANCAGEM, signals)
-                    tp_price, sl_price = dyn.get('tp_price'), dyn.get('sl_price')
-                    if not attach_exchange_tp():
-                        print("   ⚠️ [TP/SL] ATTACH_EXCHANGE_TP=false — TP não será enviado", flush=True)
-                        tp_price = None
-                    print(f"   📐 [TP/SL] {dyn.get('rule')} TP1={dyn.get('tp1_price')}", flush=True)
-
-                    order_result = broker.execute_market_order(
-                        symbol, side.lower(), qty, raise_on_error=True, strict_pct_sizing=True,
-                        tp_price=tp_price, sl_price=sl_price,
+                if not _is_order_execution_enabled(None):
+                    print(
+                        f"   🚫 [EXEC] {symbol}: execução desabilitada "
+                        f"(ALLOW_ORDER_EXECUTION/ALLOW_REAL_TRADING)",
+                        flush=True,
                     )
-                    if order_result:
+                    continue
+
+                print(
+                    f"🔮 Enviando Ordem Real: Cliente={c.get('nome')} | Margem={margem} | Par={symbol}",
+                    flush=True,
+                )
+                # 🔧 CONFIGURAÇÃO AUTOMÁTICA DE ALAVANCAGEM (VARIÁVEL)
+                # Define alavancagem conforme ALAVANCAGEM global antes de enviar ordem
+                if broker.pybit_session:
+                    try:
+                        v5_symbol = broker._normalize_v5_symbol(symbol)
+                        leverage_str = str(ALAVANCAGEM)
+                        rsp_leverage = broker.pybit_session.set_leverage(
+                            category='linear',
+                            symbol=v5_symbol,
+                            buyLeverage=leverage_str,
+                            sellLeverage=leverage_str
+                        )
+                        ok, err = broker._handle_v5_ret_code(rsp_leverage, 'set_leverage')
+                        if ok or 'leverage not modified' in err.lower():
+                            print(f"   ✅ [LEVERAGE] {v5_symbol} configurado para {ALAVANCAGEM}x", flush=True)
+                        else:
+                            print(f"   ⚠️ [LEVERAGE] Aviso ao definir alavancagem: {err}", flush=True)
+                    except Exception as lev_err:
+                        # Ignora erros se moeda já estiver na alavancagem desejada
+                        print(f"   ⚠️ [LEVERAGE] Erro ao configurar para {ALAVANCAGEM}x (pode já estar neste valor): {lev_err}", flush=True)
+
+                # 🎯 SL/TP: prioriza C3 soberano; fallback Turtle/Fib
+                from src.risk.position_sizing import attach_exchange_tp, calculate_dynamic_tp_sl
+                dyn = calculate_dynamic_tp_sl(entry_price, side.lower(), ALAVANCAGEM, signals)
+                tp_price, sl_price = dyn.get('tp_price'), dyn.get('sl_price')
+                try:
+                    c3_sl = float(signals.get('c3_stop_loss') or signals.get('institutional_sl_price') or 0)
+                except (TypeError, ValueError):
+                    c3_sl = 0.0
+                try:
+                    c3_tp = float(signals.get('c3_take_profit_1') or 0)
+                except (TypeError, ValueError):
+                    c3_tp = 0.0
+                if c3_sl > 0:
+                    sl_price = c3_sl
+                if c3_tp > 0:
+                    tp_price = c3_tp
+                # Ajuste anti-chase soft (aperta SL)
+                try:
+                    tighten = float(signals.get('c3_stop_loss_tighten_pct') or 0)
+                except (TypeError, ValueError):
+                    tighten = 0.0
+                if tighten > 0 and sl_price and entry_price:
+                    is_long = str(side).lower() in ('buy', 'long', 'comprar')
+                    dist = abs(float(entry_price) - float(sl_price))
+                    new_dist = dist * max(0.5, 1.0 - (tighten / 100.0))
+                    sl_price = (
+                        float(entry_price) - new_dist if is_long
+                        else float(entry_price) + new_dist
+                    )
+                if not attach_exchange_tp():
+                    print("   ⚠️ [TP/SL] ATTACH_EXCHANGE_TP=false — TP não será enviado", flush=True)
+                    tp_price = None
+                print(
+                    f"   📐 [TP/SL] {dyn.get('rule')} TP={tp_price} SL={sl_price} "
+                    f"(C3={'sim' if c3_sl or c3_tp else 'não'})",
+                    flush=True,
+                )
+
+                order_result = broker.execute_market_order(
+                    symbol, side.lower(), qty, raise_on_error=True, strict_pct_sizing=True,
+                    tp_price=tp_price, sl_price=sl_price,
+                )
+                if order_result:
                         order_id = order_result.get('id', order_result.get('orderId', 'N/A'))
                         side_label = 'COMPRAR' if side.lower() in ('buy', 'comprar') else 'VENDER'
 
