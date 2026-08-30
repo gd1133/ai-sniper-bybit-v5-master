@@ -114,12 +114,12 @@ class MarketIntelligence:
 
         if adx_blocked:
             hard_veto_reasons.append(
-                f"SEM TENDÊNCIA: ADX(14)={regime.get('adx', 0)} < {adx_min:.0f} — sinal forçado a NEUTRO"
+                f"SEM TENDÊNCIA: ADX(14)={regime.get('adx', 0)} < {adx_min:.0f} — contexto para C3 (sem veto)"
             )
         if bb_blocked:
             hard_veto_reasons.append(
                 f"SEM EXPANSÃO: BB Width={regime.get('bollinger_bandwidth', 0)} <= "
-                f"média(50)={regime.get('bollinger_bandwidth_mean_50', 0)} — sinal forçado a NEUTRO"
+                f"média(50)={regime.get('bollinger_bandwidth_mean_50', 0)} — contexto para C3"
             )
         if amplitude_lateral:
             hard_veto_reasons.append(
