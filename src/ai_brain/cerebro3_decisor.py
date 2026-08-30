@@ -129,87 +129,143 @@ def _normalize_decision(raw: dict | None, price: float, *, exit_mode: bool = Fal
     }
 
 
+def _directional_bias(trend: str, short: str, st: int, rsi: float) -> str:
+    """Bias direcional sem veto — macro, short, SuperTrend ou RSI."""
+    if trend == 'ALTA':
+        return 'BUY'
+    if trend == 'BAIXA':
+        return 'SELL'
+    if short == 'ALTA' or st > 0:
+        return 'BUY'
+    if short == 'BAIXA' or st < 0:
+        return 'SELL'
+    if rsi <= 40:
+        return 'BUY'
+    if rsi >= 60:
+        return 'SELL'
+    return 'HOLD'
+
+
 def _local_entry_decision(context: dict[str, Any]) -> dict[str, Any]:
-    """Fallback matemático com confiança dinâmica 35%–75%."""
+    """
+    Fallback matemático soberano.
+
+    Com confluência gráfica: confiança dinâmica 50%–75% (nunca congelada sob o limiar).
+    Sem confluência: HOLD com conf baixa (não opera).
+    """
     c1 = context.get('cerebro1') or {}
     gates = context.get('gates_advisory') or {}
     snap = context.get('signals_snapshot') or {}
+    c2 = context.get('cerebro2') or {}
     price = _f(context.get('price'))
     trend = str((c1.get('trend') or {}).get('macro', 'NEUTRO')).upper()
     short = str((c1.get('trend') or {}).get('short', 'NEUTRO')).upper()
     st = int((c1.get('trend') or {}).get('supertrend_signal', 0) or 0)
     rsi = _f((c1.get('momentum') or {}).get('rsi'), 50)
     adx = _f((c1.get('structure') or {}).get('adx'))
-    vol_score = gates.get('volume_score', 'Normal')
-    is_lateral = bool(gates.get('is_lateral'))
+    vol_score = str(gates.get('volume_score') or snap.get('volume_score') or 'Normal')
+    is_lateral = bool(gates.get('is_lateral') or (c1.get('structure') or {}).get('is_lateral'))
     atr = _f((c1.get('volatility_volume') or {}).get('atr'), price * 0.01)
     levels = c1.get('levels') or {}
-    near_support = bool(levels.get('near_support'))
-    near_resistance = bool(levels.get('near_resistance'))
+    near_support = bool(levels.get('near_support') or snap.get('near_pivot_support'))
+    near_resistance = bool(levels.get('near_resistance') or snap.get('near_pivot_resistance'))
+    flow_bias = str(
+        (c2.get('order_flow') or {}).get('bias')
+        or snap.get('money_flow_side')
+        or ''
+    ).upper()
 
     action = 'HOLD'
     strat = 'TREND'
-    confidence = 0.35
+    confidence = 0.0
+    rationale_extra = ''
 
     # ── Dump / derretimento → SHORT prioritário ──────────────────────────
     meltdown = bool(snap.get('meltdown') or snap.get('dump_lane') or snap.get('freefall'))
     melt_str = _f(snap.get('meltdown_strength'))
     if meltdown or melt_str >= 40:
         action, strat = 'SELL', 'BREAKOUT'
-        confidence = min(0.75, 0.58 + min(0.12, melt_str / 500))
+        confidence = 0.58 + min(0.12, melt_str / 500.0)
         if vol_score == 'Institucional':
-            confidence = min(0.75, confidence + 0.06)
+            confidence += 0.06
         rationale_extra = f' dump/meltdown str={melt_str:.0f}'
     else:
-        rationale_extra = ''
-        use_range = is_lateral or adx < 22
+        # Lateral / ADX fraco → RANGE; senão TREND (mesmo com macro NEUTRO)
+        use_range = is_lateral or adx < 18
+        bias = _directional_bias(trend, short, st, rsi)
+
         if use_range:
             strat = 'RANGE_BOUNCE'
-            if rsi <= 30:
+            if rsi <= 32 or (rsi <= 40 and near_support):
                 action = 'BUY'
-                confidence = 0.55 + min(0.10, (30 - rsi) / 30 * 0.10)
-                if near_support:
-                    confidence += 0.08
-            elif rsi >= 70:
-                action = 'SELL'
-                confidence = 0.55 + min(0.10, (rsi - 70) / 30 * 0.10)
-                if near_resistance:
-                    confidence += 0.08
-            elif rsi <= 35:
-                action = 'BUY'
-                confidence = 0.48 + (35 - rsi) * 0.012
+                confidence = 0.55 + min(0.12, max(0.0, 40.0 - rsi) / 40.0 * 0.12)
                 if near_support:
                     confidence += 0.06
-            elif rsi >= 65:
+            elif rsi >= 68 or (rsi >= 60 and near_resistance):
                 action = 'SELL'
-                confidence = 0.48 + (rsi - 65) * 0.012
+                confidence = 0.55 + min(0.12, max(0.0, rsi - 60.0) / 40.0 * 0.12)
                 if near_resistance:
                     confidence += 0.06
+            elif rsi <= 42 and bias == 'BUY':
+                action, confidence = 'BUY', 0.52
+            elif rsi >= 58 and bias == 'SELL':
+                action, confidence = 'SELL', 0.52
+            elif bias in ('BUY', 'SELL') and (adx >= 14 or vol_score in ('Normal', 'Institucional')):
+                # Confluência leve: short/ST/fluxo — não fica preso em 35%
+                action = bias
+                confidence = 0.50 + (0.04 if vol_score == 'Institucional' else 0.02)
+                if near_support and action == 'BUY':
+                    confidence += 0.04
+                if near_resistance and action == 'SELL':
+                    confidence += 0.04
             if vol_score == 'Institucional' and action != 'HOLD':
-                confidence = min(0.75, confidence + 0.05)
+                confidence += 0.04
         else:
             strat = 'TREND'
             ema_aligned_long = trend == 'ALTA' and st >= 0
             ema_aligned_short = trend == 'BAIXA' and st <= 0
-            if adx > 22 and ema_aligned_long and short in ('ALTA', 'NEUTRO'):
+            if adx >= 22 and ema_aligned_long and short in ('ALTA', 'NEUTRO'):
                 action, confidence = 'BUY', 0.60
-            elif adx > 22 and ema_aligned_short and short in ('BAIXA', 'NEUTRO'):
+            elif adx >= 22 and ema_aligned_short and short in ('BAIXA', 'NEUTRO'):
                 action, confidence = 'SELL', 0.60
-            elif trend == 'ALTA' and short == 'ALTA' and vol_score in ('Normal', 'Institucional'):
+            elif trend == 'ALTA' and short == 'ALTA':
                 action, confidence = 'BUY', 0.58
-            elif trend == 'BAIXA' and short == 'BAIXA' and vol_score in ('Normal', 'Institucional'):
+            elif trend == 'BAIXA' and short == 'BAIXA':
                 action, confidence = 'SELL', 0.58
-            elif adx >= 22:
-                if trend == 'BAIXA' and rsi < 45:
-                    action, confidence = 'SELL', 0.56
-                elif trend == 'ALTA' and rsi > 55:
-                    action, confidence = 'BUY', 0.56
+            elif trend == 'ALTA' and rsi >= 48:
+                action, confidence = 'BUY', 0.56
+            elif trend == 'BAIXA' and rsi <= 52:
+                action, confidence = 'SELL', 0.56
+            elif bias == 'BUY' and (short == 'ALTA' or st > 0 or rsi >= 52):
+                action, confidence = 'BUY', 0.54
+            elif bias == 'SELL' and (short == 'BAIXA' or st < 0 or rsi <= 48):
+                action, confidence = 'SELL', 0.54
+            elif bias in ('BUY', 'SELL') and adx >= 20:
+                # Macro NEUTRO mas ADX + short/ST/RSI — opera a favor do fluxo
+                action, confidence = bias, 0.52
+            elif rsi <= 35:
+                action, confidence = 'BUY', 0.53
+                strat = 'RANGE_BOUNCE'
+            elif rsi >= 65:
+                action, confidence = 'SELL', 0.53
+                strat = 'RANGE_BOUNCE'
             if vol_score == 'Institucional' and action != 'HOLD':
-                confidence = min(0.75, confidence + 0.04)
+                confidence += 0.04
             if adx >= 35 and action != 'HOLD':
-                confidence = min(0.75, confidence + 0.05)
+                confidence += 0.05
 
-    confidence = max(0.35, min(0.75, confidence))
+        # Fluxo C2 / money flow reforça lado (nunca veta)
+        if action != 'HOLD':
+            if action == 'BUY' and flow_bias in ('BUY', 'LONG', 'COMPRA', 'BULLISH'):
+                confidence += 0.03
+            elif action == 'SELL' and flow_bias in ('SELL', 'SHORT', 'VENDA', 'BEARISH'):
+                confidence += 0.03
+
+    # Operável: sempre 50–75%. HOLD sem confluência: conf baixa explícita.
+    if action in ('BUY', 'SELL'):
+        confidence = max(0.50, min(0.75, confidence))
+    else:
+        confidence = min(0.34, max(0.0, confidence))
 
     sl_dist = max(atr * 1.5, price * 0.012)
     tp_dist = sl_dist * 2.2
@@ -233,13 +289,23 @@ def _local_entry_decision(context: dict[str, Any]) -> dict[str, Any]:
         'stop_loss': round(sl, 8),
         'take_profit_1': round(tp1, 8),
         'take_profit_2': round(tp2, 8),
-        'invalidation_reason': '',
+        'invalidation_reason': '' if action != 'HOLD' else 'sem confluência gráfica mínima',
         'rationale': (
-            f'Fallback local C3 | {strat} trend={trend} RSI={rsi:.0f} '
+            f'Fallback local C3 | {strat} trend={trend} short={short} RSI={rsi:.0f} '
             f'ADX={adx:.0f} vol={vol_score} conf={confidence*100:.1f}%{rationale_extra}'
         ),
         'source': 'local_fallback',
     }
+
+
+def c3_action_to_institutional(action_or_side: str) -> str:
+    """Mapeia decisão soberana C3 → sinal estrutural para execução Bybit."""
+    a = str(action_or_side or '').strip().upper()
+    if a in ('BUY', 'COMPRAR', 'LONG'):
+        return 'COMPRA_INSTITUCIONAL'
+    if a in ('SELL', 'VENDER', 'SHORT'):
+        return 'VENDA_INSTITUCIONAL'
+    return 'NEUTRO'
 
 
 def apply_dump_lane_override(

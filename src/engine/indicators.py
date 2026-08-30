@@ -344,17 +344,27 @@ class IndicatorEngine:
                 'structure_filters_pass': False,
             })
 
-        # Acumulação / amplitude baixa: força NEUTRO e bloqueia entrada
+        # Acumulação / amplitude baixa: contexto consultivo (C3 decide — sem hard NEUTRO)
         if signals_out.get('is_lateral_amplitude') or signals_out.get('is_accumulation') or signals_out.get('amplitude_lateral') or signals_out.get('is_lateral'):
-            signals_out['trend'] = 'NEUTRO'
             signals_out['is_lateral'] = True
-            signals_out['sinal_institucional'] = 'NEUTRO'
-            signals_out['money_flow_side'] = 'WAIT'
+            signals_out['advisory_lateral'] = True
+            # Mantém short_trend / bias; não zera sinal institucional no modo soberano
+            _adv = str(__import__('os').getenv('ADVISORY_GATES', 'true')).strip().lower() in {
+                '1', 'true', 'yes', 'on',
+            }
+            if not _adv:
+                signals_out['trend'] = 'NEUTRO'
+                signals_out['sinal_institucional'] = 'NEUTRO'
+                signals_out['money_flow_side'] = 'WAIT'
             if not signals_out.get('regime_label'):
                 amp = float(signals_out.get('amplitude_pct', 0) or 0)
-                signals_out['regime_label'] = f'LATERAL/ACUMULAÇÃO — amplitude {amp:.3f}% — sinais ignorados'
+                signals_out['regime_label'] = (
+                    f'LATERAL/ACUMULAÇÃO — amplitude {amp:.3f}% — contexto para C3'
+                    if _adv else
+                    f'LATERAL/ACUMULAÇÃO — amplitude {amp:.3f}% — sinais ignorados'
+                )
 
-        # Anatomia da vela (cor + close 35% + anti-faca) — defesa em profundidade
+        # Anatomia da vela (cor + close 35% + anti-faca) — consultiva no modo soberano
         try:
             from src.engine.candle_anatomy import analyze_from_dataframe
             anatomy = analyze_from_dataframe(
@@ -369,14 +379,20 @@ class IndicatorEngine:
             signals_out['amplitude_dominance'] = anatomy.get('amplitude_dominance')
             signals_out['anatomy_log'] = anatomy.get('anatomy_log') or ''
             signals_out['candle_anatomy_reason'] = anatomy.get('abort_reason') or ''
+            _adv = str(__import__('os').getenv('ADVISORY_GATES', 'true')).strip().lower() in {
+                '1', 'true', 'yes', 'on',
+            }
             if (
-                str(signals_out.get('sinal_institucional') or '').upper()
+                not _adv
+                and str(signals_out.get('sinal_institucional') or '').upper()
                 in ('COMPRA_INSTITUCIONAL', 'VENDA_INSTITUCIONAL')
                 and not anatomy.get('allowed')
             ):
                 signals_out['sinal_institucional'] = 'NEUTRO'
                 signals_out['money_flow_side'] = 'WAIT'
                 signals_out['candle_anatomy_blocked'] = True
+            elif not anatomy.get('allowed'):
+                signals_out['candle_anatomy_advisory'] = True
         except Exception as anat_err:
             signals_out['candle_anatomy_ok'] = False
             signals_out['candle_anatomy_reason'] = str(anat_err)
@@ -389,11 +405,19 @@ class IndicatorEngine:
             signals_out['meltdown_strength'] = float(melt.get('strength') or 0)
             signals_out['second_red_entry'] = bool(melt.get('second_red_entry'))
             signals_out['meltdown_reason'] = melt.get('reason') or ''
-            # Em dump: se ainda estava marcado COMPRA, força NEUTRO (não comprar faca)
+            # Em dump: marca bloqueio LONG como advisory; C3/dump-lane inverte para SHORT
             if melt.get('meltdown') and str(signals_out.get('sinal_institucional') or '').upper() == 'COMPRA_INSTITUCIONAL':
-                signals_out['sinal_institucional'] = 'NEUTRO'
-                signals_out['money_flow_side'] = 'WAIT'
                 signals_out['meltdown_blocked_long'] = True
+                signals_out['prefer_short'] = True
+                _adv = str(__import__('os').getenv('ADVISORY_GATES', 'true')).strip().lower() in {
+                    '1', 'true', 'yes', 'on',
+                }
+                if not _adv:
+                    signals_out['sinal_institucional'] = 'NEUTRO'
+                    signals_out['money_flow_side'] = 'WAIT'
+                else:
+                    signals_out['sinal_institucional'] = 'VENDA_INSTITUCIONAL'
+                    signals_out['money_flow_side'] = 'SELL'
         except Exception:
             signals_out.setdefault('meltdown', False)
 
@@ -425,16 +449,33 @@ class IndicatorEngine:
             from src.engine.liquidity_smc import analyze_smart_money_liquidity
             liq = analyze_smart_money_liquidity(self.df, signals_out)
             signals_out.update(liq)
+            _adv_liq = str(__import__('os').getenv('ADVISORY_GATES', 'true')).strip().lower() in {
+                '1', 'true', 'yes', 'on',
+            }
             if liq.get('liquidity_block_long') and str(signals_out.get('sinal_institucional') or '').upper() == 'COMPRA_INSTITUCIONAL':
-                signals_out['sinal_institucional'] = 'NEUTRO'
-                signals_out['money_flow_side'] = 'WAIT'
+                signals_out['liquidity_block_long_advisory'] = True
                 signals_out['liquidity_blocked'] = True
-                print(f"   🚫 [LIQUIDEZ] sweep BSL — COMPRA invalidada: {liq.get('sweep_reason')}", flush=True)
+                if _adv_liq:
+                    print(
+                        f"   ℹ️ [LIQUIDEZ] sweep BSL (consultivo): {liq.get('sweep_reason')}",
+                        flush=True,
+                    )
+                else:
+                    signals_out['sinal_institucional'] = 'NEUTRO'
+                    signals_out['money_flow_side'] = 'WAIT'
+                    print(f"   🚫 [LIQUIDEZ] sweep BSL — COMPRA invalidada: {liq.get('sweep_reason')}", flush=True)
             if liq.get('liquidity_block_short') and str(signals_out.get('sinal_institucional') or '').upper() == 'VENDA_INSTITUCIONAL':
-                signals_out['sinal_institucional'] = 'NEUTRO'
-                signals_out['money_flow_side'] = 'WAIT'
+                signals_out['liquidity_block_short_advisory'] = True
                 signals_out['liquidity_blocked'] = True
-                print(f"   🚫 [LIQUIDEZ] sweep SSL — VENDA invalidada: {liq.get('sweep_reason')}", flush=True)
+                if _adv_liq:
+                    print(
+                        f"   ℹ️ [LIQUIDEZ] sweep SSL (consultivo): {liq.get('sweep_reason')}",
+                        flush=True,
+                    )
+                else:
+                    signals_out['sinal_institucional'] = 'NEUTRO'
+                    signals_out['money_flow_side'] = 'WAIT'
+                    print(f"   🚫 [LIQUIDEZ] sweep SSL — VENDA invalidada: {liq.get('sweep_reason')}", flush=True)
         except Exception:
             try:
                 from src.engine.cautious_entry_gate import detect_fair_value_gap

@@ -3474,6 +3474,16 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
             or (res_ia or {}).get('sinal_institucional')
             or 'NEUTRO'
         ).upper()
+        # C3 soberano: se ainda NEUTRO, deriva do lado da ordem (não trava execução)
+        if structural_signal in ('NEUTRO', '', 'NONE', 'NULL'):
+            try:
+                from src.ai_brain.cerebro3_decisor import c3_action_to_institutional
+                structural_signal = c3_action_to_institutional(side)
+            except Exception:
+                structural_signal = (
+                    'VENDA_INSTITUCIONAL' if str(side).lower() in ('sell', 'short', 'vender')
+                    else 'COMPRA_INSTITUCIONAL'
+                )
         threading.Thread(
             target=_process_client_orders_background,
             args=(
@@ -3868,8 +3878,8 @@ def sniper_worker_loop():
                     side_exec = _dump_ov['side'] if _dump_ov['side'] != 'wait' else (
                         'sell' if decisao in ('SELL', 'VENDER') else 'buy'
                     )
+                    signals = dict(signals)
                     if _c3.get('entry_price') or res.get('entry_price'):
-                        signals = dict(signals)
                         signals['c3_entry_price'] = _c3.get('entry_price')
                         signals['c3_stop_loss'] = _c3.get('stop_loss')
                         signals['c3_take_profit_1'] = _c3.get('take_profit_1')
@@ -3877,8 +3887,17 @@ def sniper_worker_loop():
                         if _c3.get('stop_loss'):
                             signals['c3_stop_loss'] = _c3.get('stop_loss')
                             signals['institutional_sl_price'] = _c3.get('stop_loss')
+                    # C3 soberano: mapeia BUY/SELL → sinal estrutural (não aborta em NEUTRO)
+                    try:
+                        from src.ai_brain.cerebro3_decisor import c3_action_to_institutional
+                        signals['sinal_institucional'] = c3_action_to_institutional(side_exec)
+                        signals['c3_sovereign_side'] = side_exec
+                    except Exception:
+                        if side_exec == 'sell':
+                            signals['sinal_institucional'] = 'VENDA_INSTITUCIONAL'
+                        elif side_exec == 'buy':
+                            signals['sinal_institucional'] = 'COMPRA_INSTITUCIONAL'
                     if signals.get('dump_lane') or signals.get('meltdown'):
-                        signals = dict(signals)
                         signals['sinal_institucional'] = 'VENDA_INSTITUCIONAL'
 
                     # C3 é decisor — sem re-validação Smart Money / tendência macro
@@ -4206,46 +4225,48 @@ def sniper_worker_loop():
                         )
                         if anti_x.get('sl_tighten_pct') and signals.get('c3_stop_loss'):
                             signals['c3_stop_loss_tighten_pct'] = anti_x['sl_tighten_pct']
+                    # C3 já passou limiar operacional — anti-chase é consultivo (não aborta)
                     if not anti_x.get('allowed'):
                         code = anti_x.get('code') or 'REJECTED'
                         reason = anti_x.get('abort_reason') or code
-                        print(
-                            f"   🚫 [ANTI-CHASE EXEC] {melhor['clean_symbol']}: {reason}",
-                            flush=True,
-                        )
-                        try:
-                            from src.database.decision_history import record_ia_decision
-                            record_ia_decision(
-                                sym,
-                                motivo_saida=reason,
-                                pnl_garantido_pct=0.0,
-                                tipo_execucao='ENTRY_REJECTED',
-                                action_payload=str(code),
-                                client_id=0,
+                        if _c3_prob >= float(THRESHOLD_ENTRADA):
+                            print(
+                                f"   ℹ️ [ANTI-CHASE EXEC] {melhor['clean_symbol']}: {reason} "
+                                f"(consultivo — C3 conf={_c3_prob:.1f}% >= limiar)",
+                                flush=True,
                             )
-                            _push_ia_decision_live(
-                                melhor['clean_symbol'], str(code), reason, 0.0, 'ENTRY_REJECTED',
+                            if signals.get('c3_stop_loss'):
+                                signals['c3_stop_loss_tighten_pct'] = float(
+                                    anti_x.get('sl_tighten_pct') or 1.2
+                                )
+                        else:
+                            print(
+                                f"   🚫 [ANTI-CHASE EXEC] {melhor['clean_symbol']}: {reason}",
+                                flush=True,
                             )
-                        except Exception:
-                            pass
-                        time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
-                        continue
+                            try:
+                                from src.database.decision_history import record_ia_decision
+                                record_ia_decision(
+                                    sym,
+                                    motivo_saida=reason,
+                                    pnl_garantido_pct=0.0,
+                                    tipo_execucao='ENTRY_REJECTED',
+                                    action_payload=str(code),
+                                    client_id=0,
+                                )
+                                _push_ia_decision_live(
+                                    melhor['clean_symbol'], str(code), reason, 0.0, 'ENTRY_REJECTED',
+                                )
+                            except Exception:
+                                pass
+                            time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
+                            continue
                 except Exception as anti_exec_err:
-                    _c3_prob_exec = float(melhor.get('probabilidade') or 0)
-                    if _c3_prob_exec >= 50:
-                        print(
-                            f"   ⚠️ [ANTI-CHASE EXEC] {melhor['clean_symbol']}: "
-                            f"falha ({anti_exec_err}) — C3 conf>=50% segue",
-                            flush=True,
-                        )
-                    else:
-                        print(
-                            f"   🚫 [ANTI-CHASE EXEC] {melhor['clean_symbol']}: "
-                            f"falha ({anti_exec_err}) — abort",
-                            flush=True,
-                        )
-                        time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
-                        continue
+                    print(
+                        f"   ⚠️ [ANTI-CHASE EXEC] {melhor['clean_symbol']}: "
+                        f"falha ({anti_exec_err}) — C3 soberano segue",
+                        flush=True,
+                    )
 
                 # 🧠 Aprendizado: registra as estratégias ativas nesta entrada
                 _adaptive_log_entry(sym, signals, intel_ctx)
@@ -4275,25 +4296,41 @@ def _process_client_orders_background(
     """
     Loop assíncrono de execução Bybit V5 (mainnet).
 
-    BLOQUEIO ABSOLUTO: se structural_signal == NEUTRO, return imediato
-    (não configura margem, não calcula lote, não envia ordem).
+    C3 soberano: NEUTRO é remapeado pelo lado da ordem (não aborta execução).
     """
     try:
         from src.engine.hard_gates import is_neutro_signal, side_matches_institutional
 
-        # Short-circuit absoluto na execução — defesa em profundidade
+        # Remapeia NEUTRO → COMPRA/VENDA a partir do side (C3 já decidiu)
         if is_neutro_signal(structural_signal):
+            try:
+                from src.ai_brain.cerebro3_decisor import c3_action_to_institutional
+                structural_signal = c3_action_to_institutional(side)
+            except Exception:
+                structural_signal = (
+                    'VENDA_INSTITUCIONAL'
+                    if str(side).lower() in ('sell', 'short', 'vender')
+                    else 'COMPRA_INSTITUCIONAL'
+                )
             print(
-                f"   🚫 [EXEC] {symbol}: sinal estrutural=NEUTRO — ordem abortada (return imediato)",
+                f"   🧠 [EXEC] {symbol}: NEUTRO→{structural_signal} (C3 soberano side={side})",
                 flush=True,
             )
-            return
         if not side_matches_institutional(side, structural_signal):
+            # Alinha sinal ao lado soberano em vez de abortar
+            try:
+                from src.ai_brain.cerebro3_decisor import c3_action_to_institutional
+                structural_signal = c3_action_to_institutional(side)
+            except Exception:
+                structural_signal = (
+                    'VENDA_INSTITUCIONAL'
+                    if str(side).lower() in ('sell', 'short', 'vender')
+                    else 'COMPRA_INSTITUCIONAL'
+                )
             print(
-                f"   🚫 [EXEC] {symbol}: side={side} incompatível com {structural_signal} — abortado",
+                f"   🧠 [EXEC] {symbol}: alinhado side={side} → {structural_signal}",
                 flush=True,
             )
-            return
 
         # 1. DUALIDADE DE CONFIGURAÇÃO (FALLBACK DO BANCO)
         # Primeiro tenta ler do .env, depois fallback para variáveis do banco

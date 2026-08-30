@@ -79,7 +79,59 @@ def test_c3_fallback_pengu_oversold():
     with patch.dict(os.environ, {'ENABLE_CEREBRO3_LLM': 'false'}):
         dec = decide_entry(context)
     assert dec['action'] == 'BUY'
-    assert dec['probabilidade'] >= 55.0
+    assert dec['probabilidade'] >= 50.0
+
+
+def test_c3_fallback_jnj_neutro_adx_short():
+    """Log Render: macro NEUTRO + ADX alto + short BAIXA → SELL >= 50%."""
+    from src.ai_brain.cerebro3_decisor import decide_entry
+
+    context = {
+        'price': 150.0,
+        'gates_advisory': {'is_lateral': False, 'volume_score': 'Baixo'},
+        'cerebro1': {
+            'trend': {'macro': 'NEUTRO', 'short': 'BAIXA', 'supertrend_signal': -1},
+            'structure': {'adx': 43.4, 'is_lateral': False},
+            'momentum': {'rsi': 20},
+            'levels': {},
+            'volatility_volume': {'atr': 1.5},
+        },
+        'cerebro2': {},
+    }
+    with patch.dict(os.environ, {'ENABLE_CEREBRO3_LLM': 'false'}):
+        dec = decide_entry(context)
+    assert dec['action'] == 'SELL'
+    assert 50.0 <= dec['probabilidade'] <= 75.0
+
+
+def test_c3_fallback_sndk_confluence_not_stuck_35():
+    """ADX 29 + short ALTA + RSI 65 — não congelar WAIT 35%."""
+    from src.ai_brain.cerebro3_decisor import decide_entry
+
+    context = {
+        'price': 10.0,
+        'gates_advisory': {'is_lateral': False, 'volume_score': 'Institucional'},
+        'cerebro1': {
+            'trend': {'macro': 'NEUTRO', 'short': 'ALTA', 'supertrend_signal': 1},
+            'structure': {'adx': 28.7, 'is_lateral': False},
+            'momentum': {'rsi': 65},
+            'levels': {},
+            'volatility_volume': {'atr': 0.1},
+        },
+        'cerebro2': {},
+    }
+    with patch.dict(os.environ, {'ENABLE_CEREBRO3_LLM': 'false'}):
+        dec = decide_entry(context)
+    assert dec['action'] in ('BUY', 'SELL')
+    assert dec['probabilidade'] >= 50.0
+    assert dec['probabilidade'] <= 75.0
+
+
+def test_c3_action_to_institutional():
+    from src.ai_brain.cerebro3_decisor import c3_action_to_institutional
+    assert c3_action_to_institutional('BUY') == 'COMPRA_INSTITUCIONAL'
+    assert c3_action_to_institutional('sell') == 'VENDA_INSTITUCIONAL'
+    assert c3_action_to_institutional('HOLD') == 'NEUTRO'
 
 
 def test_dump_lane_inverts_buy_to_short():
@@ -118,7 +170,7 @@ def test_anti_chase_soft_when_c3_high_confidence():
         df_1m=df,
         df_5m=df,
         signals={'price': 130.0, 'rsi': 72, 'atr_pct': 1.5},
-        c3_confidence_pct=58.0,
+        c3_confidence_pct=36.0,
     )
     assert anti.get('allowed') is True
     assert anti.get('soft_override') is True
@@ -144,3 +196,6 @@ def test_sovereign_predict_no_neutro_block():
         res = v.consensus_predict(tech, 'TEST/USDT', intelligence_context={'allow_entry': True})
     assert 'decisao' in res
     assert res.get('brains', {}).get('cerebro3') == 'leader'
+    # Com confluência (short ALTA + suporte), não deve ficar WAIT 35%
+    if res.get('decisao') in ('BUY', 'SELL'):
+        assert float(res.get('probabilidade') or 0) >= 50.0

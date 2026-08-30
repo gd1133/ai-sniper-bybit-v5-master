@@ -30,7 +30,7 @@ RSI_5M_SHORT_MIN = float(os.getenv('ANTI_CHASE_RSI_5M_SHORT_MIN', '32'))
 RSI_1M_SHORT_MIN = float(os.getenv('ANTI_CHASE_RSI_1M_SHORT_MIN', '25'))
 MAX_EXTENSION_PCT = float(os.getenv('ANTI_CHASE_MAX_EXTENSION_PCT', '3.5'))
 ATR_EXTENSION_MULT = float(os.getenv('ANTI_CHASE_ATR_MULT', '2.0'))
-C3_SOFT_CONFIDENCE_PCT = float(os.getenv('C3_SOFT_FILTER_MIN_CONF', '50'))
+C3_SOFT_CONFIDENCE_PCT = float(os.getenv('C3_SOFT_FILTER_MIN_CONF', '36'))
 PULLBACK_TOL_PCT = float(os.getenv('ANTI_CHASE_PULLBACK_TOL_PCT', '0.90'))
 EMA_FAST = int(os.getenv('ANTI_CHASE_EMA_FAST', '8'))
 EMA_SLOW = int(os.getenv('ANTI_CHASE_EMA_SLOW', '20'))
@@ -214,7 +214,7 @@ def evaluate_anti_chase_entry(
     c3_soft = c3_confidence_pct is not None and float(c3_confidence_pct) >= C3_SOFT_CONFIDENCE_PCT
 
     def _soft_allow(blocked: dict) -> dict:
-        """C3 >= 50%: não aborta — aperta gestão de risco."""
+        """C3 >= limiar operacional: não aborta — aperta gestão de risco."""
         if not c3_soft or blocked.get('allowed'):
             return blocked
         out = dict(blocked)
