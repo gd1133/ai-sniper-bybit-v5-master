@@ -5071,6 +5071,11 @@ def api_manual_entry_trade():
             try:
                 db.record_trade(1, symbol, side_normalized, 0, 10, time.strftime("%d/%m %H:%M"), "ENTRADA MANUAL", "open", entry_price)
                 _sync_active_trades_from_db()
+                try:
+                    from src.ai_brain.cerebro3_decisor import c3_action_to_institutional
+                    manual_sig = c3_action_to_institutional(side_exec)
+                except Exception:
+                    manual_sig = hard_gate.get('sinal_institucional', 'NEUTRO')
                 threading.Thread(
                     target=_process_client_orders_background,
                     args=(
@@ -5079,7 +5084,8 @@ def api_manual_entry_trade():
                         entry_price,
                         70,
                         "Manual",
-                        hard_gate.get('sinal_institucional', 'NEUTRO'),
+                        manual_sig,
+                        tech_data,
                     ),
                     daemon=True,
                 ).start()
