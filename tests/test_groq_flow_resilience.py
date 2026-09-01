@@ -9,6 +9,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _disable_c3_solo(monkeypatch):
+    """Estes testes validam fluxo Groq/C1/C2 — fora do modo C3 solo."""
+    monkeypatch.setenv('C3_SOLO_MODE', 'false')
+
+
 def test_groq_model_chain_defaults():
     from src.intelligence.groq_client import get_groq_model_chain, DEFAULT_GROQ_MODEL
 
@@ -18,20 +24,19 @@ def test_groq_model_chain_defaults():
         os.environ.pop('GROQ_FALLBACK_MODELS', None)
         chain = get_groq_model_chain('flow')
         assert chain[0] == DEFAULT_GROQ_MODEL
-        assert chain[0] == 'llama3-70b-8192'
+        assert chain[0] == 'openai/gpt-oss-120b'
         assert 'llama-3.3-70b-versatile' not in chain
-        assert 'llama3-8b-8192' in chain
-        assert 'llama-3.1-8b-instant' in chain
-        assert 'openai/gpt-oss-20b' not in chain
-        assert 'openai/gpt-oss-120b' not in chain
+        assert 'openai/gpt-oss-20b' in chain
+        assert 'qwen/qwen3.6-27b' in chain
+        assert 'llama3-70b-8192' not in chain
 
 
-def test_deprecated_gpt_oss_model_is_remapped():
+def test_deprecated_llama_model_is_remapped():
     from src.intelligence.groq_client import get_groq_model_chain
 
-    with patch.dict(os.environ, {'GROQ_FLOW_MODEL': 'openai/gpt-oss-20b'}):
+    with patch.dict(os.environ, {'GROQ_FLOW_MODEL': 'llama3-70b-8192'}):
         chain = get_groq_model_chain('flow')
-        assert chain[0] == 'llama3-8b-8192'
+        assert chain[0] == 'openai/gpt-oss-120b'
 
 
 def test_classify_groq_error_model_not_found():
@@ -48,7 +53,7 @@ def test_groq_chat_tries_fallback_on_404():
 
     def fake_create(**kwargs):
         calls.append(kwargs.get('model'))
-        if kwargs.get('model') == 'bad-model':
+        if kwargs.get('model') == 'openai/gpt-oss-120b':
             raise Exception('404 model_not_found')
         rsp = MagicMock()
         rsp.choices = [MagicMock(message=MagicMock(content='{"score_fluxo": 0.5}'))]
@@ -59,8 +64,8 @@ def test_groq_chat_tries_fallback_on_404():
 
     with patch.dict(os.environ, {
         'GROQ_API_KEY': 'test-key',
-        'GROQ_FLOW_MODEL': 'bad-model',
-        'GROQ_FALLBACK_MODELS': 'llama-3.1-8b-instant',
+        'GROQ_FLOW_MODEL': 'openai/gpt-oss-120b',
+        'GROQ_FALLBACK_MODELS': 'openai/gpt-oss-20b',
     }):
         with patch.object(groq_client, 'Groq', return_value=mock_client):
             result = groq_client.groq_chat_completion(
@@ -68,8 +73,8 @@ def test_groq_chat_tries_fallback_on_404():
                 purpose='flow',
             )
     assert result['ok'] is True
-    assert 'bad-model' in calls
-    assert 'llama-3.1-8b-instant' in calls
+    assert 'openai/gpt-oss-120b' in calls
+    assert 'openai/gpt-oss-20b' in calls
 
 
 def test_groq_cooldown_blocks_repeat_calls():

@@ -416,48 +416,28 @@ def _call_gemini_tribunal(messages: list[dict]) -> dict | None:
     """Fallback Gemini quando Groq falha ou está em rate limit."""
     if not _env_bool('ENABLE_GEMINI_C3_FALLBACK', True):
         return None
-    gemini_key = os.getenv('GEMINI_API_KEY', '').strip()
-    if not gemini_key:
-        return None
-    try:
-        import requests
-        model = (
-            os.getenv('GEMINI_C3_MODEL', '').strip()
-            or os.getenv('GEMINI_MACRO_MODEL', '').strip()
-            or 'gemini-2.0-flash'
-        )
-        system = next((m.get('content', '') for m in messages if m.get('role') == 'system'), '')
-        user = next((m.get('content', '') for m in messages if m.get('role') == 'user'), '')
-        url = (
-            'https://generativelanguage.googleapis.com/v1beta/models/'
-            f'{model}:generateContent?key={gemini_key}'
-        )
-        rsp = requests.post(
-            url,
-            json={
-                'contents': [{'parts': [{'text': f'{system}\n\n{user}'}]}],
-                'generationConfig': {
-                    'temperature': 0.15,
-                    'maxOutputTokens': int(os.getenv('CEREBRO3_MAX_TOKENS', '320') or 320),
-                },
-            },
-            timeout=18,
-        )
-        if rsp.status_code != 200:
+    from src.intelligence.gemini_client import gemini_generate_text
+
+    system = next((m.get('content', '') for m in messages if m.get('role') == 'system'), '')
+    user = next((m.get('content', '') for m in messages if m.get('role') == 'user'), '')
+    result = gemini_generate_text(
+        f'{system}\n\n{user}',
+        purpose='tribunal',
+        temperature=0.15,
+        max_tokens=int(os.getenv('CEREBRO3_MAX_TOKENS', '320') or 320),
+    )
+    if not result.get('ok'):
+        status = result.get('status_code') or 0
+        if status:
             print(
-                f'⚠️ [C3] Gemini fallback HTTP {rsp.status_code} — fallback técnico local',
+                f'⚠️ [C3] Gemini fallback HTTP {status} — fallback técnico local',
                 flush=True,
             )
-            return None
-        parts = (rsp.json().get('candidates') or [{}])[0].get('content', {}).get('parts') or []
-        text = ' '.join(str(p.get('text', '')) for p in parts).strip()
-        parsed = _parse_decision_json(text)
-        if parsed:
-            print(f'⚠️ [C3] Groq indisponível → Gemini ({model})', flush=True)
-        return parsed
-    except Exception as exc:
-        print(f'⚠️ [C3] Gemini fallback falhou: {exc}', flush=True)
         return None
+    parsed = _parse_decision_json(result.get('text') or '')
+    if parsed:
+        print(f'⚠️ [C3] Groq indisponível → Gemini ({result.get("model")})', flush=True)
+    return parsed
 
 
 def _call_llm(messages: list[dict], purpose: str = 'tribunal') -> dict | None:
@@ -485,18 +465,25 @@ def _call_llm(messages: list[dict], purpose: str = 'tribunal') -> dict | None:
 def decide_entry(context: dict[str, Any]) -> dict[str, Any]:
     """Decisão principal de entrada — Cérebro 3."""
     price = _f(context.get('price'))
-    payload_txt = json.dumps(context, ensure_ascii=False, default=str)[:6000]
-    user_msg = f'Contexto de mercado:\n{payload_txt}\n\nDecida BUY/SELL/HOLD com gestão de risco.'
 
-    raw = _call_llm([
-        {'role': 'system', 'content': CEREBRO3_SYSTEM_PROMPT},
-        {'role': 'user', 'content': user_msg},
-    ], purpose='tribunal')
+    from src.config.c3_mode import is_c3_solo_mode
 
-    if raw:
-        decision = _normalize_decision(raw, price, exit_mode=False)
-    else:
+    if is_c3_solo_mode():
         decision = _local_entry_decision(context)
+        decision['source'] = 'c3_solo_local'
+    else:
+        payload_txt = json.dumps(context, ensure_ascii=False, default=str)[:6000]
+        user_msg = f'Contexto de mercado:\n{payload_txt}\n\nDecida BUY/SELL/HOLD com gestão de risco.'
+
+        raw = _call_llm([
+            {'role': 'system', 'content': CEREBRO3_SYSTEM_PROMPT},
+            {'role': 'user', 'content': user_msg},
+        ], purpose='tribunal')
+
+        if raw:
+            decision = _normalize_decision(raw, price, exit_mode=False)
+        else:
+            decision = _local_entry_decision(context)
 
     decision['probabilidade'] = round(decision['confidence'] * 100, 2)
     if decision['action'] == 'BUY':
