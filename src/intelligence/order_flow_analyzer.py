@@ -192,32 +192,26 @@ def _gemini_flow_fallback(symbol: str, user_payload: str) -> dict | None:
     """Segundo tier cloud — Gemini analisa order book quando Groq falha."""
     if not _env_bool('ENABLE_GEMINI_FLOW_FALLBACK', True):
         return None
-    gemini_key = os.getenv('GEMINI_API_KEY', '').strip()
-    if not gemini_key:
+    if not os.getenv('GEMINI_API_KEY', '').strip():
         return None
     try:
-        model = os.getenv('GEMINI_FLOW_MODEL', os.getenv('GEMINI_MACRO_MODEL', 'gemini-2.0-flash'))
-        url = (
-            'https://generativelanguage.googleapis.com/v1beta/models/'
-            f'{model}:generateContent?key={gemini_key}'
-        )
+        from src.intelligence.gemini_client import gemini_generate_text
+
         prompt = f'{GROQ_FLOW_SYSTEM}\n\nSímbolo: {symbol}\n{user_payload}'
-        rsp = requests.post(
-            url,
-            json={
-                'contents': [{'parts': [{'text': prompt}]}],
-                'generationConfig': {'temperature': 0.1, 'maxOutputTokens': 220},
-            },
-            timeout=12,
+        result = gemini_generate_text(
+            prompt,
+            purpose='flow',
+            temperature=0.1,
+            max_tokens=220,
         )
-        if rsp.status_code != 200:
+        if not result.get('ok'):
             return None
-        parts = (rsp.json().get('candidates') or [{}])[0].get('content', {}).get('parts') or []
-        text = ' '.join(str(p.get('text', '')) for p in parts).strip()
-        parsed = _parse_flow_json(text, source='gemini_flow')
+        parsed = _parse_flow_json(result.get('text') or '', source='gemini_flow')
         if parsed:
             parsed['groq_degraded'] = True
-            parsed['reason'] = f'Gemini fallback (Groq indisponível) — {parsed.get("reason", "")}'
+            parsed['reason'] = (
+                f'Gemini ({result.get("model")}) fallback — {parsed.get("reason", "")}'
+            )
         return parsed
     except Exception as exc:
         print(f'⚠️ [GROQ FLOW] Gemini fallback indisponível: {exc}', flush=True)
@@ -285,6 +279,18 @@ def analyze_order_book_flow(
         local['groq_degraded'] = True
         local['reason'] = 'ENABLE_GROQ_FLOW_AI=false — fluxo local'
         return _finish(local)
+
+    try:
+        from src.config.c3_mode import is_c3_solo_mode
+        if is_c3_solo_mode():
+            local = _local_flow_from_book(order_book, signals)
+            local['available'] = True
+            local['groq_degraded'] = False
+            local['source'] = 'c3_solo_local'
+            local['reason'] = 'C3 solo — sem Groq flow'
+            return _finish(local)
+    except Exception:
+        pass
 
     cache_key = f"{symbol}:{bool(order_book)}"
     now = time.time()

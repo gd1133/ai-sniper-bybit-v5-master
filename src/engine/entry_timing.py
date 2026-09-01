@@ -142,6 +142,31 @@ def _confirm_long_repique(df: pd.DataFrame) -> Tuple[bool, list[str]]:
     return True, reasons
 
 
+def summarize_timing_log(reasons: list[str]) -> tuple[str, str]:
+    """
+    Resume logs de timing — separa avisos consultivos (C1/C2) de confirmações.
+    Retorna (nível, texto) onde nível é 'consultivo' | 'ok' | 'aguardar'.
+    """
+    reasons = [str(r) for r in (reasons or []) if r]
+    consultivo = [
+        r for r in reasons
+        if '[consultivo]' in r or '⛔' in r or 'BLOQUEIO' in r or 'NUNCA' in r
+    ]
+    ok_bits = [r for r in reasons if r.startswith('✅')]
+    if consultivo:
+        short = '; '.join(
+            r.replace('[consultivo]', '').replace('[C1 cauteloso]', '').replace('[C1 velas]', '').strip()[:72]
+            for r in consultivo[:2]
+        )
+        tail = ok_bits[-1] if ok_bits else 'C3 soberano decide execução'
+        return 'consultivo', f'avisos C1/C2: {short} | {tail}'
+    if ok_bits:
+        return 'ok', ' | '.join(reasons[-4:])
+    if reasons:
+        return 'aguardar', ' | '.join(reasons[:3])
+    return 'ok', 'sem sinais extras'
+
+
 def _post_c3_advisory_only() -> bool:
     from src.engine.advisory_gates import post_c3_advisory_enabled
     return post_c3_advisory_enabled()

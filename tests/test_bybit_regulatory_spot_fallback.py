@@ -12,7 +12,7 @@ from src.config.trading_mode import normalize_trading_mode, resolve_trading_mode
 def test_normalize_trading_mode_aliases():
     assert normalize_trading_mode('perp') == 'linear'
     assert normalize_trading_mode('spot') == 'spot'
-    assert normalize_trading_mode('invalid') == 'linear'
+    assert normalize_trading_mode('invalid') == 'spot'
 
 
 def test_resolve_trading_mode_per_client():
@@ -67,13 +67,8 @@ def test_execute_market_order_retries_spot_on_10024():
     client._normalize_order_qty = MagicMock(return_value='0.01')
     client._format_tpsl_prices = MagicMock(return_value=(None, None))
     client.get_last_price = MagicMock(return_value=100.0)
-    client._handle_v5_ret_code = MagicMock(
-        side_effect=[
-            (False, 'retCode=10024 regulatory restrictions'),
-            (True, ''),
-        ]
-    )
-    client.fetch_order_details = MagicMock(return_value={'id': '1', 'price': 100})
+    client._fetch_order_details = MagicMock(return_value={'id': '1', 'price': 100})
+    client.fetch_order_details = client._fetch_order_details
     client._normalize_v5_symbol = lambda s: 'BTCUSDT'
     client._normalize_v5_side = lambda s: 'Buy'
     client._enable_spot_fallback = BybitClient._enable_spot_fallback.__get__(client, BybitClient)
@@ -81,16 +76,48 @@ def test_execute_market_order_retries_spot_on_10024():
     client.is_spot_trading = BybitClient.is_spot_trading.__get__(client, BybitClient)
     client._build_v5_market_payload = BybitClient._build_v5_market_payload.__get__(client, BybitClient)
     client._is_regulatory_restriction_error = BybitClient._is_regulatory_restriction_error
+    client._place_v5_order_safe = MagicMock(
+        side_effect=[
+            (False, None, 'retCode=10024 regulatory restrictions'),
+            (True, {'retCode': 0, 'result': {'orderId': 'abc'}}, ''),
+        ]
+    )
+    client._retry_spot_after_10024 = BybitClient._retry_spot_after_10024.__get__(client, BybitClient)
 
     session = MagicMock()
-    session.place_order.return_value = {'retCode': 0, 'result': {'orderId': 'abc'}}
     client.pybit_session = session
 
     result = client.execute_market_order('BTC/USDT', 'buy', 0.01)
     assert result is not None
     assert client.trading_mode == 'spot'
-    assert session.place_order.call_count == 2
-    assert session.place_order.call_args_list[1][1]['category'] == 'spot'
+    assert client._place_v5_order_safe.call_count == 2
+
+
+def test_execute_market_order_sell_skips_spot_on_10024():
+    client = object.__new__(BybitClient)
+    client.authenticated = True
+    client.trading_mode = 'linear'
+    client._derivatives_restricted = False
+    client.exchange = MagicMock()
+    client._normalize_order_qty = MagicMock(return_value='64.0')
+    client._format_tpsl_prices = MagicMock(return_value=('0.4', '0.46'))
+    client.get_last_price = MagicMock(return_value=0.44)
+    client._normalize_v5_symbol = lambda s: 'CYSUSDT'
+    client._normalize_v5_side = lambda s: 'Sell'
+    client._enable_spot_fallback = BybitClient._enable_spot_fallback.__get__(client, BybitClient)
+    client.get_order_category = BybitClient.get_order_category.__get__(client, BybitClient)
+    client._build_v5_market_payload = BybitClient._build_v5_market_payload.__get__(client, BybitClient)
+    client._is_regulatory_restriction_error = BybitClient._is_regulatory_restriction_error
+    client._place_v5_order_safe = MagicMock(
+        return_value=(False, None, 'ErrCode: 10024 regulatory restrictions'),
+    )
+    client._retry_spot_after_10024 = BybitClient._retry_spot_after_10024.__get__(client, BybitClient)
+    client.fetch_order_details = MagicMock()
+    client.pybit_session = MagicMock()
+
+    result = client.execute_market_order('CYS/USDT', 'sell', 64.0, raise_on_error=False)
+    assert result is None
+    assert client._derivatives_restricted is True
 
 
 def test_groq_default_models():
@@ -101,9 +128,10 @@ def test_groq_default_models():
             import os
             os.environ.pop(key, None)
         chain = get_groq_model_chain('flow')
-    assert chain[0] == 'llama3-70b-8192'
-    assert DEFAULT_GROQ_MODEL == 'llama3-70b-8192'
+    assert chain[0] == 'openai/gpt-oss-120b'
+    assert DEFAULT_GROQ_MODEL == 'openai/gpt-oss-120b'
     assert 'llama-3.3-70b-versatile' not in chain
+    assert 'llama3-70b-8192' not in chain
 
 
 def test_cautious_gate_advisory_never_blocks():

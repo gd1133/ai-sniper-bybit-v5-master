@@ -3520,7 +3520,19 @@ def sniper_worker_loop():
     from src.ai_brain.validator import GroqValidator
     from src.intelligence.market_intelligence import get_market_intelligence
     from src.engine.entry_timing import confirmar_timing_entrada
+    from src.config.c3_mode import is_c3_solo_mode
+    from src.intelligence.groq_client import log_groq_boot_config
     global _FORCED_SIGNAL_FIRED
+
+    try:
+        log_groq_boot_config()
+        print(
+            f'🧠 [BOOT] C3_SOLO_MODE={is_c3_solo_mode()} — '
+            f'C1/C2 {"fora da operação" if is_c3_solo_mode() else "consultivos"}',
+            flush=True,
+        )
+    except Exception as boot_cfg_err:
+        print(f'⚠️ [BOOT] config LLM: {boot_cfg_err}', flush=True)
 
     while True:
         try:
@@ -3783,12 +3795,23 @@ def sniper_worker_loop():
                         f"{(' | ' + _notes) if _notes else ''}",
                         flush=True,
                     )
-                    print(
-                        f"   🧠 [TRIPLO CÉREBRO] {clean_sym}: camada incremental ON "
-                        f"(C1 Turtle/anatomia · C2 liquidez/FVG · C3 pesos extra) "
-                        f"— não substitui SMA/ST/Portas/VWAP/Groq/Gemini",
-                        flush=True,
-                    )
+                    try:
+                        from src.config.c3_mode import is_c3_solo_mode
+                        if is_c3_solo_mode():
+                            print(
+                                f"   🧠 [C3 SOBERANO] {clean_sym}: C1/C2 fora da operação — "
+                                f"C3 unificado (tendência + volume + decisão local)",
+                                flush=True,
+                            )
+                        else:
+                            print(
+                                f"   🧠 [TRIPLO CÉREBRO] {clean_sym}: camada incremental ON "
+                                f"(C1 Turtle/anatomia · C2 liquidez/FVG · C3 pesos extra) "
+                                f"— não substitui SMA/ST/Portas/VWAP/Groq/Gemini",
+                                flush=True,
+                            )
+                    except Exception:
+                        pass
                     try:
                         from src.engine.triple_brain_layer import summarize_incremental
                         snap = summarize_incremental(signals)
@@ -3819,7 +3842,7 @@ def sniper_worker_loop():
                     intel_ctx['gates_advisory'] = hard_gate
                     intel_ctx['order_book'] = order_book
                     intel_ctx['ticker'] = t
-                    if intel_ctx.get('groq_flow_degraded'):
+                    if intel_ctx.get('groq_flow_degraded') and not is_c3_solo_mode():
                         flow_src = (intel_ctx.get('groq_flow') or {}).get('source', 'local')
                         print(
                             f"   ⚠️ [GROQ FLOW] {clean_sym}: API degradada → fallback {flow_src} "
@@ -3838,10 +3861,16 @@ def sniper_worker_loop():
                         intel_ctx = dict(intel_ctx)
                         intel_ctx['headlines'] = intel_ctx.get('headlines') or (intel_ctx.get('news') or {}).get('headlines')
 
-                    if intel_ctx.get('advisory_flags'):
+                    if intel_ctx.get('advisory_flags') and not is_c3_solo_mode():
                         print(
                             f"   📋 [C2→C3] {clean_sym}: flags="
                             f"{'; '.join(intel_ctx.get('advisory_flags', [])[:3])}",
+                            flush=True,
+                        )
+                    elif intel_ctx.get('advisory_flags') and is_c3_solo_mode():
+                        print(
+                            f"   📋 [C3] {clean_sym}: contexto="
+                            f"{'; '.join(intel_ctx.get('advisory_flags', [])[:2])} (informativo)",
                             flush=True,
                         )
 
@@ -4006,24 +4035,21 @@ def sniper_worker_loop():
                     timing_ok, timing_reasons = confirmar_timing_entrada(
                         side_exec, df, signals_timing, advisory_only=True,
                     )
-                    _timing_consultivo = any(
-                        str(r).startswith('[consultivo]') for r in (timing_reasons or [])
-                    )
-                    if _timing_consultivo:
+                    from src.engine.entry_timing import summarize_timing_log
+                    _timing_level, _timing_text = summarize_timing_log(timing_reasons)
+                    if _timing_level == 'consultivo':
                         print(
-                            f"   ⏳ [TIMING] {clean_sym} (consultivo): "
-                            f"{' | '.join(timing_reasons)}",
+                            f"   ⏳ [TIMING] {clean_sym} (consultivo): {_timing_text}",
                             flush=True,
                         )
                         signals['timing_advisory_sl_tighten_pct'] = 1.0
                     elif not timing_ok:
                         print(
-                            f"   ⏳ [TIMING] {clean_sym}: "
-                            f"{' | '.join(timing_reasons)}",
+                            f"   ⏳ [TIMING] {clean_sym}: {_timing_text}",
                             flush=True,
                         )
                     else:
-                        print(f"   ✅ [TIMING] {clean_sym}: {' | '.join(timing_reasons)}", flush=True)
+                        print(f"   ✅ [TIMING] {clean_sym}: {_timing_text}", flush=True)
 
                     # ── ANTI-CHASE: RSI / extensão EMA-VWAP / pullback EMA8 ──
                     # Bloqueia entrada no topo/fundo esticado ANTES da ordem a mercado.

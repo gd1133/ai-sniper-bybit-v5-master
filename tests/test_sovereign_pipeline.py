@@ -192,10 +192,14 @@ def test_sovereign_predict_no_neutro_block():
         'pivot_high': 52,
         'near_pivot_support': True,
     }
-    with patch.dict(os.environ, {'ADVISORY_GATES': 'true', 'ENABLE_CEREBRO3_LLM': 'false'}):
+    with patch.dict(os.environ, {
+        'ADVISORY_GATES': 'true',
+        'ENABLE_CEREBRO3_LLM': 'false',
+        'C3_SOLO_MODE': 'true',
+    }):
         res = v.consensus_predict(tech, 'TEST/USDT', intelligence_context={'allow_entry': True})
     assert 'decisao' in res
-    assert res.get('brains', {}).get('cerebro3') == 'leader'
+    assert res.get('brains', {}).get('cerebro3') == 'solo'
     # Com confluência (short ALTA + suporte), não deve ficar WAIT 35%
     if res.get('decisao') in ('BUY', 'SELL'):
         assert float(res.get('probabilidade') or 0) >= 50.0
