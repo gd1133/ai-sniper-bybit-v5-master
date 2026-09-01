@@ -18,21 +18,24 @@ try:
 except Exception:
     Groq = None
 
-# Groq desligou llama-3.3-70b-versatile e llama-3.1-8b-instant em 16/08/2026.
-# Fontes: https://console.groq.com/docs/deprecations e /docs/models
-DEFAULT_GROQ_MODEL = 'openai/gpt-oss-20b'
+# Modelos Groq estáveis — principal + fallback rápido.
+# IDs descontinuados (gpt-oss, mixtral legado) são remapeados automaticamente.
+DEFAULT_GROQ_MODEL = 'llama-3.3-70b-versatile'
 DEFAULT_GROQ_FALLBACK_CHAIN = (
-    'openai/gpt-oss-20b',
-    'qwen/qwen3.6-27b',
-    'openai/gpt-oss-120b',
+    'llama-3.3-70b-versatile',
+    'llama-3.1-8b-instant',
 )
 _DEPRECATED_GROQ_MODELS = {
-    'llama-3.3-70b-versatile': DEFAULT_GROQ_MODEL,
+    'openai/gpt-oss-20b': DEFAULT_GROQ_MODEL,
+    'openai/gpt-oss-120b': DEFAULT_GROQ_MODEL,
+    'gpt-oss-20b': DEFAULT_GROQ_MODEL,
+    'gpt-oss-120b': DEFAULT_GROQ_MODEL,
+    'qwen/qwen3.6-27b': 'llama-3.1-8b-instant',
     'llama-3.1-70b-versatile': DEFAULT_GROQ_MODEL,
-    'llama-3.1-8b-instant': DEFAULT_GROQ_MODEL,
     'llama-3.1-70b-specdec': DEFAULT_GROQ_MODEL,
     'llama3-70b-8192': DEFAULT_GROQ_MODEL,
     'llama3-8b-8192': DEFAULT_GROQ_MODEL,
+    'mixtral-8x7b-32768': 'llama-3.1-8b-instant',
 }
 
 # Cooldown global — compartilhado por flow, news e tribunal (evita spam 429/TPD).
