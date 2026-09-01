@@ -1,20 +1,14 @@
 """
-Confirmação de timing de entrada — Cérebro 3 CAUTELOSO.
+Confirmação de timing de entrada — consultivo pós-C3.
 
-Regras de ouro:
-  - NUNCA comprar com vela vermelha ou contra tendência
-  - NUNCA vender com vela verde ou contra tendência
-  - Venda no fundo: só com vela FORTE vermelha
-  - Compra no fundo: só com vela FORTE verde (mudança de momentum)
-  - Sempre buscar o momento certo (cor + força + engolfo/FVG)
-
-Camada 1: Portão cauteloso (bloqueio DURO) — cautious_entry_gate
-Camada 2: Tendência + SuperTrend
-Camada 3: Confirmação institucional / estrutura / repique
+Com POST_C3_GATES_ADVISORY=true (default), nunca bloqueia execução decidida
+pelo C3 — apenas informa alinhamento de tendência/SuperTrend/repique e
+sugere ajustes de gestão de risco.
 """
 
 from __future__ import annotations
 
+import os
 from typing import Tuple
 
 import pandas as pd
@@ -148,27 +142,47 @@ def _confirm_long_repique(df: pd.DataFrame) -> Tuple[bool, list[str]]:
     return True, reasons
 
 
-def confirmar_timing_entrada(side: str, df: pd.DataFrame, signals: dict | None = None) -> Tuple[bool, list[str]]:
+def _post_c3_advisory_only() -> bool:
+    return str(os.getenv('POST_C3_GATES_ADVISORY', 'true')).strip().lower() in {
+        '1', 'true', 'yes', 'on',
+    }
+
+
+def confirmar_timing_entrada(
+    side: str,
+    df: pd.DataFrame,
+    signals: dict | None = None,
+    *,
+    advisory_only: bool | None = None,
+) -> Tuple[bool, list[str]]:
     """
-    Validação CAUTELOSA antes de disparar ordem:
-      0. Portão cauteloso (cor da vela + força + anti-armadilha) — DURO
-      1. Tendência macro + SuperTrend — DURO
-      2. Velas institucionais / estrutura / repique / FVG — confirmação
+    Validação de timing antes de disparar ordem.
+
+    advisory_only=True (default via POST_C3_GATES_ADVISORY): 100% consultivo —
+    nunca retorna False; C3 soberano decide execução.
     """
+    if advisory_only is None:
+        advisory_only = _post_c3_advisory_only()
+
     signals = enrich_signals_with_fvg(df, signals or {})
     side_norm = str(side or '').strip().lower()
     all_reasons: list[str] = []
 
-    # ── 0) PORTÃO CAUTELOSO (bloqueio duro — anti Padilha/armadilha) ──
+    def _finalize(ok: bool, reasons: list[str]) -> Tuple[bool, list[str]]:
+        if advisory_only and not ok:
+            return True, [f'[consultivo] {r}' for r in reasons]
+        return ok, reasons
+
+    # ── 0) PORTÃO CAUTELOSO ──
     ok_gate, gate_reasons = cautious_entry_gate(side, df, signals)
     if not ok_gate:
-        return False, gate_reasons
+        return _finalize(False, gate_reasons)
     all_reasons.extend(gate_reasons)
 
     # ── 1) Tendência + SuperTrend ──
     ok_trend, trend_reasons = _trend_must_align(side, signals)
     if not ok_trend:
-        return False, trend_reasons
+        return _finalize(False, trend_reasons)
     all_reasons.extend(trend_reasons)
 
     # ── 2) Confirmações adicionais (não bypassam o portão) ──
@@ -190,7 +204,7 @@ def confirmar_timing_entrada(side: str, df: pd.DataFrame, signals: dict | None =
     elif side_norm in ('buy', 'long', 'comprar'):
         ok_repique, repique_reasons = _confirm_long_repique(df)
     else:
-        return False, [f'Side inválido: {side}']
+        return _finalize(False, [f'Side inválido: {side}'])
 
     if ok_repique:
         all_reasons.extend(repique_reasons)
@@ -213,4 +227,4 @@ def confirmar_timing_entrada(side: str, df: pd.DataFrame, signals: dict | None =
     all_reasons.append(
         '⏳ Portão OK mas volume fraco — aguarde confirmação de fluxo'
     )
-    return False, all_reasons
+    return _finalize(False, all_reasons)

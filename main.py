@@ -868,13 +868,14 @@ def run_sniper(symbol: str = SYMBOL):
                 time.sleep(SCAN_INTERVAL)
                 continue
 
-            # ── ETAPA 9: Cálculo de Tamanho da Entrada (Risco Dinâmico) ──────
-            timing_ok, timing_reasons = confirmar_timing_entrada(side.lower(), df, tech_data)
+            # ── ETAPA 9: Timing consultivo (C3 soberano decide execução) ──────
+            timing_ok, timing_reasons = confirmar_timing_entrada(
+                side.lower(), df, tech_data, advisory_only=True,
+            )
             if not timing_ok:
-                print(f"⏳ [TIMING] Aguardando fim de repique: {' | '.join(timing_reasons)}")
-                time.sleep(SCAN_INTERVAL)
-                continue
-            print(f"✅ [TIMING] Entrada confirmada: {' | '.join(timing_reasons)}")
+                print(f"⏳ [TIMING] (consultivo): {' | '.join(timing_reasons)}")
+            else:
+                print(f"✅ [TIMING] Entrada confirmada: {' | '.join(timing_reasons)}")
 
             entry_pct = risk_manager.current_entry_pct
             qty = calculate_entry_qty(client, price, entry_pct)

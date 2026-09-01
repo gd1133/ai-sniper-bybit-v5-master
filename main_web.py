@@ -3992,10 +3992,22 @@ def sniper_worker_loop():
 
                     signals_timing = dict(signals)
                     signals_timing['whale_aligned'] = bool(intel_ctx.get('whale_aligned'))
-                    timing_ok, timing_reasons = confirmar_timing_entrada(side_exec, df, signals_timing)
-                    if not timing_ok:
+                    timing_ok, timing_reasons = confirmar_timing_entrada(
+                        side_exec, df, signals_timing, advisory_only=True,
+                    )
+                    _timing_consultivo = any(
+                        str(r).startswith('[consultivo]') for r in (timing_reasons or [])
+                    )
+                    if _timing_consultivo:
                         print(
                             f"   ⏳ [TIMING] {clean_sym} (consultivo): "
+                            f"{' | '.join(timing_reasons)}",
+                            flush=True,
+                        )
+                        signals['timing_advisory_sl_tighten_pct'] = 1.0
+                    elif not timing_ok:
+                        print(
+                            f"   ⏳ [TIMING] {clean_sym}: "
                             f"{' | '.join(timing_reasons)}",
                             flush=True,
                         )
@@ -4027,14 +4039,17 @@ def sniper_worker_loop():
                             df_1m=df_1m_ac,
                             df_5m=df_5m_ac,
                             signals=signals,
+                            c3_confidence_pct=prob,
                         )
                         if not anti.get('allowed'):
                             reason = anti.get('abort_reason') or anti.get('code') or 'aviso'
                             print(
                                 f"   ℹ️ [ANTI-CHASE] {clean_sym} {side_exec.upper()}: "
-                                f"{reason} (consultivo — C3 decidiu, não bloqueia)",
+                                f"{reason} (consultivo — C3 conf={prob:.1f}%)",
                                 flush=True,
                             )
+                            if anti.get('sl_tighten_pct'):
+                                signals['c3_stop_loss_tighten_pct'] = anti['sl_tighten_pct']
                         else:
                             print(
                                 f"   ✅ [ANTI-CHASE] {clean_sym}: {anti.get('abort_reason')}",
@@ -4226,42 +4241,18 @@ def sniper_worker_loop():
                         )
                         if anti_x.get('sl_tighten_pct') and signals.get('c3_stop_loss'):
                             signals['c3_stop_loss_tighten_pct'] = anti_x['sl_tighten_pct']
-                    # C3 já passou limiar operacional — anti-chase é consultivo (não aborta)
+                    # C3 soberano: anti-chase EXEC é 100% consultivo — nunca aborta ordem
                     if not anti_x.get('allowed'):
                         code = anti_x.get('code') or 'REJECTED'
                         reason = anti_x.get('abort_reason') or code
-                        if _c3_prob >= float(THRESHOLD_ENTRADA):
-                            print(
-                                f"   ℹ️ [ANTI-CHASE EXEC] {melhor['clean_symbol']}: {reason} "
-                                f"(consultivo — C3 conf={_c3_prob:.1f}% >= limiar)",
-                                flush=True,
-                            )
-                            if signals.get('c3_stop_loss'):
-                                signals['c3_stop_loss_tighten_pct'] = float(
-                                    anti_x.get('sl_tighten_pct') or 1.2
-                                )
-                        else:
-                            print(
-                                f"   🚫 [ANTI-CHASE EXEC] {melhor['clean_symbol']}: {reason}",
-                                flush=True,
-                            )
-                            try:
-                                from src.database.decision_history import record_ia_decision
-                                record_ia_decision(
-                                    sym,
-                                    motivo_saida=reason,
-                                    pnl_garantido_pct=0.0,
-                                    tipo_execucao='ENTRY_REJECTED',
-                                    action_payload=str(code),
-                                    client_id=0,
-                                )
-                                _push_ia_decision_live(
-                                    melhor['clean_symbol'], str(code), reason, 0.0, 'ENTRY_REJECTED',
-                                )
-                            except Exception:
-                                pass
-                            time.sleep(SCAN_INTER_SYMBOL_DELAY_SECS)
-                            continue
+                        print(
+                            f"   ℹ️ [ANTI-CHASE EXEC] {melhor['clean_symbol']}: {reason} "
+                            f"(consultivo — C3 conf={_c3_prob:.1f}% ≥ limiar, ordem segue)",
+                            flush=True,
+                        )
+                        tighten = float(anti_x.get('sl_tighten_pct') or 1.2)
+                        prev_tighten = float(signals.get('c3_stop_loss_tighten_pct') or 0)
+                        signals['c3_stop_loss_tighten_pct'] = max(prev_tighten, tighten)
                 except Exception as anti_exec_err:
                     print(
                         f"   ⚠️ [ANTI-CHASE EXEC] {melhor['clean_symbol']}: "
@@ -4473,6 +4464,11 @@ def _process_client_orders_background(
                     tighten = float(signals.get('c3_stop_loss_tighten_pct') or 0)
                 except (TypeError, ValueError):
                     tighten = 0.0
+                try:
+                    timing_tighten = float(signals.get('timing_advisory_sl_tighten_pct') or 0)
+                except (TypeError, ValueError):
+                    timing_tighten = 0.0
+                tighten = max(tighten, timing_tighten)
                 if tighten > 0 and sl_price and entry_price:
                     is_long = str(side).lower() in ('buy', 'long', 'comprar')
                     dist = abs(float(entry_price) - float(sl_price))

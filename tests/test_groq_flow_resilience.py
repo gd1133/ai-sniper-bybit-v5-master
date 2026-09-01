@@ -18,18 +18,19 @@ def test_groq_model_chain_defaults():
         os.environ.pop('GROQ_FALLBACK_MODELS', None)
         chain = get_groq_model_chain('flow')
         assert chain[0] == DEFAULT_GROQ_MODEL
-        assert 'openai/gpt-oss-20b' in chain
-        assert 'qwen/qwen3.6-27b' in chain
-        assert 'llama-3.3-70b-versatile' not in chain
+        assert 'llama-3.3-70b-versatile' in chain
+        assert 'llama-3.1-8b-instant' in chain
+        assert 'openai/gpt-oss-20b' not in chain
+        assert 'openai/gpt-oss-120b' not in chain
 
 
-def test_deprecated_llama_model_is_remapped():
+def test_deprecated_gpt_oss_model_is_remapped():
     from src.intelligence.groq_client import get_groq_model_chain
 
-    with patch.dict(os.environ, {'GROQ_FLOW_MODEL': 'llama-3.3-70b-versatile'}):
+    with patch.dict(os.environ, {'GROQ_FLOW_MODEL': 'openai/gpt-oss-20b'}):
         chain = get_groq_model_chain('flow')
-        assert chain[0] == 'openai/gpt-oss-20b'
-        assert 'llama-3.3-70b-versatile' not in chain
+        assert chain[0] == 'llama-3.3-70b-versatile'
+        assert 'openai/gpt-oss-20b' not in chain
 
 
 def test_classify_groq_error_model_not_found():
@@ -58,7 +59,7 @@ def test_groq_chat_tries_fallback_on_404():
     with patch.dict(os.environ, {
         'GROQ_API_KEY': 'test-key',
         'GROQ_FLOW_MODEL': 'bad-model',
-        'GROQ_FALLBACK_MODELS': 'qwen/qwen3.6-27b',
+        'GROQ_FALLBACK_MODELS': 'llama-3.1-8b-instant',
     }):
         with patch.object(groq_client, 'Groq', return_value=mock_client):
             result = groq_client.groq_chat_completion(
@@ -67,7 +68,7 @@ def test_groq_chat_tries_fallback_on_404():
             )
     assert result['ok'] is True
     assert 'bad-model' in calls
-    assert 'qwen/qwen3.6-27b' in calls
+    assert 'llama-3.1-8b-instant' in calls
 
 
 def test_groq_cooldown_blocks_repeat_calls():
@@ -215,6 +216,5 @@ def test_market_intel_allows_entry_when_groq_degraded_no_hard_veto():
 
     assert ctx.get('groq_flow_degraded') is True
     assert ctx.get('allow_entry') is True
-    # Fallback local disponível → não força modo autônomo cego
     assert ctx.get('ai_assistants_unavailable') is False
     assert ctx.get('autonomous_mode') is False

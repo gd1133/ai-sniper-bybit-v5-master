@@ -412,11 +412,59 @@ def _local_exit_decision(context: dict[str, Any], position: dict) -> dict[str, A
     }
 
 
+def _call_gemini_tribunal(messages: list[dict]) -> dict | None:
+    """Fallback Gemini quando Groq falha ou está em rate limit."""
+    if not _env_bool('ENABLE_GEMINI_C3_FALLBACK', True):
+        return None
+    gemini_key = os.getenv('GEMINI_API_KEY', '').strip()
+    if not gemini_key:
+        return None
+    try:
+        import requests
+        model = (
+            os.getenv('GEMINI_C3_MODEL', '').strip()
+            or os.getenv('GEMINI_MACRO_MODEL', '').strip()
+            or 'gemini-2.0-flash'
+        )
+        system = next((m.get('content', '') for m in messages if m.get('role') == 'system'), '')
+        user = next((m.get('content', '') for m in messages if m.get('role') == 'user'), '')
+        url = (
+            'https://generativelanguage.googleapis.com/v1beta/models/'
+            f'{model}:generateContent?key={gemini_key}'
+        )
+        rsp = requests.post(
+            url,
+            json={
+                'contents': [{'parts': [{'text': f'{system}\n\n{user}'}]}],
+                'generationConfig': {
+                    'temperature': 0.15,
+                    'maxOutputTokens': int(os.getenv('CEREBRO3_MAX_TOKENS', '320') or 320),
+                },
+            },
+            timeout=18,
+        )
+        if rsp.status_code != 200:
+            print(
+                f'⚠️ [C3] Gemini fallback HTTP {rsp.status_code} — fallback técnico local',
+                flush=True,
+            )
+            return None
+        parts = (rsp.json().get('candidates') or [{}])[0].get('content', {}).get('parts') or []
+        text = ' '.join(str(p.get('text', '')) for p in parts).strip()
+        parsed = _parse_decision_json(text)
+        if parsed:
+            print(f'⚠️ [C3] Groq indisponível → Gemini ({model})', flush=True)
+        return parsed
+    except Exception as exc:
+        print(f'⚠️ [C3] Gemini fallback falhou: {exc}', flush=True)
+        return None
+
+
 def _call_llm(messages: list[dict], purpose: str = 'tribunal') -> dict | None:
     if not _env_bool('ENABLE_CEREBRO3_LLM', True):
         return None
     try:
-        from src.intelligence.groq_client import groq_chat_completion
+        from src.intelligence.groq_client import groq_chat_completion, log_groq_degraded
         result = groq_chat_completion(
             messages=messages,
             purpose=purpose,
@@ -424,10 +472,14 @@ def _call_llm(messages: list[dict], purpose: str = 'tribunal') -> dict | None:
             max_tokens=int(os.getenv('CEREBRO3_MAX_TOKENS', '320') or 320),
         )
         if result.get('ok'):
-            return _parse_decision_json(result.get('content') or '')
-    except Exception:
-        pass
-    return None
+            parsed = _parse_decision_json(result.get('content') or '')
+            if parsed:
+                return parsed
+        elif not result.get('cooldown'):
+            log_groq_degraded('C3 TRIBUNAL', result)
+    except Exception as exc:
+        print(f'⚠️ [C3] Groq erro: {exc}', flush=True)
+    return _call_gemini_tribunal(messages)
 
 
 def decide_entry(context: dict[str, Any]) -> dict[str, Any]:
