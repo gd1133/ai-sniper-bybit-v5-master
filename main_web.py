@@ -467,14 +467,19 @@ class BrokerManager:
         self._initialized = True
         print("🔄 [BROKER MANAGER] Singleton inicializado")
 
-    def _generate_cache_key(self, client_id, exchange, testnet, endpoint_url=None):
+    def _generate_cache_key(self, client_id, exchange, testnet, endpoint_url=None, trading_mode=None):
         endpoint_tag = str(endpoint_url or '').strip().lower()
-        return f"{exchange}_{client_id}_{testnet}_{endpoint_tag}"
+        mode_tag = str(trading_mode or 'linear').strip().lower()
+        return f"{exchange}_{client_id}_{testnet}_{endpoint_tag}_{mode_tag}"
 
     def get_broker(self, client, broker_cls, testnet, endpoint_url=None):
+        from src.config.trading_mode import resolve_trading_mode
+        trading_mode = resolve_trading_mode(client)
         client_id = client.get('id')
         exchange = str(client.get('exchange') or 'bybit').strip().lower()
-        cache_key = self._generate_cache_key(client_id, exchange, testnet, endpoint_url=endpoint_url)
+        cache_key = self._generate_cache_key(
+            client_id, exchange, testnet, endpoint_url=endpoint_url, trading_mode=trading_mode,
+        )
 
         with self._cache_lock:
             if cache_key in self._broker_cache:
@@ -498,7 +503,13 @@ class BrokerManager:
                 f"testnet={testnet} url={endpoint_url or '-'}",
                 flush=True,
             )
-            broker_instance = broker_cls(api_key, api_secret, testnet=testnet, base_url=endpoint_url)
+            broker_instance = broker_cls(
+                api_key,
+                api_secret,
+                testnet=testnet,
+                base_url=endpoint_url,
+                trading_mode=trading_mode,
+            )
             self._broker_cache[cache_key] = broker_instance
             return broker_instance
 
@@ -4361,15 +4372,17 @@ def _process_client_orders_background(
                 except Exception as dup_err:
                     print(f"   ⚠️ [ANTI-DUP] Falha ao verificar posição de {symbol}: {dup_err}", flush=True)
 
-                # 🔒 MARGEM ISOLADA + ALAVANCAGEM 20x (proibido Cross Margin)
-                try:
-                    # Preferência: switch_isolated_margin (alias Bybit V5 / diretriz)
-                    if hasattr(broker, 'switch_isolated_margin'):
-                        broker.switch_isolated_margin(symbol, ALAVANCAGEM)
-                    else:
-                        broker.set_isolated_margin(symbol, ALAVANCAGEM)
-                except Exception as mm_err:
-                    print(f"   ⚠️ [MARGEM] Falha ao forçar isolada em {symbol}: {mm_err}", flush=True)
+                # 🔒 MARGEM ISOLADA + ALAVANCAGEM 20x (somente linear/perp)
+                if not getattr(broker, 'is_spot_trading', lambda: False)():
+                    try:
+                        if hasattr(broker, 'switch_isolated_margin'):
+                            broker.switch_isolated_margin(symbol, ALAVANCAGEM)
+                        else:
+                            broker.set_isolated_margin(symbol, ALAVANCAGEM)
+                    except Exception as mm_err:
+                        print(f"   ⚠️ [MARGEM] Falha ao forçar isolada em {symbol}: {mm_err}", flush=True)
+                else:
+                    print(f"   ℹ️ [SPOT] {c.get('nome')} — ordem spot sem alavancagem", flush=True)
 
                 # 🔒 CORREÇÃO MODO CONSERVADOR: Bloqueia nova entrada se já houver posição aberta
                 if RISK_MODE == 'conservative':
@@ -4422,9 +4435,8 @@ def _process_client_orders_background(
                     f"🔮 Enviando Ordem Real: Cliente={c.get('nome')} | Margem={margem} | Par={symbol}",
                     flush=True,
                 )
-                # 🔧 CONFIGURAÇÃO AUTOMÁTICA DE ALAVANCAGEM (VARIÁVEL)
-                # Define alavancagem conforme ALAVANCAGEM global antes de enviar ordem
-                if broker.pybit_session:
+                # 🔧 ALAVANCAGEM — apenas derivativos (linear)
+                if broker.pybit_session and not broker.is_spot_trading():
                     try:
                         v5_symbol = broker._normalize_v5_symbol(symbol)
                         leverage_str = str(ALAVANCAGEM)
@@ -4440,8 +4452,7 @@ def _process_client_orders_background(
                         else:
                             print(f"   ⚠️ [LEVERAGE] Aviso ao definir alavancagem: {err}", flush=True)
                     except Exception as lev_err:
-                        # Ignora erros se moeda já estiver na alavancagem desejada
-                        print(f"   ⚠️ [LEVERAGE] Erro ao configurar para {ALAVANCAGEM}x (pode já estar neste valor): {lev_err}", flush=True)
+                        print(f"   ⚠️ [LEVERAGE] Erro ao configurar para {ALAVANCAGEM}x: {lev_err}", flush=True)
 
                 # 🎯 SL/TP: prioriza C3 soberano; fallback Turtle/Fib
                 from src.risk.position_sizing import attach_exchange_tp, calculate_dynamic_tp_sl

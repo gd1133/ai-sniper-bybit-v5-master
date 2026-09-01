@@ -40,7 +40,7 @@ def _ensure_ema_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _trend_must_align(side: str, signals: dict) -> Tuple[bool, list[str]]:
-    """Bloqueio duro: lado da ordem deve seguir tendência macro + SuperTrend."""
+    """Contexto C1: tendência + SuperTrend (consultivo — não veta ordem no modo soberano)."""
     side_norm = str(side or '').strip().lower()
     trend = str(signals.get('trend', 'NEUTRO')).upper()
     st = int(signals.get('supertrend_signal', 0) or 0)
@@ -143,9 +143,8 @@ def _confirm_long_repique(df: pd.DataFrame) -> Tuple[bool, list[str]]:
 
 
 def _post_c3_advisory_only() -> bool:
-    return str(os.getenv('POST_C3_GATES_ADVISORY', 'true')).strip().lower() in {
-        '1', 'true', 'yes', 'on',
-    }
+    from src.engine.advisory_gates import post_c3_advisory_enabled
+    return post_c3_advisory_enabled()
 
 
 def confirmar_timing_entrada(

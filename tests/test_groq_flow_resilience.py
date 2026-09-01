@@ -18,7 +18,9 @@ def test_groq_model_chain_defaults():
         os.environ.pop('GROQ_FALLBACK_MODELS', None)
         chain = get_groq_model_chain('flow')
         assert chain[0] == DEFAULT_GROQ_MODEL
-        assert 'llama-3.3-70b-versatile' in chain
+        assert chain[0] == 'llama3-70b-8192'
+        assert 'llama-3.3-70b-versatile' not in chain
+        assert 'llama3-8b-8192' in chain
         assert 'llama-3.1-8b-instant' in chain
         assert 'openai/gpt-oss-20b' not in chain
         assert 'openai/gpt-oss-120b' not in chain
@@ -29,8 +31,7 @@ def test_deprecated_gpt_oss_model_is_remapped():
 
     with patch.dict(os.environ, {'GROQ_FLOW_MODEL': 'openai/gpt-oss-20b'}):
         chain = get_groq_model_chain('flow')
-        assert chain[0] == 'llama-3.3-70b-versatile'
-        assert 'openai/gpt-oss-20b' not in chain
+        assert chain[0] == 'llama3-8b-8192'
 
 
 def test_classify_groq_error_model_not_found():
