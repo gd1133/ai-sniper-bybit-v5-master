@@ -758,7 +758,7 @@ class GroqValidator:
         return result
 
     def _sovereign_predict(self, tech_data, symbol, intelligence_context=None):
-        """C1/C2 consultivos + C3 decisor (sem bloqueio por tendência neutra/lateral)."""
+        """C3 solo: tendência+volume+decisão unificados. Caso contrário: C1/C2 consultivos → C3."""
         from src.engine.context_enrichment import (
             build_cerebro1_payload,
             build_cerebro2_payload,
@@ -766,6 +766,7 @@ class GroqValidator:
             merge_context_for_cerebro3,
         )
         from src.ai_brain.cerebro3_decisor import decide_entry, decision_to_consensus
+        from src.config.c3_mode import is_c3_solo_mode
 
         ctx = dict(intelligence_context or {})
         # Veto estrutural duro (ex.: lateral absoluto) — só C3 pode abortar, não C1/C2
@@ -808,12 +809,52 @@ class GroqValidator:
             ticker=ctx.get('ticker'),
         )
         context = merge_context_for_cerebro3(symbol, tech_data, gates, report_c1, report_c2, ctx)
-        # C2 local disponível → não marca modo autônomo forçado
-        if (ctx.get('groq_flow') or {}).get('available') and ctx.get('groq_flow_degraded'):
-            ctx['autonomous_mode'] = False
-            ctx['ai_assistants_unavailable'] = False
-        decision = decide_entry(context)
-        result = decision_to_consensus(decision, context, report_c1, report_c2)
+
+        if is_c3_solo_mode():
+            agent_c1 = self.cerebro1.generate_report(tech_data, symbol)
+            agent_c2 = self.cerebro2.generate_report(tech_data, symbol, ctx)
+            sovereign = self.cerebro3.decide(
+                tech_data, symbol, agent_c1, agent_c2, intelligence_context=ctx,
+            )
+            decision = decide_entry(context)
+            action = str(sovereign.get('decisao') or decision.get('decisao') or 'WAIT').upper()
+            if action == 'WAIT' and decision.get('decisao') in ('BUY', 'SELL'):
+                action = decision['decisao']
+            prob = max(
+                float(sovereign.get('probabilidade', 0) or 0),
+                float(decision.get('probabilidade', 0) or 0),
+            )
+            if action in ('BUY', 'SELL') and prob < 48:
+                prob = max(prob, float(decision.get('confidence', 0) or 0) * 100)
+            merged = dict(decision)
+            motivo_text = (
+                f"C3 solo | {str(sovereign.get('motivo', ''))[:120]} | "
+                f"{str(decision.get('rationale') or decision.get('motivo', ''))[:120]}"
+            )
+            merged.update({
+                'decisao': action,
+                'action': action,
+                'probabilidade': prob,
+                'motivo': motivo_text,
+                'rationale': motivo_text,
+                'source': 'c3_solo',
+                'autonomous_mode': True,
+            })
+            result = decision_to_consensus(merged, context, report_c1, report_c2)
+            result['brains'] = {
+                'cerebro1': 'absorbed_by_c3',
+                'cerebro2': 'absorbed_by_c3',
+                'cerebro3': 'solo',
+                'local': 'autonomous',
+            }
+            result['autonomous_mode'] = True
+        else:
+            if (ctx.get('groq_flow') or {}).get('available') and ctx.get('groq_flow_degraded'):
+                ctx['autonomous_mode'] = False
+                ctx['ai_assistants_unavailable'] = False
+            decision = decide_entry(context)
+            result = decision_to_consensus(decision, context, report_c1, report_c2)
+
         result['votes'] = {
             'buy': 1 if result.get('decisao') == 'BUY' else 0,
             'sell': 1 if result.get('decisao') == 'SELL' else 0,

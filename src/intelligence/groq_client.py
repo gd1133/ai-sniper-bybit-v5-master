@@ -18,23 +18,23 @@ try:
 except Exception:
     Groq = None
 
-# Modelos Groq compatíveis (IDs estáveis). llama-3.3-70b-versatile → remapeado.
-DEFAULT_GROQ_MODEL = 'llama3-70b-8192'
+# Modelos Groq ativos (Llama/Mixtral descontinuados em ago/2026 — ver console.groq.com/docs/deprecations)
+DEFAULT_GROQ_MODEL = 'openai/gpt-oss-120b'
 DEFAULT_GROQ_FALLBACK_CHAIN = (
-    'llama3-70b-8192',
-    'llama3-8b-8192',
-    'mixtral-8x7b-32768',
-    'llama-3.1-8b-instant',
+    'openai/gpt-oss-120b',
+    'openai/gpt-oss-20b',
+    'qwen/qwen3.6-27b',
 )
 _DEPRECATED_GROQ_MODELS = {
-    'llama-3.3-70b-versatile': 'llama3-70b-8192',
-    'llama-3.1-70b-versatile': 'llama3-70b-8192',
-    'llama-3.1-70b-specdec': 'llama3-70b-8192',
-    'openai/gpt-oss-20b': 'llama3-8b-8192',
-    'openai/gpt-oss-120b': 'llama3-70b-8192',
-    'gpt-oss-20b': 'llama3-8b-8192',
-    'gpt-oss-120b': 'llama3-70b-8192',
-    'qwen/qwen3.6-27b': 'llama-3.1-8b-instant',
+    'llama-3.3-70b-versatile': 'openai/gpt-oss-120b',
+    'llama-3.1-70b-versatile': 'openai/gpt-oss-120b',
+    'llama-3.1-70b-specdec': 'openai/gpt-oss-120b',
+    'llama3-70b-8192': 'openai/gpt-oss-120b',
+    'llama3-8b-8192': 'openai/gpt-oss-20b',
+    'llama-3.1-8b-instant': 'openai/gpt-oss-20b',
+    'mixtral-8x7b-32768': 'qwen/qwen3.6-27b',
+    'gpt-oss-20b': 'openai/gpt-oss-20b',
+    'gpt-oss-120b': 'openai/gpt-oss-120b',
 }
 
 # Cooldown global — compartilhado por flow, news e tribunal (evita spam 429/TPD).
@@ -208,56 +208,34 @@ def _gemini_chat_fallback(
     """Fallback Gemini quando Groq retorna 404 / rate-limit / indisponível."""
     if not _env_bool('ENABLE_GEMINI_FLOW_FALLBACK', True):
         return None
-    gemini_key = os.getenv('GEMINI_API_KEY', '').strip()
-    if not gemini_key:
-        return None
-    try:
-        import requests
-        model = (
-            os.getenv('GEMINI_CHAT_MODEL', '').strip()
-            or os.getenv('GEMINI_FLOW_MODEL', '').strip()
-            or os.getenv('GEMINI_MACRO_MODEL', '').strip()
-            or 'gemini-2.0-flash'
-        )
-        url = (
-            'https://generativelanguage.googleapis.com/v1beta/models/'
-            f'{model}:generateContent?key={gemini_key}'
-        )
-        prompt = _messages_to_prompt(messages)
-        rsp = requests.post(
-            url,
-            json={
-                'contents': [{'parts': [{'text': prompt}]}],
-                'generationConfig': {
-                    'temperature': float(temperature),
-                    'maxOutputTokens': int(max_tokens),
-                },
-            },
-            timeout=15,
-        )
-        if rsp.status_code != 200:
+    from src.intelligence.gemini_client import gemini_generate_text
+
+    prompt = _messages_to_prompt(messages)
+    result = gemini_generate_text(
+        prompt,
+        purpose=purpose,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    if not result.get('ok'):
+        status = result.get('status_code') or 0
+        if status:
             print(
-                f'⚠️ [GEMINI] {purpose} HTTP {rsp.status_code} — fallback técnico C3',
+                f'⚠️ [GEMINI] {purpose} HTTP {status} — fallback técnico C3',
                 flush=True,
             )
-            return None
-        parts = (rsp.json().get('candidates') or [{}])[0].get('content', {}).get('parts') or []
-        text = ' '.join(str(p.get('text', '')) for p in parts).strip()
-        if not text:
-            return None
-        print(f'✅ [GEMINI] {purpose} respondeu via {model} (Groq indisponível)', flush=True)
-        return {
-            'ok': True,
-            'content': text,
-            'model': f'gemini:{model}',
-            'error_type': None,
-            'error': None,
-            'models_tried': [f'gemini:{model}'],
-            'gemini_fallback': True,
-        }
-    except Exception as exc:
-        print(f'⚠️ [GEMINI] {purpose} fallback falhou: {exc}', flush=True)
         return None
+    model = result.get('model') or 'gemini'
+    print(f'✅ [GEMINI] {purpose} respondeu via {model} (Groq indisponível)', flush=True)
+    return {
+        'ok': True,
+        'content': result.get('text') or '',
+        'model': f'gemini:{model}',
+        'error_type': None,
+        'error': None,
+        'models_tried': [f'gemini:{model}'],
+        'gemini_fallback': True,
+    }
 
 
 def groq_chat_completion(

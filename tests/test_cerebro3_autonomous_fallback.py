@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
+import pytest
+
 from src.ai_brain.validator import AI_UNAVAILABLE_REPORT, GroqValidator
+
+
+@pytest.fixture(autouse=True)
+def _disable_c3_solo(monkeypatch):
+    monkeypatch.setenv('C3_SOLO_MODE', 'false')
 
 
 def _tech_alta():

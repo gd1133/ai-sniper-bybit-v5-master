@@ -286,6 +286,18 @@ def analyze_order_book_flow(
         local['reason'] = 'ENABLE_GROQ_FLOW_AI=false — fluxo local'
         return _finish(local)
 
+    try:
+        from src.config.c3_mode import is_c3_solo_mode
+        if is_c3_solo_mode():
+            local = _local_flow_from_book(order_book, signals)
+            local['available'] = True
+            local['groq_degraded'] = False
+            local['source'] = 'c3_solo_local'
+            local['reason'] = 'C3 solo — sem Groq flow'
+            return _finish(local)
+    except Exception:
+        pass
+
     cache_key = f"{symbol}:{bool(order_book)}"
     now = time.time()
     ttl = _CACHE_TTL_DEGRADED if is_groq_in_cooldown() else _CACHE_TTL

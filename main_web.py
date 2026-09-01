@@ -3783,12 +3783,23 @@ def sniper_worker_loop():
                         f"{(' | ' + _notes) if _notes else ''}",
                         flush=True,
                     )
-                    print(
-                        f"   🧠 [TRIPLO CÉREBRO] {clean_sym}: camada incremental ON "
-                        f"(C1 Turtle/anatomia · C2 liquidez/FVG · C3 pesos extra) "
-                        f"— não substitui SMA/ST/Portas/VWAP/Groq/Gemini",
-                        flush=True,
-                    )
+                    try:
+                        from src.config.c3_mode import is_c3_solo_mode
+                        if is_c3_solo_mode():
+                            print(
+                                f"   🧠 [C3 SOBERANO] {clean_sym}: C1/C2 fora da operação — "
+                                f"C3 unificado (tendência + volume + decisão local)",
+                                flush=True,
+                            )
+                        else:
+                            print(
+                                f"   🧠 [TRIPLO CÉREBRO] {clean_sym}: camada incremental ON "
+                                f"(C1 Turtle/anatomia · C2 liquidez/FVG · C3 pesos extra) "
+                                f"— não substitui SMA/ST/Portas/VWAP/Groq/Gemini",
+                                flush=True,
+                            )
+                    except Exception:
+                        pass
                     try:
                         from src.engine.triple_brain_layer import summarize_incremental
                         snap = summarize_incremental(signals)

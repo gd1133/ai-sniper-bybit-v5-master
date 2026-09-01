@@ -15,6 +15,7 @@ from src.intelligence.whale_detector import analyze_whale_activity
 from src.intelligence.order_flow_analyzer import analyze_order_book_flow
 from src.intelligence.gemini_macro_analyzer import analyze_gemini_macro_news
 from src.ai_brain.cerebro3_soberano import market_condition_from_signals
+from src.config.c3_mode import is_c3_solo_mode
 
 
 def _env_bool(name: str, default: bool = True) -> bool:
@@ -54,16 +55,8 @@ class MarketIntelligence:
         news = analyze_news_sentiment(symbol, signals, regime, whale)
 
         headlines = list(news.get('headlines') or [])
-        gemini_macro = analyze_gemini_macro_news(
-            symbol,
-            headlines=headlines,
-            news_blob=str(news.get('reason') or ''),
-            signals={**signals, 'market_regime': regime.get('market_regime')},
-        )
         condicao = market_condition_from_signals(signals, regime)
 
-        # Estrutura: amplitude + ADX são travas; BB só se STRUCTURE_REQUIRE_BB_EXPAND.
-        # BLOCK_LATERAL_MARKETS controla apenas critérios complementares (chop/range).
         from src.engine.structure_config import STRUCTURE_ADX_MIN, STRUCTURE_REQUIRE_BB_EXPAND
         adx_min = float(STRUCTURE_ADX_MIN)
         amplitude_lateral = bool(
@@ -75,42 +68,57 @@ class MarketIntelligence:
         bb_blocked = STRUCTURE_REQUIRE_BB_EXPAND and (
             not bool(regime.get('bollinger_expanding', False))
         )
-        block_lateral = _env_bool('BLOCK_LATERAL_MARKETS', True)  # default ON — anti-acumulação
-        hard_veto_reasons = []
-        soft_veto_reasons = []
+        block_lateral = _env_bool('BLOCK_LATERAL_MARKETS', True)
+        hard_veto_reasons: list[str] = []
+        soft_veto_reasons: list[str] = []
         ai_assistants_unavailable = False
         groq_flow_degraded = False
-        cloud_news_degraded = bool(
-            news.get('cloud_ai_degraded')
-            or news.get('ai_unavailable')
-            or str(news.get('ai_status', '')).lower() in ('degradado', 'disabled')
-            or str(news.get('source', '')).lower() == 'disabled'
-        )
+        cloud_news_degraded = False
+        local_flow_ok = True
 
-        # Incremental: Groq fluxo (order book) + Gemini macro (manchetes)
-        import os
-        advisory = str(os.getenv('ADVISORY_GATES', 'true')).strip().lower() in {'1', 'true', 'yes', 'on'}
-        hard_gates_ok = True if advisory else bool(
-            signals.get('sinal_institucional')
-            and str(signals.get('trend', 'NEUTRO')).upper() in ('ALTA', 'BAIXA')
-            and not signals.get('is_lateral')
-        )
-        flow = analyze_order_book_flow(
-            symbol,
-            order_book=order_book,
-            signals=signals,
-            df=df,
-            hard_gates_approved=hard_gates_ok,
-        )
-        groq_flow_degraded = bool(flow.get('groq_degraded'))
-        # Cloud Groq caiu mas fallback local OK → NÃO desliga Cérebro 2
-        # (antes: groq_degraded forçava ai_assistants_unavailable e C2 virava
-        # "limites de API" mesmo com order book local válido).
-        local_flow_ok = bool(flow.get('available', False))
-        if groq_flow_degraded and not local_flow_ok:
-            ai_assistants_unavailable = True
-        elif groq_flow_degraded and local_flow_ok:
-            ai_assistants_unavailable = False
+        if is_c3_solo_mode():
+            from src.intelligence.gemini_macro_analyzer import _neutral_macro
+            from src.intelligence.order_flow_analyzer import _local_flow_from_book
+
+            gemini_macro = _neutral_macro('C3 solo — macro local (sem cloud)')
+            gemini_macro['source'] = 'c3_solo_local'
+            flow = _local_flow_from_book(order_book, signals)
+            flow['available'] = True
+            flow['groq_degraded'] = False
+            flow['source'] = 'c3_solo_local'
+            flow['reason'] = 'C3 solo — fluxo local (C1/C2 absorvidos)'
+        else:
+            gemini_macro = analyze_gemini_macro_news(
+                symbol,
+                headlines=headlines,
+                news_blob=str(news.get('reason') or ''),
+                signals={**signals, 'market_regime': regime.get('market_regime')},
+            )
+            cloud_news_degraded = bool(
+                news.get('cloud_ai_degraded')
+                or news.get('ai_unavailable')
+                or str(news.get('ai_status', '')).lower() in ('degradado', 'disabled')
+                or str(news.get('source', '')).lower() == 'disabled'
+            )
+            advisory = str(os.getenv('ADVISORY_GATES', 'true')).strip().lower() in {'1', 'true', 'yes', 'on'}
+            hard_gates_ok = True if advisory else bool(
+                signals.get('sinal_institucional')
+                and str(signals.get('trend', 'NEUTRO')).upper() in ('ALTA', 'BAIXA')
+                and not signals.get('is_lateral')
+            )
+            flow = analyze_order_book_flow(
+                symbol,
+                order_book=order_book,
+                signals=signals,
+                df=df,
+                hard_gates_approved=hard_gates_ok,
+            )
+            groq_flow_degraded = bool(flow.get('groq_degraded'))
+            local_flow_ok = bool(flow.get('available', False))
+            if groq_flow_degraded and not local_flow_ok:
+                ai_assistants_unavailable = True
+            elif groq_flow_degraded and local_flow_ok:
+                ai_assistants_unavailable = False
 
         if adx_blocked:
             hard_veto_reasons.append(
@@ -198,7 +206,6 @@ class MarketIntelligence:
             soft_ai_veto_only = True
 
         # Modo consultivo: Cérebro 3 decide — flags viram contexto, não veto
-        import os
         advisory = str(os.getenv('ADVISORY_GATES', 'true')).strip().lower() in {'1', 'true', 'yes', 'on'}
         advisory_flags = list(hard_veto_reasons) + list(soft_veto_reasons)
         if advisory:

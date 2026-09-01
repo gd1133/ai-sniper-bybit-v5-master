@@ -121,30 +121,20 @@ def analyze_gemini_macro_news(
         f'Bloco de notícias:\n{blob}'
     )
     try:
-        model = os.getenv('GEMINI_MACRO_MODEL', 'gemini-2.0-flash')
-        url = (
-            'https://generativelanguage.googleapis.com/v1beta/models/'
-            f'{model}:generateContent?key={gemini_key}'
+        from src.intelligence.gemini_client import gemini_generate_text
+
+        result = gemini_generate_text(
+            user_payload,
+            purpose='macro',
+            temperature=0.15,
+            max_tokens=280,
+            api_key=gemini_key,
         )
-        rsp = requests.post(
-            url,
-            json={
-                'contents': [{'parts': [{'text': user_payload}]}],
-                'generationConfig': {'temperature': 0.15, 'maxOutputTokens': 280},
-            },
-            timeout=15,
-        )
-        if rsp.status_code != 200:
-            out = _neutral_macro(f'Gemini HTTP {rsp.status_code}')
+        if not result.get('ok'):
+            out = _neutral_macro(f'Gemini HTTP {result.get("status_code") or "erro"}')
             _CACHE[cache_key] = (now, out)
             return out
-        text = (
-            ((rsp.json() or {}).get('candidates') or [{}])[0]
-            .get('content', {})
-            .get('parts', [{}])[0]
-            .get('text', '')
-        )
-        parsed = _parse_macro_json(text)
+        parsed = _parse_macro_json(result.get('text') or '')
         if parsed:
             # Hard-veto só se explicitamente permitido (preserva regra assistente)
             if parsed.get('filtro_noticia_travar_bot') and not _env_bool('ALLOW_NEWS_HARD_VETO', False):
