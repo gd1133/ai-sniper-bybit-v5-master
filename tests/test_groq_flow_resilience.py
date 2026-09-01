@@ -53,7 +53,7 @@ def test_groq_chat_tries_fallback_on_404():
 
     def fake_create(**kwargs):
         calls.append(kwargs.get('model'))
-        if kwargs.get('model') == 'bad-model':
+        if kwargs.get('model') == 'openai/gpt-oss-120b':
             raise Exception('404 model_not_found')
         rsp = MagicMock()
         rsp.choices = [MagicMock(message=MagicMock(content='{"score_fluxo": 0.5}'))]
@@ -64,7 +64,7 @@ def test_groq_chat_tries_fallback_on_404():
 
     with patch.dict(os.environ, {
         'GROQ_API_KEY': 'test-key',
-        'GROQ_FLOW_MODEL': 'bad-model',
+        'GROQ_FLOW_MODEL': 'openai/gpt-oss-120b',
         'GROQ_FALLBACK_MODELS': 'openai/gpt-oss-20b',
     }):
         with patch.object(groq_client, 'Groq', return_value=mock_client):
@@ -73,7 +73,7 @@ def test_groq_chat_tries_fallback_on_404():
                 purpose='flow',
             )
     assert result['ok'] is True
-    assert 'bad-model' in calls
+    assert 'openai/gpt-oss-120b' in calls
     assert 'openai/gpt-oss-20b' in calls
 
 

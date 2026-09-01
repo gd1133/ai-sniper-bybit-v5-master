@@ -62,6 +62,17 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return str(raw).strip().lower() in {'1', 'true', 'yes', 'on'}
 
 
+def _allowed_groq_model(model: str) -> bool:
+    """Só modelos ativos na Groq (ago/2026) — bloqueia IDs mortos no Render."""
+    m = (model or '').strip()
+    if not m:
+        return False
+    return (
+        m.startswith('openai/gpt-oss-')
+        or m.startswith('qwen/')
+    )
+
+
 def get_groq_model_chain(purpose: str = 'flow') -> list[str]:
     """
     Retorna cadeia de modelos a tentar (primário + fallbacks, sem duplicatas).
@@ -73,22 +84,55 @@ def get_groq_model_chain(purpose: str = 'flow') -> list[str]:
         'tribunal': 'GROQ_TRIBUNAL_MODEL',
     }
     primary_env = env_map.get(purpose, 'GROQ_FLOW_MODEL')
-    primary = _remap_groq_model(
+    raw_primary = (
         os.getenv(primary_env, '').strip()
         or os.getenv('GROQ_MODEL', '').strip()
         or DEFAULT_GROQ_MODEL
     )
+    primary = _remap_groq_model(raw_primary)
+    if not _allowed_groq_model(primary):
+        print(
+            f'⚠️ [GROQ] {purpose}: modelo inválido `{raw_primary}` → `{DEFAULT_GROQ_MODEL}`',
+            flush=True,
+        )
+        primary = DEFAULT_GROQ_MODEL
+
     chain: list[str] = [primary]
     extra = os.getenv('GROQ_FALLBACK_MODELS', '').strip()
     if extra:
         for m in extra.split(','):
-            m = _remap_groq_model(m.strip())
-            if m and m not in chain:
-                chain.append(m)
+            raw = m.strip()
+            mapped = _remap_groq_model(raw)
+            if mapped and _allowed_groq_model(mapped) and mapped not in chain:
+                chain.append(mapped)
+            elif raw and raw != mapped:
+                pass  # já logado em _remap_groq_model
+            elif raw and not _allowed_groq_model(mapped):
+                print(
+                    f'⚠️ [GROQ] ignorando fallback inválido `{raw}` (descontinuado)',
+                    flush=True,
+                )
     for fb in DEFAULT_GROQ_FALLBACK_CHAIN:
         if fb not in chain:
             chain.append(fb)
     return chain
+
+
+def log_groq_boot_config() -> None:
+    """Uma vez no boot — mostra cadeia efetiva (ajuda debug Render)."""
+    global _groq_boot_logged
+    if _groq_boot_logged:
+        return
+    _groq_boot_logged = True
+    for purpose in ('flow', 'tribunal', 'news'):
+        chain = get_groq_model_chain(purpose)
+        print(
+            f'🔧 [GROQ] {purpose}: cadeia={", ".join(chain[:4])}',
+            flush=True,
+        )
+
+
+_groq_boot_logged = False
 
 
 def classify_groq_error(exc: BaseException) -> str:

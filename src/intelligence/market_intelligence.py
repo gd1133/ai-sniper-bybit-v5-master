@@ -51,8 +51,22 @@ class MarketIntelligence:
             return self._passthrough(signals, regime)
 
         whale = analyze_whale_activity(signals, ticker, df)
-        # Notícias legado (assistente) — desligado por padrão via ENABLE_NEWS_AI
-        news = analyze_news_sentiment(symbol, signals, regime, whale)
+        # Notícias: em C3 solo usa apenas web/local — sem Groq/Gemini cloud (C1/C2 sem voz)
+        if is_c3_solo_mode():
+            news = {
+                'sentiment_score': 50.0,
+                'global_trend': 'NEUTRAL',
+                'news_risk': 'LOW',
+                'investor_mood': 'NEUTRAL',
+                'headlines': [],
+                'reason': 'C3 solo — sentimento técnico local (sem cloud C1/C2)',
+                'source': 'c3_solo_local',
+                'ai_status': 'disabled',
+                'block_trade': False,
+                'cloud_ai_degraded': False,
+            }
+        else:
+            news = analyze_news_sentiment(symbol, signals, regime, whale)
 
         headlines = list(news.get('headlines') or [])
         condicao = market_condition_from_signals(signals, regime)

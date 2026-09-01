@@ -811,32 +811,18 @@ class GroqValidator:
         context = merge_context_for_cerebro3(symbol, tech_data, gates, report_c1, report_c2, ctx)
 
         if is_c3_solo_mode():
-            agent_c1 = self.cerebro1.generate_report(tech_data, symbol)
-            agent_c2 = self.cerebro2.generate_report(tech_data, symbol, ctx)
-            sovereign = self.cerebro3.decide(
-                tech_data, symbol, agent_c1, agent_c2, intelligence_context=ctx,
-            )
             decision = decide_entry(context)
-            action = str(sovereign.get('decisao') or decision.get('decisao') or 'WAIT').upper()
-            if action == 'WAIT' and decision.get('decisao') in ('BUY', 'SELL'):
-                action = decision['decisao']
-            prob = max(
-                float(sovereign.get('probabilidade', 0) or 0),
-                float(decision.get('probabilidade', 0) or 0),
-            )
-            if action in ('BUY', 'SELL') and prob < 48:
-                prob = max(prob, float(decision.get('confidence', 0) or 0) * 100)
+            action = str(decision.get('decisao') or decision.get('action') or 'WAIT').upper()
+            prob = float(decision.get('probabilidade', 0) or 0)
             merged = dict(decision)
-            motivo_text = (
-                f"C3 solo | {str(sovereign.get('motivo', ''))[:120]} | "
-                f"{str(decision.get('rationale') or decision.get('motivo', ''))[:120]}"
-            )
             merged.update({
                 'decisao': action,
                 'action': action,
                 'probabilidade': prob,
-                'motivo': motivo_text,
-                'rationale': motivo_text,
+                'motivo': (
+                    f"C3 solo | {str(decision.get('rationale') or decision.get('motivo', ''))[:200]}"
+                ),
+                'rationale': str(decision.get('rationale') or decision.get('motivo', ''))[:200],
                 'source': 'c3_solo',
                 'autonomous_mode': True,
             })

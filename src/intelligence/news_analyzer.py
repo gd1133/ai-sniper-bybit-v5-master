@@ -176,27 +176,15 @@ def _ai_analyze_with_gemini(symbol: str, tech_summary: str, gemini_key: str) -> 
     if not gemini_key:
         return None
     try:
-        url = (
-            'https://generativelanguage.googleapis.com/v1beta/models/'
-            f'gemini-2.0-flash:generateContent?key={gemini_key}'
-        )
+        from src.intelligence.gemini_client import gemini_generate_text
+
         prompt = f"""Analise o contexto de mercado de {symbol} para decisão de trading.
 {tech_summary}
 Retorne JSON: sentiment_score (0-100), global_trend (BULLISH/BEARISH/NEUTRAL), news_risk (LOW/MEDIUM/HIGH), investor_mood, block_trade (bool), reason (pt-BR)."""
-        rsp = requests.post(
-            url,
-            json={'contents': [{'parts': [{'text': prompt}]}]},
-            timeout=15,
-        )
-        if rsp.status_code != 200:
+        result = gemini_generate_text(prompt, purpose='news', temperature=0.15, max_tokens=280)
+        if not result.get('ok'):
             return None
-        text = (
-            ((rsp.json() or {}).get('candidates') or [{}])[0]
-            .get('content', {})
-            .get('parts', [{}])[0]
-            .get('text', '')
-        )
-        text = re.sub(r'^```json\s*|\s*```$', '', text.strip(), flags=re.IGNORECASE)
+        text = re.sub(r'^```json\s*|\s*```$', '', (result.get('text') or '').strip(), flags=re.IGNORECASE)
         return json.loads(text)
     except Exception as exc:
         print(f'⚠️ [NEWS AI] Gemini indisponível: {exc}', flush=True)
