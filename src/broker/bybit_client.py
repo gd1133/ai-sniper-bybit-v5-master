@@ -96,30 +96,45 @@ def _get_pybit_http():
     return _pybit_http_class
 
 
-def inicializar_exchange_bybit(api_key=None, api_secret=None, e_testnet=False, e_demo=False, base_url=None):
+def inicializar_exchange_bybit(
+    api_key=None,
+    api_secret=None,
+    e_testnet=False,
+    e_demo=False,
+    base_url=None,
+    trading_mode: str | None = None,
+):
     """
     Cria a instância CCXT Bybit com endpoint correto para Mainnet, Testnet ou Demo.
 
     - Mainnet: https://api.bybit.com (sem sandbox)
     - Testnet: https://api-testnet.bybit.com + set_sandbox_mode(True)
     - Demo Trading: https://api-demo.bybit.com (URLs forçadas; sandbox CCXT = testnet, não demo)
+    - trading_mode: spot | linear — define defaultType CCXT
     """
     from src.config import get_bybit_base_url
+    from src.config.trading_mode import normalize_trading_mode
 
     ccxt = _get_ccxt()
     e_testnet = bool(e_testnet)
     e_demo = bool(e_demo)
+    mode = normalize_trading_mode(trading_mode)
+
+    ccxt_options = {
+        'adjustForTimeDifference': True,
+        'recvWindow': 20000,
+    }
+    if mode == 'spot':
+        ccxt_options['defaultType'] = 'spot'
+    else:
+        ccxt_options['defaultType'] = 'swap'
+        ccxt_options['defaultSubType'] = 'linear'
 
     exchange_params = {
         'enableRateLimit': True,
         'rateLimit': 100,
         'timeout': 15000,
-        'options': {
-            'defaultType': 'swap',
-            'defaultSubType': 'linear',
-            'adjustForTimeDifference': True,
-            'recvWindow': 20000,
-        },
+        'options': ccxt_options,
     }
     key = str(api_key or '').strip()
     secret = str(api_secret or '').strip()
@@ -160,7 +175,7 @@ def inicializar_exchange_bybit(api_key=None, api_secret=None, e_testnet=False, e
 
     print(
         f"🔧 [CCXT BYBIT] sandbox_testnet={bool(e_testnet and not e_demo)} "
-        f"demo={e_demo} endpoint={endpoint}",
+        f"demo={e_demo} endpoint={endpoint} trading_mode={mode}",
         flush=True,
     )
     return exchange, endpoint, e_testnet, e_demo
@@ -211,6 +226,13 @@ class BybitClient:
             e_demo = False
             e_testnet = resolve_use_testnet(testnet)
 
+        # Resolve modo antes de instanciar CCXT (spot vs linear)
+        from src.config.trading_mode import resolve_trading_mode
+        self.trading_mode = resolve_trading_mode(
+            {'trading_mode': trading_mode} if trading_mode else None
+        )
+        self._derivatives_restricted = False
+
         # NÃO instancia OrderCalculator aqui — validação de chaves/saldo não precisa
         self.exchange, self.active_endpoint, resolved_testnet, resolved_demo = inicializar_exchange_bybit(
             api_key=api_key,
@@ -218,6 +240,7 @@ class BybitClient:
             e_testnet=e_testnet,
             e_demo=e_demo,
             base_url=normalized_base_url or None,
+            trading_mode=self.trading_mode,
         )
         self.testnet = bool(resolved_testnet and not resolved_demo)
         self.is_demo = bool(resolved_demo)
@@ -254,10 +277,6 @@ class BybitClient:
         )
 
         self.authenticated = bool(api_key and api_secret)
-        self.trading_mode = resolve_trading_mode(
-            {'trading_mode': trading_mode} if trading_mode else None
-        )
-        self._derivatives_restricted = False
 
         # --- SISTEMA DE CACHE E PROTEÇÃO CONTRA EXPULSÃO ---
         self.cache_ohlcv = {}
@@ -636,11 +655,13 @@ class BybitClient:
             self._emit_authentication_alert()
         return False, message
 
+    def _ccxt_symbol(self, symbol):
+        from src.broker.symbol_utils import to_ccxt_symbol
+        return to_ccxt_symbol(symbol, spot=self.is_spot_trading())
+
     def _normalize_v5_symbol(self, symbol):
-        raw = str(symbol or '').strip().upper()
-        if not raw:
-            return raw
-        return raw.replace('/', '').replace(':USDT', '')
+        from src.broker.symbol_utils import to_v5_symbol
+        return to_v5_symbol(symbol)
 
     def _normalize_v5_side(self, side):
         normalized = str(side or '').strip().lower()
@@ -712,12 +733,16 @@ class BybitClient:
             raise ValueError("Saldo indisponível para cálculo percentual da banca")
 
         lev = float(leverage or getattr(self, 'default_leverage', 10) or 10)
+        if self.is_spot_trading():
+            lev = 1.0
+
         target = load_entry_after_stop_pct() if after_stop else load_entry_pct()
 
         market = {}
+        ccxt_sym = self._ccxt_symbol(symbol)
         try:
             self.exchange.load_markets()
-            market = self.exchange.market(symbol) or {}
+            market = self.exchange.market(ccxt_sym) or {}
         except Exception:
             market = {}
         lot = extract_bybit_lot_filters(market)
@@ -1308,6 +1333,31 @@ class BybitClient:
         self._public_market_exchange = exchange
         return exchange
 
+    def _fetch_spot_coin_balance(self, coin: str) -> float:
+        """Saldo livre da moeda-base no wallet unificado (spot)."""
+        coin = str(coin or '').strip().upper()
+        if not coin:
+            return 0.0
+        try:
+            if self.pybit_session is not None:
+                rsp = self.pybit_session.get_wallet_balance(accountType='UNIFIED', coin=coin)
+                ok, _ = self._handle_v5_ret_code(rsp, 'wallet_balance')
+                if ok:
+                    for row in (rsp.get('result') or {}).get('list') or []:
+                        for c in row.get('coin') or []:
+                            if str(c.get('coin', '')).upper() == coin:
+                                return float(c.get('walletBalance') or c.get('availableToWithdraw') or 0)
+            bal = self.exchange.fetch_balance()
+            free = (bal.get('free') or {}).get(coin)
+            if free is not None:
+                return float(free)
+        except Exception as exc:
+            print(f'   ⚠️ [SPOT BAL] {coin}: {exc}', flush=True)
+        return 0.0
+
+    def _price_category(self) -> str:
+        return 'spot' if self.is_spot_trading() else 'linear'
+
     def _ticker_symbol_candidates(self, symbol):
         """Gera formatos Bybit/CCXT (BTCUSDT, BTC/USDT:USDT, BTC/USDT)."""
         raw = str(symbol or '').strip()
@@ -1334,7 +1384,7 @@ class BybitClient:
         last_err = None
         for sym in self._ticker_symbol_candidates(symbol):
             try:
-                ticker = exchange.fetch_ticker(sym, params={'category': 'linear'})
+                ticker = exchange.fetch_ticker(sym, params={'category': self._price_category()})
                 price = float(ticker.get('last') or 0)
                 if price > 0:
                     return price
@@ -1345,16 +1395,45 @@ class BybitClient:
             raise last_err
         return 0.0
 
+    def _fetch_spot_coin_balance(self, coin: str) -> float:
+        """Saldo livre da moeda-base no wallet spot/unified."""
+        coin_u = str(coin or '').upper()
+        if self.pybit_session is not None:
+            for account_type in ('UNIFIED', 'SPOT'):
+                try:
+                    rsp = self.pybit_session.get_wallet_balance(accountType=account_type, coin=coin_u)
+                    ok, _ = self._handle_v5_ret_code(rsp, f'wallet/{account_type}')
+                    if not ok:
+                        continue
+                    for row in (rsp.get('result') or {}).get('list') or []:
+                        for item in row.get('coin') or []:
+                            if str(item.get('coin', '')).upper() == coin_u:
+                                return float(
+                                    item.get('availableToWithdraw')
+                                    or item.get('walletBalance')
+                                    or item.get('free')
+                                    or 0
+                                )
+                except Exception:
+                    continue
+        try:
+            balance = self.exchange.fetch_balance({'type': 'spot'})
+            return float((balance.get(coin_u) or {}).get('free') or 0)
+        except Exception:
+            return 0.0
+
     def get_last_price(self, symbol):
         """Preço em tempo real do ativo (com fallback público se a sessão autenticada falhar)."""
         if symbol in self.cache_ticker and self._is_cache_valid(self.cache_ticker[symbol], self.cache_ttl_ticker):
             return self.cache_ticker[symbol][0]
 
+        category = self.get_order_category()
         last_err = None
         for sym in self._ticker_symbol_candidates(symbol):
             try:
                 self._apply_rate_limit('get_last_price')
-                ticker = self.exchange.fetch_ticker(sym, params={'category': 'linear'})
+                ccxt_sym = self._ccxt_symbol(sym) if sym == symbol or '/' in sym else self._ccxt_symbol(symbol)
+                ticker = self.exchange.fetch_ticker(ccxt_sym, params={'category': category})
                 price = float(ticker['last'])
                 if price > 0:
                     self.cache_ticker[symbol] = (price, time.time())
@@ -1446,10 +1525,24 @@ class BybitClient:
 
     def has_open_position(self, symbol) -> bool:
         """
-        Anti-overtrading: True se já existe QUALQUER quantidade aberta para o símbolo.
-        Usado para abortar novas compras enquanto houver posição viva no par.
+        Anti-overtrading: True se já existe posição/ativo para o símbolo.
+        linear: posição aberta no perp | spot: saldo da moeda-base > mínimo.
         """
         try:
+            if self.is_spot_trading():
+                v5_symbol = self._normalize_v5_symbol(symbol)
+                base = v5_symbol.replace('USDT', '')
+                if not base:
+                    return False
+                bal = self._fetch_spot_coin_balance(base)
+                min_qty = 0.0
+                try:
+                    market = self.exchange.market(self._ccxt_symbol(symbol)) or {}
+                    min_qty = float((market.get('limits') or {}).get('amount', {}).get('min') or 0)
+                except Exception:
+                    min_qty = 0.0
+                return bal > max(min_qty, 1e-12)
+
             if self.pybit_session is not None:
                 v5_symbol = self._normalize_v5_symbol(symbol)
                 rsp = self.pybit_session.get_positions(
@@ -1503,6 +1596,74 @@ class BybitClient:
             )
         self._derivatives_restricted = True
         self.trading_mode = 'spot'
+
+    def _place_v5_order_safe(self, payload: dict) -> tuple[bool, dict | None, str]:
+        """place_order pybit — captura exceção 10024 (pybit levanta em vez de retCode)."""
+        try:
+            rsp = self.pybit_session.place_order(**payload)
+            ok, err = self._handle_v5_ret_code(rsp, 'v5/order/create')
+            return ok, rsp, err
+        except Exception as exc:
+            err = str(exc)
+            if self._is_regulatory_restriction_error(err):
+                return False, None, err
+            raise
+
+    def _retry_spot_after_10024(
+        self,
+        symbol: str,
+        side: str,
+        normalized_qty: str,
+        *,
+        tp_price=None,
+        sl_price=None,
+        raise_on_error: bool = False,
+    ) -> tuple[dict | None, str, bool]:
+        """
+        Após 10024 em linear: BUY → spot compra; SELL/SHORT → sem equivalente spot.
+        Retorna (result, category, local_tp_sl).
+        """
+        self._enable_spot_fallback('regulatory 10024')
+        side_l = str(side or '').lower()
+        if side_l in ('sell', 'short', 'vender'):
+            msg = (
+                f'⚠️ [BYBIT 10024] Futuros bloqueados para {symbol} — '
+                f'SHORT não tem equivalente SPOT (conta BR/regulatório). Ordem abortada.'
+            )
+            print(msg, flush=True)
+            if raise_on_error:
+                raise RuntimeError(msg)
+            return None, 'spot', False
+
+        payload, _ = self._build_v5_market_payload(
+            'spot', symbol, side, normalized_qty, None, None,
+        )
+        print(f'   📤 Retry SPOT (/v5/order/create): {payload}', flush=True)
+        ok, rsp, err = self._place_v5_order_safe(payload)
+        print(f'   📥 Resposta Bybit SPOT: {rsp}', flush=True)
+        if not ok:
+            print(f'❌ [ERRO EXECUÇÃO BYBIT] SPOT retry falhou: {err}', flush=True)
+            if raise_on_error:
+                raise RuntimeError(err)
+            return None, 'spot', False
+
+        result = (rsp or {}).get('result') or {}
+        order_id = result.get('orderId') or result.get('orderLinkId')
+        print(f'✅ [BYBIT SPOT] Ordem preenchida — ID: {order_id}', flush=True)
+        local_tp_sl = bool(tp_price or sl_price)
+        extra = {
+            'route': 'v5/order/create',
+            'category': 'spot',
+            'tp_sl_applied': False,
+            'local_tp_sl': local_tp_sl,
+        }
+        if local_tp_sl:
+            extra['tp_price'] = tp_price
+            extra['sl_price'] = sl_price
+        order_details = self.fetch_order_details(symbol, order_id, category='spot')
+        if order_details:
+            return {**order_details, **extra}, 'spot', local_tp_sl
+        return {**result, 'id': order_id, 'symbol': self._normalize_v5_symbol(symbol), **extra}, 'spot', local_tp_sl
 
     def _build_v5_market_payload(
         self,
@@ -1593,10 +1754,10 @@ class BybitClient:
                 )
 
                 print(f"   📤 Enviando via Pybit V5 (/v5/order/create): {payload}", flush=True)
-                rsp = self.pybit_session.place_order(**payload)
-                print(f"   📥 Resposta Bybit: {rsp}", flush=True)
+                ok, rsp, error_message = self._place_v5_order_safe(payload)
+                if rsp is not None:
+                    print(f"   📥 Resposta Bybit: {rsp}", flush=True)
 
-                ok, error_message = self._handle_v5_ret_code(rsp, 'v5/order/create')
                 if not ok and category == 'linear' and tp_sl_applied and any(
                     tok in str(error_message).lower()
                     for tok in ('takeprofit', 'stoploss', 'tpsl', 'tp/sl', 'trigger')
@@ -1610,22 +1771,20 @@ class BybitClient:
                                 'stopLoss', 'slTriggerBy', 'slOrderType'):
                         payload.pop(key, None)
                     tp_sl_applied = False
-                    rsp = self.pybit_session.place_order(**payload)
-                    print(f"   📥 Resposta Bybit (retry): {rsp}", flush=True)
-                    ok, error_message = self._handle_v5_ret_code(rsp, 'v5/order/create')
+                    ok, rsp, error_message = self._place_v5_order_safe(payload)
+                    if rsp is not None:
+                        print(f"   📥 Resposta Bybit (retry): {rsp}", flush=True)
 
-                # Erro 10024: derivativos bloqueados → retry automático em SPOT
+                # Erro 10024: derivativos bloqueados → retry SPOT (BUY) ou aborta SHORT
                 if not ok and category == 'linear' and self._is_regulatory_restriction_error(error_message):
-                    self._enable_spot_fallback(error_message)
-                    category = 'spot'
-                    local_tp_sl = bool(tp_price or sl_price)
-                    payload, tp_sl_applied = self._build_v5_market_payload(
-                        'spot', symbol, side, normalized_qty, None, None,
+                    spot_result, category, local_tp_sl = self._retry_spot_after_10024(
+                        symbol, side, normalized_qty,
+                        tp_price=tp_price, sl_price=sl_price,
+                        raise_on_error=raise_on_error,
                     )
-                    print(f"   📤 Retry SPOT (/v5/order/create): {payload}", flush=True)
-                    rsp = self.pybit_session.place_order(**payload)
-                    print(f"   📥 Resposta Bybit SPOT: {rsp}", flush=True)
-                    ok, error_message = self._handle_v5_ret_code(rsp, 'v5/order/create')
+                    if spot_result is not None:
+                        return spot_result
+                    return None
 
                 if not ok:
                     print(f"❌ [ERRO EXECUÇÃO BYBIT] {error_message}", flush=True)
@@ -1669,11 +1828,27 @@ class BybitClient:
                         params['slTriggerBy'] = 'MarkPrice'
                     tp_sl_applied = True
             print(
-                f"   📤 Enviando via CCXT Fallback: {symbol} | qty={normalized_qty} | "
+                f"   📤 Enviando via CCXT Fallback: {self._ccxt_symbol(symbol)} | qty={normalized_qty} | "
                 f"category={category}",
                 flush=True,
             )
-            order = self.exchange.create_order(symbol, 'market', side, ccxt_qty, params=params)
+            ccxt_sym = self._ccxt_symbol(symbol)
+            try:
+                order = self.exchange.create_order(ccxt_sym, 'market', side, ccxt_qty, params=params)
+            except Exception as ccxt_exc:
+                ccxt = _get_ccxt()
+                if (
+                    category == 'linear'
+                    and self._is_regulatory_restriction_error(ccxt_exc)
+                ):
+                    self._enable_spot_fallback(str(ccxt_exc))
+                    category = 'spot'
+                    local_tp_sl = bool(tp_price or sl_price)
+                    ccxt_sym = self._ccxt_symbol(symbol)
+                    params = {'category': 'spot'}
+                    order = self.exchange.create_order(ccxt_sym, 'market', side, ccxt_qty, params=params)
+                else:
+                    raise
             print(f"   📥 Resposta CCXT: {order}", flush=True)
             order_id = order.get('id', 'N/A')
             print(f"✅ [BYBIT CCXT] Ordem preenchida - ID: {order_id}", flush=True)
@@ -1691,12 +1866,31 @@ class BybitClient:
 
             return {**order, **ccxt_extra}
         except Exception as e:
+            err = str(e)
+            if (
+                self.get_order_category() == 'linear'
+                and self._is_regulatory_restriction_error(err)
+            ):
+                try:
+                    spot_result, _, _ = self._retry_spot_after_10024(
+                        symbol, side, self._normalize_order_qty(symbol, qty, strict_pct_sizing=strict_pct_sizing),
+                        tp_price=tp_price, sl_price=sl_price,
+                        raise_on_error=raise_on_error,
+                    )
+                    if spot_result is not None:
+                        return spot_result
+                    return None
+                except Exception:
+                    if raise_on_error:
+                        raise
+                    return None
             ccxt = _get_ccxt()
             if isinstance(e, ccxt.BaseError):
                 print(f"❌ ERRO DA CORRETORA BYBIT (CCXT): {e}", flush=True)
             else:
                 print(f"❌ [ERRO EXECUÇÃO BYBIT] Falha de infraestrutura: {e}", flush=True)
-            if raise_on_error: raise
+            if raise_on_error:
+                raise
             return None
 
     def test_connection(self):
@@ -1770,6 +1964,29 @@ class BybitClient:
             if not self.authenticated:
                 print("❌ [TP/SL] Não autenticado. Proteção de capital ABORTADA.", flush=True)
                 return False
+
+            if self.is_spot_trading():
+                from src.risk.position_sizing import calculate_dynamic_tp_sl, calculate_tp_sl_prices
+                side_norm = str(side or '').strip().lower()
+                lev = 1.0
+                if tp_price is None or sl_price is None:
+                    dyn = calculate_dynamic_tp_sl(entry_price, side, lev, signals or {})
+                    tp_price = tp_price if tp_price is not None else dyn.get('tp_price')
+                    sl_price = sl_price if sl_price is not None else dyn.get('sl_price')
+                if not tp_price or not sl_price:
+                    tp_price, sl_price = calculate_tp_sl_prices(entry_price, side, lev)
+                from src.broker.spot_exit_monitor import register_spot_position
+                register_spot_position(
+                    client_id=getattr(self, '_client_id', 0),
+                    symbol=symbol,
+                    side=side,
+                    qty=position_qty,
+                    entry_price=entry_price,
+                    tp_price=tp_price,
+                    sl_price=sl_price,
+                )
+                return True
+
             if not self.pybit_session:
                 print("❌ [TP/SL] Sessão pybit indisponível.", flush=True)
                 return False
