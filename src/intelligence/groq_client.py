@@ -18,24 +18,23 @@ try:
 except Exception:
     Groq = None
 
-# Modelos Groq estáveis — principal + fallback rápido.
-# IDs descontinuados (gpt-oss, mixtral legado) são remapeados automaticamente.
-DEFAULT_GROQ_MODEL = 'llama-3.3-70b-versatile'
+# Modelos Groq compatíveis (IDs estáveis). llama-3.3-70b-versatile → remapeado.
+DEFAULT_GROQ_MODEL = 'llama3-70b-8192'
 DEFAULT_GROQ_FALLBACK_CHAIN = (
-    'llama-3.3-70b-versatile',
+    'llama3-70b-8192',
+    'llama3-8b-8192',
+    'mixtral-8x7b-32768',
     'llama-3.1-8b-instant',
 )
 _DEPRECATED_GROQ_MODELS = {
-    'openai/gpt-oss-20b': DEFAULT_GROQ_MODEL,
-    'openai/gpt-oss-120b': DEFAULT_GROQ_MODEL,
-    'gpt-oss-20b': DEFAULT_GROQ_MODEL,
-    'gpt-oss-120b': DEFAULT_GROQ_MODEL,
+    'llama-3.3-70b-versatile': 'llama3-70b-8192',
+    'llama-3.1-70b-versatile': 'llama3-70b-8192',
+    'llama-3.1-70b-specdec': 'llama3-70b-8192',
+    'openai/gpt-oss-20b': 'llama3-8b-8192',
+    'openai/gpt-oss-120b': 'llama3-70b-8192',
+    'gpt-oss-20b': 'llama3-8b-8192',
+    'gpt-oss-120b': 'llama3-70b-8192',
     'qwen/qwen3.6-27b': 'llama-3.1-8b-instant',
-    'llama-3.1-70b-versatile': DEFAULT_GROQ_MODEL,
-    'llama-3.1-70b-specdec': DEFAULT_GROQ_MODEL,
-    'llama3-70b-8192': DEFAULT_GROQ_MODEL,
-    'llama3-8b-8192': DEFAULT_GROQ_MODEL,
-    'mixtral-8x7b-32768': 'llama-3.1-8b-instant',
 }
 
 # Cooldown global — compartilhado por flow, news e tribunal (evita spam 429/TPD).
@@ -183,10 +182,82 @@ def _log_groq_cooldown_skip(purpose: str) -> None:
     info = get_groq_cooldown_info()
     print(
         f'⚠️ [GROQ] {purpose}: API em cooldown ({info["reason"]}, '
-        f'{info["remaining_secs"]:.0f}s restantes) → fallback local',
+        f'{info["remaining_secs"]:.0f}s restantes) → fallback Gemini/local',
         flush=True,
     )
     _groq_cooldown_logged_until = info['until']
+
+
+def _messages_to_prompt(messages: list[dict[str, str]]) -> str:
+    parts = []
+    for msg in messages or []:
+        role = str(msg.get('role') or 'user').upper()
+        content = str(msg.get('content') or '').strip()
+        if content:
+            parts.append(f'{role}:\n{content}')
+    return '\n\n'.join(parts)
+
+
+def _gemini_chat_fallback(
+    messages: list[dict[str, str]],
+    *,
+    purpose: str = 'flow',
+    temperature: float = 0.1,
+    max_tokens: int = 220,
+) -> dict[str, Any] | None:
+    """Fallback Gemini quando Groq retorna 404 / rate-limit / indisponível."""
+    if not _env_bool('ENABLE_GEMINI_FLOW_FALLBACK', True):
+        return None
+    gemini_key = os.getenv('GEMINI_API_KEY', '').strip()
+    if not gemini_key:
+        return None
+    try:
+        import requests
+        model = (
+            os.getenv('GEMINI_CHAT_MODEL', '').strip()
+            or os.getenv('GEMINI_FLOW_MODEL', '').strip()
+            or os.getenv('GEMINI_MACRO_MODEL', '').strip()
+            or 'gemini-2.0-flash'
+        )
+        url = (
+            'https://generativelanguage.googleapis.com/v1beta/models/'
+            f'{model}:generateContent?key={gemini_key}'
+        )
+        prompt = _messages_to_prompt(messages)
+        rsp = requests.post(
+            url,
+            json={
+                'contents': [{'parts': [{'text': prompt}]}],
+                'generationConfig': {
+                    'temperature': float(temperature),
+                    'maxOutputTokens': int(max_tokens),
+                },
+            },
+            timeout=15,
+        )
+        if rsp.status_code != 200:
+            print(
+                f'⚠️ [GEMINI] {purpose} HTTP {rsp.status_code} — fallback técnico C3',
+                flush=True,
+            )
+            return None
+        parts = (rsp.json().get('candidates') or [{}])[0].get('content', {}).get('parts') or []
+        text = ' '.join(str(p.get('text', '')) for p in parts).strip()
+        if not text:
+            return None
+        print(f'✅ [GEMINI] {purpose} respondeu via {model} (Groq indisponível)', flush=True)
+        return {
+            'ok': True,
+            'content': text,
+            'model': f'gemini:{model}',
+            'error_type': None,
+            'error': None,
+            'models_tried': [f'gemini:{model}'],
+            'gemini_fallback': True,
+        }
+    except Exception as exc:
+        print(f'⚠️ [GEMINI] {purpose} fallback falhou: {exc}', flush=True)
+        return None
 
 
 def groq_chat_completion(
@@ -289,6 +360,16 @@ def groq_chat_completion(
                 )
                 break
             continue
+
+    # Gemini como segundo tier cloud (404 em todos os modelos Groq ou cooldown)
+    gemini_result = _gemini_chat_fallback(
+        messages,
+        purpose=purpose,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    if gemini_result and gemini_result.get('ok'):
+        return gemini_result
 
     err_msg = str(last_err) if last_err else 'Groq indisponível'
     return {

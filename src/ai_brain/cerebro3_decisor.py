@@ -539,6 +539,47 @@ def decision_to_consensus(decision: dict, context: dict, report_c1: dict, report
     """Adapta decisão C3 para formato legado do radar."""
     action = str(decision.get('decisao') or decision.get('action', 'WAIT')).upper()
     prob = float(decision.get('probabilidade') or decision.get('confidence', 0) * 100)
+    intel = context.get('intel') or {}
+    flow_ok = bool((intel.get('groq_flow') or intel.get('order_flow') or {}).get('available'))
+    autonomous = bool(
+        intel.get('force_assistants_unavailable')
+        or (
+            intel.get('autonomous_mode')
+            and intel.get('ai_assistants_unavailable')
+            and not flow_ok
+        )
+    )
+
+    agents = [
+        {
+            'id': 'gemini',
+            'label': 'Gemini Macro',
+            'score': float((intel.get('gemini_macro') or {}).get('score_sentimento_noticias', 0) or 0) * 50 + 50,
+            'action': 'WAIT',
+            'motivo': str((intel.get('gemini_macro') or {}).get('motivo', 'contexto macro')),
+        },
+        {
+            'id': 'groq',
+            'label': 'Groq Tático',
+            'score': float((intel.get('groq_flow') or {}).get('forca_agressao', 0) or 0),
+            'action': 'WAIT',
+            'motivo': str((intel.get('groq_flow') or {}).get('reason', 'fluxo de ordens')),
+        },
+        {
+            'id': 'analyst',
+            'label': 'Analista de Dados',
+            'score': float(report_c1.get('score', 0) or 0),
+            'action': report_c1.get('action', 'WAIT'),
+            'motivo': str(report_c1.get('report', ''))[:200],
+        },
+        {
+            'id': 'learner',
+            'label': 'Aprendizado Neural',
+            'score': float(decision.get('confidence', 0) or 0) * 100,
+            'action': action if action in ('BUY', 'SELL') else 'WAIT',
+            'motivo': str(decision.get('rationale') or decision.get('motivo', ''))[:200],
+        },
+    ]
 
     return {
         'probabilidade': prob,
@@ -552,8 +593,8 @@ def decision_to_consensus(decision: dict, context: dict, report_c1: dict, report
         'stop_loss': decision.get('stop_loss'),
         'take_profit_1': decision.get('take_profit_1'),
         'take_profit_2': decision.get('take_profit_2'),
-        'autonomous_mode': decision.get('source') == 'local_fallback',
-        'agents': [],
+        'autonomous_mode': autonomous,
+        'agents': agents,
         'cerebro_reports': {
             'cerebro1': report_c1,
             'cerebro2': report_c2,
@@ -562,7 +603,7 @@ def decision_to_consensus(decision: dict, context: dict, report_c1: dict, report
         'brains': {
             'cerebro1': 'collector',
             'cerebro2': 'collector',
-            'cerebro3': 'leader',
+            'cerebro3': 'autonomous' if autonomous else 'leader',
         },
-        'intelligence': context.get('intel') or {},
+        'intelligence': intel,
     }

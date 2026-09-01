@@ -70,7 +70,7 @@ def detect_strong_down_candle(row, atr: float = 0.0, volume_ratio: float = 1.0) 
         return is_bearish_candle(row) and _body_pct(row) >= 55
 
 
-def institutional_candle_confirmation(
+def _evaluate_institutional_candle_confirmation(
     side: str,
     df: pd.DataFrame,
     signals: dict | None = None,
@@ -149,3 +149,14 @@ def institutional_candle_confirmation(
         return True, reasons
 
     return False, [f'Side inválido: {side}']
+
+
+def institutional_candle_confirmation(
+    side: str,
+    df: pd.DataFrame,
+    signals: dict | None = None,
+) -> Tuple[bool, list[str]]:
+    """Cérebro 1 — velas consultivas; não veta execução do C3."""
+    from src.engine.advisory_gates import advisory_wrap
+    ok, reasons = _evaluate_institutional_candle_confirmation(side, df, signals)
+    return advisory_wrap(ok, reasons, prefix='C1 velas')

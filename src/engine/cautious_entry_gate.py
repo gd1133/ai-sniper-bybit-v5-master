@@ -74,7 +74,7 @@ def _near_top_trap(signals: dict, rsi: float) -> bool:
     return False
 
 
-def cautious_entry_gate(
+def _evaluate_cautious_entry_gate(
     side: str,
     df: pd.DataFrame,
     signals: dict | None = None,
@@ -230,6 +230,19 @@ def cautious_entry_gate(
         return True, reasons
 
     return False, [f'Side inválido: {side}']
+
+
+def cautious_entry_gate(
+    side: str,
+    df: pd.DataFrame,
+    signals: dict | None = None,
+) -> Tuple[bool, list[str]]:
+    """
+    Portão cauteloso — consultivo pós-C3 (não aborta ordem; Cérebro 3 decide).
+    """
+    from src.engine.advisory_gates import advisory_wrap
+    ok, reasons = _evaluate_cautious_entry_gate(side, df, signals)
+    return advisory_wrap(ok, reasons, prefix='C1 cauteloso')
 
 
 def enrich_signals_with_fvg(df: pd.DataFrame, signals: dict) -> dict:

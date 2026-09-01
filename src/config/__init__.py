@@ -5,6 +5,7 @@ from .bybit import (
     get_bybit_credentials,
     resolve_use_testnet,
 )
+from .trading_mode import normalize_trading_mode, resolve_trading_mode
 from .environment import (
     EnvironmentConfig,
     get_environment_config,
@@ -21,5 +22,7 @@ __all__ = [
     'get_environment_config',
     'get_environment_name',
     'is_truthy',
+    'normalize_trading_mode',
+    'resolve_trading_mode',
     'resolve_use_testnet',
 ]

@@ -180,9 +180,11 @@ class BybitClient:
         base_url=None,
         allow_env_credentials=True,
         quick_validate=False,
+        trading_mode=None,
     ):
         # LAZY LOADING: config só; OrderCalculator sob demanda (não bloqueia validação de API)
         from src.config import get_bybit_credentials, resolve_use_testnet
+        from src.config.trading_mode import resolve_trading_mode
 
         self.quick_validate = bool(quick_validate)
 
@@ -252,6 +254,10 @@ class BybitClient:
         )
 
         self.authenticated = bool(api_key and api_secret)
+        self.trading_mode = resolve_trading_mode(
+            {'trading_mode': trading_mode} if trading_mode else None
+        )
+        self._derivatives_restricted = False
 
         # --- SISTEMA DE CACHE E PROTEÇÃO CONTRA EXPULSÃO ---
         self.cache_ohlcv = {}
@@ -1371,11 +1377,11 @@ class BybitClient:
 
         return self.cache_ticker[symbol][0] if symbol in self.cache_ticker else 0.0
 
-    def fetch_order_details(self, symbol, order_id):
+    def fetch_order_details(self, symbol, order_id, category: str | None = None):
         """Busca a ficha descritiva completa de uma boleta de mercado executada."""
         try:
             self._apply_rate_limit('fetch_order')
-            params = {'category': 'linear'}
+            params = {'category': category or self.get_order_category()}
             print(f"   🔍 Buscando detalhes da ordem {order_id} para {symbol}...", flush=True)
             order_details = self.exchange.fetch_order(order_id, symbol, params=params)
             print("   ✅ Detalhes da ordem obtidos com sucesso", flush=True)
@@ -1387,10 +1393,11 @@ class BybitClient:
     def set_isolated_margin(self, symbol, leverage=20):
         """
         Força MARGEM ISOLADA + alavancagem antes de enviar a ordem (anti-cruzada).
-
-        Segue a diretriz de segurança: nunca operar em Cross Margin.
-        Best-effort: se já estiver isolada/na alavancagem, ignora o erro.
+        No modo SPOT não aplica (sem derivativos).
         """
+        if self.is_spot_trading():
+            print(f"   ℹ️ [MARGEM] {symbol} modo SPOT — sem alavancagem/isolada", flush=True)
+            return True
         lev = int(float(leverage or getattr(self, 'default_leverage', 20) or 20))
         applied = False
         # 1) CCXT set_margin_mode('isolated', symbol, {'leverage': lev}) — conforme diretriz
@@ -1468,6 +1475,71 @@ class BybitClient:
             print(f"   ⚠️ [POSICAO] Falha ao checar posição de {symbol}: {str(e)[:140]}", flush=True)
             return False
 
+    def get_order_category(self) -> str:
+        """linear (perp) ou spot — após erro 10024 força spot na sessão."""
+        mode = str(getattr(self, 'trading_mode', 'linear') or 'linear').strip().lower()
+        if getattr(self, '_derivatives_restricted', False) or mode == 'spot':
+            return 'spot'
+        return 'linear'
+
+    def is_spot_trading(self) -> bool:
+        return self.get_order_category() == 'spot'
+
+    @staticmethod
+    def _is_regulatory_restriction_error(message) -> bool:
+        s = str(message or '').lower()
+        return (
+            '10024' in s
+            or 'regulatory restriction' in s
+            or 'not available to you due to regulatory' in s
+        )
+
+    def _enable_spot_fallback(self, reason: str) -> None:
+        if not getattr(self, '_derivatives_restricted', False):
+            print(
+                f'♻️ [BYBIT] Erro 10024 / restrição regulatória — fallback SPOT ativo: '
+                f'{str(reason)[:180]}',
+                flush=True,
+            )
+        self._derivatives_restricted = True
+        self.trading_mode = 'spot'
+
+    def _build_v5_market_payload(
+        self,
+        category: str,
+        symbol: str,
+        side: str,
+        normalized_qty: str,
+        tp_str: str | None,
+        sl_str: str | None,
+    ) -> tuple[dict, bool]:
+        """Monta payload Bybit V5. Spot: sem positionIdx/leverage/TP-SL inline."""
+        v5_symbol = self._normalize_v5_symbol(symbol)
+        payload = {
+            'category': category,
+            'symbol': v5_symbol,
+            'side': self._normalize_v5_side(side),
+            'orderType': 'Market',
+            'qty': normalized_qty,
+        }
+        tp_sl_applied = False
+        if category == 'linear':
+            payload['positionIdx'] = 1 if side.lower() == 'buy' else 2
+            if tp_str or sl_str:
+                payload['tpslMode'] = 'Full'
+                if tp_str:
+                    payload['takeProfit'] = tp_str
+                    payload['tpTriggerBy'] = 'MarkPrice'
+                    payload['tpOrderType'] = 'Market'
+                if sl_str:
+                    payload['stopLoss'] = sl_str
+                    payload['slTriggerBy'] = 'MarkPrice'
+                    payload['slOrderType'] = 'Market'
+                tp_sl_applied = True
+        else:
+            payload['marketUnit'] = 'baseCoin'
+        return payload, tp_sl_applied
+
     def execute_market_order(self, symbol, side, qty, raise_on_error=False, strict_pct_sizing=False,
                              tp_price=None, sl_price=None):
         """
@@ -1505,48 +1577,35 @@ class BybitClient:
                 sl_str = str(sl_price) if sl_price else None
 
             tp_sl_applied = False
+            category = self.get_order_category()
+            local_tp_sl = category == 'spot' and (tp_price or sl_price)
 
-            print(f"🔥 [ORDEM SNIPER BYBIT] {side.upper()} {normalized_qty} em {symbol}"
-                  + (f" | TP={tp_str} SL={sl_str}" if (tp_str or sl_str) else ""), flush=True)
+            print(
+                f"🔥 [ORDEM SNIPER BYBIT] {side.upper()} {normalized_qty} em {symbol} "
+                f"[{category}]"
+                + (f" | TP={tp_str} SL={sl_str}" if (tp_str or sl_str) and category == 'linear' else ""),
+                flush=True,
+            )
 
             if self.pybit_session is not None:
-                v5_symbol = self._normalize_v5_symbol(symbol)
-
-                # Mapeia positionIdx para Hedge Mode (Modo Bidirecional)
-                position_idx = 1 if side.lower() == 'buy' else 2
-
-                payload = {
-                    'category': 'linear',
-                    'symbol': v5_symbol,
-                    'side': self._normalize_v5_side(side),
-                    'orderType': 'Market',
-                    'qty': normalized_qty,
-                    'positionIdx': position_idx,
-                }
-                # TP/SL vinculados à ordem principal (Bybit V5)
-                if tp_str or sl_str:
-                    payload['tpslMode'] = 'Full'
-                    if tp_str:
-                        payload['takeProfit'] = tp_str
-                        payload['tpTriggerBy'] = 'MarkPrice'
-                        payload['tpOrderType'] = 'Market'
-                    if sl_str:
-                        payload['stopLoss'] = sl_str
-                        payload['slTriggerBy'] = 'MarkPrice'
-                        payload['slOrderType'] = 'Market'
-                    tp_sl_applied = True
+                payload, tp_sl_applied = self._build_v5_market_payload(
+                    category, symbol, side, normalized_qty, tp_str, sl_str,
+                )
 
                 print(f"   📤 Enviando via Pybit V5 (/v5/order/create): {payload}", flush=True)
                 rsp = self.pybit_session.place_order(**payload)
                 print(f"   📥 Resposta Bybit: {rsp}", flush=True)
 
                 ok, error_message = self._handle_v5_ret_code(rsp, 'v5/order/create')
-                if not ok and tp_sl_applied and any(
+                if not ok and category == 'linear' and tp_sl_applied and any(
                     tok in str(error_message).lower()
                     for tok in ('takeprofit', 'stoploss', 'tpsl', 'tp/sl', 'trigger')
                 ):
-                    # Reenvia sem TP/SL inline; alvos serão aplicados por set_tp_sl_sniper (fallback)
-                    print(f"   ⚠️ [TP/SL INLINE] Rejeitado ({error_message}). Reenviando ordem sem TP/SL inline.", flush=True)
+                    print(
+                        f"   ⚠️ [TP/SL INLINE] Rejeitado ({error_message}). "
+                        f"Reenviando ordem sem TP/SL inline.",
+                        flush=True,
+                    )
                     for key in ('tpslMode', 'takeProfit', 'tpTriggerBy', 'tpOrderType',
                                 'stopLoss', 'slTriggerBy', 'slOrderType'):
                         payload.pop(key, None)
@@ -1555,39 +1614,63 @@ class BybitClient:
                     print(f"   📥 Resposta Bybit (retry): {rsp}", flush=True)
                     ok, error_message = self._handle_v5_ret_code(rsp, 'v5/order/create')
 
+                # Erro 10024: derivativos bloqueados → retry automático em SPOT
+                if not ok and category == 'linear' and self._is_regulatory_restriction_error(error_message):
+                    self._enable_spot_fallback(error_message)
+                    category = 'spot'
+                    local_tp_sl = bool(tp_price or sl_price)
+                    payload, tp_sl_applied = self._build_v5_market_payload(
+                        'spot', symbol, side, normalized_qty, None, None,
+                    )
+                    print(f"   📤 Retry SPOT (/v5/order/create): {payload}", flush=True)
+                    rsp = self.pybit_session.place_order(**payload)
+                    print(f"   📥 Resposta Bybit SPOT: {rsp}", flush=True)
+                    ok, error_message = self._handle_v5_ret_code(rsp, 'v5/order/create')
+
                 if not ok:
                     print(f"❌ [ERRO EXECUÇÃO BYBIT] {error_message}", flush=True)
-                    if raise_on_error: raise RuntimeError(error_message)
+                    if raise_on_error:
+                        raise RuntimeError(error_message)
                     return None
 
                 result = (rsp or {}).get('result') or {}
                 order_id = result.get('orderId') or result.get('orderLinkId')
                 print(f"✅ [BYBIT] Ordem preenchida na exchange - ID: {order_id}", flush=True)
 
-                order_details = self.fetch_order_details(symbol, order_id)
+                extra = {
+                    'route': 'v5/order/create',
+                    'category': category,
+                    'tp_sl_applied': tp_sl_applied,
+                    'local_tp_sl': local_tp_sl,
+                }
+                if local_tp_sl:
+                    extra['tp_price'] = tp_price
+                    extra['sl_price'] = sl_price
+
+                order_details = self.fetch_order_details(symbol, order_id, category=category)
                 if order_details:
-                    return {**order_details, 'route': 'v5/order/create', 'category': 'linear', 'tp_sl_applied': tp_sl_applied}
-                else:
-                    return {**result, 'id': order_id, 'route': 'v5/order/create', 'category': 'linear', 'symbol': v5_symbol, 'tp_sl_applied': tp_sl_applied}
+                    return {**order_details, **extra}
+                return {**result, 'id': order_id, 'symbol': self._normalize_v5_symbol(symbol), **extra}
 
             # Fallback nativo via Core CCXT Engine
-            # Mapeia positionIdx para Hedge Mode (Modo Bidirecional)
             position_idx = 1 if side.lower() == 'buy' else 2
-            params = {'category': 'linear', 'positionIdx': position_idx}
-            if tp_str or sl_str:
-                params['tpslMode'] = 'Full'
-                if tp_str:
-                    params['takeProfit'] = tp_str
-                    params['takeProfitPrice'] = tp_str
-                    params['tpTriggerBy'] = 'MarkPrice'
-                if sl_str:
-                    params['stopLoss'] = sl_str
-                    params['stopLossPrice'] = sl_str
-                    params['slTriggerBy'] = 'MarkPrice'
-                tp_sl_applied = True
+            params = {'category': category}
+            if category == 'linear':
+                params['positionIdx'] = position_idx
+                if tp_str or sl_str:
+                    params['tpslMode'] = 'Full'
+                    if tp_str:
+                        params['takeProfit'] = tp_str
+                        params['takeProfitPrice'] = tp_str
+                        params['tpTriggerBy'] = 'MarkPrice'
+                    if sl_str:
+                        params['stopLoss'] = sl_str
+                        params['stopLossPrice'] = sl_str
+                        params['slTriggerBy'] = 'MarkPrice'
+                    tp_sl_applied = True
             print(
                 f"   📤 Enviando via CCXT Fallback: {symbol} | qty={normalized_qty} | "
-                f"positionIdx={position_idx} | params TP/SL={ {k: params[k] for k in params if 'Profit' in k or 'Loss' in k or 'Trigger' in k or 'tpsl' in k} }",
+                f"category={category}",
                 flush=True,
             )
             order = self.exchange.create_order(symbol, 'market', side, ccxt_qty, params=params)
@@ -1595,11 +1678,18 @@ class BybitClient:
             order_id = order.get('id', 'N/A')
             print(f"✅ [BYBIT CCXT] Ordem preenchida - ID: {order_id}", flush=True)
 
-            if order_id != 'N/A':
-                order_details = self.fetch_order_details(symbol, order_id)
-                if order_details: return {**order_details, 'tp_sl_applied': tp_sl_applied}
+            ccxt_extra = {'tp_sl_applied': tp_sl_applied, 'category': category}
+            if category == 'spot' and (tp_price or sl_price):
+                ccxt_extra['local_tp_sl'] = True
+                ccxt_extra['tp_price'] = tp_price
+                ccxt_extra['sl_price'] = sl_price
 
-            return {**order, 'tp_sl_applied': tp_sl_applied}
+            if order_id != 'N/A':
+                order_details = self.fetch_order_details(symbol, order_id, category=category)
+                if order_details:
+                    return {**order_details, **ccxt_extra}
+
+            return {**order, **ccxt_extra}
         except Exception as e:
             ccxt = _get_ccxt()
             if isinstance(e, ccxt.BaseError):

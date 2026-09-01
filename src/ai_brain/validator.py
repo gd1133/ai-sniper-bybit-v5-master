@@ -529,12 +529,10 @@ class GroqValidator:
         return min(100, score)
 
     def consensus_predict(self, tech_data, symbol, force_local_only=True, intelligence_context=None):
-        """Pipeline soberano: C1/C2 coletam contexto → C3 decide."""
-        import os
-        advisory = str(os.getenv('ADVISORY_GATES', 'true')).strip().lower() in {'1', 'true', 'yes', 'on'}
-        if advisory:
-            return self._sovereign_predict(tech_data, symbol, intelligence_context=intelligence_context)
+        """Pipeline soberano: C1/C2 coletam contexto → C3 decide (sem veto C1/C2)."""
+        return self._sovereign_predict(tech_data, symbol, intelligence_context=intelligence_context)
 
+    def _legacy_consensus_predict(self, tech_data, symbol, force_local_only=True, intelligence_context=None):
         trend = tech_data.get('trend', 'NEUTRO')
         if trend == 'NEUTRO':
             return {
@@ -770,6 +768,37 @@ class GroqValidator:
         from src.ai_brain.cerebro3_decisor import decide_entry, decision_to_consensus
 
         ctx = dict(intelligence_context or {})
+        # Veto estrutural duro (ex.: lateral absoluto) — só C3 pode abortar, não C1/C2
+        if ctx and not ctx.get('allow_entry', True):
+            hard = list(ctx.get('hard_veto_reasons') or [])
+            if hard and not ctx.get('soft_ai_veto_only'):
+                gates = ctx.get('gates_advisory') or evaluate_gates_advisory(tech_data)
+                report_c1 = build_cerebro1_payload(tech_data, gates=gates)
+                report_c2 = build_cerebro2_payload(
+                    tech_data, intel_ctx=ctx,
+                    order_book=ctx.get('order_book'), ticker=ctx.get('ticker'),
+                )
+                context = merge_context_for_cerebro3(symbol, tech_data, gates, report_c1, report_c2, ctx)
+                blocked = decision_to_consensus(
+                    {
+                        'action': 'WAIT',
+                        'decisao': 'WAIT',
+                        'confidence': 0.0,
+                        'probabilidade': 0.0,
+                        'rationale': f"C3 veto estrutural: {' | '.join(hard)}",
+                        'motivo': f"C3 bloqueou: {' | '.join(hard)}",
+                        'source': 'hard_veto',
+                    },
+                    context,
+                    report_c1,
+                    report_c2,
+                )
+                blocked['probabilidade'] = 0.0
+                blocked['decisao'] = 'WAIT'
+                blocked['motivo'] = f"C3 bloqueou: {' | '.join(hard)}"
+                blocked['intelligence'] = ctx
+                return blocked
+
         gates = ctx.get('gates_advisory') or evaluate_gates_advisory(tech_data)
         report_c1 = build_cerebro1_payload(tech_data, gates=gates)
         report_c2 = build_cerebro2_payload(
@@ -779,6 +808,10 @@ class GroqValidator:
             ticker=ctx.get('ticker'),
         )
         context = merge_context_for_cerebro3(symbol, tech_data, gates, report_c1, report_c2, ctx)
+        # C2 local disponível → não marca modo autônomo forçado
+        if (ctx.get('groq_flow') or {}).get('available') and ctx.get('groq_flow_degraded'):
+            ctx['autonomous_mode'] = False
+            ctx['ai_assistants_unavailable'] = False
         decision = decide_entry(context)
         result = decision_to_consensus(decision, context, report_c1, report_c2)
         result['votes'] = {
