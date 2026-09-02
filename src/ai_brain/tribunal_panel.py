@@ -10,8 +10,6 @@ from __future__ import annotations
 import os
 from typing import Any
 
-import requests
-
 try:
     from groq import Groq
 except Exception:
@@ -125,29 +123,16 @@ def _cloud_gemini_comment(symbol: str, side: str, tech_summary: str) -> str | No
     if not key or not _env_bool('ENABLE_AI_TRIBUNAL_CLOUD', True):
         return None
     try:
-        url = (
-            'https://generativelanguage.googleapis.com/v1beta/models/'
-            f'gemini-2.0-flash:generateContent?key={key}'
-        )
+        from src.intelligence.gemini_client import gemini_generate_content
         prompt = (
             f'Você é o analista Gemini do robô Motor Sniper. Em 2 frases curtas em português, '
             f'explique por que a entrada {side} em {symbol} faz sentido (ou o risco). '
             f'Dados:\n{tech_summary}\nResponda só o texto, sem JSON.'
         )
-        rsp = requests.post(
-            url,
-            json={'contents': [{'parts': [{'text': prompt}]}]},
-            timeout=12,
-        )
-        if rsp.status_code != 200:
+        result = gemini_generate_content(prompt, purpose='chat', temperature=0.3, max_tokens=180)
+        if not result.get('ok'):
             return None
-        text = (
-            ((rsp.json() or {}).get('candidates') or [{}])[0]
-            .get('content', {})
-            .get('parts', [{}])[0]
-            .get('text', '')
-        )
-        return (text or '').strip()[:320] or None
+        return (result.get('text') or '').strip()[:320] or None
     except Exception as exc:
         print(f'⚠️ [TRIBUNAL] Gemini indisponível: {exc}', flush=True)
         return None
