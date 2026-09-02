@@ -189,35 +189,27 @@ def _parse_flow_json(text: str, source: str = 'groq') -> dict | None:
 
 
 def _gemini_flow_fallback(symbol: str, user_payload: str) -> dict | None:
-    """Segundo tier cloud — Gemini analisa order book quando Groq falha."""
+    """Segundo tier cloud — Gemini analisa order book quando Groq falha (cadeia v1beta)."""
     if not _env_bool('ENABLE_GEMINI_FLOW_FALLBACK', True):
         return None
-    gemini_key = os.getenv('GEMINI_API_KEY', '').strip()
-    if not gemini_key:
+    if not str(os.getenv('GEMINI_API_KEY') or '').strip():
         return None
     try:
-        model = os.getenv('GEMINI_FLOW_MODEL', os.getenv('GEMINI_MACRO_MODEL', 'gemini-2.0-flash'))
-        url = (
-            'https://generativelanguage.googleapis.com/v1beta/models/'
-            f'{model}:generateContent?key={gemini_key}'
-        )
+        from src.intelligence.gemini_client import gemini_generate_content
         prompt = f'{GROQ_FLOW_SYSTEM}\n\nSímbolo: {symbol}\n{user_payload}'
-        rsp = requests.post(
-            url,
-            json={
-                'contents': [{'parts': [{'text': prompt}]}],
-                'generationConfig': {'temperature': 0.1, 'maxOutputTokens': 220},
-            },
-            timeout=12,
+        result = gemini_generate_content(
+            prompt, purpose='flow', temperature=0.1, max_tokens=220,
         )
-        if rsp.status_code != 200:
+        if not result.get('ok'):
             return None
-        parts = (rsp.json().get('candidates') or [{}])[0].get('content', {}).get('parts') or []
-        text = ' '.join(str(p.get('text', '')) for p in parts).strip()
-        parsed = _parse_flow_json(text, source='gemini_flow')
+        parsed = _parse_flow_json(result.get('text') or '', source='gemini_flow')
         if parsed:
             parsed['groq_degraded'] = True
-            parsed['reason'] = f'Gemini fallback (Groq indisponível) — {parsed.get("reason", "")}'
+            parsed['groq_model'] = result.get('model')
+            parsed['reason'] = (
+                f"Gemini fallback ({result.get('model')}, Groq indisponível) — "
+                f"{parsed.get('reason', '')}"
+            )
         return parsed
     except Exception as exc:
         print(f'⚠️ [GROQ FLOW] Gemini fallback indisponível: {exc}', flush=True)

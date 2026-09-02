@@ -101,9 +101,10 @@ def test_groq_default_models():
             import os
             os.environ.pop(key, None)
         chain = get_groq_model_chain('flow')
-    assert chain[0] == 'llama3-70b-8192'
-    assert DEFAULT_GROQ_MODEL == 'llama3-70b-8192'
-    assert 'llama-3.3-70b-versatile' not in chain
+    assert chain[0] == 'llama-3.3-70b-versatile'
+    assert DEFAULT_GROQ_MODEL == 'llama-3.3-70b-versatile'
+    assert 'llama-3.1-8b-instant' in chain
+    assert 'llama3-70b-8192' not in chain
 
 
 def test_cautious_gate_advisory_never_blocks():

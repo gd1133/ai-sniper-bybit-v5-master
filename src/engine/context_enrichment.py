@@ -170,19 +170,45 @@ def evaluate_gates_advisory(signals: dict | None, df=None) -> dict[str, Any]:
 
 
 def build_cerebro1_payload(signals: dict | None, df=None, gates: dict | None = None) -> dict[str, Any]:
-    """Cérebro 1 — pacote técnico (consultivo)."""
+    """Cérebro 1 — métricas matemáticas puras (EMA/SMA/ADX/RSI/VWAP/ATR/S&R) → C3."""
     signals = signals or {}
     gates = gates or {}
     price = _f(signals.get('price') or signals.get('close'))
+    ema8 = _f(signals.get('ema_8') or signals.get('ema_9'))
+    ema20 = _f(signals.get('ema_20') or signals.get('ema_21'))
+    sma200 = _f(signals.get('sma_200'))
     return {
         'brain': 1,
-        'role': 'Técnico — Tendência e Estrutura',
+        'role': 'Técnico — Tendência e Estrutura (Python puro)',
         'available': True,
+        'score': round(min(100.0, max(0.0, (
+            (55 if str(signals.get('trend', '')).upper() in ('ALTA', 'BAIXA') else 30)
+            + min(25.0, _f(signals.get('adx')) * 0.8)
+            + (10 if _f(signals.get('volume_ratio'), 1) >= 1.3 else 0)
+        ))), 1),
+        'action': (
+            'BUY' if str(signals.get('trend', '')).upper() == 'ALTA' and int(signals.get('supertrend_signal') or 0) == 1
+            else (
+                'SELL' if str(signals.get('trend', '')).upper() == 'BAIXA' and int(signals.get('supertrend_signal') or 0) == -1
+                else 'WAIT'
+            )
+        ),
+        'report': (
+            f"EMA8={ema8:.4f} EMA20={ema20:.4f} SMA200={sma200:.4f} "
+            f"ADX={_f(signals.get('adx')):.1f} RSI={_f(signals.get('rsi'), 50):.1f} "
+            f"VWAP={_f(signals.get('vwap')):.4f} ATR={_f(signals.get('atr_20') or signals.get('atr')):.4f}"
+        ),
         'trend': {
             'macro': str(signals.get('trend', 'NEUTRO')),
             'short': str(signals.get('short_trend', 'NEUTRO')),
             'supertrend_signal': int(signals.get('supertrend_signal', 0) or 0),
-            'ema_alignment': str(signals.get('ema_trend', signals.get('trend', 'NEUTRO'))),
+            'ema_alignment': 'BULL' if ema8 > ema20 > 0 else ('BEAR' if ema8 < ema20 else 'FLAT'),
+        },
+        'emas': {
+            'ema_8': round(ema8, 6),
+            'ema_20': round(ema20, 6),
+            'sma_200': round(sma200, 6),
+            'vwap': round(_f(signals.get('vwap')), 6),
         },
         'structure': {
             'adx': round(_f(signals.get('adx')), 2),
@@ -196,7 +222,6 @@ def build_cerebro1_payload(signals: dict | None, df=None, gates: dict | None = N
             'rsi': round(_f(signals.get('rsi'), 50), 2),
             'macd_hist': round(_f(signals.get('macd_hist')), 6),
             'macd_trend': str(signals.get('macd_trend', 'NEUTRO')),
-            'stoch_k': round(_f(signals.get('stoch_k'), 50), 2) if signals.get('stoch_k') else None,
         },
         'volatility_volume': {
             'atr': round(_f(signals.get('atr_20') or signals.get('atr')), 6),
@@ -211,12 +236,6 @@ def build_cerebro1_payload(signals: dict | None, df=None, gates: dict | None = N
             'near_support': bool(signals.get('near_pivot_support')),
             'near_resistance': bool(signals.get('near_pivot_resistance')),
             'fib_distance_pct': round(_f(signals.get('fib_distance_pct'), 100), 2),
-            'dist_to_high_pct': round(
-                ((price - _f(signals.get('pivot_high'))) / price * 100) if price > 0 else 0, 2
-            ),
-            'dist_to_low_pct': round(
-                ((price - _f(signals.get('pivot_low'))) / price * 100) if price > 0 else 0, 2
-            ),
         },
         'candle': {
             'body_ratio': round(_f(signals.get('candle_body_ratio')), 2),
@@ -232,48 +251,74 @@ def build_cerebro2_payload(
     order_book: dict | None = None,
     ticker: dict | None = None,
 ) -> dict[str, Any]:
-    """Cérebro 2 — sentimento, fluxo e macro (consultivo)."""
+    """Cérebro 2 — fluxo/liquidez em Python puro (volume, book skew, long/short) → C3."""
     signals = signals or {}
     intel_ctx = intel_ctx or {}
     flow = intel_ctx.get('groq_flow') or intel_ctx.get('order_flow') or {}
 
-    bids = list((order_book or {}).get('bids') or [])[:10]
-    asks = list((order_book or {}).get('asks') or [])[:10]
+    bids = list((order_book or {}).get('bids') or [])[:20]
+    asks = list((order_book or {}).get('asks') or [])[:20]
     bid_sz = sum(_f(x[1]) for x in bids if len(x) >= 2)
     ask_sz = sum(_f(x[1]) for x in asks if len(x) >= 2)
     imb = (bid_sz - ask_sz) / (bid_sz + ask_sz + 1e-9)
+    book_skew = bid_sz / (ask_sz + 1e-9)
 
     info = (ticker or {}).get('info') or {}
     funding = _f(info.get('fundingRate') or info.get('funding_rate') or (ticker or {}).get('fundingRate'))
+    recent_ret = _f(signals.get('recent_return_pct'))
+    vol_ratio = _f(signals.get('volume_ratio'), 1.0)
+
+    ls_hint = 'NEUTRAL'
+    if funding > 0.0003:
+        ls_hint = 'LONG_CROWDED'
+    elif funding < -0.0003:
+        ls_hint = 'SHORT_CROWDED'
+    if book_skew >= 1.6:
+        ls_hint = 'BID_DOMINANT'
+    elif book_skew <= (1 / 1.6):
+        ls_hint = 'ASK_DOMINANT'
 
     return {
         'brain': 2,
-        'role': 'Sentimento / Fluxo / Macro',
+        'role': 'Fluxo / Liquidez (Python puro)',
         'available': True,
+        'score': round(min(100.0, max(0.0, 40 + abs(imb) * 40 + min(20.0, (vol_ratio - 1) * 20))), 1),
+        'action': (
+            'BUY' if imb > 0.15 and vol_ratio >= 1.2
+            else ('SELL' if imb < -0.15 and vol_ratio >= 1.2 else 'WAIT')
+        ),
+        'report': (
+            f"vol×={vol_ratio:.2f} skew={book_skew:.2f} imb={imb:.3f} "
+            f"ret%={recent_ret:.2f} LS={ls_hint}"
+        ),
         'order_book': {
             'imbalance': round(imb, 4),
-            'bid_size_top10': round(bid_sz, 4),
-            'ask_size_top10': round(ask_sz, 4),
+            'book_skew': round(book_skew, 4),
+            'bid_size_top20': round(bid_sz, 4),
+            'ask_size_top20': round(ask_sz, 4),
             'score_fluxo': _f(flow.get('score_fluxo')),
             'forca_agressao': _f(flow.get('forca_agressao')),
-            'source': flow.get('source', 'n/d'),
+            'source': flow.get('source', 'local_book'),
+        },
+        'volume_flow': {
+            'volume_ratio': round(vol_ratio, 3),
+            'recent_return_pct': round(recent_ret, 3),
+            'money_flow_side': str(signals.get('money_flow_side', 'WAIT')),
         },
         'sentiment': {
-            'global_trend': str(intel_ctx.get('global_trend', 'NEUTRAL')),
-            'sentiment_score': round(_f(intel_ctx.get('sentiment_score'), 50), 1),
-            'news_risk': str(intel_ctx.get('news_risk', 'LOW')),
-            'investor_mood': str(intel_ctx.get('investor_mood', 'NEUTRAL')),
+            'global_trend': 'NEUTRAL',  # notícias desativadas — neutro técnico
+            'sentiment_score': 50.0,
+            'news_risk': 'LOW',
+            'investor_mood': 'NEUTRAL',
         },
         'whales': {
-            'whale_score': round(_f((intel_ctx.get('whale') or {}).get('whale_score')), 1),
+            'whale_score': round(_f((intel_ctx.get('whale') or {}).get('whale_score') or intel_ctx.get('whale_score')), 1),
             'whale_aligned': bool(intel_ctx.get('whale_aligned')),
         },
         'derivatives': {
             'funding_rate': funding if funding else None,
             'open_interest': info.get('openInterest') or info.get('open_interest'),
-            'long_short_hint': 'LONG_CROWDED' if funding > 0.0003 else (
-                'SHORT_CROWDED' if funding < -0.0003 else 'NEUTRAL'
-            ) if funding else 'N/A',
+            'long_short_hint': ls_hint,
         },
         'timing_score': round(_f(intel_ctx.get('timing_score'), 50), 1),
         'advisory_flags': list(intel_ctx.get('advisory_flags') or []),

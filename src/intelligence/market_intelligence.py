@@ -50,16 +50,27 @@ class MarketIntelligence:
             return self._passthrough(signals, regime)
 
         whale = analyze_whale_activity(signals, ticker, df)
-        # Notícias legado (assistente) — desligado por padrão via ENABLE_NEWS_AI
+        # Notícias/scrapers OFF por padrão — foco técnico/fluxo em tempo real
         news = analyze_news_sentiment(symbol, signals, regime, whale)
 
         headlines = list(news.get('headlines') or [])
-        gemini_macro = analyze_gemini_macro_news(
-            symbol,
-            headlines=headlines,
-            news_blob=str(news.get('reason') or ''),
-            signals={**signals, 'market_regime': regime.get('market_regime')},
-        )
+        # Macro Gemini só se notícias e macro estiverem explicitamente ligados
+        if _env_bool('ENABLE_NEWS_AI', False) and _env_bool('ENABLE_GEMINI_MACRO_AI', False):
+            gemini_macro = analyze_gemini_macro_news(
+                symbol,
+                headlines=headlines,
+                news_blob=str(news.get('reason') or ''),
+                signals={**signals, 'market_regime': regime.get('market_regime')},
+            )
+        else:
+            gemini_macro = {
+                'score_sentimento_noticias': 0.0,
+                'impacto_volatilidade': 'BAIXO',
+                'narrativa_dominante': 'macro omitido — pipeline técnico',
+                'filtro_noticia_travar_bot': False,
+                'source': 'disabled',
+                'available': False,
+            }
         condicao = market_condition_from_signals(signals, regime)
 
         # Estrutura: amplitude + ADX são travas; BB só se STRUCTURE_REQUIRE_BB_EXPAND.
