@@ -1229,6 +1229,10 @@ def _count_live_open_positions():
             broker = _make_broker(cliente)
             if not broker.pybit_session or not broker.authenticated:
                 continue
+            if getattr(broker, 'is_spot_trading', lambda: False)():
+                for h in broker.fetch_spot_holdings():
+                    symbols.add(_normalize_symbol_key(h.get('symbol')))
+                continue
             rsp = broker.pybit_session.get_positions(category='linear', settleCoin='USDT')
             ok, _ = broker._handle_v5_ret_code(rsp, 'get_positions')
             if not ok:
@@ -1241,6 +1245,52 @@ def _count_live_open_positions():
     except Exception:
         pass
     return len(central_state.get('active_trades') or [])
+
+
+def _spot_entry_from_open_trades(client_id: int, symbol: str, fallback_price: float) -> float:
+    """Preço médio da compra Spot a partir do trade aberto no banco."""
+    try:
+        want = _normalize_symbol_key(symbol)
+        for trade in db.get_open_trades(200):
+            if int(trade.get('client_id') or 0) != int(client_id or 0):
+                continue
+            if _normalize_symbol_key(trade.get('pair')) != want:
+                continue
+            px = float(trade.get('entry_price') or 0)
+            if px > 0:
+                return px
+    except Exception:
+        pass
+    return float(fallback_price or 0)
+
+
+def _spot_holdings_as_positions(broker, cliente) -> list[dict]:
+    """Converte saldo Unified (ex.: 0.00999 ETH) em cards de trade ativo."""
+    out = []
+    client_id = cliente.get('id')
+    for h in broker.fetch_spot_holdings():
+        mark = float(h.get('mark_price') or 0)
+        entry = _spot_entry_from_open_trades(client_id, h.get('symbol'), mark)
+        size = float(h.get('size') or 0)
+        unrealised = (mark - entry) * size if entry > 0 and mark > 0 else 0.0
+        notional = size * (entry or mark)
+        pos = {
+            'client_id': client_id,
+            'client_nome': cliente.get('nome'),
+            'symbol': h.get('symbol'),
+            'raw_symbol': h.get('raw_symbol') or h.get('symbol'),
+            'side': 'COMPRAR',
+            'size': size,
+            'entry_price': entry or mark,
+            'mark_price': mark,
+            'unrealised_pnl': unrealised,
+            'leverage': 1.0,
+            'positionIM': notional,
+            'positionValue': size * mark,
+            'category': 'spot',
+        }
+        out.append(pos)
+    return out
 
 def _build_exchange_trade_card(pos_data, key=None):
     """Monta card de posição para o dashboard (com fallback se preço live falhar)."""
@@ -2584,15 +2634,29 @@ def _monitor_financial_stop_loss():
                         continue
 
                     try:
-                        positions_response = broker.pybit_session.get_positions(category='linear', settleCoin='USDT')
-                        ok, err = broker._handle_v5_ret_code(positions_response, 'get_positions')
+                        if getattr(broker, 'is_spot_trading', lambda: False)():
+                            positions_list = []
+                            for h in _spot_holdings_as_positions(broker, cliente):
+                                positions_list.append({
+                                    'symbol': h.get('symbol'),
+                                    'size': h.get('size'),
+                                    'side': 'Buy',
+                                    'unrealisedPnl': h.get('unrealised_pnl'),
+                                    'avgPrice': h.get('entry_price'),
+                                    'markPrice': h.get('mark_price'),
+                                    'leverage': 1,
+                                    'positionIM': h.get('positionIM'),
+                                })
+                        else:
+                            positions_response = broker.pybit_session.get_positions(category='linear', settleCoin='USDT')
+                            ok, err = broker._handle_v5_ret_code(positions_response, 'get_positions')
 
-                        if not ok:
-                            if _is_bybit_auth_error(err) or str(_extract_bybit_ret_code_from_error(err)) in ('10003', '33004'):
-                                _handle_bybit_auth_failure(cliente, err, source_label='MONITOR FINANCEIRO:get_positions')
-                            continue
+                            if not ok:
+                                if _is_bybit_auth_error(err) or str(_extract_bybit_ret_code_from_error(err)) in ('10003', '33004'):
+                                    _handle_bybit_auth_failure(cliente, err, source_label='MONITOR FINANCEIRO:get_positions')
+                                continue
 
-                        positions_list = (positions_response.get('result') or {}).get('list', [])
+                            positions_list = (positions_response.get('result') or {}).get('list', [])
 
                         for pos in positions_list:
                             try:
@@ -3017,68 +3081,79 @@ def _monitor_dashboard_positions():
                         if _handle_bybit_auth_failure(cliente, wallet_err, source_label='DASHBOARD:get_wallet_balance:exception'):
                             pass
 
-                    # 2️⃣ BUSCA POSIÇÕES ABERTAS COM PARÂMETROS CORRETOS
+                    # 2️⃣ POSIÇÕES: Spot = saldo de cripto na Unified; linear = get_positions
                     client_positions_ok = False
                     try:
-                        # CORREÇÃO CRÍTICA: Usa category='linear' e settleCoin='USDT'
-                        positions_response = broker.pybit_session.get_positions(
-                            category='linear',
-                            settleCoin='USDT'
-                        )
-                        ok, err = broker._handle_v5_ret_code(positions_response, 'get_positions')
-
-                        if not ok:
-                            print(f"   ⚠️ [DASHBOARD] Erro ao buscar posições de {cliente.get('nome')}: {err}", flush=True)
-                            continue
-
-                        client_positions_ok = True
-                        positions_fetched_ok = True
-                        positions_list = (positions_response.get('result') or {}).get('list', [])
-
-                        for pos in positions_list:
-                            try:
-                                # Extrai dados da posição
-                                symbol = pos.get('symbol', '')
-                                size = float(pos.get('size') or 0)
-                                side = str(pos.get('side', '')).lower()
-                                entry_price = float(pos.get('avgPrice') or 0)
-                                unrealised_pnl = float(pos.get('unrealisedPnl') or 0)
-                                leverage = float(pos.get('leverage') or ALAVANCAGEM)
-                                mark_price = float(pos.get('markPrice') or pos.get('lastPrice') or entry_price or 0)
-
-                                # Pula se não houver posição aberta
-                                if size <= 0:
-                                    continue
-
-                                # Normaliza o lado da posição para o formato do sistema
-                                side_normalized = 'COMPRAR' if side in ('buy', 'long') else 'VENDER'
-
-                                # Adiciona à lista de posições
-                                all_positions.append({
-                                    'client_id': cliente.get('id'),
-                                    'client_nome': cliente.get('nome'),
-                                    'symbol': symbol,
-                                    'side': side_normalized,
-                                    'size': size,
-                                    'entry_price': entry_price,
-                                    'mark_price': mark_price,
-                                    'unrealised_pnl': unrealised_pnl,
-                                    'leverage': leverage,
-                                    'positionIM': pos.get('positionIM'),
-                                    'positionValue': pos.get('positionValue'),
-                                })
-
-                                _ensure_exchange_position_in_db(cliente, all_positions[-1], broker, raw_pos=pos)
-
+                        use_spot = getattr(broker, 'is_spot_trading', lambda: False)()
+                        if use_spot:
+                            spot_positions = _spot_holdings_as_positions(broker, cliente)
+                            client_positions_ok = True
+                            positions_fetched_ok = True
+                            for pos in spot_positions:
+                                all_positions.append(pos)
+                                _ensure_exchange_position_in_db(cliente, pos, broker, raw_pos=pos)
                                 print(
-                                    f"   📊 [DASHBOARD] {symbol}: {side_normalized} | Size: {size} | "
-                                    f"Entry: ${entry_price:.4f} | Mark: ${mark_price:.4f} | PnL: ${unrealised_pnl:.2f}",
+                                    f"   📊 [DASHBOARD SPOT] {pos.get('symbol')}: COMPRAR | "
+                                    f"Size: {pos.get('size')} | Entry: ${float(pos.get('entry_price') or 0):.4f} | "
+                                    f"Mark: ${float(pos.get('mark_price') or 0):.4f} | "
+                                    f"PnL: ${float(pos.get('unrealised_pnl') or 0):.2f}",
                                     flush=True,
                                 )
+                        else:
+                            positions_response = broker.pybit_session.get_positions(
+                                category='linear',
+                                settleCoin='USDT'
+                            )
+                            ok, err = broker._handle_v5_ret_code(positions_response, 'get_positions')
 
-                            except Exception as pos_parse_err:
-                                print(f"   ⚠️ [DASHBOARD] Erro ao processar posição: {pos_parse_err}", flush=True)
+                            if not ok:
+                                print(f"   ⚠️ [DASHBOARD] Erro ao buscar posições de {cliente.get('nome')}: {err}", flush=True)
                                 continue
+
+                            client_positions_ok = True
+                            positions_fetched_ok = True
+                            positions_list = (positions_response.get('result') or {}).get('list', [])
+
+                            for pos in positions_list:
+                                try:
+                                    symbol = pos.get('symbol', '')
+                                    size = float(pos.get('size') or 0)
+                                    side = str(pos.get('side', '')).lower()
+                                    entry_price = float(pos.get('avgPrice') or 0)
+                                    unrealised_pnl = float(pos.get('unrealisedPnl') or 0)
+                                    leverage = float(pos.get('leverage') or ALAVANCAGEM)
+                                    mark_price = float(pos.get('markPrice') or pos.get('lastPrice') or entry_price or 0)
+
+                                    if size <= 0:
+                                        continue
+
+                                    side_normalized = 'COMPRAR' if side in ('buy', 'long') else 'VENDER'
+
+                                    all_positions.append({
+                                        'client_id': cliente.get('id'),
+                                        'client_nome': cliente.get('nome'),
+                                        'symbol': symbol,
+                                        'side': side_normalized,
+                                        'size': size,
+                                        'entry_price': entry_price,
+                                        'mark_price': mark_price,
+                                        'unrealised_pnl': unrealised_pnl,
+                                        'leverage': leverage,
+                                        'positionIM': pos.get('positionIM'),
+                                        'positionValue': pos.get('positionValue'),
+                                    })
+
+                                    _ensure_exchange_position_in_db(cliente, all_positions[-1], broker, raw_pos=pos)
+
+                                    print(
+                                        f"   📊 [DASHBOARD] {symbol}: {side_normalized} | Size: {size} | "
+                                        f"Entry: ${entry_price:.4f} | Mark: ${mark_price:.4f} | PnL: ${unrealised_pnl:.2f}",
+                                        flush=True,
+                                    )
+
+                                except Exception as pos_parse_err:
+                                    print(f"   ⚠️ [DASHBOARD] Erro ao processar posição: {pos_parse_err}", flush=True)
+                                    continue
 
                     except Exception as fetch_pos_err:
                         print(f"   ⚠️ [DASHBOARD] Erro ao buscar posições: {fetch_pos_err}", flush=True)
@@ -4395,7 +4470,7 @@ def _process_client_orders_background(
                 if RISK_MODE == 'conservative':
                     try:
                         # Verifica quantas posições reais o cliente tem abertas na Bybit
-                        if broker.pybit_session and broker.authenticated:
+                        if broker.pybit_session and broker.authenticated and not broker.is_spot_trading():
                             positions_response = broker.pybit_session.get_positions(
                                 category='linear',
                                 settleCoin='USDT'

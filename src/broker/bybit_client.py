@@ -1345,14 +1345,15 @@ class BybitClient:
         self._apply_rate_limit('get_last_price_public')
         last_err = None
         for sym in self._ticker_symbol_candidates(symbol):
-            try:
-                ticker = exchange.fetch_ticker(sym, params={'category': 'linear'})
-                price = float(ticker.get('last') or 0)
-                if price > 0:
-                    return price
-            except Exception as err:
-                last_err = err
-                continue
+            for cat in ('spot', 'linear'):
+                try:
+                    ticker = exchange.fetch_ticker(sym, params={'category': cat})
+                    price = float(ticker.get('last') or 0)
+                    if price > 0:
+                        return price
+                except Exception as err:
+                    last_err = err
+                    continue
         if last_err:
             raise last_err
         return 0.0
@@ -1364,16 +1365,17 @@ class BybitClient:
 
         last_err = None
         for sym in self._ticker_symbol_candidates(symbol):
-            try:
-                self._apply_rate_limit('get_last_price')
-                ticker = self.exchange.fetch_ticker(sym, params={'category': 'linear'})
-                price = float(ticker['last'])
-                if price > 0:
-                    self.cache_ticker[symbol] = (price, time.time())
-                    return price
-            except Exception as e:
-                last_err = e
-                continue
+            self._apply_rate_limit('get_last_price')
+            for cat in ('spot', 'linear'):
+                try:
+                    ticker = self.exchange.fetch_ticker(sym, params={'category': cat})
+                    price = float(ticker['last'])
+                    if price > 0:
+                        self.cache_ticker[symbol] = (price, time.time())
+                        return price
+                except Exception as e:
+                    last_err = e
+                    continue
         if last_err:
             print(f"[ERRO BROKER] Preço para {symbol} falhou: {last_err}", flush=True)
 
@@ -1458,10 +1460,16 @@ class BybitClient:
 
     def has_open_position(self, symbol) -> bool:
         """
-        Anti-overtrading: True se já existe QUALQUER quantidade aberta para o símbolo.
-        Usado para abortar novas compras enquanto houver posição viva no par.
+        Anti-overtrading: True se já existe quantidade aberta no par.
+        Spot: saldo do coin na Unified. Linear: get_positions.
         """
         try:
+            if self.is_spot_trading():
+                coin = self._spot_base_coin(symbol)
+                for h in self.fetch_spot_holdings():
+                    if str(h.get('coin') or '').upper() == coin:
+                        return True
+                return False
             if self.pybit_session is not None:
                 v5_symbol = self._normalize_v5_symbol(symbol)
                 rsp = self.pybit_session.get_positions(
@@ -1474,7 +1482,6 @@ class BybitClient:
                     if float(pos.get('size') or 0) > 0:
                         return True
                 return False
-            # Fallback CCXT
             positions = self.exchange.fetch_positions([symbol])
             for pos in positions or []:
                 size = pos.get('contracts')
@@ -1486,6 +1493,98 @@ class BybitClient:
         except Exception as e:
             print(f"   ⚠️ [POSICAO] Falha ao checar posição de {symbol}: {str(e)[:140]}", flush=True)
             return False
+
+    @staticmethod
+    def _spot_base_coin(symbol: str) -> str:
+        raw = str(symbol or '').upper().replace('/USDT:USDT', '').replace(':USDT', '')
+        raw = raw.replace('/USDT', '').replace('-USDT', '').replace('USDT', '')
+        return ''.join(ch for ch in raw if ch.isalnum()) or str(symbol or '').upper()
+
+    def fetch_spot_holdings(self, min_notional: float | None = None) -> list[dict]:
+        """
+        Ativos Spot/Unified em custódia (não são get_positions linear).
+
+        Ignora stables e poeira. Cada item vira um 'trade ativo' no dashboard.
+        """
+        try:
+            min_notional = float(
+                min_notional
+                if min_notional is not None
+                else (os.getenv('SPOT_HOLDING_MIN_USDT') or 5.0)
+            )
+        except (TypeError, ValueError):
+            min_notional = 5.0
+        stables = {'USDT', 'USDC', 'USD', 'DAI', 'BUSD', 'EUR'}
+        holdings: list[dict] = []
+        coins: list[dict] = []
+
+        try:
+            if self.pybit_session is not None:
+                rsp = self.pybit_session.get_wallet_balance(accountType='UNIFIED')
+                ok, err = self._handle_v5_ret_code(rsp, 'get_wallet_balance')
+                if ok:
+                    rows = ((rsp.get('result') or {}).get('list') or [])
+                    if rows:
+                        coins = list(rows[0].get('coin') or [])
+            if not coins:
+                bal = self.exchange.fetch_balance(params={'accountType': 'UNIFIED'})
+                totals = (bal or {}).get('total') or {}
+                free = (bal or {}).get('free') or {}
+                for coin, qty in totals.items():
+                    coins.append({
+                        'coin': coin,
+                        'walletBalance': qty,
+                        'availableToWithdraw': free.get(coin, qty),
+                    })
+        except Exception as exc:
+            print(f"   ⚠️ [SPOT HOLDINGS] carteira: {str(exc)[:160]}", flush=True)
+            return []
+
+        for coin_row in coins:
+            coin = str(coin_row.get('coin') or '').upper().strip()
+            if not coin or coin in stables:
+                continue
+            try:
+                qty = float(
+                    coin_row.get('availableToWithdraw')
+                    or coin_row.get('walletBalance')
+                    or coin_row.get('equity')
+                    or 0
+                )
+            except (TypeError, ValueError):
+                qty = 0.0
+            if qty <= 0:
+                continue
+            symbol = f'{coin}/USDT'
+            mark = 0.0
+            try:
+                usd_val = float(coin_row.get('usdValue') or 0)
+            except (TypeError, ValueError):
+                usd_val = 0.0
+            try:
+                mark = float(self.get_last_price(symbol) or 0)
+            except Exception:
+                mark = 0.0
+            notional = usd_val if usd_val > 0 else (qty * mark)
+            if notional < min_notional:
+                continue
+            if mark <= 0 and notional > 0 and qty > 0:
+                mark = notional / qty
+            holdings.append({
+                'coin': coin,
+                'symbol': symbol,
+                'raw_symbol': symbol,
+                'side': 'COMPRAR',
+                'size': qty,
+                'entry_price': mark,
+                'mark_price': mark,
+                'unrealised_pnl': 0.0,
+                'leverage': 1.0,
+                'positionIM': round(notional, 6),
+                'positionValue': round(notional, 6),
+                'category': 'spot',
+            })
+        return holdings
 
     def get_order_category(self) -> str:
         """spot (default) ou linear — após erro 10024 força spot na sessão."""
@@ -1852,6 +1951,12 @@ class BybitClient:
             if not self.authenticated:
                 print("❌ [TP/SL] Não autenticado. Proteção de capital ABORTADA.", flush=True)
                 return False
+            if self.is_spot_trading():
+                print(
+                    "   ℹ️ [TP/SL] Spot — TP/SL ficam no monitor local (sem set_trading_stop)",
+                    flush=True,
+                )
+                return True
             if not self.pybit_session:
                 print("❌ [TP/SL] Sessão pybit indisponível.", flush=True)
                 return False
@@ -2093,6 +2198,21 @@ class BybitClient:
                 return False
 
             print(f"🔒 [CLOSE POSITION] Disparando fechamento para {symbol}", flush=True)
+
+            if self.is_spot_trading():
+                qty = 0.0
+                coin = self._spot_base_coin(symbol)
+                for h in self.fetch_spot_holdings(min_notional=0.01):
+                    if str(h.get('coin') or '').upper() == coin:
+                        qty = float(h.get('size') or 0)
+                        break
+                if qty <= 0:
+                    print(f"⚠️ [CLOSE POSITION] Sem saldo Spot de {coin}", flush=True)
+                    return False
+                order = self.execute_market_order(
+                    f'{coin}/USDT', 'sell', qty, raise_on_error=False,
+                )
+                return bool(order)
 
             requested_side = str(position_side or '').strip().lower()
             if requested_side in ('buy', 'long', 'comprar'):
