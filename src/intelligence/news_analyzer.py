@@ -35,8 +35,15 @@ def _symbol_to_coin_id(symbol: str) -> str:
     return raw.replace('USDT', '').strip() or 'BTC'
 
 
+def _scrapers_enabled() -> bool:
+    """Scrapers externos OFF por padrão — não atrasam o ciclo técnico."""
+    return _env_bool('ENABLE_NEWS_SCRAPERS', False) and _env_bool('ENABLE_NEWS_AI', False)
+
+
 def _fetch_coingecko_trending() -> list[str]:
     """Moedas em alta no mundo crypto (proxy de interesse dos investidores)."""
+    if not _scrapers_enabled():
+        return []
     try:
         rsp = requests.get(
             'https://api.coingecko.com/api/v3/search/trending',
@@ -58,6 +65,8 @@ def _fetch_coingecko_trending() -> list[str]:
 
 def _fetch_coingecko_sentiment(coin_id: str) -> dict:
     """Sentimento da comunidade CoinGecko (up/down votes)."""
+    if not _scrapers_enabled():
+        return {}
     try:
         rsp = requests.get(
             f'https://api.coingecko.com/api/v3/coins/{coin_id.lower()}',
@@ -176,27 +185,14 @@ def _ai_analyze_with_gemini(symbol: str, tech_summary: str, gemini_key: str) -> 
     if not gemini_key:
         return None
     try:
-        url = (
-            'https://generativelanguage.googleapis.com/v1beta/models/'
-            f'gemini-2.0-flash:generateContent?key={gemini_key}'
-        )
+        from src.intelligence.gemini_client import gemini_generate_content
         prompt = f"""Analise o contexto de mercado de {symbol} para decisão de trading.
 {tech_summary}
 Retorne JSON: sentiment_score (0-100), global_trend (BULLISH/BEARISH/NEUTRAL), news_risk (LOW/MEDIUM/HIGH), investor_mood, block_trade (bool), reason (pt-BR)."""
-        rsp = requests.post(
-            url,
-            json={'contents': [{'parts': [{'text': prompt}]}]},
-            timeout=15,
-        )
-        if rsp.status_code != 200:
+        result = gemini_generate_content(prompt, purpose='macro', temperature=0.2, max_tokens=280)
+        if not result.get('ok'):
             return None
-        text = (
-            ((rsp.json() or {}).get('candidates') or [{}])[0]
-            .get('content', {})
-            .get('parts', [{}])[0]
-            .get('text', '')
-        )
-        text = re.sub(r'^```json\s*|\s*```$', '', text.strip(), flags=re.IGNORECASE)
+        text = re.sub(r'^```json\s*|\s*```$', '', (result.get('text') or '').strip(), flags=re.IGNORECASE)
         return json.loads(text)
     except Exception as exc:
         print(f'⚠️ [NEWS AI] Gemini indisponível: {exc}', flush=True)
@@ -206,8 +202,10 @@ Retorne JSON: sentiment_score (0-100), global_trend (BULLISH/BEARISH/NEUTRAL), n
 def _fetch_web_headlines(coin: str, limit: int = 6) -> list[dict]:
     """
     Busca manchetes reais na web (Google News RSS) sobre a tendência da moeda.
-    Sem API key — falha silenciosa se offline.
+    Desligado por padrão (ENABLE_NEWS_SCRAPERS / ENABLE_NEWS_AI).
     """
+    if not _scrapers_enabled():
+        return []
     headlines: list[dict] = []
     queries = [
         f'{coin} cryptocurrency OR crypto OR bitcoin OR USDT',

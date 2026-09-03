@@ -16,8 +16,6 @@ import re
 import time
 from typing import Any
 
-import requests
-
 _CACHE: dict[str, tuple[float, dict]] = {}
 _CACHE_TTL = 180.0
 
@@ -88,10 +86,12 @@ def analyze_gemini_macro_news(
     signals: dict | None = None,
 ) -> dict[str, Any]:
     """
-    Gemini macro JSON. Se ENABLE_GEMINI_MACRO_AI=false ou sem chave → neutro.
+    Gemini macro JSON. Desligado por padrão — pipeline técnico C1/C2→C3.
     """
-    if not _env_bool('ENABLE_GEMINI_MACRO_AI', True):
-        return _neutral_macro('Gemini macro desativado')
+    if not _env_bool('ENABLE_GEMINI_MACRO_AI', False):
+        return _neutral_macro('Gemini macro desativado — foco técnico C1/C2→C3')
+    if not _env_bool('ENABLE_NEWS_AI', False):
+        return _neutral_macro('Notícias desativadas — macro Gemini omitido')
 
     gemini_key = os.getenv('GEMINI_API_KEY', '').strip()
     if not gemini_key:
@@ -121,32 +121,16 @@ def analyze_gemini_macro_news(
         f'Bloco de notícias:\n{blob}'
     )
     try:
-        model = os.getenv('GEMINI_MACRO_MODEL', 'gemini-2.0-flash')
-        url = (
-            'https://generativelanguage.googleapis.com/v1beta/models/'
-            f'{model}:generateContent?key={gemini_key}'
+        from src.intelligence.gemini_client import gemini_generate_content
+        result = gemini_generate_content(
+            user_payload, purpose='macro', temperature=0.15, max_tokens=280,
         )
-        rsp = requests.post(
-            url,
-            json={
-                'contents': [{'parts': [{'text': user_payload}]}],
-                'generationConfig': {'temperature': 0.15, 'maxOutputTokens': 280},
-            },
-            timeout=15,
-        )
-        if rsp.status_code != 200:
-            out = _neutral_macro(f'Gemini HTTP {rsp.status_code}')
+        if not result.get('ok'):
+            out = _neutral_macro(f"Gemini: {result.get('error') or 'falha'}")
             _CACHE[cache_key] = (now, out)
             return out
-        text = (
-            ((rsp.json() or {}).get('candidates') or [{}])[0]
-            .get('content', {})
-            .get('parts', [{}])[0]
-            .get('text', '')
-        )
-        parsed = _parse_macro_json(text)
+        parsed = _parse_macro_json(result.get('text') or '')
         if parsed:
-            # Hard-veto só se explicitamente permitido (preserva regra assistente)
             if parsed.get('filtro_noticia_travar_bot') and not _env_bool('ALLOW_NEWS_HARD_VETO', False):
                 parsed['filtro_noticia_travar_bot_sugerido'] = True
                 parsed['filtro_noticia_travar_bot'] = False
@@ -154,6 +138,7 @@ def analyze_gemini_macro_news(
                     f"{parsed.get('narrativa_dominante', '')} "
                     f"[alerta sistêmico — soft, hard-veto off]"
                 ).strip()
+            parsed['source'] = f"gemini:{result.get('model')}"
             _CACHE[cache_key] = (now, parsed)
             return parsed
     except Exception as exc:

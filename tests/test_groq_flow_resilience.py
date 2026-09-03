@@ -17,15 +17,15 @@ def test_groq_model_chain_defaults():
         os.environ.pop('GROQ_MODEL', None)
         os.environ.pop('GROQ_FALLBACK_MODELS', None)
         chain = get_groq_model_chain('flow')
-        assert chain[0] == DEFAULT_GROQ_MODEL
-        assert chain[0] == 'openai/gpt-oss-120b'
-        assert 'openai/gpt-oss-20b' in chain
-        # IDs aposentados NÃO devem aparecer direto na cadeia
-        assert 'llama3-70b-8192' not in chain
-        assert 'llama3-8b-8192' not in chain
-        assert 'mixtral-8x7b-32768' not in chain
-        assert 'llama-3.3-70b-versatile' not in chain
-        assert 'llama-3.1-8b-instant' not in chain
+    assert chain[0] == DEFAULT_GROQ_MODEL
+    assert chain[0] == 'openai/gpt-oss-120b'
+    assert 'openai/gpt-oss-20b' in chain
+    # IDs aposentados NÃO devem aparecer direto na cadeia
+    assert 'llama3-70b-8192' not in chain
+    assert 'llama3-8b-8192' not in chain
+    assert 'mixtral-8x7b-32768' not in chain
+    assert 'llama-3.3-70b-versatile' not in chain
+    assert 'llama-3.1-8b-instant' not in chain
 
 
 def test_deprecated_llama3_remapped():

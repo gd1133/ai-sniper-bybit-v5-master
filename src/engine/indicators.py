@@ -103,6 +103,9 @@ class IndicatorEngine:
         self.df['vol_ma'] = self.df['vol'].rolling(window=20, min_periods=1).mean()
         self.df['volume_ratio'] = self.df['vol'] / (self.df['vol_ma'] + 1e-9)
 
+        # EMA 8 / 20 — alinhamento curto (C1 → C3)
+        self.df['ema_8'] = self.df['close'].ewm(span=8, adjust=False).mean()
+        self.df['ema_20'] = self.df['close'].ewm(span=20, adjust=False).mean()
         # EMA 9 / EMA 21 — timing de entrada (fim de repique)
         self.df['ema_9'] = self.df['close'].ewm(span=9, adjust=False).mean()
         self.df['ema_21'] = self.df['close'].ewm(span=21, adjust=False).mean()
@@ -293,6 +296,8 @@ class IndicatorEngine:
             'bollinger_bandwidth_mean_50': float(regime.get('bollinger_bandwidth_mean_50', 0) or 0),
             'bollinger_expanding': bool(regime.get('bollinger_expanding', False)),
             'structure_filters_pass': bool(regime.get('structure_filters_pass', False)),
+            'ema_8': float(last['ema_8']) if 'ema_8' in last else 0.0,
+            'ema_20': float(last['ema_20']) if 'ema_20' in last else 0.0,
             'ema_9': float(last['ema_9']) if 'ema_9' in last else 0.0,
             'ema_21': float(last['ema_21']) if 'ema_21' in last else 0.0,
             'ema_50': ema50,
