@@ -784,10 +784,13 @@ class BybitClient:
             print(f"⚠️ [BYBIT MARKET] Erro ao carregar limites: {market_err}, usando defaults", flush=True)
             return 0.001, 6.0
 
-    def validate_pct_sizing_qty(self, symbol, qty, strict=True):
+    def validate_pct_sizing_qty(self, symbol, qty, strict=False):
         """
-        Valida qty calculada por % da banca.
-        strict=True: aborta se abaixo do mínimo da exchange (não aumenta para o mínimo).
+        Valida/ajusta qty para o step size e nocional mínimo da Bybit.
+
+        strict=False (padrão): se qty < mínimo da exchange, eleva automaticamente
+        para o mínimo — nunca rejeita por nocional pequeno, ordem segue.
+        strict=True: comportamento legado (rejeita se abaixo do mínimo).
         Retorna (qty_normalizada, ok, motivo).
         """
         try:
@@ -806,29 +809,38 @@ class BybitClient:
         min_qty_for_notional = Decimal(str(min_cost)) / Decimal(str(current_price))
         required_min_qty = max(Decimal(str(min_amount)), min_qty_for_notional)
 
-        if strict and qty_decimal < required_min_qty:
-            notional = float(qty_decimal) * current_price
-            return (
-                float(qty_decimal),
-                False,
-                (
-                    f"5% da banca (${notional:.2f} nocional) abaixo do mínimo da exchange "
-                    f"(${min_cost:.2f}). Aumente o saldo ou o percentual — não usamos mínimo da moeda."
-                ),
+        if qty_decimal < required_min_qty:
+            if strict:
+                notional = float(qty_decimal) * current_price
+                return (
+                    float(qty_decimal),
+                    False,
+                    (
+                        f"Nocional ${notional:.2f} abaixo do mínimo ${min_cost:.2f} "
+                        f"(strict=True)."
+                    ),
+                )
+            # strict=False → bump automático para o mínimo da exchange
+            print(
+                f"   ⚡ [BYBIT QTY] {symbol}: qty {float(qty_decimal):.6f} < mínimo "
+                f"{float(required_min_qty):.6f} — elevando para o mínimo da exchange",
+                flush=True,
             )
+            qty_decimal = required_min_qty
 
         final_qty = float(self.exchange.amount_to_precision(symbol, float(qty_decimal)))
         final_notional = final_qty * current_price
-        if strict and final_notional < min_cost:
-            return (
-                final_qty,
-                False,
-                f"Nocional ${final_notional:.2f} abaixo do mínimo ${min_cost:.2f} após precisão",
-            )
+
+        # Se após arredondamento o nocional ficou abaixo, +1 step
+        if final_notional < min_cost and min_cost > 0:
+            step = float(required_min_qty - Decimal(str(min_amount))) or float(required_min_qty)
+            qty_bumped = float(qty_decimal) + step
+            final_qty = float(self.exchange.amount_to_precision(symbol, qty_bumped))
+            final_notional = final_qty * current_price
 
         print(
-            f"   ✅ [BYBIT ORDER VALIDA] qty={final_qty} (notional=${final_notional:.2f}, "
-            f"mínimo exchange=${min_cost:.2f})",
+            f"   ✅ [BYBIT ORDER VALIDA] qty={final_qty} "
+            f"(notional=${final_notional:.2f}, mínimo=${min_cost:.2f})",
             flush=True,
         )
         return final_qty, True, "OK"

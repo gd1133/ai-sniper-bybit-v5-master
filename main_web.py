@@ -3403,22 +3403,36 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None, client_context
         except Exception:
             pass
 
-        if not report.get('aprovado'):
-            print(f"   🚫 [CALC QTY] Ordem abortada por viabilidade de banca/Step Size.", flush=True)
-            return 0.0, 0.0, saldo_atual
-
+        # Se viabilidade rejeitou, ainda tenta com o mínimo da exchange (não aborta mais)
         margem = float(report.get('final_margin') or 0)
         qty = float(report.get('final_qty') or 0)
 
-        print(f"   💰 [CALC QTY] Saldo UNIFIED (atualizado): ${saldo_atual:.2f} USDT", flush=True)
-        print(f"   💰 [CALC QTY] MI ≈ {report.get('final_pct')}% = ${margem:.4f} USDT (alvo {margem_pct*100:.1f}%)", flush=True)
+        if not report.get('aprovado') or qty <= 0:
+            # Bump automático: usa mínimo da exchange em vez de abortar
+            min_qty_bump = float(lot.get('min_order_qty') or 0.001)
+            min_cost_bump = float(lot.get('min_cost') or 6.0)
+            qty_from_cost = (min_cost_bump / last_price) if last_price > 0 else min_qty_bump
+            qty = max(min_qty_bump, qty_from_cost)
+            margem = round((qty * last_price) / leverage_value, 4) if leverage_value > 0 else 0
+            print(
+                f"   ⚡ [CALC QTY] Banca abaixo do alvo — bump para mínimo da exchange: "
+                f"qty={qty:.6f} nocional=${qty * last_price:.2f} USDT",
+                flush=True,
+            )
+
+        print(f"   💰 [CALC QTY] Saldo UNIFIED: ${saldo_atual:.2f} USDT", flush=True)
+        print(f"   💰 [CALC QTY] MI ≈ {report.get('final_pct') or round((margem/capital_ref)*100,2)}% = ${margem:.4f} USDT", flush=True)
         print(f"   📊 [CALC QTY] Preço: ${last_price:.4f} | L={leverage_value}x | Qty={qty}", flush=True)
 
         try:
-            qty, ok, reason = broker.validate_pct_sizing_qty(symbol, qty, strict=True)
+            # strict=False: arredonda para o step mas NUNCA aborta por nocional baixo
+            qty, ok, reason = broker.validate_pct_sizing_qty(symbol, qty, strict=False)
             if not ok:
-                print(f"   🚫 [CALC QTY] Ordem abortada: {reason}", flush=True)
-                return 0.0, 0.0, saldo_atual
+                # fallback: normaliza qty direto pela exchange
+                try:
+                    qty = float(broker.exchange.amount_to_precision(symbol, qty))
+                except Exception:
+                    pass
             print(f"   ✅ [CALC QTY] Qty validada: {qty}", flush=True)
         except AttributeError:
             try:
@@ -4025,8 +4039,7 @@ def sniper_worker_loop():
                     else:
                         print(f"   ✅ [TIMING] {clean_sym}: {' | '.join(timing_reasons)}", flush=True)
 
-                    # ── ANTI-CHASE: RSI / extensão EMA-VWAP / pullback EMA8 ──
-                    # Bloqueia entrada no topo/fundo esticado ANTES da ordem a mercado.
+                    # ── ANTI-CHASE (100 % consultivo — C3 já decidiu) ──────────────────
                     try:
                         from src.engine.anti_chase_gate import evaluate_anti_chase_entry
                         df_1m_ac = df_5m_ac = None
@@ -4052,20 +4065,15 @@ def sniper_worker_loop():
                             signals=signals,
                             c3_confidence_pct=prob,
                         )
-                        if not anti.get('allowed'):
-                            reason = anti.get('abort_reason') or anti.get('code') or 'aviso'
-                            print(
-                                f"   ℹ️ [ANTI-CHASE] {clean_sym} {side_exec.upper()}: "
-                                f"{reason} (consultivo — C3 conf={prob:.1f}%)",
-                                flush=True,
-                            )
-                            if anti.get('sl_tighten_pct'):
-                                signals['c3_stop_loss_tighten_pct'] = anti['sl_tighten_pct']
-                        else:
-                            print(
-                                f"   ✅ [ANTI-CHASE] {clean_sym}: {anti.get('abort_reason')}",
-                                flush=True,
-                            )
+                        # NUNCA aborta — apenas ajusta SL se necessário
+                        if anti.get('sl_tighten_pct'):
+                            signals['c3_stop_loss_tighten_pct'] = anti['sl_tighten_pct']
+                        note = anti.get('abort_reason') or anti.get('code') or ''
+                        status = '✅' if anti.get('allowed') else 'ℹ️'
+                        print(
+                            f"   {status} [ANTI-CHASE] {clean_sym}: {note} (consultivo)",
+                            flush=True,
+                        )
                     except Exception as anti_err:
                         print(
                             f"   ⚠️ [ANTI-CHASE] {clean_sym}: {anti_err} (consultivo)",
@@ -4252,13 +4260,12 @@ def sniper_worker_loop():
                         )
                         if anti_x.get('sl_tighten_pct') and signals.get('c3_stop_loss'):
                             signals['c3_stop_loss_tighten_pct'] = anti_x['sl_tighten_pct']
-                    # C3 soberano: anti-chase EXEC é 100% consultivo — nunca aborta ordem
+                    # C3 soberano: anti-chase EXEC 100% consultivo — NUNCA aborta
                     if not anti_x.get('allowed'):
-                        code = anti_x.get('code') or 'REJECTED'
-                        reason = anti_x.get('abort_reason') or code
+                        reason = anti_x.get('abort_reason') or anti_x.get('code') or ''
                         print(
                             f"   ℹ️ [ANTI-CHASE EXEC] {melhor['clean_symbol']}: {reason} "
-                            f"(consultivo — C3 conf={_c3_prob:.1f}% ≥ limiar, ordem segue)",
+                            f"(consultivo — C3 conf={_c3_prob:.1f}%, ordem segue)",
                             flush=True,
                         )
                         tighten = float(anti_x.get('sl_tighten_pct') or 1.2)

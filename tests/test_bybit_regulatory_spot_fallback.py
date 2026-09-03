@@ -101,8 +101,10 @@ def test_groq_default_models():
             import os
             os.environ.pop(key, None)
         chain = get_groq_model_chain('flow')
-    assert chain[0] == 'llama3-70b-8192'
-    assert DEFAULT_GROQ_MODEL == 'llama3-70b-8192'
+    assert chain[0] == 'openai/gpt-oss-120b'
+    assert DEFAULT_GROQ_MODEL == 'openai/gpt-oss-120b'
+    assert 'openai/gpt-oss-20b' in chain
+    assert 'llama3-70b-8192' not in chain
     assert 'llama-3.3-70b-versatile' not in chain
 
 
