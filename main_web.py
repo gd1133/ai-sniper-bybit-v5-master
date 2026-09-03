@@ -469,7 +469,7 @@ class BrokerManager:
 
     def _generate_cache_key(self, client_id, exchange, testnet, endpoint_url=None, trading_mode=None):
         endpoint_tag = str(endpoint_url or '').strip().lower()
-        mode_tag = str(trading_mode or 'linear').strip().lower()
+        mode_tag = str(trading_mode or 'spot').strip().lower()
         return f"{exchange}_{client_id}_{testnet}_{endpoint_tag}_{mode_tag}"
 
     def get_broker(self, client, broker_cls, testnet, endpoint_url=None):

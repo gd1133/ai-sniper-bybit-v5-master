@@ -178,9 +178,12 @@ if __name__ == '__main__':
             raise SystemExit(11)
 
         order_call = client.pybit_session.place_order_calls[-1]
-        if order_call.get('category') != 'linear' or order_call.get('symbol') != 'BTCUSDT' or order_call.get('side') != 'Buy':
-            print(f"❌ Payload V5 incorreto: {order_call}")
+        if order_call.get('category') != 'spot' or order_call.get('symbol') != 'BTCUSDT' or order_call.get('side') != 'Buy':
+            print(f"❌ Payload V5 incorreto (esperado spot): {order_call}")
             raise SystemExit(3)
+        if 'positionIdx' in order_call or 'tpslMode' in order_call:
+            print(f"❌ Spot não deve enviar positionIdx/tpslMode: {order_call}")
+            raise SystemExit(12)
         # Note: Quantity is normalized using internal logic in _normalize_order_qty,
         # which applies ROUND_UP to ensure minimum notional value is met
         if order_call.get('qty') != '2.67':

@@ -1488,9 +1488,9 @@ class BybitClient:
             return False
 
     def get_order_category(self) -> str:
-        """linear (perp) ou spot — após erro 10024 força spot na sessão."""
-        mode = str(getattr(self, 'trading_mode', 'linear') or 'linear').strip().lower()
-        if getattr(self, '_derivatives_restricted', False) or mode == 'spot':
+        """spot (default) ou linear — após erro 10024 força spot na sessão."""
+        mode = str(getattr(self, 'trading_mode', 'spot') or 'spot').strip().lower()
+        if getattr(self, '_derivatives_restricted', False) or mode != 'linear':
             return 'spot'
         return 'linear'
 
@@ -1555,11 +1555,11 @@ class BybitClient:
     def execute_market_order(self, symbol, side, qty, raise_on_error=False, strict_pct_sizing=False,
                              tp_price=None, sl_price=None):
         """
-        Executa ordem a mercado para entrada instantânea na Bybit V5.
+        Executa ordem a mercado Bybit V5.
 
-        TP/SL são VINCULADOS à ordem principal (params takeProfit/stopLoss),
-        evitando requisições separadas após a compra. Retorna o resultado com
-        a flag 'tp_sl_applied' indicando se os alvos foram anexados na ordem.
+        Default: category=spot (sem positionIdx / tpslMode / leverage).
+        TP/SL no Spot ficam para o loop local (local_tp_sl=True).
+        Se ainda tentar linear e receber 10024, refaz imediatamente em spot.
         """
         try:
             if not self.authenticated:
@@ -1571,11 +1571,9 @@ class BybitClient:
             normalized_qty = self._normalize_order_qty(symbol, qty, strict_pct_sizing=strict_pct_sizing)
             ccxt_qty = float(normalized_qty)
 
-            # Formata TP/SL na precisão tickSize (string Bybit, sem notação científica)
             tp_str = sl_str = None
             try:
                 tp_str, sl_str = self._format_tpsl_prices(symbol, side, 0.0, tp_price, sl_price)
-                # Sem entry ainda (preço de mercado); revalida depois se tivermos last
                 last = 0.0
                 try:
                     last = float(self.get_last_price(symbol) or 0)
@@ -1588,61 +1586,85 @@ class BybitClient:
                 tp_str = str(tp_price) if tp_price else None
                 sl_str = str(sl_price) if sl_price else None
 
-            tp_sl_applied = False
             category = self.get_order_category()
-            local_tp_sl = category == 'spot' and (tp_price or sl_price)
+            # Spot nunca anexa TP/SL no payload — gestão no loop do robô
+            use_inline_tpsl = category == 'linear'
+            local_tp_sl = (not use_inline_tpsl) and bool(tp_price or sl_price)
 
             print(
                 f"🔥 [ORDEM SNIPER BYBIT] {side.upper()} {normalized_qty} em {symbol} "
                 f"[{category}]"
-                + (f" | TP={tp_str} SL={sl_str}" if (tp_str or sl_str) and category == 'linear' else ""),
+                + (f" | TP={tp_str} SL={sl_str}" if (tp_str or sl_str) and use_inline_tpsl else "")
+                + (" | TP/SL local (spot)" if local_tp_sl else ""),
                 flush=True,
             )
 
-            if self.pybit_session is not None:
+            def _place_pybit(cat: str):
                 payload, tp_sl_applied = self._build_v5_market_payload(
-                    category, symbol, side, normalized_qty, tp_str, sl_str,
+                    cat,
+                    symbol,
+                    side,
+                    normalized_qty,
+                    tp_str if cat == 'linear' else None,
+                    sl_str if cat == 'linear' else None,
                 )
-
                 print(f"   📤 Enviando via Pybit V5 (/v5/order/create): {payload}", flush=True)
-                rsp = self.pybit_session.place_order(**payload)
+                try:
+                    rsp = self.pybit_session.place_order(**payload)
+                except Exception as place_exc:
+                    err_txt = str(place_exc)
+                    if cat == 'linear' and self._is_regulatory_restriction_error(err_txt):
+                        return None, False, err_txt, False, True
+                    raise
                 print(f"   📥 Resposta Bybit: {rsp}", flush=True)
-
                 ok, error_message = self._handle_v5_ret_code(rsp, 'v5/order/create')
-                if not ok and category == 'linear' and tp_sl_applied and any(
-                    tok in str(error_message).lower()
-                    for tok in ('takeprofit', 'stoploss', 'tpsl', 'tp/sl', 'trigger')
+
+                if (
+                    not ok
+                    and cat == 'linear'
+                    and tp_sl_applied
+                    and any(
+                        tok in str(error_message).lower()
+                        for tok in ('takeprofit', 'stoploss', 'tpsl', 'tp/sl', 'trigger')
+                    )
                 ):
                     print(
                         f"   ⚠️ [TP/SL INLINE] Rejeitado ({error_message}). "
                         f"Reenviando ordem sem TP/SL inline.",
                         flush=True,
                     )
-                    for key in ('tpslMode', 'takeProfit', 'tpTriggerBy', 'tpOrderType',
-                                'stopLoss', 'slTriggerBy', 'slOrderType'):
+                    for key in (
+                        'tpslMode', 'takeProfit', 'tpTriggerBy', 'tpOrderType',
+                        'stopLoss', 'slTriggerBy', 'slOrderType',
+                    ):
                         payload.pop(key, None)
                     tp_sl_applied = False
                     rsp = self.pybit_session.place_order(**payload)
                     print(f"   📥 Resposta Bybit (retry): {rsp}", flush=True)
                     ok, error_message = self._handle_v5_ret_code(rsp, 'v5/order/create')
 
-                # Erro 10024: derivativos bloqueados → retry automático em SPOT
-                if not ok and category == 'linear' and self._is_regulatory_restriction_error(error_message):
+                needs_spot = (
+                    not ok
+                    and cat == 'linear'
+                    and self._is_regulatory_restriction_error(error_message)
+                )
+                return rsp, ok, error_message if not ok else '', tp_sl_applied, needs_spot
+
+            if self.pybit_session is not None:
+                rsp, ok, error_message, tp_sl_applied, needs_spot = _place_pybit(category)
+
+                if needs_spot:
                     self._enable_spot_fallback(error_message)
                     category = 'spot'
                     local_tp_sl = bool(tp_price or sl_price)
-                    payload, tp_sl_applied = self._build_v5_market_payload(
-                        'spot', symbol, side, normalized_qty, None, None,
-                    )
-                    print(f"   📤 Retry SPOT (/v5/order/create): {payload}", flush=True)
-                    rsp = self.pybit_session.place_order(**payload)
-                    print(f"   📥 Resposta Bybit SPOT: {rsp}", flush=True)
-                    ok, error_message = self._handle_v5_ret_code(rsp, 'v5/order/create')
+                    use_inline_tpsl = False
+                    print(f"   📤 Retry SPOT (/v5/order/create) após 10024…", flush=True)
+                    rsp, ok, error_message, tp_sl_applied, _ = _place_pybit('spot')
 
-                if not ok:
-                    print(f"❌ [ERRO EXECUÇÃO BYBIT] {error_message}", flush=True)
+                if not ok or rsp is None:
+                    print(f"❌ [ERRO EXECUÇÃO BYBIT] {error_message or 'sem resposta'}", flush=True)
                     if raise_on_error:
-                        raise RuntimeError(error_message)
+                        raise RuntimeError(error_message or 'sem resposta')
                     return None
 
                 result = (rsp or {}).get('result') or {}
@@ -1652,7 +1674,7 @@ class BybitClient:
                 extra = {
                     'route': 'v5/order/create',
                     'category': category,
-                    'tp_sl_applied': tp_sl_applied,
+                    'tp_sl_applied': bool(tp_sl_applied and use_inline_tpsl),
                     'local_tp_sl': local_tp_sl,
                 }
                 if local_tp_sl:
@@ -1662,13 +1684,17 @@ class BybitClient:
                 order_details = self.fetch_order_details(symbol, order_id, category=category)
                 if order_details:
                     return {**order_details, **extra}
-                return {**result, 'id': order_id, 'symbol': self._normalize_v5_symbol(symbol), **extra}
+                return {
+                    **result,
+                    'id': order_id,
+                    'symbol': self._normalize_v5_symbol(symbol),
+                    **extra,
+                }
 
             # Fallback nativo via Core CCXT Engine
-            position_idx = 1 if side.lower() == 'buy' else 2
             params = {'category': category}
             if category == 'linear':
-                params['positionIdx'] = position_idx
+                params['positionIdx'] = 1 if side.lower() == 'buy' else 2
                 if tp_str or sl_str:
                     params['tpslMode'] = 'Full'
                     if tp_str:
@@ -1680,17 +1706,43 @@ class BybitClient:
                         params['stopLossPrice'] = sl_str
                         params['slTriggerBy'] = 'MarkPrice'
                     tp_sl_applied = True
+                else:
+                    tp_sl_applied = False
+            else:
+                tp_sl_applied = False
+
             print(
                 f"   📤 Enviando via CCXT Fallback: {symbol} | qty={normalized_qty} | "
                 f"category={category}",
                 flush=True,
             )
-            order = self.exchange.create_order(symbol, 'market', side, ccxt_qty, params=params)
+            try:
+                order = self.exchange.create_order(symbol, 'market', side, ccxt_qty, params=params)
+            except Exception as ccxt_exc:
+                if category == 'linear' and self._is_regulatory_restriction_error(ccxt_exc):
+                    self._enable_spot_fallback(str(ccxt_exc))
+                    category = 'spot'
+                    local_tp_sl = bool(tp_price or sl_price)
+                    params = {'category': 'spot'}
+                    print(
+                        f"   📤 Retry SPOT via CCXT: {symbol} | qty={normalized_qty}",
+                        flush=True,
+                    )
+                    order = self.exchange.create_order(
+                        symbol, 'market', side, ccxt_qty, params=params,
+                    )
+                    tp_sl_applied = False
+                else:
+                    raise
+
             print(f"   📥 Resposta CCXT: {order}", flush=True)
             order_id = order.get('id', 'N/A')
             print(f"✅ [BYBIT CCXT] Ordem preenchida - ID: {order_id}", flush=True)
 
-            ccxt_extra = {'tp_sl_applied': tp_sl_applied, 'category': category}
+            ccxt_extra = {
+                'tp_sl_applied': bool(tp_sl_applied and category == 'linear'),
+                'category': category,
+            }
             if category == 'spot' and (tp_price or sl_price):
                 ccxt_extra['local_tp_sl'] = True
                 ccxt_extra['tp_price'] = tp_price
@@ -1703,12 +1755,30 @@ class BybitClient:
 
             return {**order, **ccxt_extra}
         except Exception as e:
+            # Última chance: qualquer 10024 fora do fluxo acima → spot
+            if (
+                not getattr(self, '_derivatives_restricted', False)
+                and self._is_regulatory_restriction_error(e)
+                and self.get_order_category() == 'linear'
+            ):
+                try:
+                    self._enable_spot_fallback(str(e))
+                    return self.execute_market_order(
+                        symbol, side, qty,
+                        raise_on_error=raise_on_error,
+                        strict_pct_sizing=strict_pct_sizing,
+                        tp_price=tp_price,
+                        sl_price=sl_price,
+                    )
+                except Exception as spot_retry_err:
+                    e = spot_retry_err
             ccxt = _get_ccxt()
             if isinstance(e, ccxt.BaseError):
                 print(f"❌ ERRO DA CORRETORA BYBIT (CCXT): {e}", flush=True)
             else:
                 print(f"❌ [ERRO EXECUÇÃO BYBIT] Falha de infraestrutura: {e}", flush=True)
-            if raise_on_error: raise
+            if raise_on_error:
+                raise
             return None
 
     def test_connection(self):
