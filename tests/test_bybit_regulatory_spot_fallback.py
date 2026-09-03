@@ -12,17 +12,26 @@ from src.config.trading_mode import normalize_trading_mode, resolve_trading_mode
 def test_normalize_trading_mode_aliases():
     assert normalize_trading_mode('perp') == 'linear'
     assert normalize_trading_mode('spot') == 'spot'
-    assert normalize_trading_mode('invalid') == 'linear'
+    assert normalize_trading_mode('invalid') == 'spot'
+    assert normalize_trading_mode(None) == 'spot'
 
 
-def test_resolve_trading_mode_per_client():
+def test_resolve_trading_mode_defaults_to_spot():
     assert resolve_trading_mode({'trading_mode': 'spot'}) == 'spot'
     with patch.dict('os.environ', {'TRADING_MODE': 'linear'}, clear=False):
         assert resolve_trading_mode({}) == 'linear'
+    with patch.dict('os.environ', {}, clear=False):
+        import os
+        os.environ.pop('TRADING_MODE', None)
+        assert resolve_trading_mode({}) == 'spot'
 
 
 def test_regulatory_error_detection():
     assert BybitClient._is_regulatory_restriction_error('retCode=10024 regulatory restrictions')
+    assert BybitClient._is_regulatory_restriction_error(
+        'Dear User, The product or service you are seeking to access is not available '
+        'to you due to regulatory restrictions. (ErrCode: 10024)'
+    )
     assert not BybitClient._is_regulatory_restriction_error('retCode=10006')
 
 
@@ -30,7 +39,7 @@ def test_spot_payload_no_position_idx():
     client = object.__new__(BybitClient)
     client.trading_mode = 'spot'
     client._derivatives_restricted = False
-    client._normalize_v5_symbol = lambda s: str(s).replace('/', '')
+    client._normalize_v5_symbol = lambda s: str(s).replace('/', '').replace(':USDT', '')
     client._normalize_v5_side = lambda s: 'Buy' if str(s).lower() == 'buy' else 'Sell'
 
     payload, tp_applied = client._build_v5_market_payload(
@@ -38,7 +47,10 @@ def test_spot_payload_no_position_idx():
     )
     assert payload['category'] == 'spot'
     assert 'positionIdx' not in payload
+    assert 'tpslMode' not in payload
     assert 'takeProfit' not in payload
+    assert 'tpTriggerBy' not in payload
+    assert 'slTriggerBy' not in payload
     assert tp_applied is False
     assert payload.get('marketUnit') == 'baseCoin'
 
@@ -93,6 +105,53 @@ def test_execute_market_order_retries_spot_on_10024():
     assert session.place_order.call_args_list[1][1]['category'] == 'spot'
 
 
+def test_execute_market_order_retries_spot_when_pybit_raises_10024():
+    """Pybit frequentemente levanta Exception em vez de retornar retCode."""
+    client = object.__new__(BybitClient)
+    client.authenticated = True
+    client.trading_mode = 'linear'
+    client._derivatives_restricted = False
+    client.exchange = MagicMock()
+    client._normalize_order_qty = MagicMock(return_value='0.31')
+    client._format_tpsl_prices = MagicMock(return_value=(None, None))
+    client.get_last_price = MagicMock(return_value=90.0)
+    client._handle_v5_ret_code = MagicMock(return_value=(True, ''))
+    client.fetch_order_details = MagicMock(return_value={'id': 'spot-1', 'price': 90})
+    client._normalize_v5_symbol = lambda s: 'MAGMAUSDT'
+    client._normalize_v5_side = lambda s: 'Sell' if str(s).lower() == 'sell' else 'Buy'
+    client._enable_spot_fallback = BybitClient._enable_spot_fallback.__get__(client, BybitClient)
+    client.get_order_category = BybitClient.get_order_category.__get__(client, BybitClient)
+    client.is_spot_trading = BybitClient.is_spot_trading.__get__(client, BybitClient)
+    client._build_v5_market_payload = BybitClient._build_v5_market_payload.__get__(client, BybitClient)
+    client._is_regulatory_restriction_error = BybitClient._is_regulatory_restriction_error
+
+    session = MagicMock()
+    session.place_order.side_effect = [
+        Exception(
+            'Dear User, The product or service you are seeking to access is not available '
+            'to you due to regulatory restrictions. (ErrCode: 10024)'
+        ),
+        {'retCode': 0, 'result': {'orderId': 'spot-abc'}},
+    ]
+    client.pybit_session = session
+
+    result = client.execute_market_order('MAGMA/USDT', 'sell', 0.31)
+    assert result is not None
+    assert client.trading_mode == 'spot'
+    assert session.place_order.call_count == 2
+    spot_kwargs = session.place_order.call_args_list[1][1]
+    assert spot_kwargs['category'] == 'spot'
+    assert 'positionIdx' not in spot_kwargs
+    assert 'tpslMode' not in spot_kwargs
+
+
+def test_default_category_is_spot():
+    client = object.__new__(BybitClient)
+    client.trading_mode = 'spot'
+    client._derivatives_restricted = False
+    assert BybitClient.get_order_category(client) == 'spot'
+
+
 def test_groq_default_models():
     from src.intelligence.groq_client import DEFAULT_GROQ_MODEL, get_groq_model_chain
 
@@ -101,10 +160,11 @@ def test_groq_default_models():
             import os
             os.environ.pop(key, None)
         chain = get_groq_model_chain('flow')
-    assert chain[0] == 'llama-3.3-70b-versatile'
-    assert DEFAULT_GROQ_MODEL == 'llama-3.3-70b-versatile'
-    assert 'llama-3.1-8b-instant' in chain
+    assert chain[0] == 'openai/gpt-oss-120b'
+    assert DEFAULT_GROQ_MODEL == 'openai/gpt-oss-120b'
+    assert 'openai/gpt-oss-20b' in chain
     assert 'llama3-70b-8192' not in chain
+    assert 'llama-3.3-70b-versatile' not in chain
 
 
 def test_cautious_gate_advisory_never_blocks():
