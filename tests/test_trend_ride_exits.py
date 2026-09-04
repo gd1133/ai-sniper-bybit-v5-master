@@ -105,3 +105,17 @@ def test_volume_flip_ignores_low_roi():
     flip = detect_volume_flip_exit(df, 'buy', roi_pct=5)
     assert flip['triggered'] is False
 
+
+def test_soft_profit_lock_arms_before_full_trail():
+    """ROI >= 25% → trava lucro parcial (não volta 0-0), sem fechar."""
+    df = _ohlcv()
+    d = decide_trend_action(
+        side='buy', roi_pct=30, entry_price=100.0, mark_price=101.5,
+        df_slow=df, df_fast=df, leverage=20.0, partial_tp_done=True,
+    )
+    assert d['action'] == 'ARM_BREAKEVEN'
+    assert d['breakeven_armed'] is True
+    assert d['sl_price'] > 100.0
+    # @20x, +8% ROI ≈ +0.4% preço → SL ~100.4 (ou BE+fee)
+    assert d['sl_price'] >= 100.0
+

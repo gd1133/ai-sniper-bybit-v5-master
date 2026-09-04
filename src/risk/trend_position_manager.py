@@ -26,6 +26,9 @@ POLL_SECS = float(os.getenv('TREND_POS_POLL_SECS', '8'))
 BE_ROI_PCT = float(os.getenv('BREAKEVEN_ROI_PCT', '100'))
 BE_PRICE_PCT = float(os.getenv('BREAKEVEN_PRICE_PCT', '5.0'))
 BE_FEE_BUFFER_PCT = float(os.getenv('BREAKEVEN_FEE_BUFFER_PCT', '0.12'))
+# Proteção cedo: trava lucro parcial para NÃO voltar a 0-0
+SOFT_BE_ROI_PCT = float(os.getenv('SOFT_BREAKEVEN_ROI_PCT', '25'))
+SOFT_LOCK_ROI_PCT = float(os.getenv('SOFT_LOCK_ROI_PCT', '8'))
 TRAIL_ROI_PCT = float(os.getenv('TREND_TRAIL_ROI_PCT', '100'))
 TRAIL_MIN_PCT = float(os.getenv('TREND_TRAIL_DIST_MIN_PCT', '2.0'))
 TRAIL_MAX_PCT = float(os.getenv('TREND_TRAIL_DIST_MAX_PCT', '3.0'))
@@ -37,7 +40,7 @@ STRONG_EXIT_BODY_PCT = float(os.getenv('TREND_EXIT_BODY_PCT', '48'))
 # Saída “humana”: volume vira contra a tendência com vela direcional (mesmo em lucro)
 VOL_FLIP_RATIO = float(os.getenv('TREND_VOL_FLIP_RATIO', '1.55'))
 VOL_FLIP_BODY_PCT = float(os.getenv('TREND_VOL_FLIP_BODY_PCT', '45'))
-VOL_FLIP_MIN_ROI = float(os.getenv('TREND_VOL_FLIP_MIN_ROI', '22'))
+VOL_FLIP_MIN_ROI = float(os.getenv('TREND_VOL_FLIP_MIN_ROI', '12'))
 ENABLE_FIB_PARTIAL_TP = str(os.getenv('ENABLE_FIB_PARTIAL_TP', 'true')).strip().lower() in {
     '1', 'true', 'yes', 'on',
 }
@@ -337,6 +340,7 @@ def decide_trend_action(
     symbol: str | None = None,
     signals: dict | None = None,
     intel_ctx: dict | None = None,
+    leverage: float = 20.0,
 ) -> dict[str, Any]:
     """
     Orquestra decisão viva.
@@ -348,6 +352,7 @@ def decide_trend_action(
     roi = _f(roi_pct)
     entry = _f(entry_price)
     mark = _f(mark_price)
+    lev = max(_f(leverage, 20.0), 1.0)
     move = price_move_pct(entry, mark, side)
     is_long = _is_long(side)
 
@@ -375,6 +380,7 @@ def decide_trend_action(
         'partial_tp_done': bool(partial_tp_done),
         'roi_pct': roi,
         'price_move_pct': move,
+        'leverage': lev,
     }
 
     # ── 0) Cérebro 3 — gestão ativa de saída (HOLD / CLOSE / TRAIL) ────────
@@ -503,9 +509,38 @@ def decide_trend_action(
         )
         return result
 
+    # ── 2b) Soft lock: lucro parcial → NÃO volta a 0-0 ─────────────────
+    if (
+        not trailing_armed
+        and not breakeven_armed
+        and roi >= SOFT_BE_ROI_PCT
+        and roi < TRAIL_ROI_PCT
+        and entry > 0
+    ):
+        lock_sl = compute_lock_sl_price(entry, side, SOFT_LOCK_ROI_PCT, leverage=lev)
+        be_sl = compute_breakeven_sl(entry, side)
+        if is_long:
+            parts = [x for x in (lock_sl, be_sl) if x > 0]
+            sl = max(parts) if parts else 0.0
+        else:
+            parts = [x for x in (lock_sl, be_sl) if x > 0]
+            sl = min(parts) if parts else 0.0
+        if sl > 0:
+            result['action'] = 'ARM_BREAKEVEN'
+            result['tipo_execucao'] = 'SOFT_PROFIT_LOCK'
+            result['sl_price'] = sl
+            result['breakeven_armed'] = True
+            result['motivo'] = (
+                f'Proteção lucro: ROI={roi:.0f}% ≥ {SOFT_BE_ROI_PCT:.0f}% → '
+                f'trava +{SOFT_LOCK_ROI_PCT:.0f}% ROI (não volta 0-0) SL={sl:.6g}'
+            )
+            return result
+
+    # Soft SL já armado: se preço tocou o piso virtual, sai (Spot / fallback)
+    # (futuros: Bybit realiza; aqui cobre mark vs sl informado pelo registry via peak)
     # ── 3) Trailing Turtle (LL20 long / HH10 short) + piso +80% — deixa o lucro fluir
     if roi >= TRAIL_ROI_PCT or trailing_armed:
-        lock_sl = compute_lock_sl_price(entry, side, LOCK_ROI_PCT)
+        lock_sl = compute_lock_sl_price(entry, side, LOCK_ROI_PCT, leverage=lev)
         turtle_sl = 0.0
         turtle_rule = ''
         try:

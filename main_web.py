@@ -901,7 +901,8 @@ def _push_ia_decision_live(symbol, action, motivo, roi, tipo):
 def _start_trend_position_manager():
     """
     Gestão viva trend-following (~8s):
-      Segue tendência → saída só vela forte+volume 5m → trail/piso a partir de +100% ROI
+      Segue tendência → saída só vela forte+volume 5m → soft lock lucro → trail/piso a partir de +100% ROI
+      Spot: mesma lógica com SL virtual (venda a mercado ao tocar).
     """
     from src.risk.trend_position_manager import get_trend_position_manager, get_trend_registry, decide_trend_action
     from src.risk.position_sizing import position_roi_pct
@@ -910,6 +911,9 @@ def _start_trend_position_manager():
     def _apply_sl(broker, symbol, side, sl, clear_tp=False):
         if sl <= 0:
             return False
+        # Spot não tem set_trading_stop linear — SL virtual no registry
+        if getattr(broker, 'is_spot_trading', lambda: False)():
+            return True
         try:
             if clear_tp and hasattr(broker, 'clear_take_profit_set_trailing_sl'):
                 return bool(broker.clear_take_profit_set_trailing_sl(symbol, side, sl))
@@ -918,6 +922,32 @@ def _start_trend_position_manager():
         except Exception as err:
             print(f"   ⚠️ [TREND MGR] set SL {symbol}: {err}", flush=True)
         return False
+
+    def _list_open_positions(broker, cliente):
+        """Linear OU Spot holdings como lista unificada."""
+        if getattr(broker, 'is_spot_trading', lambda: False)():
+            out = []
+            for h in _spot_holdings_as_positions(broker, cliente):
+                out.append({
+                    'symbol': h.get('symbol'),
+                    'size': h.get('size'),
+                    'side': 'Buy',
+                    'avgPrice': h.get('entry_price'),
+                    'markPrice': h.get('mark_price'),
+                    'unrealisedPnl': h.get('unrealised_pnl'),
+                    'leverage': 1.0,
+                    'createdTime': 0,
+                    'category': 'spot',
+                })
+            return out
+        try:
+            rsp = broker.pybit_session.get_positions(category='linear', settleCoin='USDT')
+            ok, _ = broker._handle_v5_ret_code(rsp, 'get_positions')
+            if not ok:
+                return []
+            return list((rsp.get('result') or {}).get('list', []) or [])
+        except Exception:
+            return []
 
     def _cycle():
         reg = get_trend_registry()
@@ -930,15 +960,10 @@ def _start_trend_position_manager():
             broker = _make_broker(cliente)
             if not broker or not getattr(broker, 'pybit_session', None) or not broker.authenticated:
                 continue
-            try:
-                rsp = broker.pybit_session.get_positions(category='linear', settleCoin='USDT')
-                ok, _ = broker._handle_v5_ret_code(rsp, 'get_positions')
-                if not ok:
-                    continue
-            except Exception:
-                continue
+            is_spot = bool(getattr(broker, 'is_spot_trading', lambda: False)())
+            positions = _list_open_positions(broker, cliente)
 
-            for pos in (rsp.get('result') or {}).get('list', []):
+            for pos in positions:
                 size = float(pos.get('size') or 0)
                 if size <= 0:
                     continue
@@ -948,6 +973,7 @@ def _start_trend_position_manager():
                 mark_price = float(pos.get('markPrice') or entry_price or 0)
                 unrealised = float(pos.get('unrealisedPnl') or 0)
                 created_ms = float(pos.get('createdTime') or pos.get('updatedTime') or 0)
+                leverage = 1.0 if is_spot else float(pos.get('leverage') or ALAVANCAGEM or 1.0)
                 entry_margin = _resolve_entry_margin_for_exit(cliente, symbol, pos=pos)
                 roi = float(position_roi_pct(unrealised, entry_margin)) if entry_margin else 0.0
 
@@ -982,6 +1008,7 @@ def _start_trend_position_manager():
                     partial_tp_done=bool(st.get('partial_tp_done')),
                     df_fast=df_1m,
                     df_slow=df_5m,
+                    leverage=leverage,
                 )
                 action = decision.get('action')
                 reg.update(
@@ -993,6 +1020,24 @@ def _start_trend_position_manager():
                     partial_tp_done=bool(decision.get('partial_tp_done') or st.get('partial_tp_done')),
                     sl=float(decision.get('sl_price') or st.get('sl') or 0),
                 )
+
+                # Spot / virtual: se preço tocou SL armado → fecha a mercado
+                virt_sl = float(decision.get('sl_price') or st.get('sl') or 0)
+                if action == 'HOLD' and virt_sl > 0 and (
+                    bool(st.get('breakeven_armed')) or bool(st.get('trailing_armed'))
+                    or bool(decision.get('breakeven_armed')) or bool(decision.get('trailing_armed'))
+                ):
+                    is_long = side in ('buy', 'long', 'comprar')
+                    hit_virt = (is_long and mark_price <= virt_sl) or ((not is_long) and mark_price >= virt_sl)
+                    if hit_virt:
+                        action = 'EARLY_EXIT'
+                        decision = dict(decision)
+                        decision['action'] = 'EARLY_EXIT'
+                        decision['tipo_execucao'] = 'VIRTUAL_SL_HIT'
+                        decision['motivo'] = (
+                            f'SL virtual hit @ {virt_sl:.6g} (mark={mark_price:.6g}) — protege lucro'
+                        )
+
                 if action == 'HOLD':
                     continue
 
@@ -1050,6 +1095,15 @@ def _start_trend_position_manager():
                     continue
 
                 if action == 'PARTIAL_TP':
+                    if is_spot:
+                        # Spot: partial linear não existe — marca feito e deixa trail/reversão
+                        print(
+                            f"   ℹ️ [TREND MGR] PARTIAL_TP Spot {symbol}: "
+                            f"aguarda reversão/trail (sem partial linear)",
+                            flush=True,
+                        )
+                        reg.update(client_id, symbol, partial_tp_done=True)
+                        continue
                     try:
                         closed = bool(broker.close_partial_position(symbol, side, fraction=0.5))
                     except Exception as part_err:
@@ -1074,7 +1128,7 @@ def _start_trend_position_manager():
                 if action in ('EARLY_EXIT', 'STAGNATION_TIMEOUT'):
                     try:
                         try:
-                            if broker.pybit_session:
+                            if broker.pybit_session and not is_spot:
                                 v5 = broker._normalize_v5_symbol(symbol)
                                 broker.pybit_session.cancel_all_orders(category='linear', symbol=v5)
                         except Exception:
@@ -1134,7 +1188,7 @@ def _start_trend_position_manager():
                         )
 
     get_trend_position_manager().start(cycle_fn=_cycle)
-    print("🫀 [BOOT] TrendPositionManager ativo (BE / Trailing / Early / Time-Stop)", flush=True)
+    print("🫀 [BOOT] TrendPositionManager ativo (BE / SoftLock / Trailing / Early / Spot)", flush=True)
 
 def _limpar_simbolo(sym):
     if not sym: return "---"
@@ -1294,7 +1348,10 @@ def _spot_holdings_as_positions(broker, cliente) -> list[dict]:
 
 def _build_exchange_trade_card(pos_data, key=None):
     """Monta card de posição para o dashboard (com fallback se preço live falhar)."""
-    leverage = float(pos_data.get('leverage') or ALAVANCAGEM or 1)
+    is_spot = str(pos_data.get('category') or '').lower() == 'spot'
+    leverage = float(pos_data.get('leverage') or (1 if is_spot else ALAVANCAGEM) or 1)
+    if is_spot:
+        leverage = 1.0
     margin_used = extract_exchange_position_margin(pos_data)
     if margin_used <= 0:
         notional_value = float(pos_data.get('size') or 0) * float(pos_data.get('entry_price') or 0)
@@ -1315,9 +1372,9 @@ def _build_exchange_trade_card(pos_data, key=None):
         if current_price <= 0:
             current_price = float(pos_data.get('mark_price') or 0)
         live_metrics = _calculate_live_trade_metrics(
-            pos_data['entry_price'], current_price, pos_data['side'],
+            pos_data['entry_price'], current_price, pos_data['side'], leverage=leverage,
         )
-        # Prefere ROI real da Bybit (unrealisedPnl / margem) quando disponível
+        # Prefere ROI real (unrealisedPnl / margem). Spot nunca usa 20x fantasma.
         if margin_used > 0 and unrealised != 0:
             pnl_pct = roi_pct
             open_pnl_value = round(unrealised, 2)
@@ -1331,7 +1388,7 @@ def _build_exchange_trade_card(pos_data, key=None):
     except Exception:
         fallback_price = float(pos_data.get('mark_price') or pos_data.get('entry_price') or 0)
         live_metrics = _calculate_live_trade_metrics(
-            pos_data['entry_price'], fallback_price, pos_data['side'],
+            pos_data['entry_price'], fallback_price, pos_data['side'], leverage=leverage,
         )
         pnl_pct = roi_pct if margin_used > 0 else live_metrics['pnl_pct']
         open_pnl_value = round(unrealised, 2)
@@ -1350,6 +1407,8 @@ def _build_exchange_trade_card(pos_data, key=None):
         'open_pnl_value': open_pnl_value,
         'entry': round(margin_used, 2),
         'size': pos_data.get('size'),
+        'leverage': leverage,
+        'category': 'spot' if is_spot else 'linear',
         'client_count': pos_data.get('client_count', 1),
     }
 
@@ -1402,16 +1461,21 @@ def _refresh_active_trades_for_status():
         refreshed = []
         for trade in existing:
             try:
+                trade_lev = float(trade.get('leverage') or 1.0)
+                if trade_lev <= 0:
+                    trade_lev = 1.0
                 live = _get_live_price_snapshot(
                     trade.get('raw_symbol') or trade.get('symbol'),
                     trade.get('entry_price'),
                     trade.get('side'),
+                    leverage=trade_lev,
                 )
                 updated = dict(trade)
                 updated.update(live)
+                updated['leverage'] = trade_lev
                 entry_margin = float(updated.get('entry') or 0)
                 pnl_pct = float(updated.get('pnl_pct') or 0)
-                if entry_margin and 'open_pnl_value' not in updated:
+                if entry_margin:
                     updated['open_pnl_value'] = round((entry_margin * pnl_pct) / 100, 2)
                 refreshed.append(updated)
             except Exception:
@@ -1443,13 +1507,19 @@ def _coerce_float(*values, default=0.0):
 # ==============================================================================
 # 📊 FUNÇÃO DE CÁLCULO DE MÉTRICAS DE PREÇO LIVE (PNL OSCILANTE)
 # ==============================================================================
-def _calculate_live_trade_metrics(entry_price, current_price, side):
+def _calculate_live_trade_metrics(entry_price, current_price, side, leverage=None):
     """
     Calcula métricas de PnL em tempo real para ordens ativas.
-    Alimenta os cards visuais da Dashboard com dados oscilantes.
+    Spot: leverage=1 (nunca multiplica pelos 20x de futuros).
     """
     entry = float(entry_price or 0)
     current = float(current_price or 0)
+    try:
+        lev = float(leverage if leverage is not None else ALAVANCAGEM or 1)
+    except (TypeError, ValueError):
+        lev = float(ALAVANCAGEM or 1)
+    if lev <= 0:
+        lev = 1.0
 
     if entry <= 0 or current <= 0:
         return {
@@ -1460,14 +1530,10 @@ def _calculate_live_trade_metrics(entry_price, current_price, side):
             "is_favorable": False
         }
 
-    # Calcula a movimentação do mercado em %
     market_move = ((current - entry) / entry) * 100
-
-    # Inverte o PnL se for posição SHORT/VENDER
     price_pct = -market_move if str(side).upper() in ('VENDER', 'SELL', 'SHORT') else market_move
-
-    # Aplica alavancagem para obter PnL % sobre a margem (igual ao exibido na Bybit)
-    pnl_pct = price_pct * ALAVANCAGEM
+    # ROI sobre a margem = variação de preço × alavancagem real da posição
+    pnl_pct = price_pct * lev
 
     return {
         "current_price": round(current, 8),
@@ -2485,9 +2551,17 @@ def _build_api_status_payload():
 def _refresh_real_balance_state(force=False):
     _fetch_active_client_balances(force=force)
 
-def _get_live_price_snapshot(symbol, entry_price, side):
-    try: return _calculate_live_trade_metrics(entry_price, _get_public_price_broker().get_last_price(symbol), side)
-    except Exception: return _calculate_live_trade_metrics(entry_price, 0.0, side)
+def _get_live_price_snapshot(symbol, entry_price, side, leverage=None):
+    """Snapshot live. leverage=1 no Spot — nunca reaplicar 20x no refresh do dashboard."""
+    try:
+        return _calculate_live_trade_metrics(
+            entry_price,
+            _get_public_price_broker().get_last_price(symbol),
+            side,
+            leverage=leverage,
+        )
+    except Exception:
+        return _calculate_live_trade_metrics(entry_price, 0.0, side, leverage=leverage)
 
 def _refresh_last_sniper_signal():
     s = central_state.get('last_sniper_signal')
@@ -2666,7 +2740,8 @@ def _monitor_financial_stop_loss():
                                 unrealised_pnl = float(pos.get('unrealisedPnl') or 0)
                                 entry_price = float(pos.get('avgPrice') or pos.get('entryPrice') or 0)
                                 mark_price = float(pos.get('markPrice') or pos.get('lastPrice') or entry_price or 0)
-                                leverage = float(pos.get('leverage') or ALAVANCAGEM or 1.0)
+                                is_spot_pos = bool(getattr(broker, 'is_spot_trading', lambda: False)())
+                                leverage = 1.0 if is_spot_pos else float(pos.get('leverage') or ALAVANCAGEM or 1.0)
 
                                 if size <= 0:
                                     continue
@@ -3406,20 +3481,23 @@ def _client_had_last_stop_loss(client_id: int) -> bool:
 
 def _calculate_dynamic_order_quantity(broker, symbol, banca=None, client_context=None):
     """
-    Gestão de entrada por percentual de capital (perpétuos Bybit):
-      MI = Saldo × 5%  |  Valor = MI × L  |  Qty = Valor / Preço
+    Gestão de entrada:
+      Spot  → qty = mínimo da exchange (min notional / step), leverage=1
+      Linear → MI = Saldo × % | Valor = MI × L | Qty = Valor / Preço
 
-    Antes de enviar: valida Step Size / minOrderQty vs Max_Tolerance_Pct (7.5%).
+    Spot nunca multiplica banca pela alavancagem de futuros (evita all-in).
     """
     from src.risk.entry_viability import (
         build_frontend_entry_card,
         evaluate_entry_viability,
         extract_bybit_lot_filters,
         print_entry_viability_log,
+        quantize_qty_to_step,
     )
 
     try:
-        leverage_value = float(ALAVANCAGEM or 1.0)
+        is_spot = bool(getattr(broker, 'is_spot_trading', lambda: False)())
+        leverage_value = 1.0 if is_spot else float(ALAVANCAGEM or 1.0)
 
         saldo_atual = broker.get_balance()
         if saldo_atual is None or saldo_atual <= 0:
@@ -3445,7 +3523,7 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None, client_context
             print(f"❌ [CALC QTY] Preço inválido para {symbol}", flush=True)
             return 0.0, 0.0, saldo_atual
 
-        # Limites Bybit (minOrderQty / qtyStep)
+        # Limites Bybit (minOrderQty / qtyStep / minNotional)
         market = {}
         try:
             broker.exchange.load_markets()
@@ -3461,15 +3539,81 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None, client_context
             except Exception:
                 pass
 
+        min_qty = float(lot.get('min_order_qty') or 0.001)
+        qty_step = float(lot.get('qty_step') or min_qty or 0.001)
+        min_cost = float(lot.get('min_cost') or 5.0)
+        if min_cost <= 0:
+            min_cost = 5.0
+
+        # ── SPOT: entrada = mínimo da moeda (não % × 20x) ───────────────────
+        if is_spot:
+            qty_from_cost = (min_cost / last_price) if last_price > 0 else min_qty
+            qty = quantize_qty_to_step(max(min_qty, qty_from_cost), qty_step, round_up=True)
+            # Teto: nunca gastar mais que X% da banca no Spot (default 35%)
+            try:
+                spot_cap_pct = float(os.getenv('SPOT_MAX_ENTRY_PCT', '35') or 35)
+                if spot_cap_pct > 1:
+                    spot_cap_pct /= 100.0
+            except (TypeError, ValueError):
+                spot_cap_pct = 0.35
+            max_notional = capital_ref * max(0.05, min(1.0, spot_cap_pct))
+            notional = qty * last_price
+            if notional > max_notional and last_price > 0:
+                qty = quantize_qty_to_step(max_notional / last_price, qty_step, round_up=False)
+                if qty < min_qty:
+                    print(
+                        f"   🚫 [CALC QTY SPOT] Banca ${capital_ref:.2f} insuficiente para "
+                        f"mínimo ${min_cost:.2f} da moeda",
+                        flush=True,
+                    )
+                    return 0.0, 0.0, saldo_atual
+            margem = round(qty * last_price, 4)  # Spot: margem = nocional (1x)
+            print(
+                f"   ⚡ [CALC QTY SPOT] Mínimo exchange: qty={qty} nocional=${margem:.2f} "
+                f"(min_cost=${min_cost:.2f}, step={qty_step})",
+                flush=True,
+            )
+            try:
+                card = build_frontend_entry_card({
+                    'symbol': str(symbol),
+                    'bank_balance': capital_ref,
+                    'current_price': last_price,
+                    'min_order_qty': min_qty,
+                    'qty_step': qty_step,
+                    'min_cost_exchange': min_cost,
+                    'min_nominal': margem,
+                    'min_margin': margem,
+                    'leverage': 1.0,
+                    'target_pct': margem_pct,
+                    'target_pct_display': margem_pct * 100,
+                    'max_tolerance_pct': 1.0,
+                    'max_tolerance_pct_display': 100.0,
+                    'final_qty': qty,
+                    'final_margin': margem,
+                    'final_pct': (margem / capital_ref) * 100 if capital_ref else 0,
+                    'final_notional': margem,
+                    'aprovado': True,
+                    'decisao': 'APROVADO',
+                    'motivo': f'Spot mínimo da moeda (${min_cost:.2f})',
+                    'real_min_pct': (margem / capital_ref) * 100 if capital_ref else 0,
+                })
+                central_state['entry_sizing'] = card
+                central_state['proxima_entrada'] = card
+            except Exception:
+                pass
+            print(f"   💰 [CALC QTY] Saldo UNIFIED: ${saldo_atual:.2f} USDT", flush=True)
+            print(f"   📊 [CALC QTY] Preço: ${last_price:.4f} | Spot 1x | Qty={qty}", flush=True)
+            return float(margem), float(qty), saldo_atual
+
         report = evaluate_entry_viability(
             bank_balance=capital_ref,
             current_price=last_price,
             leverage=leverage_value,
-            min_order_qty=float(lot.get('min_order_qty') or 0.001),
-            qty_step=float(lot.get('qty_step') or lot.get('min_order_qty') or 0.001),
+            min_order_qty=min_qty,
+            qty_step=qty_step,
             target_pct=margem_pct,
             symbol=str(symbol),
-            min_cost=float(lot.get('min_cost') or 0),
+            min_cost=min_cost,
         )
         print_entry_viability_log(report)
         try:
@@ -3478,16 +3622,12 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None, client_context
         except Exception:
             pass
 
-        # Se viabilidade rejeitou, ainda tenta com o mínimo da exchange (não aborta mais)
         margem = float(report.get('final_margin') or 0)
         qty = float(report.get('final_qty') or 0)
 
         if not report.get('aprovado') or qty <= 0:
-            # Bump automático: usa mínimo da exchange em vez de abortar
-            min_qty_bump = float(lot.get('min_order_qty') or 0.001)
-            min_cost_bump = float(lot.get('min_cost') or 6.0)
-            qty_from_cost = (min_cost_bump / last_price) if last_price > 0 else min_qty_bump
-            qty = max(min_qty_bump, qty_from_cost)
+            qty_from_cost = (min_cost / last_price) if last_price > 0 else min_qty
+            qty = quantize_qty_to_step(max(min_qty, qty_from_cost), qty_step, round_up=True)
             margem = round((qty * last_price) / leverage_value, 4) if leverage_value > 0 else 0
             print(
                 f"   ⚡ [CALC QTY] Banca abaixo do alvo — bump para mínimo da exchange: "
@@ -3500,10 +3640,8 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None, client_context
         print(f"   📊 [CALC QTY] Preço: ${last_price:.4f} | L={leverage_value}x | Qty={qty}", flush=True)
 
         try:
-            # strict=False: arredonda para o step mas NUNCA aborta por nocional baixo
             qty, ok, reason = broker.validate_pct_sizing_qty(symbol, qty, strict=False)
             if not ok:
-                # fallback: normaliza qty direto pela exchange
                 try:
                     qty = float(broker.exchange.amount_to_precision(symbol, qty))
                 except Exception:
@@ -3516,7 +3654,6 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None, client_context
                 print(f"   ⚠️ [CALC QTY] Erro na precisão: {precision_err}", flush=True)
                 qty = round(qty, 3)
 
-        # Recalcula margem real pós-precisão
         if last_price > 0 and leverage_value > 0 and qty > 0:
             margem = round((qty * last_price) / leverage_value, 4)
             try:
@@ -3534,10 +3671,10 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None, client_context
             except Exception:
                 pass
 
-        return round(margem, 2), qty, saldo_atual
+        return float(margem), float(qty), saldo_atual
     except Exception as calc_err:
         print(f"❌ [CALC QTY] Erro no cálculo: {calc_err}", flush=True)
-        return 0.0, 0.0, banca if banca and banca > 0 else 1000.0
+        return 0.0, 0.0, float(banca or 0)
 
 def _is_order_execution_enabled(client_context):
     """
@@ -4352,6 +4489,44 @@ def sniper_worker_loop():
                         f"falha ({anti_exec_err}) — C3 soberano segue",
                         flush=True,
                     )
+
+                # 🐋 Portão baleia / volume institucional (LONG)
+                try:
+                    _req_whale = str(os.getenv('REQUIRE_WHALE_VOLUME_ENTRY', 'true')).strip().lower() in {
+                        '1', 'true', 'yes', 'on',
+                    }
+                    _side_w = str(side_best or '').lower()
+                    if _req_whale and _side_w in ('buy', 'long', 'comprar'):
+                        _w_score = float(intel_ctx.get('whale_score') or 0)
+                        _w_aligned = bool(intel_ctx.get('whale_aligned'))
+                        _vol_r = float(signals.get('volume_ratio') or 0)
+                        _min_w = float(os.getenv('WHALE_SCORE_MIN_LONG', '28') or 28)
+                        _min_vol = float(os.getenv('WHALE_VOLUME_RATIO_MIN', '1.45') or 1.45)
+                        whale_ok = (
+                            _w_aligned
+                            or _w_score >= _min_w
+                            or _vol_r >= _min_vol
+                            or bool(signals.get('big_player_ativo'))
+                            or str(signals.get('sinal_institucional', '')).upper() in (
+                                'COMPRA_INSTITUCIONAL', 'VENDA_INSTITUCIONAL',
+                            )
+                        )
+                        if not whale_ok:
+                            print(
+                                f"   🐋 [BALEIA] {melhor['clean_symbol']}: entrada BLOQUEADA — "
+                                f"aligned={_w_aligned} score={_w_score:.0f} vol×={_vol_r:.2f} "
+                                f"(exige baleia/volume institucional)",
+                                flush=True,
+                            )
+                            time.sleep(COOLDOWN_INSTITUCIONAL_SECS)
+                            continue
+                        print(
+                            f"   🐋 [BALEIA] {melhor['clean_symbol']}: OK "
+                            f"aligned={_w_aligned} score={_w_score:.0f} vol×={_vol_r:.2f}",
+                            flush=True,
+                        )
+                except Exception as whale_gate_err:
+                    print(f"   ⚠️ [BALEIA] gate: {whale_gate_err}", flush=True)
 
                 # 🧠 Aprendizado: registra as estratégias ativas nesta entrada
                 _adaptive_log_entry(sym, signals, intel_ctx)
