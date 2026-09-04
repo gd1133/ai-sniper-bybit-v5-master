@@ -6,6 +6,8 @@ services:
     envVars:
       - key: ENVIRONMENT
         value: development
+      - key: TRADING_MODE
+        value: linear
       - key: SQLITE_DB_PATH
         value: ./data/database.db
       - key: LATERAL_AMPLITUDE_PERIODS
