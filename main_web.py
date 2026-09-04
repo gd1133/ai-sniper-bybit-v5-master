@@ -3547,9 +3547,17 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None, client_context
 
         # ── SPOT: entrada = mínimo da moeda (não % × 20x) ───────────────────
         if is_spot:
+            if capital_ref + 1e-9 < min_cost:
+                print(
+                    f"   🚫 [CALC QTY SPOT] Banca livre ${capital_ref:.2f} < mínimo "
+                    f"${min_cost:.2f} da moeda — aborta entrada",
+                    flush=True,
+                )
+                return 0.0, 0.0, saldo_atual
+
             qty_from_cost = (min_cost / last_price) if last_price > 0 else min_qty
             qty = quantize_qty_to_step(max(min_qty, qty_from_cost), qty_step, round_up=True)
-            # Teto: nunca gastar mais que X% da banca no Spot (default 35%)
+            # Teto % da banca, mas NUNCA abaixo do min_cost se a banca cobre o mínimo
             try:
                 spot_cap_pct = float(os.getenv('SPOT_MAX_ENTRY_PCT', '35') or 35)
                 if spot_cap_pct > 1:
@@ -3557,20 +3565,31 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None, client_context
             except (TypeError, ValueError):
                 spot_cap_pct = 0.35
             max_notional = capital_ref * max(0.05, min(1.0, spot_cap_pct))
+            # Piso: se há saldo para o mínimo da exchange, o teto não pode forçar abaixo
+            max_notional = max(max_notional, min_cost)
+            # Não gastar mais que ~98% do USDT livre (pó de poeira)
+            max_notional = min(max_notional, capital_ref * 0.98)
+
             notional = qty * last_price
             if notional > max_notional and last_price > 0:
                 qty = quantize_qty_to_step(max_notional / last_price, qty_step, round_up=False)
-                if qty < min_qty:
-                    print(
-                        f"   🚫 [CALC QTY SPOT] Banca ${capital_ref:.2f} insuficiente para "
-                        f"mínimo ${min_cost:.2f} da moeda",
-                        flush=True,
-                    )
-                    return 0.0, 0.0, saldo_atual
-            margem = round(qty * last_price, 4)  # Spot: margem = nocional (1x)
+
+            # Guarda final: nocional >= min_cost (senão bump round_up)
+            if last_price > 0 and (qty * last_price) + 1e-9 < min_cost:
+                qty = quantize_qty_to_step(min_cost / last_price, qty_step, round_up=True)
+
+            margem = round(qty * last_price, 4)
+            if margem + 1e-9 < min_cost or margem > capital_ref + 1e-6:
+                print(
+                    f"   🚫 [CALC QTY SPOT] Após step: nocional=${margem:.2f} inválido "
+                    f"(min=${min_cost:.2f}, livre=${capital_ref:.2f})",
+                    flush=True,
+                )
+                return 0.0, 0.0, saldo_atual
+
             print(
                 f"   ⚡ [CALC QTY SPOT] Mínimo exchange: qty={qty} nocional=${margem:.2f} "
-                f"(min_cost=${min_cost:.2f}, step={qty_step})",
+                f"(min_cost=${min_cost:.2f}, step={qty_step}, teto=${max_notional:.2f})",
                 flush=True,
             )
             try:
@@ -4754,8 +4773,11 @@ def _process_client_orders_background(
                     flush=True,
                 )
 
+                # Spot: permite bump ao mínimo da exchange (strict=False).
+                # Linear: strict=True preserva o % da banca sem inflar qty.
+                _strict_pct = not bool(getattr(broker, 'is_spot_trading', lambda: False)())
                 order_result = broker.execute_market_order(
-                    symbol, side.lower(), qty, raise_on_error=True, strict_pct_sizing=True,
+                    symbol, side.lower(), qty, raise_on_error=True, strict_pct_sizing=_strict_pct,
                     tp_price=tp_price, sl_price=sl_price,
                 )
                 if order_result:
