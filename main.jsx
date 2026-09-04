@@ -300,7 +300,8 @@ const getTradeProgressPercent = (trade) => {
   const pnlPct = Number(trade?.pnl_pct || 0);
   if (!Number.isFinite(pnlPct)) return 0;
   if (pnlPct >= 0) return Math.max(0, Math.min(100, pnlPct));
-  return Math.max(0, Math.min(100, (Math.abs(pnlPct) / 3) * 100));
+  // Protocolo 100/50: barra de SL usa −50% da margem (não /3)
+  return Math.max(0, Math.min(100, (Math.abs(pnlPct) / 50) * 100));
 };
 
 const getTradeProgressText = (trade) => {
