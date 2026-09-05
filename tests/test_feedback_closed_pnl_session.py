@@ -49,6 +49,7 @@ class TestGetClosedPnlSoftFail:
         broker.get_closed_pnl.return_value = []
         broker.authenticated = False
         broker.pybit_session = None
+        broker.session = None
         broker.exchange = None
         broker._api_key = ''
         broker._api_secret = ''
@@ -85,13 +86,33 @@ class TestGetClosedPnlSoftFail:
         )
         broker.authenticated = False
         broker.pybit_session = None
+        broker.session = None
         broker.exchange = None
 
-        with patch.object(loop, '_resolve_credentials', return_value=('', '')):
-            result = loop.sincronizar_trades_fechados(broker=broker, force=True)
+        with patch.object(loop, 'ensure_live_broker', return_value=broker):
+            with patch.object(loop, '_resolve_credentials', return_value=('', '')):
+                result = loop.sincronizar_trades_fechados(broker=broker, force=True)
         assert result.get('processed', 0) == 0
-        # Não deve propagar como crash; errors só se _fetch levantar (não deve)
         assert 'falha get_closed_pnl' not in ' '.join(result.get('errors') or [])
+
+    def test_sincronizar_session_error_is_soft_skip(self, tmp_path, capsys):
+        fb_mod._TABLES_STARTUP_LOGGED = True
+        loop = FeedbackLoopEvolutivo(db_path=str(tmp_path / 't.db'))
+        loop._tables_ready = True
+        loop._last_sync_ts = 0.0
+        loop._last_session_warn_ts = 0.0
+
+        with patch.object(loop, 'ensure_live_broker', return_value=None):
+            with patch.object(
+                loop,
+                '_fetch_closed_pnl',
+                side_effect=RuntimeError('sessão Bybit indisponível para get_closed_pnl'),
+            ):
+                result = loop.sincronizar_trades_fechados(force=True)
+        assert result.get('skipped_session') is True
+        out = capsys.readouterr().out
+        assert 'falha get_closed_pnl' not in out
+        assert 'closed_pnl adiado' in out or result.get('skipped_session')
 
 
 class TestTablesStartupLogOnce:

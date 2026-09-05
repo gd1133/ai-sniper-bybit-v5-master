@@ -396,6 +396,15 @@ class BybitClient:
             return True
         return bool(self._api_key and self._api_secret)
 
+    @property
+    def session(self):
+        """Alias thread-safe para pybit HTTP (Feedback Loop / V5 closed PnL)."""
+        return self.pybit_session
+
+    @session.setter
+    def session(self, value):
+        self.pybit_session = value
+
     def _resolve_private_credentials(
         self, api_key: str | None = None, api_secret: str | None = None
     ) -> tuple[str, str]:
@@ -428,12 +437,17 @@ class BybitClient:
         with self._session_lock:
             self._api_key = key
             self._api_secret = secret
+            # Regra pedida: if not session or not apiKey → reconnect
             session_dead = (
-                self.pybit_session is None
+                self.session is None
                 or not self._session_has_api_key()
             )
             if session_dead:
-                print("♻️ [BYBIT] Reconectando sessão privada (pybit V5)...", flush=True)
+                now = time.time()
+                last = float(getattr(self, '_last_reconnect_log_ts', 0) or 0)
+                if (now - last) >= 60:
+                    print("♻️ [BYBIT] Reconectando sessão privada (pybit V5 / linear)...", flush=True)
+                    self._last_reconnect_log_ts = now
                 self.pybit_session = None
                 self._init_pybit_session(key, secret)
 
@@ -472,7 +486,7 @@ class BybitClient:
             except Exception as ccxt_err:
                 print(f"⚠️ [BYBIT] CCXT reconnect: {ccxt_err}", flush=True)
 
-            ok = self.pybit_session is not None or bool(
+            ok = self.session is not None or bool(
                 getattr(getattr(self, 'exchange', None), 'apiKey', None)
             )
             self.authenticated = bool(ok)
@@ -484,59 +498,82 @@ class BybitClient:
         Ordem: pybit get_closed_pnl → CCXT private_get_v5_position_closed_pnl.
         Nunca levanta exceção para o Feedback Loop: retorna [] em falha.
         """
-        if not self.ensure_private_session():
-            # Soft-fail: background loop não pode derrubar o robô
-            return []
+        try:
+            # if not self.session or not apiKey → força re-init com env Render
+            if self.session is None or not self._session_has_api_key():
+                if not self.ensure_private_session():
+                    return []
+            elif not self.ensure_private_session():
+                return []
 
-        limit = max(1, min(int(limit or 50), 100))
-        category = str(category or 'linear')
-        last_err = None
+            limit = max(1, min(int(limit or 50), 100))
+            category = str(category or 'linear')
+            last_err = None
 
-        # 1) pybit HTTP
-        if self.pybit_session is not None:
-            try:
-                rsp = self.pybit_session.get_closed_pnl(category=category, limit=limit)
-                ok, err = self._handle_v5_ret_code(rsp, 'get_closed_pnl')
-                if ok:
-                    return list((rsp.get('result') or {}).get('list') or [])
-                last_err = err or rsp
-                # Sessão morta / auth → força reconnect uma vez
-                if self._is_auth_error(str(err or '')):
-                    self.pybit_session = None
-                    if self.ensure_private_session() and self.pybit_session is not None:
-                        rsp2 = self.pybit_session.get_closed_pnl(category=category, limit=limit)
-                        ok2, err2 = self._handle_v5_ret_code(rsp2, 'get_closed_pnl_retry')
-                        if ok2:
-                            return list((rsp2.get('result') or {}).get('list') or [])
-                        last_err = err2 or rsp2
-            except Exception as e:
-                last_err = e
-                print(f"⚠️ [BYBIT] get_closed_pnl pybit: {e}", flush=True)
-
-        # 2) CCXT V5 fallback (Unified Trading Account)
-        exchange = getattr(self, 'exchange', None)
-        if exchange is not None and getattr(exchange, 'apiKey', None):
-            params = {'category': category, 'limit': str(limit)}
-            try:
-                if hasattr(exchange, 'privateGetV5PositionClosedPnl'):
-                    rsp = exchange.privateGetV5PositionClosedPnl(params)
-                elif hasattr(exchange, 'private_get_v5_position_closed_pnl'):
-                    rsp = exchange.private_get_v5_position_closed_pnl(params)
-                else:
-                    rsp = None
-                if isinstance(rsp, dict):
-                    ret = rsp.get('retCode')
-                    if ret in (0, '0', None):
+            # 1) pybit HTTP
+            if self.session is not None:
+                try:
+                    rsp = self.session.get_closed_pnl(category=category, limit=limit)
+                    ok, err = self._handle_v5_ret_code(rsp, 'get_closed_pnl')
+                    if ok:
                         return list((rsp.get('result') or {}).get('list') or [])
-                    last_err = f"retCode={ret} {rsp.get('retMsg')}"
-            except Exception as e:
-                last_err = e
-                # NetworkError / AuthenticationError do CCXT — não derruba o loop
-                print(f"⚠️ [BYBIT] get_closed_pnl CCXT: {e}", flush=True)
+                    last_err = err or rsp
+                    if self._is_auth_error(str(err or '')):
+                        self.pybit_session = None
+                        if self.ensure_private_session() and self.session is not None:
+                            rsp2 = self.session.get_closed_pnl(category=category, limit=limit)
+                            ok2, err2 = self._handle_v5_ret_code(rsp2, 'get_closed_pnl_retry')
+                            if ok2:
+                                return list((rsp2.get('result') or {}).get('list') or [])
+                            last_err = err2 or rsp2
+                except Exception as e:
+                    last_err = e
+                    # Network / auth — soft-fail, log rate-limited
+                    now = time.time()
+                    last_log = float(getattr(self, '_last_closed_pnl_err_ts', 0) or 0)
+                    if (now - last_log) >= 120:
+                        print(f"⚠️ [BYBIT] get_closed_pnl pybit: {e}", flush=True)
+                        self._last_closed_pnl_err_ts = now
 
-        if last_err is not None:
-            print(f"⚠️ [BYBIT] get_closed_pnl soft-fail: {last_err}", flush=True)
-        return []
+            # 2) CCXT V5 fallback (Unified Trading Account)
+            exchange = getattr(self, 'exchange', None)
+            if exchange is not None and getattr(exchange, 'apiKey', None):
+                params = {'category': category, 'limit': str(limit)}
+                try:
+                    if hasattr(exchange, 'privateGetV5PositionClosedPnl'):
+                        rsp = exchange.privateGetV5PositionClosedPnl(params)
+                    elif hasattr(exchange, 'private_get_v5_position_closed_pnl'):
+                        rsp = exchange.private_get_v5_position_closed_pnl(params)
+                    else:
+                        rsp = None
+                    if isinstance(rsp, dict):
+                        ret = rsp.get('retCode')
+                        if ret in (0, '0', None):
+                            return list((rsp.get('result') or {}).get('list') or [])
+                        last_err = f"retCode={ret} {rsp.get('retMsg')}"
+                except Exception as e:
+                    last_err = e
+                    now = time.time()
+                    last_log = float(getattr(self, '_last_closed_pnl_err_ts', 0) or 0)
+                    if (now - last_log) >= 120:
+                        print(f"⚠️ [BYBIT] get_closed_pnl CCXT: {e}", flush=True)
+                        self._last_closed_pnl_err_ts = now
+
+            if last_err is not None:
+                now = time.time()
+                last_log = float(getattr(self, '_last_closed_pnl_err_ts', 0) or 0)
+                if (now - last_log) >= 300:
+                    print(f"⚠️ [BYBIT] get_closed_pnl soft-fail: {last_err}", flush=True)
+                    self._last_closed_pnl_err_ts = now
+            return []
+        except Exception as fatal:
+            # Última linha de defesa — Feedback Loop nunca pode crashar aqui
+            now = time.time()
+            last_log = float(getattr(self, '_last_closed_pnl_err_ts', 0) or 0)
+            if (now - last_log) >= 300:
+                print(f"⚠️ [BYBIT] get_closed_pnl fatal soft-fail: {fatal}", flush=True)
+                self._last_closed_pnl_err_ts = now
+            return []
 
     def _format_bybit_error(self, payload):
         """Normaliza erros da Bybit V5 para o front-end."""

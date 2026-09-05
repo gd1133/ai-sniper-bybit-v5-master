@@ -1946,6 +1946,11 @@ def _run_feedback_pnl_sync(force: bool = False):
                 broker = None
 
         fb = get_feedback_loop()
+        # Garante broker vivo (env Render / investidor) antes do sync
+        try:
+            broker = fb.ensure_live_broker(key or '', sec or '', broker=broker)
+        except Exception:
+            pass
         result = fb.sincronizar_trades_fechados(
             api_key=key or '',
             api_secret=sec or '',
