@@ -39,7 +39,7 @@ except Exception as e:
 BybitClient = None
 BybitV5HTTP = None
 IndicatorEngine = None
-GroqValidator = None
+AIDecisionValidator = None
 public_price_broker = None
 public_radar_broker = None
 
@@ -734,7 +734,7 @@ central_state = {
     "win_rate": 0.0,  
     "ia2_decision": {
         "motivo": "Varrendo mercado com IA institucional: regime, baleias, notícias e timing...",
-        "brains": {"gemini": "online", "groq": "online", "analyst": "online", "learner": "online"}
+        "brains": {"macro": "online", "flow": "online", "analyst": "online", "learner": "online"}
     },
     "evidence": None,
     "ai_tribunal": None,
@@ -805,7 +805,7 @@ def _preload_runtime_modules():
     partially initialized module" (import parcial/circular) causado pela
     corrida entre a thread do radar e a primeira requisição no cold start.
     """
-    global BybitClient, IndicatorEngine, GroqValidator
+    global BybitClient, IndicatorEngine, AIDecisionValidator
     # OrderCalculator ANTES do BybitClient — desacopla o grafo de imports
     try:
         from src.broker.order_calculator import OrderCalculator as _OC  # noqa: F401
@@ -828,10 +828,10 @@ def _preload_runtime_modules():
     except Exception as e:
         print(f"⚠️ [BOOT] preload IndicatorEngine adiado: {e}", flush=True)
     try:
-        from src.ai_brain.validator import GroqValidator as _GV
-        GroqValidator = _GV
+        from src.ai_brain.validator import AIDecisionValidator as _GV
+        AIDecisionValidator = _GV
     except Exception as e:
-        print(f"⚠️ [BOOT] preload GroqValidator adiado: {e}", flush=True)
+        print(f"⚠️ [BOOT] preload AIDecisionValidator adiado: {e}", flush=True)
     try:
         from src.intelligence.market_intelligence import get_market_intelligence  # noqa: F401
         from src.engine.entry_timing import confirmar_timing_entrada  # noqa: F401
@@ -1095,33 +1095,58 @@ def _start_trend_position_manager():
                     continue
 
                 if action == 'PARTIAL_TP':
+                    partial_fraction = float(decision.get('partial_fraction') or 0.4)
+                    partial_fraction = max(0.1, min(0.9, partial_fraction))
+                    sl_be = float(decision.get('sl_price') or st.get('sl') or 0)
                     if is_spot:
-                        # Spot: partial linear não existe — marca feito e deixa trail/reversão
+                        # Spot não permite reduce-only parcial no mesmo modelo da linear.
+                        # Mantém estado N1 e arma SL virtual em breakeven.
                         print(
                             f"   ℹ️ [TREND MGR] PARTIAL_TP Spot {symbol}: "
-                            f"aguarda reversão/trail (sem partial linear)",
+                            f"sem parcial nativa, armando BE virtual (SL={sl_be:.6g})",
                             flush=True,
                         )
-                        reg.update(client_id, symbol, partial_tp_done=True)
+                        reg.update(
+                            client_id,
+                            symbol,
+                            partial_tp_done=True,
+                            breakeven_armed=True,
+                            sl=sl_be if sl_be > 0 else float(st.get('sl') or 0),
+                        )
                         continue
                     try:
-                        closed = bool(broker.close_partial_position(symbol, side, fraction=0.5))
+                        closed = bool(
+                            broker.close_partial_position(
+                                symbol,
+                                side,
+                                fraction=partial_fraction,
+                            )
+                        )
                     except Exception as part_err:
                         print(f"   ⚠️ [TREND MGR] partial TP {symbol}: {part_err}", flush=True)
                         closed = False
                     if closed:
-                        reg.update(client_id, symbol, partial_tp_done=True)
+                        if sl_be > 0:
+                            _apply_sl(broker, symbol, side, sl_be, clear_tp=False)
+                        reg.update(
+                            client_id,
+                            symbol,
+                            partial_tp_done=True,
+                            breakeven_armed=True,
+                            sl=sl_be if sl_be > 0 else float(st.get('sl') or 0),
+                        )
+                        _tipo = str(decision.get('tipo_execucao') or 'PROFIT_LADDER_N1')
                         record_ia_decision(
                             symbol,
                             motivo_saida=decision.get('motivo') or '',
                             pnl_garantido_pct=roi,
-                            tipo_execucao='FIB_TP1_100',
+                            tipo_execucao=_tipo,
                             action_payload='ACTION: PARTIAL_TP',
                             client_id=client_id,
                         )
-                        _push_ia_decision_live(symbol, 'PARTIAL_TP', decision.get('motivo'), roi, 'FIB_TP1_100')
+                        _push_ia_decision_live(symbol, 'PARTIAL_TP', decision.get('motivo'), roi, _tipo)
                         central_state['status'] = (
-                            f"🎯 TP parcial Fib 100% {_limpar_simbolo(symbol)}"
+                            f"🎯 TP parcial {_limpar_simbolo(symbol)} ({partial_fraction*100:.0f}%)"
                         )
                     continue
 
@@ -1215,6 +1240,27 @@ def _close_open_trades_in_db(client_id, symbol, *, pnl_pct=0.0, profit=0.0, note
                 (round(float(pnl_pct), 2), round(float(profit), 2), note_tag, trade.get('id')),
             )
             updated += 1
+            try:
+                setup_name = str(trade.get('setup_name') or '').strip().upper()
+                if setup_name:
+                    cur.execute(
+                        '''
+                        INSERT INTO trade_learning
+                            (setup_name, timeframe, rsi_entry, adx_entry, volume_ratio, win, pnl_pct)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        ''',
+                        (
+                            setup_name,
+                            str(trade.get('timeframe') or '15m').strip().lower() or '15m',
+                            float(trade.get('rsi_entry') or 0),
+                            float(trade.get('adx_entry') or 0),
+                            float(trade.get('volume_ratio') or 0),
+                            1 if float(pnl_pct or 0) > 0 else 0,
+                            float(pnl_pct or 0),
+                        ),
+                    )
+            except Exception as learning_err:
+                print(f"   ⚠️ [TRADE_LEARNING] close {symbol}: {learning_err}", flush=True)
         conn.commit()
         conn.close()
         if updated and 'STOP_LOSS' in str(note_tag or '').upper():
@@ -1579,7 +1625,7 @@ def _build_last_sniper_signal(symbol, side, entry_price, confidence, reason):
 
 def _publish_ai_tribunal_evidence(symbol, side, tech_data, consensus, intel_ctx=None, df=None):
     """
-    Publica os 4 cards do Tribunal (Gemini/Groq/Analista/Aprendizado) no /api/status
+    Publica os 4 cards do Tribunal (Macro IA/Fluxo IA/Analista/Aprendizado) no /api/status
     para o cliente ver por que o robô comprou/vendeu, o estudo das velas e a assertividade.
     """
     try:
@@ -1637,7 +1683,7 @@ def _publish_ai_tribunal_evidence(symbol, side, tech_data, consensus, intel_ctx=
             if mods:
                 by_label = {str(m.get('modulo')): m for m in mods}
                 label_map = {
-                    'groq': 'Groq Tático',
+                    'flow': 'Fluxo IA',
                     'analyst': 'Analista de Dados',
                     'learner': 'Aprendizado Neural',
                 }
@@ -1814,14 +1860,14 @@ def _adaptive_log_entry(symbol, tech_data, intel_ctx=None):
         ml = _get_local_ml()
         sigs = ml._strategy_signals(tech_data or {})
         ml.weights.log_entry(symbol, sigs)
-        # Incremental: pesos por condição + insights Groq/Gemini
+        # Incremental: pesos por condição + insights Macro/Fluxo IA
         try:
             from src.ai_brain.cerebro3_soberano import get_cerebro3_soberano, market_condition_from_signals
             ctx = intel_ctx or {}
             cond = str(ctx.get('condicao_mercado') or market_condition_from_signals(tech_data, ctx))
             insights = {
-                'groq': ctx.get('groq_flow') or ctx.get('order_flow'),
-                'gemini': ctx.get('gemini_macro'),
+                'flow': ctx.get('flow_ai') or ctx.get('order_flow'),
+                'macro': ctx.get('macro_ai'),
             }
             get_cerebro3_soberano().log_entry_with_insights(symbol, sigs, cond, insights)
         except Exception:
@@ -1860,6 +1906,45 @@ def _adaptive_record_outcome(symbol, pnl_pct):
             pass
     except Exception as e:
         print(f"⚠️ [PESOS IA] outcome {symbol}: {e}", flush=True)
+
+
+def _build_trade_learning_setup_name(symbol, strategy_type):
+    clean_symbol = _normalize_symbol_key(_canonicalize_symbol(symbol) or symbol)
+    strat = str(strategy_type or 'TREND').strip().upper() or 'TREND'
+    return f"{clean_symbol}|{strat}" if clean_symbol else strat
+
+
+def _coerce_timeframe_from_signals(signals):
+    tf = str((signals or {}).get('timeframe') or (signals or {}).get('tf') or '15m').strip().lower()
+    if tf not in {'1m', '3m', '5m', '15m', '30m', '1h', '4h'}:
+        return '15m'
+    return tf
+
+
+def _trade_learning_pre_entry_policy(symbol, res, signals):
+    """Consulta últimos 20 trades do setup/par e retorna política de lote."""
+    try:
+        c3 = (res or {}).get('cerebro3_decision') or {}
+        strategy = c3.get('strategy_type') or (res or {}).get('strategy_type') or 'TREND'
+        setup_name = _build_trade_learning_setup_name(symbol, strategy)
+        timeframe = _coerce_timeframe_from_signals(signals)
+        stats = db.get_trade_learning_stats(setup_name=setup_name, timeframe=timeframe, limit=20)
+        return {
+            'setup_name': setup_name,
+            'timeframe': timeframe,
+            'stats': stats,
+            'qty_multiplier': float(stats.get('qty_multiplier') or 1.0),
+            'allow_entry': float(stats.get('qty_multiplier') or 1.0) > 0,
+        }
+    except Exception as err:
+        print(f"⚠️ [TRADE_LEARNING] policy pre-entry: {err}", flush=True)
+        return {
+            'setup_name': _build_trade_learning_setup_name(symbol, 'TREND'),
+            'timeframe': '15m',
+            'stats': {'sample_size': 0, 'win_rate_pct': 0.0, 'decision': 'neutral'},
+            'qty_multiplier': 1.0,
+            'allow_entry': True,
+        }
 
 
 _FEEDBACK_ENV_BROKER = None
@@ -3762,7 +3847,7 @@ def sniper_worker_loop():
     time.sleep(1)
     from src.broker.bybit_client import BybitClient
     from src.engine.indicators import IndicatorEngine
-    from src.ai_brain.validator import GroqValidator
+    from src.ai_brain.validator import AIDecisionValidator
     from src.intelligence.market_intelligence import get_market_intelligence
     from src.engine.entry_timing import confirmar_timing_entrada
     global _FORCED_SIGNAL_FIRED
@@ -3812,7 +3897,7 @@ def sniper_worker_loop():
             radar_broker = _get_public_radar_broker_mainnet()
             top_coins = _refresh_radar_live_from_public_tickers() or []
 
-            validator = GroqValidator()
+            validator = AIDecisionValidator()
             market_intel = get_market_intelligence()
             oportunidades = []
 
@@ -4031,7 +4116,7 @@ def sniper_worker_loop():
                     print(
                         f"   🧠 [TRIPLO CÉREBRO] {clean_sym}: camada incremental ON "
                         f"(C1 Turtle/anatomia · C2 liquidez/FVG · C3 pesos extra) "
-                        f"— não substitui SMA/ST/Portas/VWAP/Groq/Gemini",
+                        f"— não substitui SMA/ST/Portas/VWAP e regras técnicas",
                         flush=True,
                     )
                     try:
@@ -4064,10 +4149,10 @@ def sniper_worker_loop():
                     intel_ctx['gates_advisory'] = hard_gate
                     intel_ctx['order_book'] = order_book
                     intel_ctx['ticker'] = t
-                    if intel_ctx.get('groq_flow_degraded'):
-                        flow_src = (intel_ctx.get('groq_flow') or {}).get('source', 'local')
+                    if intel_ctx.get('ai_flow_degraded'):
+                        flow_src = (intel_ctx.get('flow_ai') or intel_ctx.get('order_flow') or {}).get('source', 'local')
                         print(
-                            f"   ⚠️ [GROQ FLOW] {clean_sym}: API degradada → fallback {flow_src} "
+                            f"   ⚠️ [FLOW IA] {clean_sym}: Abacus indisponível → fallback {flow_src} "
                             f"(portas 1–5 OK — execução continua)",
                             flush=True,
                         )
@@ -4547,6 +4632,34 @@ def sniper_worker_loop():
                 except Exception as whale_gate_err:
                     print(f"   ⚠️ [BALEIA] gate: {whale_gate_err}", flush=True)
 
+                # 🧠 Aprendizado local por setup/par (últimos 20): ajusta lote antes da entrada
+                learning_policy = _trade_learning_pre_entry_policy(sym, res, signals)
+                lp_stats = learning_policy.get('stats') or {}
+                lp_mul = float(learning_policy.get('qty_multiplier') or 1.0)
+                if not learning_policy.get('allow_entry', True):
+                    print(
+                        f"   🚫 [TRADE_LEARNING] {melhor['clean_symbol']}: setup "
+                        f"{learning_policy.get('setup_name')} bloqueado "
+                        f"(amostra={lp_stats.get('sample_size')} win_rate={lp_stats.get('win_rate_pct')}%)",
+                        flush=True,
+                    )
+                    time.sleep(COOLDOWN_INSTITUCIONAL_SECS)
+                    continue
+                signals = dict(signals)
+                signals['learning_setup_name'] = learning_policy.get('setup_name')
+                signals['learning_timeframe'] = learning_policy.get('timeframe')
+                signals['learning_qty_multiplier'] = lp_mul
+                signals['learning_win_rate_pct'] = lp_stats.get('win_rate_pct')
+                signals['learning_sample_size'] = lp_stats.get('sample_size')
+                if abs(lp_mul - 1.0) > 1e-9:
+                    print(
+                        f"   🧠 [TRADE_LEARNING] {melhor['clean_symbol']}: "
+                        f"mult={lp_mul:.2f} ({lp_stats.get('decision')}) "
+                        f"amostra={lp_stats.get('sample_size')} "
+                        f"win_rate={lp_stats.get('win_rate_pct')}%",
+                        flush=True,
+                    )
+
                 # 🧠 Aprendizado: registra as estratégias ativas nesta entrada
                 _adaptive_log_entry(sym, signals, intel_ctx)
                 broadcast_ordem_global(
@@ -4691,6 +4804,24 @@ def _process_client_orders_background(
                     client_context=c,
                 )
 
+                # Aprendizado local por setup/par aplica multiplicador de lote
+                learning_mul = float(signals.get('learning_qty_multiplier') or 1.0)
+                if learning_mul > 0 and abs(learning_mul - 1.0) > 1e-9:
+                    qty_before = float(qty or 0)
+                    qty_target = qty_before * learning_mul
+                    try:
+                        if hasattr(broker, '_normalize_order_qty'):
+                            qty_target = float(broker._normalize_order_qty(symbol, qty_target) or qty_target)
+                    except Exception:
+                        pass
+                    if qty_target > 0:
+                        qty = qty_target
+                        print(
+                            f"   🧠 [TRADE_LEARNING] {symbol}: qty {qty_before:.6g} -> {qty:.6g} "
+                            f"(x{learning_mul:.2f})",
+                            flush=True,
+                        )
+
                 if qty <= 0:
                     print(
                         f"   🚫 [EXEC] {c.get('nome')} {symbol}: qty=0 "
@@ -4790,6 +4921,13 @@ def _process_client_orders_background(
                             if saldo_atualizado and saldo_atualizado > 0
                             else format_entry_pct()
                         )
+                        setup_name = str(signals.get('learning_setup_name') or '').strip().upper()
+                        if not setup_name:
+                            setup_name = _build_trade_learning_setup_name(
+                                symbol,
+                                signals.get('c3_strategy_type') or 'TREND',
+                            )
+                        timeframe = str(signals.get('learning_timeframe') or _coerce_timeframe_from_signals(signals))
                         db.record_trade(
                             client_id=c.get('id', 1), 
                             pair=symbol, 
@@ -4802,9 +4940,14 @@ def _process_client_orders_background(
                             entry_price=entry_price,
                             exit_price=0.0,
                             quantity=qty,
-                            margin=margem
+                            margin=margem,
+                            setup_name=setup_name,
+                            timeframe=timeframe,
+                            rsi_entry=float(signals.get('rsi') or 0),
+                            adx_entry=float(signals.get('adx') or 0),
+                            volume_ratio=float(signals.get('volume_ratio') or 0),
                         )
-                        # Feedback Loop — log inicial ABERTA (sinais Groq/Gemini/Cérebro 3)
+                        # Feedback Loop — log inicial ABERTA (sinais de IA/Cérebro 3)
                         try:
                             from src.learning.feedback_loop import get_feedback_loop
                             get_feedback_loop().registrar_operacao_aberta(
@@ -4990,7 +5133,7 @@ def add_cliente():
 @app.route('/api/estrategias/pesos', methods=['GET'])
 def api_estrategias_pesos():
     """
-    Pesos das 5 estratégias + módulos evolutivos (Groq/Analista/Neural)
+    Pesos das 5 estratégias + módulos evolutivos (Fluxo/Analista/Neural)
     alimentados pelo Feedback Loop (desbloqueia 0 Amostras no Render).
     """
     try:
@@ -5058,7 +5201,7 @@ def api_decisoes_ia():
 @app.route('/api/tribunal/status', methods=['GET'])
 def api_tribunal_status():
     """
-    Cards do Tribunal de Debate (Groq / Analista / Neural / Gemini)
+    Cards do Tribunal de Debate (Fluxo IA / Analista / Neural / Macro IA)
     lidos do SQLite + snapshot em memória.
     """
     try:
@@ -5328,9 +5471,9 @@ def api_manual_entry_trade():
         pub_broker = _get_public_price_broker()
         entry_price = float(pub_broker.get_last_price(symbol))
         
-        global IndicatorEngine, GroqValidator
+        global IndicatorEngine, AIDecisionValidator
         from src.engine.indicators import IndicatorEngine
-        from src.ai_brain.validator import GroqValidator
+        from src.ai_brain.validator import AIDecisionValidator
 
         df = pub_broker.fetch_ohlcv(symbol, timeframe='15m')
         tech_data = IndicatorEngine(df).get_signals() if df is not None and len(df) >= 200 else {
@@ -5381,7 +5524,7 @@ def api_manual_entry_trade():
                 if not handed_off:
                     _release_signal_slot(symbol)
 
-        ai_result = GroqValidator().consensus_predict(tech_data, symbol, force_local_only=True)
+        ai_result = AIDecisionValidator().consensus_predict(tech_data, symbol, force_local_only=True)
         return jsonify({
             "success": True,
             "analysis_only": True,

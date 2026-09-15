@@ -1,4 +1,4 @@
-"""Análise de notícias e sentimento de mercado com IA (Groq/Gemini) + fallbacks."""
+"""Análise de notícias e sentimento de mercado com IA local/Abacus + fallbacks."""
 
 from __future__ import annotations
 
@@ -11,11 +11,6 @@ from typing import Any
 import urllib.parse
 
 import requests
-
-try:
-    from groq import Groq
-except Exception:
-    Groq = None
 
 _CACHE: dict[str, tuple[float, dict]] = {}
 _CACHE_TTL_SECS = 300
@@ -103,100 +98,11 @@ def _neutral_degraded_payload(reason: str) -> dict:
 
 
 def _ai_analyze_with_groq(symbol: str, tech_summary: str, groq_key: str) -> dict | None:
-    global _GROQ_FAIL_STREAK
-    from src.intelligence.groq_client import get_groq_cooldown_info, is_groq_in_cooldown
-
-    if not groq_key or Groq is None:
-        return None
-    now = time.time()
-    in_cooldown = is_groq_in_cooldown()
-    cooldown_info = get_groq_cooldown_info()
-    # #region agent log
-    try:
-        from src.debug_agent_log import agent_dbg
-        agent_dbg('B', 'news_analyzer.py:_ai_analyze_with_groq', 'groq_call_attempt', {
-            'symbol': str(symbol)[:40],
-            'cooldown_until': cooldown_info.get('until', 0),
-            'in_cooldown': in_cooldown,
-            'fail_streak': _GROQ_FAIL_STREAK,
-        })
-    except Exception:
-        pass
-    # #endregion
-    # Cooldown: retorna NEUTRO (assistente degradado) — não erro/bloqueio
-    if in_cooldown:
-        return _neutral_degraded_payload(
-            f'Groq em cooldown — sentimento NEUTRO para {symbol} (assistente degradado)'
-        )
-    try:
-        prompt = f"""Você é analista institucional de criptomoedas. Avalie {symbol} para trading de futuros.
-
-Dados técnicos e de fluxo:
-{tech_summary}
-
-Responda APENAS em JSON válido:
-{{
-  "sentiment_score": 0-100,
-  "global_trend": "BULLISH|BEARISH|NEUTRAL",
-  "news_risk": "LOW|MEDIUM|HIGH",
-  "investor_mood": "FOMO|FEAR|NEUTRAL|ACCUMULATION",
-  "block_trade": false,
-  "reason": "resumo em português de 1-2 frases"
-}}"""
-        from src.intelligence.groq_client import groq_chat_completion, log_groq_degraded
-        result = groq_chat_completion(
-            messages=[{'role': 'user', 'content': prompt}],
-            purpose='news',
-            temperature=0.2,
-            max_tokens=300,
-        )
-        if not result.get('ok'):
-            if not result.get('cooldown'):
-                log_groq_degraded('NEWS AI', result, symbol=symbol)
-            raise RuntimeError(result.get('error') or 'Groq news indisponível')
-        text = (result.get('content') or '').strip()
-        text = re.sub(r'^```json\s*|\s*```$', '', text, flags=re.IGNORECASE).strip()
-        _GROQ_FAIL_STREAK = 0
-        return json.loads(text)
-    except Exception as exc:
-        err = str(exc)
-        is_429 = '429' in err or 'rate_limit' in err.lower() or 'cooldown' in err.lower()
-        _GROQ_FAIL_STREAK += 1
-        # Cooldown global é definido em groq_client.groq_chat_completion
-        # #region agent log
-        try:
-            from src.debug_agent_log import agent_dbg
-            from src.intelligence.groq_client import get_groq_cooldown_info
-            agent_dbg('A', 'news_analyzer.py:_ai_analyze_with_groq', 'groq_call_failed', {
-                'symbol': str(symbol)[:40],
-                'is_429': is_429,
-                'fail_streak': _GROQ_FAIL_STREAK,
-                'cooldown_until': get_groq_cooldown_info().get('until', 0),
-                'err_prefix': err[:120],
-            })
-        except Exception:
-            pass
-        # #endregion
-        print(f'⚠️ [NEWS AI] Groq indisponível: {exc}', flush=True)
-        return None
+    return None
 
 
 def _ai_analyze_with_gemini(symbol: str, tech_summary: str, gemini_key: str) -> dict | None:
-    if not gemini_key:
-        return None
-    try:
-        from src.intelligence.gemini_client import gemini_generate_content
-        prompt = f"""Analise o contexto de mercado de {symbol} para decisão de trading.
-{tech_summary}
-Retorne JSON: sentiment_score (0-100), global_trend (BULLISH/BEARISH/NEUTRAL), news_risk (LOW/MEDIUM/HIGH), investor_mood, block_trade (bool), reason (pt-BR)."""
-        result = gemini_generate_content(prompt, purpose='macro', temperature=0.2, max_tokens=280)
-        if not result.get('ok'):
-            return None
-        text = re.sub(r'^```json\s*|\s*```$', '', (result.get('text') or '').strip(), flags=re.IGNORECASE)
-        return json.loads(text)
-    except Exception as exc:
-        print(f'⚠️ [NEWS AI] Gemini indisponível: {exc}', flush=True)
-        return None
+    return None
 
 
 def _fetch_web_headlines(coin: str, limit: int = 6) -> list[dict]:
@@ -373,50 +279,14 @@ def analyze_news_sentiment(
     cloud_attempted = False
     cloud_degraded = False
     ai_status = 'ok'
-    groq_key = os.getenv('GROQ_API_KEY', '').strip()
-    gemini_key = os.getenv('GEMINI_API_KEY', '').strip()
 
-    if groq_key:
+    # Projeto sem Groq/Gemini: mantém somente sinal local + web/coingecko
+    if _env_bool('ENABLE_NEWS_AI', False):
         cloud_attempted = True
-        ai_result = _ai_analyze_with_groq(symbol, tech_summary, groq_key)
-        if ai_result is not None and not ai_result.get('_degraded'):
-            source = 'groq+web'
-        elif ai_result is not None and ai_result.get('_degraded'):
-            cloud_degraded = True
-            ai_status = 'degradado'
-            source = 'web_local' if headlines else 'local_sentiment'
-    if (ai_result is None or ai_result.get('_degraded')) and gemini_key:
-        cloud_attempted = True
-        gemini_result = _ai_analyze_with_gemini(symbol, tech_summary, gemini_key)
-        if gemini_result is not None:
-            ai_result = gemini_result
-            cloud_degraded = False
-            ai_status = 'ok'
-            source = 'gemini+web'
-
-    if cloud_attempted and (ai_result is None or ai_result.get('_degraded')):
-        # Cloud (Groq/Gemini) em cooldown/falha — NEUTRO, NUNCA bloqueia.
-        # Cérebro 3 permanece soberano na decisão técnica.
         cloud_degraded = True
         ai_status = 'degradado'
         source = 'web_local' if headlines else 'local_sentiment'
-        reasons.append('Cloud news (Groq/Gemini) indisponível — sentimento NEUTRO (assistente)')
-        ai_unavailable = False
-        # #region agent log
-        try:
-            from src.debug_agent_log import agent_dbg
-            agent_dbg('A', 'news_analyzer.py:analyze_news_sentiment', 'set_ai_unavailable', {
-                'symbol': str(symbol)[:40],
-                'has_headlines': bool(headlines),
-                'source': source,
-                'fail_streak': _GROQ_FAIL_STREAK,
-                'ai_unavailable': False,
-                'cloud_degraded': True,
-                'ai_status': 'degradado',
-            })
-        except Exception:
-            pass
-        # #endregion
+        reasons.append('Macro cloud indisponível — sentimento técnico/local em uso')
 
     if ai_result and not ai_result.get('_degraded') and not cloud_degraded:
         ai_score = float(ai_result.get('sentiment_score', 50) or 50)

@@ -383,7 +383,35 @@ def decide_trend_action(
         'leverage': lev,
     }
 
-    # ── 0) Cérebro 3 — gestão ativa de saída (HOLD / CLOSE / TRAIL) ────────
+    # ── 0) PositionGuard (C3): escada de lucro + kill-switch + exaustão ─────
+    try:
+        from src.ai_brain.cerebro3_decisor import evaluate_position_guard
+
+        pg = evaluate_position_guard(
+            side=side,
+            entry_price=entry,
+            mark_price=mark,
+            roi_pct=roi,
+            df_5m=df_slow,
+            level1_done=bool(partial_tp_done),
+            level2_done=bool(trailing_armed),
+        )
+        pg_action = str(pg.get('action') or 'HOLD').upper()
+        if pg_action != 'HOLD':
+            result['action'] = pg_action
+            result['tipo_execucao'] = str(pg.get('tipo_execucao') or '')
+            result['motivo'] = str(pg.get('motivo') or '')
+            if _f(pg.get('sl_price')) > 0:
+                result['sl_price'] = _f(pg.get('sl_price'))
+            result['partial_tp_done'] = bool(pg.get('level1_done') or partial_tp_done)
+            result['breakeven_armed'] = bool(pg.get('level1_done') or breakeven_armed)
+            result['trailing_armed'] = bool(pg.get('level2_done') or trailing_armed)
+            result['partial_fraction'] = _f(pg.get('partial_fraction'), FIB_PARTIAL_FRACTION)
+            return result
+    except Exception as pg_err:
+        result['position_guard_error'] = str(pg_err)[:120]
+
+    # ── 0b) Cérebro 3 — gestão ativa de saída (HOLD / CLOSE / TRAIL) ───────
     _c3_exit_enabled = str(os.getenv('ENABLE_CEREBRO3_EXIT', 'true')).strip().lower() in {
         '1', 'true', 'yes', 'on',
     }

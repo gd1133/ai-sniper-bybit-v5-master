@@ -1,7 +1,8 @@
 """
 Orquestrador de inteligência de mercado.
 
-Integra: regime (lateral vs tendência), baleias, notícias/sentimento e timing.
+Integra: regime, baleias, notícias/sentimento e timing.
+Cloud AI usada: Abacus Agent (sem Groq/Gemini).
 """
 
 from __future__ import annotations
@@ -13,7 +14,6 @@ from src.intelligence.news_analyzer import analyze_news_sentiment
 from src.intelligence.regime_detector import detect_market_regime
 from src.intelligence.whale_detector import analyze_whale_activity
 from src.intelligence.order_flow_analyzer import analyze_order_book_flow
-from src.intelligence.gemini_macro_analyzer import analyze_gemini_macro_news
 from src.intelligence.abacus_agent_client import abacus_agent_chat, extract_json_block
 from src.ai_brain.cerebro3_soberano import market_condition_from_signals
 
@@ -32,22 +32,22 @@ def _f(v: Any, default: float = 0.0) -> float:
         return default
 
 
-def _abacus_macro_default(reason: str) -> dict[str, Any]:
+def _macro_default(reason: str) -> dict[str, Any]:
     return {
         'score_sentimento_noticias': 0.0,
         'impacto_volatilidade': 'BAIXO',
         'narrativa_dominante': reason,
         'filtro_noticia_travar_bot': False,
-        'source': 'abacus_disabled',
+        'source': 'macro_disabled',
         'available': False,
     }
 
 
 def _call_abacus_macro_news(symbol: str, headlines: list[str], news_blob: str, signals: dict) -> dict[str, Any] | None:
     prompt = (
-        'Você é o Analista Sniper V5 de macroeconomia e sentimento. '\
-        'Retorne APENAS JSON válido com campos: '\
-        'score_sentimento_noticias (-1..1), impacto_volatilidade (ALTO|MEDIO|BAIXO), '\
+        'Você é o Analista Sniper V5 de macroeconomia e sentimento. '
+        'Retorne APENAS JSON válido com campos: '
+        'score_sentimento_noticias (-1..1), impacto_volatilidade (ALTO|MEDIO|BAIXO), '
         'narrativa_dominante (string), filtro_noticia_travar_bot (bool).\n\n'
         f'Símbolo: {symbol}\n'
         f'Tendência técnica: {signals.get("trend")}\n'
@@ -77,16 +77,6 @@ def _call_abacus_macro_news(symbol: str, headlines: list[str], news_blob: str, s
 
 
 class MarketIntelligence:
-    """
-    Camada de IA institucional do robô.
-
-    Objetivos:
-    - Ficar FORA do mercado lateral
-    - Seguir fluxo de grandes players (baleias)
-    - Considerar notícias e sentimento global
-    - Escolher o melhor timing de entrada
-    """
-
     def evaluate(
         self,
         symbol: str,
@@ -95,49 +85,31 @@ class MarketIntelligence:
         ticker: dict | None = None,
         order_book: dict | None = None,
     ) -> dict[str, Any]:
-        # ADX/BB são blindagem estrutural obrigatória, mesmo se a camada de IA
-        # complementar estiver desativada.
         regime = detect_market_regime(df, signals)
         if not _env_bool('ENABLE_MARKET_INTELLIGENCE', True):
             return self._passthrough(signals, regime)
 
         whale = analyze_whale_activity(signals, ticker, df)
-        # Notícias/scrapers OFF por padrão — foco técnico/fluxo em tempo real
         news = analyze_news_sentiment(symbol, signals, regime, whale)
 
         headlines = list(news.get('headlines') or [])
         macro_signals = {**signals, 'market_regime': regime.get('market_regime')}
         macro_blob = str(news.get('reason') or '')
-        # Macro primário: Abacus Agent. Gemini fica legado/opcional.
+
         if _env_bool('ENABLE_NEWS_AI', False):
-            gemini_macro = _call_abacus_macro_news(
+            macro_ai = _call_abacus_macro_news(
                 symbol,
                 headlines=[str(h) for h in headlines],
                 news_blob=macro_blob,
                 signals=macro_signals,
             )
-            if not gemini_macro and _env_bool('ENABLE_GEMINI_MACRO_AI', False):
-                gemini_macro = analyze_gemini_macro_news(
-                    symbol,
-                    headlines=headlines,
-                    news_blob=macro_blob,
-                    signals=macro_signals,
-                )
-            if not gemini_macro:
-                gemini_macro = _abacus_macro_default('macro Abacus/Gemini indisponível — pipeline técnico')
+            if not macro_ai:
+                macro_ai = _macro_default('macro Abacus indisponível — pipeline técnico')
         else:
-            gemini_macro = {
-                'score_sentimento_noticias': 0.0,
-                'impacto_volatilidade': 'BAIXO',
-                'narrativa_dominante': 'macro omitido — pipeline técnico',
-                'filtro_noticia_travar_bot': False,
-                'source': 'disabled',
-                'available': False,
-            }
+            macro_ai = _macro_default('macro omitido — pipeline técnico')
+
         condicao = market_condition_from_signals(signals, regime)
 
-        # Estrutura: amplitude + ADX são travas; BB só se STRUCTURE_REQUIRE_BB_EXPAND.
-        # BLOCK_LATERAL_MARKETS controla apenas critérios complementares (chop/range).
         from src.engine.structure_config import STRUCTURE_ADX_MIN, STRUCTURE_REQUIRE_BB_EXPAND
         adx_min = float(STRUCTURE_ADX_MIN)
         amplitude_lateral = bool(
@@ -146,14 +118,14 @@ class MarketIntelligence:
             or signals.get('is_accumulation')
         )
         adx_blocked = float(regime.get('adx', 0) or 0) < adx_min
-        bb_blocked = STRUCTURE_REQUIRE_BB_EXPAND and (
-            not bool(regime.get('bollinger_expanding', False))
-        )
-        block_lateral = _env_bool('BLOCK_LATERAL_MARKETS', True)  # default ON — anti-acumulação
+        bb_blocked = STRUCTURE_REQUIRE_BB_EXPAND and (not bool(regime.get('bollinger_expanding', False)))
+        block_lateral = _env_bool('BLOCK_LATERAL_MARKETS', True)
+
         hard_veto_reasons = []
         soft_veto_reasons = []
         ai_assistants_unavailable = False
-        groq_flow_degraded = False
+        ai_flow_degraded = False
+
         cloud_news_degraded = bool(
             news.get('cloud_ai_degraded')
             or news.get('ai_unavailable')
@@ -161,14 +133,13 @@ class MarketIntelligence:
             or str(news.get('source', '')).lower() == 'disabled'
         )
 
-        # Incremental: Groq fluxo (order book) + Gemini macro (manchetes)
-        import os
         advisory = str(os.getenv('ADVISORY_GATES', 'true')).strip().lower() in {'1', 'true', 'yes', 'on'}
         hard_gates_ok = True if advisory else bool(
             signals.get('sinal_institucional')
             and str(signals.get('trend', 'NEUTRO')).upper() in ('ALTA', 'BAIXA')
             and not signals.get('is_lateral')
         )
+
         flow = analyze_order_book_flow(
             symbol,
             order_book=order_book,
@@ -176,15 +147,11 @@ class MarketIntelligence:
             df=df,
             hard_gates_approved=hard_gates_ok,
         )
-        groq_flow_degraded = bool(flow.get('groq_degraded'))
-        # Cloud Groq caiu mas fallback local OK → NÃO desliga Cérebro 2
-        # (antes: groq_degraded forçava ai_assistants_unavailable e C2 virava
-        # "limites de API" mesmo com order book local válido).
+
+        ai_flow_degraded = bool(flow.get('ai_flow_degraded'))
         local_flow_ok = bool(flow.get('available', False))
-        if groq_flow_degraded and not local_flow_ok:
+        if ai_flow_degraded and not local_flow_ok:
             ai_assistants_unavailable = True
-        elif groq_flow_degraded and local_flow_ok:
-            ai_assistants_unavailable = False
 
         if adx_blocked:
             hard_veto_reasons.append(
@@ -198,8 +165,7 @@ class MarketIntelligence:
         if amplitude_lateral:
             hard_veto_reasons.append(
                 f"ACUMULAÇÃO/LATERAL por amplitude "
-                f"({regime.get('amplitude_pct', signals.get('amplitude_pct', 0))}% "
-                f"< limite) — sinais ignorados (NEUTRO)"
+                f"({regime.get('amplitude_pct', signals.get('amplitude_pct', 0))}% < limite) — sinais ignorados (NEUTRO)"
             )
         elif block_lateral and regime.get('is_lateral') and not (adx_blocked or bb_blocked):
             hard_veto_reasons.append(
@@ -208,17 +174,14 @@ class MarketIntelligence:
 
         whale_score = float(whale.get('whale_score', 0) or 0)
         volume_ratio = float(signals.get('volume_ratio', 0) or 0)
-        # Assertivo: penalidade leve de baleias (não mata oportunidade)
         whale_penalty = 0.0
         if not whale.get('whale_aligned'):
             whale_penalty = 4.0
         elif whale_score < 20 and volume_ratio < 1.15:
             whale_penalty = 2.0
 
-        # Velas contrárias: NÃO hard-veto no modo assertivo (só penalizam score via timing)
         veto_reasons = list(hard_veto_reasons)
 
-        # Timing: prefere entrada perto da golden zone (fib 0.618)
         fib_dist = float(signals.get('fib_distance_pct', 100) or 100)
         timing_score = 50.0
         if fib_dist <= 1.5:
@@ -233,7 +196,6 @@ class MarketIntelligence:
         if whale.get('whale_aligned'):
             timing_score = min(100.0, timing_score + 15)
 
-        # Bônus incremental: pivô + vela forte (leitura de gráfico)
         chart_score = float(signals.get('chart_entry_score', 0) or 0)
         if chart_score >= 40:
             timing_score = min(100.0, timing_score + min(20.0, chart_score * 0.25))
@@ -242,55 +204,46 @@ class MarketIntelligence:
         if signals.get('bounce_from_pivot_low') or signals.get('rejection_from_pivot_high'):
             timing_score = min(100.0, timing_score + 10)
 
-        # Score SEM peso de notícias — só técnica (regime + baleias + timing)
         intelligence_score = (
-            (100 - float(regime.get('lateral_score', 50) or 50)) * 0.35 +
-            float(whale.get('whale_score', 0) or 0) * 0.40 +
-            timing_score * 0.25
+            (100 - float(regime.get('lateral_score', 50) or 50)) * 0.35
+            + float(whale.get('whale_score', 0) or 0) * 0.40
+            + timing_score * 0.25
         ) - whale_penalty
 
         if whale.get('whale_aligned'):
             intelligence_score = min(100.0, intelligence_score + 8)
 
         soft_ai_veto_only = False
-
-        # Soft alerta Gemini (hard-veto só se ALLOW_NEWS_HARD_VETO e filtro True)
-        if gemini_macro.get('filtro_noticia_travar_bot'):
+        if macro_ai.get('filtro_noticia_travar_bot'):
             soft_veto_reasons.append(
-                f"Gemini macro: risco sistêmico — {gemini_macro.get('narrativa_dominante', '')}"
+                f"Macro IA: risco sistêmico — {macro_ai.get('narrativa_dominante', '')}"
             )
             if _env_bool('ALLOW_NEWS_HARD_VETO', False):
                 hard_veto_reasons.append(
-                    f"GEMINI HARD VETO: {gemini_macro.get('narrativa_dominante', 'notícia crítica')}"
+                    f"MACRO HARD VETO: {macro_ai.get('narrativa_dominante', 'notícia crítica')}"
                 )
             else:
                 soft_ai_veto_only = True
-        elif gemini_macro.get('filtro_noticia_travar_bot_sugerido'):
+        elif macro_ai.get('filtro_noticia_travar_bot_sugerido'):
             soft_veto_reasons.append(
-                f"Gemini alerta (soft): {gemini_macro.get('narrativa_dominante', '')}"
+                f"Macro alerta (soft): {macro_ai.get('narrativa_dominante', '')}"
             )
             soft_ai_veto_only = True
 
-        # Modo consultivo: Cérebro 3 decide — flags viram contexto, não veto
-        import os
-        advisory = str(os.getenv('ADVISORY_GATES', 'true')).strip().lower() in {'1', 'true', 'yes', 'on'}
         advisory_flags = list(hard_veto_reasons) + list(soft_veto_reasons)
         if advisory:
             allow_entry = True
-            hard_veto_reasons = []  # não bloqueia radar
+            hard_veto_reasons = []
             veto_reasons = list(advisory_flags)
         else:
             allow_entry = len(hard_veto_reasons) == 0 and intelligence_score >= 26
             veto_reasons = list(hard_veto_reasons)
-        # Modo autônomo só quando cloud realmente sumiu SEM fallback local
-        autonomous_mode = bool(ai_assistants_unavailable) or (
-            groq_flow_degraded and not local_flow_ok
-        )
-        if groq_flow_degraded and (advisory or len(hard_veto_reasons) == 0):
+
+        autonomous_mode = bool(ai_assistants_unavailable) or (ai_flow_degraded and not local_flow_ok)
+        if ai_flow_degraded and (advisory or len(hard_veto_reasons) == 0):
             allow_entry = True
 
-        # Sentimento derivado do Gemini macro (não zera o contrato legado)
-        sent_macro = float(gemini_macro.get('score_sentimento_noticias', 0) or 0)
+        sent_macro = float(macro_ai.get('score_sentimento_noticias', 0) or 0)
         sentiment_score = 50.0 + (sent_macro * 50.0)
         if sent_macro > 0.25:
             global_trend = 'BULLISH'
@@ -308,7 +261,8 @@ class MarketIntelligence:
             'soft_veto_reasons': soft_veto_reasons,
             'soft_ai_veto_only': soft_ai_veto_only,
             'ai_assistants_unavailable': ai_assistants_unavailable,
-            'groq_flow_degraded': groq_flow_degraded,
+            'ai_flow_degraded': ai_flow_degraded,
+            'groq_flow_degraded': ai_flow_degraded,  # compat legado
             'cloud_news_degraded': cloud_news_degraded,
             'autonomous_mode': bool(autonomous_mode or ai_assistants_unavailable),
             'market_regime': regime.get('market_regime'),
@@ -322,10 +276,7 @@ class MarketIntelligence:
             'sentiment_score': round(sentiment_score, 2),
             'global_trend': global_trend,
             'investor_mood': news.get('investor_mood', 'NEUTRAL'),
-            'news_risk': (
-                'HIGH' if gemini_macro.get('impacto_volatilidade') == 'ALTO'
-                else news.get('news_risk', 'LOW')
-            ),
+            'news_risk': ('HIGH' if macro_ai.get('impacto_volatilidade') == 'ALTO' else news.get('news_risk', 'LOW')),
             'is_trending': bool(news.get('is_trending')),
             'news_reason': news.get('reason'),
             'ai_source': news.get('source'),
@@ -334,13 +285,14 @@ class MarketIntelligence:
             'news_block_trade': False,
             'headlines': headlines,
             'web_news_bias': news.get('web_news_bias', 'NEUTRAL'),
-            # Incremental Smart Money assistants
             'order_flow': flow,
-            'groq_flow': flow,
-            'gemini_macro': gemini_macro,
+            'flow_ai': flow,
+            'groq_flow': flow,      # compat legado
+            'macro_ai': macro_ai,
+            'gemini_macro': macro_ai,  # compat legado
             'condicao_mercado': condicao,
             'advisory_flags': advisory_flags,
-            'summary': self._build_summary(regime, whale, news, timing_score, allow_entry, flow, gemini_macro),
+            'summary': self._build_summary(regime, whale, news, timing_score, allow_entry, flow, macro_ai),
         }
 
     def _passthrough(self, signals: dict, regime: dict) -> dict:
@@ -352,17 +304,15 @@ class MarketIntelligence:
             or signals.get('is_accumulation')
         )
         adx_blocked = float(regime.get('adx', 0) or 0) < adx_min
-        bb_blocked = STRUCTURE_REQUIRE_BB_EXPAND and (
-            not bool(regime.get('bollinger_expanding', False))
-        )
+        bb_blocked = STRUCTURE_REQUIRE_BB_EXPAND and (not bool(regime.get('bollinger_expanding', False)))
         structure_blocked = amplitude_blocked or adx_blocked or bb_blocked
         reasons = []
         if adx_blocked:
             reasons.append(f"ADX(14)={regime.get('adx', 0)} < {adx_min:.0f}")
         if bb_blocked:
-            reasons.append("BB Width sem expansão acima da média(50)")
+            reasons.append('BB Width sem expansão acima da média(50)')
         if amplitude_blocked:
-            reasons.append("amplitude em acumulação")
+            reasons.append('amplitude em acumulação')
         return {
             'intelligence_score': 70.0,
             'timing_score': 70.0,
@@ -386,14 +336,14 @@ class MarketIntelligence:
             ),
         }
 
-    def _build_summary(self, regime, whale, news, timing_score, allow_entry, flow=None, gemini_macro=None) -> str:
+    def _build_summary(self, regime, whale, news, timing_score, allow_entry, flow=None, macro_ai=None) -> str:
         flow = flow or {}
-        gemini_macro = gemini_macro or {}
+        macro_ai = macro_ai or {}
         parts = [
             str(regime.get('regime_label', '')),
             f"Baleias: {whale.get('whale_score', 0)}/100",
-            f"Fluxo Groq: {float(flow.get('score_fluxo', 0) or 0):+.2f}",
-            f"Gemini: {gemini_macro.get('narrativa_dominante') or news.get('global_trend', 'NEUTRAL')}",
+            f"Fluxo IA: {float(flow.get('score_fluxo', 0) or 0):+.2f}",
+            f"Macro IA: {macro_ai.get('narrativa_dominante') or news.get('global_trend', 'NEUTRAL')}",
             f"Timing: {timing_score:.0f}/100",
         ]
         if not allow_entry:

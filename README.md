@@ -253,6 +253,43 @@ python scripts/test_abacus_agent.py
 
 Se a resposta vier vazia, normalmente e falta de metering habilitado, chave ausente/invalida ou cooldown temporario apos falhas de API.
 
+## Profit Ladder, Kill-Switch e Aprendizado Local (Cerebro 3)
+
+O monitor de posicoes abertas agora usa um `PositionGuard` no Cérebro 3 com tres camadas:
+
+1. **Nível 1 (+1.8% ROI por padrão)**
+   - realiza parcial de `40%`
+   - arma stop em breakeven (+buffer de taxa)
+2. **Nível 2 (+3.5% ROI por padrão)**
+   - ativa trailing dinamico ancorado em `EMA8` ou `1.5 x ATR`
+3. **Nível 3 (exaustao/reversao)**
+   - encerra o restante quando houver cruzamento reverso EMA8/EMA20 ou 3 velas com volume decrescente
+
+### Kill-switch técnico (5m)
+
+- **LONG:** fecha antecipadamente se a vela fechada ficar abaixo da EMA20 com volume acima da média.
+- **SHORT:** fecha antecipadamente se a vela fechada ficar acima da EMA20 com volume comprador.
+
+### Aprendizado adaptativo local (SQLite)
+
+- Tabela: `trade_learning`
+- Campos: `setup_name`, `timeframe`, `rsi_entry`, `adx_entry`, `volume_ratio`, `win`, `pnl_pct`
+- Antes da entrada, o robô consulta os ultimos 20 trades do setup/par:
+  - `win_rate > 65%` -> lote `+15%`
+  - `win_rate < 40%` -> lote `x0.5` (ou bloqueia sinal se `TRADE_LEARNING_LOW_WIN_MODE=discard`)
+
+Variáveis relevantes:
+
+```env
+POSITION_GUARD_LEVEL1_TRIGGER_PCT=1.8
+POSITION_GUARD_LEVEL1_PARTIAL_FRACTION=0.40
+POSITION_GUARD_LEVEL2_TRIGGER_PCT=3.5
+POSITION_GUARD_TRAIL_ATR_MULT=1.5
+POSITION_GUARD_FEE_BUFFER_PCT=0.12
+TRADE_LEARNING_MIN_SAMPLE=8
+TRADE_LEARNING_LOW_WIN_MODE=reduce
+```
+
 ## Como rodar
 
 ### Backend
