@@ -62,6 +62,8 @@ class FeedbackLoopEvolutivo:
         self._standalone_http_key = ''
         self._standalone_ccxt = None
         self._standalone_ccxt_key = ''
+        self._dedicated_broker = None
+        self._dedicated_broker_key = ''
         self._http_lock = threading.Lock()
         self.inicializar_tabelas()
 
@@ -237,17 +239,30 @@ class FeedbackLoopEvolutivo:
                 return {'skipped': True, 'reason': 'throttle'}
             self._last_sync_ts = time.time()
 
-        result = {'processed': 0, 'wins': 0, 'losses': 0, 'errors': []}
+        result = {'processed': 0, 'wins': 0, 'losses': 0, 'errors': [], 'skipped_session': False}
         try:
+            # Garante broker vivo com chaves Render antes da consulta
+            broker = self.ensure_live_broker(api_key, api_secret, broker=broker)
             pnl_list = self._fetch_closed_pnl(api_key, api_secret, broker=broker)
         except Exception as err:
-            # Defesa em profundidade: _fetch_closed_pnl já soft-fail, mas nunca derruba o ciclo
-            msg = f'falha get_closed_pnl: {err}'
-            now_err = time.time()
-            if (now_err - self._last_session_warn_ts) >= 300:
-                print(f"[ERRO FEEDBACK LOOP] {msg}", flush=True)
-                self._last_session_warn_ts = now_err
-            result['errors'].append(msg)
+            # Soft-fail absoluto: sessão ausente NÃO é erro crítico spamável
+            err_txt = str(err or '')
+            is_session = (
+                'indisponível' in err_txt.lower()
+                or 'sessão' in err_txt.lower()
+                or 'session' in err_txt.lower()
+                or 'api key' in err_txt.lower()
+                or 'credentials' in err_txt.lower()
+            )
+            if is_session:
+                self._warn_session_unavailable(err_txt)
+                result['skipped_session'] = True
+            else:
+                now_err = time.time()
+                if (now_err - self._last_session_warn_ts) >= 300:
+                    print(f"[ERRO FEEDBACK LOOP] falha get_closed_pnl: {err}", flush=True)
+                    self._last_session_warn_ts = now_err
+                result['errors'].append(f'falha get_closed_pnl: {err}')
             return result
 
         if not isinstance(pnl_list, list):
@@ -278,6 +293,66 @@ class FeedbackLoopEvolutivo:
     # Alias pedido no enunciado
     sincronizar_trades_fechados_bybit = sincronizar_trades_fechados
 
+    def ensure_live_broker(self, api_key: str = '', api_secret: str = '', broker=None):
+        """
+        Entrega instância BybitClient válida ao Feedback Loop (thread-safe).
+        Preferência: broker recebido → reconnect → novo cliente com BYBIT_API_* do Render.
+        """
+        key, secret = self._resolve_credentials(api_key, api_secret, broker=broker)
+        if broker is not None:
+            try:
+                if hasattr(broker, 'ensure_private_session'):
+                    if broker.ensure_private_session(key or None, secret or None):
+                        return broker
+                session = getattr(broker, 'session', None) or getattr(broker, 'pybit_session', None)
+                if session is not None and (
+                    getattr(session, 'api_key', None)
+                    or getattr(session, 'apiKey', None)
+                    or getattr(broker, '_api_key', None)
+                ):
+                    return broker
+            except Exception:
+                pass
+
+        if not key or not secret:
+            return broker
+
+        with self._http_lock:
+            cached = getattr(self, '_dedicated_broker', None)
+            cached_key = getattr(self, '_dedicated_broker_key', '')
+            dead = (
+                cached is None
+                or cached_key != key
+                or (
+                    not getattr(cached, 'session', None)
+                    and not getattr(cached, 'pybit_session', None)
+                )
+            )
+            # Também morto se CCXT sem apiKey
+            if not dead and cached is not None:
+                ex = getattr(cached, 'exchange', None)
+                if ex is not None and not getattr(ex, 'apiKey', None) and not getattr(cached, 'session', None):
+                    dead = True
+            if dead:
+                try:
+                    from src.broker.bybit_client import BybitClient
+                    print("♻️ [FEEDBACK LOOP] Inicializando broker Bybit V5 dedicado (mainnet linear)...", flush=True)
+                    cached = BybitClient(api_key=key, api_secret=secret, testnet=False)
+                    if hasattr(cached, 'ensure_private_session'):
+                        cached.ensure_private_session(key, secret)
+                    self._dedicated_broker = cached
+                    self._dedicated_broker_key = key
+                except Exception as boot_err:
+                    print(f"⚠️ [FEEDBACK LOOP] broker dedicado: {boot_err}", flush=True)
+                    return broker
+            else:
+                try:
+                    if hasattr(cached, 'ensure_private_session'):
+                        cached.ensure_private_session(key, secret)
+                except Exception:
+                    pass
+            return cached
+
     def _resolve_credentials(self, api_key: str, api_secret: str, broker=None) -> tuple[str, str]:
         key = str(api_key or '').strip()
         secret = str(api_secret or '').strip()
@@ -302,14 +377,15 @@ class FeedbackLoopEvolutivo:
         return key, secret
 
     def _warn_session_unavailable(self, detail: str = '') -> None:
+        """Aviso rate-limited — NÃO usa prefixo 'falha get_closed_pnl' (evita spam Render)."""
         now = time.time()
-        if (now - self._last_session_warn_ts) < 300:
+        if (now - self._last_session_warn_ts) < 600:
             return
         self._last_session_warn_ts = now
-        suffix = f' ({detail})' if detail else ''
+        suffix = f' | {detail[:160]}' if detail else ''
         print(
-            f"[ERRO FEEDBACK LOOP] sessão Bybit indisponível para get_closed_pnl{suffix}. "
-            f"Configure BYBIT_API_KEY/SECRET ou um investidor ativo com chaves.",
+            f"⏸️ [FEEDBACK LOOP] closed_pnl adiado — sessão Bybit indisponível "
+            f"(configure BYBIT_API_KEY/SECRET ou investidor ativo){suffix}",
             flush=True,
         )
 
@@ -407,17 +483,25 @@ class FeedbackLoopEvolutivo:
                 try:
                     if hasattr(broker, 'ensure_private_session'):
                         broker.ensure_private_session(key or None, secret or None)
+                    # if not session or not apiKey → reconnect já feito acima
+                    session = getattr(broker, 'session', None) or getattr(broker, 'pybit_session', None)
+                    if session is None or (
+                        not getattr(session, 'api_key', None)
+                        and not getattr(session, 'apiKey', None)
+                        and not getattr(broker, '_api_key', None)
+                    ):
+                        if hasattr(broker, 'ensure_private_session'):
+                            broker.ensure_private_session(key or None, secret or None)
                     if hasattr(broker, 'get_closed_pnl'):
                         rows = list(broker.get_closed_pnl(category='linear', limit=50) or [])
-                        # Lista vazia com sessão OK = sem fechamentos; com sessão morta
-                        # get_closed_pnl agora retorna [] sem raise — tenta fallbacks se sem keys no broker
                         if rows or (
                             getattr(broker, 'authenticated', False)
                             or getattr(getattr(broker, 'exchange', None), 'apiKey', None)
+                            or getattr(broker, 'session', None) is not None
                             or getattr(broker, 'pybit_session', None) is not None
                         ):
                             return rows
-                    session = getattr(broker, 'pybit_session', None)
+                    session = getattr(broker, 'session', None) or getattr(broker, 'pybit_session', None)
                     if session is not None:
                         rsp = session.get_closed_pnl(category='linear', limit=50)
                         if isinstance(rsp, dict) and rsp.get('retCode') not in (0, '0', None):
@@ -425,6 +509,10 @@ class FeedbackLoopEvolutivo:
                         return list((rsp.get('result') or {}).get('list') or [])
                 except Exception as err:
                     last_err = err
+                    # Nunca re-raise RuntimeError legado 'sessão Bybit indisponível...'
+                    if 'indisponível' in str(err).lower():
+                        last_err = err
+                        # continua para standalone / CCXT
 
             if not key or not secret:
                 self._warn_session_unavailable(str(last_err or 'sem API key'))
