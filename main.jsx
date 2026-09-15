@@ -298,18 +298,35 @@ const getTradeStatusClasses = (trade) => {
 
 const getTradeProgressPercent = (trade) => {
   const pnlPct = Number(trade?.pnl_pct || 0);
+  const tpTarget = Math.max(1, Number(trade?.tp_roi_target_pct ?? 100));
+  const slTargetAbs = Math.max(1, Math.abs(Number(trade?.sl_roi_target_pct ?? -50)));
   if (!Number.isFinite(pnlPct)) return 0;
-  if (pnlPct >= 0) return Math.max(0, Math.min(100, pnlPct));
-  // Protocolo 100/50: barra de SL usa −50% da margem (não /3)
-  return Math.max(0, Math.min(100, (Math.abs(pnlPct) / 50) * 100));
+  if (pnlPct >= 0) return Math.max(0, Math.min(100, (pnlPct / tpTarget) * 100));
+  return Math.max(0, Math.min(100, (Math.abs(pnlPct) / slTargetAbs) * 100));
 };
 
 const getTradeProgressText = (trade) => {
   if (!hasLivePrice(trade)) return 'Aguardando preço ao vivo';
   const pnlPct = Number(trade?.pnl_pct || 0);
-  if (!Number.isFinite(pnlPct)) return 'TP 100% da entrada • SL 50% da entrada';
-  if (pnlPct >= 0) return `Faltam ${Math.max(0, 100 - pnlPct).toFixed(2)}% para TP`;
-  return `Faltam ${Math.max(0, 50 - Math.abs(pnlPct)).toFixed(2)}% para SL`;
+  const tpTarget = Number(trade?.tp_roi_target_pct ?? 100);
+  const slTargetAbs = Math.abs(Number(trade?.sl_roi_target_pct ?? -50));
+  if (!Number.isFinite(pnlPct)) return `TP ${tpTarget}% da entrada • SL ${slTargetAbs}% da entrada`;
+  if (pnlPct >= 0) return `Faltam ${Math.max(0, tpTarget - pnlPct).toFixed(2)}% para TP`;
+  return `Faltam ${Math.max(0, slTargetAbs - Math.abs(pnlPct)).toFixed(2)}% para SL`;
+};
+
+const getExitLineLabel = (trade) => {
+  const state = String(trade?.exit_line_state || '').toUpperCase();
+  if (state === 'TP_100_HIT') return '🎯 Linha de saída TP 100% atingida';
+  if (state === 'SL_50_HIT') return '🛑 Linha de saída SL 50% atingida';
+  return '⏳ Linha de saída ativa (TP 100% • SL 50%)';
+};
+
+const getExitLineClasses = (trade) => {
+  const state = String(trade?.exit_line_state || '').toUpperCase();
+  if (state === 'TP_100_HIT') return 'bg-green-500/10 border-green-500/30 text-green-300';
+  if (state === 'SL_50_HIT') return 'bg-red-500/10 border-red-500/30 text-red-300';
+  return 'bg-zinc-900/80 border-zinc-700 text-zinc-300';
 };
 
 const canonicalizeTradeSymbol = (value) => {
@@ -1229,6 +1246,12 @@ const App = () => {
                              className={`h-full rounded-full transition-all ${getTradeTone(trade) ? 'bg-green-500' : 'bg-red-500'}`}
                              style={{ width: `${getTradeProgressPercent(trade)}%` }}
                            />
+                         </div>
+                         <div className={`rounded-xl border px-3 py-2 text-[10px] font-black uppercase tracking-widest ${getExitLineClasses(trade)}`}>
+                           {getExitLineLabel(trade)}
+                           <div className="mt-1 text-[9px] font-bold normal-case tracking-normal opacity-90">
+                             TP≈{formatEntryPrice(trade.tp_line_price)} • SL≈{formatEntryPrice(trade.sl_line_price)}
+                           </div>
                          </div>
                           <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-widest">
                             <span className="text-zinc-500">

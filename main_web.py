@@ -3053,6 +3053,9 @@ def _sync_active_trades_from_db():
                     'client_count': 0,
                     'trade_count': 0,
                     'latest_trade_id': int(t.get('id') or 0),
+                    # Linha de saída no card (protocolo financeiro 100/50)
+                    'tp_roi_target_pct': float(load_tp_roi_pct() or 100.0),
+                    'sl_roi_target_pct': float(load_sl_roi_pct() or -50.0),
                 }
 
             trade_group = grouped[key]
@@ -3078,6 +3081,30 @@ def _sync_active_trades_from_db():
             entry_margin = float(trade.get('entry', 0) or 0)
             pnl_pct = float(trade.get('pnl_pct', 0) or 0)
             trade['open_pnl_value'] = round((entry_margin * pnl_pct) / 100, 2) if entry_margin else 0.0
+
+            tp_roi_target = float(trade.get('tp_roi_target_pct') or load_tp_roi_pct() or 100.0)
+            sl_roi_target = float(trade.get('sl_roi_target_pct') or load_sl_roi_pct() or -50.0)
+            trade['tp_roi_target_pct'] = tp_roi_target
+            trade['sl_roi_target_pct'] = sl_roi_target
+            trade['tp_line_hit'] = bool(pnl_pct >= tp_roi_target)
+            trade['sl_line_hit'] = bool(pnl_pct <= sl_roi_target)
+            trade['exit_line_state'] = (
+                'TP_100_HIT' if trade['tp_line_hit']
+                else 'SL_50_HIT' if trade['sl_line_hit']
+                else 'RUNNING'
+            )
+
+            try:
+                lev_hint = float(trade.get('leverage') or ALAVANCAGEM or 20)
+            except (TypeError, ValueError):
+                lev_hint = float(ALAVANCAGEM or 20)
+            tp_line_price, sl_line_price = calculate_tp_sl_prices(
+                float(trade.get('entry_price') or 0),
+                str(trade.get('side') or ''),
+                max(lev_hint, 1.0),
+            )
+            trade['tp_line_price'] = float(tp_line_price or 0)
+            trade['sl_line_price'] = float(sl_line_price or 0)
     except Exception:
         if not central_state.get('active_trades'):
             central_state['active_trades'] = []
@@ -4733,10 +4760,15 @@ def _process_client_orders_background(
         chat = f"{os.getenv('TELEGRAM_CHAT_ID') or ''}".strip()
 
         clientes = _get_registered_clients(active_only=True)
+        exec_total = 0
+        exec_ok = 0
+        exec_fail = 0
 
         for c in clientes:
             try:
+                exec_total += 1
                 client_id = int(c.get('id') or 0)
+                print(f"   🔁 [EXEC] Avaliando cliente {c.get('nome')} (id={client_id}) para {symbol}", flush=True)
                 if _is_training_fake_balance_client(c):
                     print(f"   🧪 [EXEC] Cliente {c.get('nome')} em modo TESTE — ignorando execução de ordens", flush=True)
                     continue
@@ -4912,6 +4944,7 @@ def _process_client_orders_background(
                     tp_price=tp_price, sl_price=sl_price,
                 )
                 if order_result:
+                        exec_ok += 1
                         order_id = order_result.get('id', order_result.get('orderId', 'N/A'))
                         side_label = 'COMPRAR' if side.lower() in ('buy', 'comprar') else 'VENDER'
 
@@ -5012,7 +5045,13 @@ def _process_client_orders_background(
                             except Exception as tg_err:
                                 print(f"❌ [TELEGRAM ERROR] Falha ao enviar notificação para {c.get('nome')}: {tg_err}", flush=True)
             except Exception as client_err:
+                exec_fail += 1
                 print(f"⚠️ [CLIENT ERROR] Falha ao processar ordem para cliente {c.get('nome', 'Unknown')}: {client_err}", flush=True)
+
+        print(
+            f"📌 [EXEC SUMMARY] {symbol}: clientes={exec_total} executadas={exec_ok} falhas={exec_fail} sem_execução={max(exec_total - exec_ok - exec_fail, 0)}",
+            flush=True,
+        )
     except Exception as general_err:
         print(f"❌ [PROCESS ERROR] Erro geral no processamento de ordens: {general_err}", flush=True)
     finally:
