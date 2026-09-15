@@ -353,6 +353,11 @@ def init_db():
         _ensure_column(cur, 'trades', 'quantity', 'REAL DEFAULT 0')
         _ensure_column(cur, 'trades', 'margin', 'REAL DEFAULT 0')
         _ensure_column(cur, 'trades', 'protection_status', "TEXT DEFAULT 'AGUARDANDO_PROTECAO'")
+        _ensure_column(cur, 'trades', 'setup_name', "TEXT DEFAULT ''")
+        _ensure_column(cur, 'trades', 'timeframe', "TEXT DEFAULT ''")
+        _ensure_column(cur, 'trades', 'rsi_entry', 'REAL DEFAULT 0')
+        _ensure_column(cur, 'trades', 'adx_entry', 'REAL DEFAULT 0')
+        _ensure_column(cur, 'trades', 'volume_ratio', 'REAL DEFAULT 0')
 
         # Tabela de configuração global (TEST_MODE, TEST_BALANCE, etc)
         cur.execute('''
@@ -449,6 +454,25 @@ def init_db():
         ''')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_decisoes_ts ON historico_decisoes_ia(timestamp)')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_decisoes_symbol ON historico_decisoes_ia(symbol)')
+
+        # Aprendizado local de setups (heurístico estatístico)
+        cur.execute('''
+        CREATE TABLE IF NOT EXISTS trade_learning (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            setup_name TEXT NOT NULL,
+            timeframe TEXT NOT NULL,
+            rsi_entry REAL DEFAULT 0,
+            adx_entry REAL DEFAULT 0,
+            volume_ratio REAL DEFAULT 0,
+            win INTEGER NOT NULL DEFAULT 0,
+            pnl_pct REAL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        cur.execute(
+            'CREATE INDEX IF NOT EXISTS idx_trade_learning_setup_tf '
+            'ON trade_learning(setup_name, timeframe, id DESC)'
+        )
 
         # Tribunal de Debate — pareceres Groq / Analista / Neural / Gemini
         cur.execute('''
@@ -681,6 +705,11 @@ def record_trade(
     exit_price: float = 0.0,
     quantity: float = 0.0,
     margin: float = 0.0,
+    setup_name: str = '',
+    timeframe: str = '',
+    rsi_entry: float = 0.0,
+    adx_entry: float = 0.0,
+    volume_ratio: float = 0.0,
 ):
     notes_clean = (notes or '').strip()
     try:
@@ -690,8 +719,29 @@ def record_trade(
 
     def _op(cur, conn):
         cur.execute(
-            'INSERT INTO trades (client_id, pair, side, pnl_pct, profit, entry_price, exit_price, quantity, margin, closed_at, notes, status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-            (client_id, pair, side, pnl_pct, profit, entry_price, exit_price, quantity, margin, closed_at, notes_clean, status.lower()),
+            'INSERT INTO trades ('
+            'client_id, pair, side, pnl_pct, profit, entry_price, exit_price, quantity, margin, closed_at, notes, status, '
+            'setup_name, timeframe, rsi_entry, adx_entry, volume_ratio'
+            ') VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            (
+                client_id,
+                pair,
+                side,
+                pnl_pct,
+                profit,
+                entry_price,
+                exit_price,
+                quantity,
+                margin,
+                closed_at,
+                notes_clean,
+                status.lower(),
+                str(setup_name or ''),
+                str(timeframe or ''),
+                float(rsi_entry or 0),
+                float(adx_entry or 0),
+                float(volume_ratio or 0),
+            ),
         )
         return cur.lastrowid
 
@@ -738,6 +788,33 @@ def close_trade(
     elif profit is None:
         profit = 0.0
 
+    learning_payload = None
+    try:
+        conn_l = _connect()
+        cur_l = conn_l.cursor()
+        cur_l.execute(
+            '''
+            SELECT setup_name, timeframe, rsi_entry, adx_entry, volume_ratio
+            FROM trades
+            WHERE id = ?
+            LIMIT 1
+            ''',
+            (trade_id,),
+        )
+        row_l = cur_l.fetchone()
+        conn_l.close()
+        if row_l:
+            data_l = dict(row_l)
+            learning_payload = {
+                'setup_name': str(data_l.get('setup_name') or '').strip(),
+                'timeframe': str(data_l.get('timeframe') or '').strip() or '15m',
+                'rsi_entry': float(data_l.get('rsi_entry') or 0),
+                'adx_entry': float(data_l.get('adx_entry') or 0),
+                'volume_ratio': float(data_l.get('volume_ratio') or 0),
+            }
+    except Exception:
+        learning_payload = None
+
     def _op(cur, conn):
         cur.execute(
             '''
@@ -755,7 +832,18 @@ def close_trade(
         return True
 
     try:
-        return bool(_execute_write('close_trade', _op))
+        ok = bool(_execute_write('close_trade', _op))
+        if ok and learning_payload and str(learning_payload.get('setup_name') or '').strip():
+            record_trade_learning(
+                setup_name=learning_payload.get('setup_name') or '',
+                timeframe=learning_payload.get('timeframe') or '15m',
+                rsi_entry=float(learning_payload.get('rsi_entry') or 0),
+                adx_entry=float(learning_payload.get('adx_entry') or 0),
+                volume_ratio=float(learning_payload.get('volume_ratio') or 0),
+                win=1 if float(pnl_pct or 0) > 0 else 0,
+                pnl_pct=float(pnl_pct or 0),
+            )
+        return ok
     except Exception as e:
         print(f"⚠️ Erro ao fechar trade {trade_id}: {e}")
         return False
@@ -970,6 +1058,134 @@ def get_last_closed_trade(client_id: int) -> Dict[str, Any]:
     row = cur.fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+def record_trade_learning(
+    setup_name: str,
+    timeframe: str,
+    rsi_entry: float,
+    adx_entry: float,
+    volume_ratio: float,
+    win: int,
+    pnl_pct: float,
+) -> bool:
+    """Registra resultado do trade para aprendizado adaptativo local."""
+    setup = str(setup_name or '').strip().upper()
+    tf = str(timeframe or '').strip().lower() or '15m'
+    if not setup:
+        return False
+
+    def _op(cur, conn):
+        cur.execute(
+            '''
+            INSERT INTO trade_learning
+                (setup_name, timeframe, rsi_entry, adx_entry, volume_ratio, win, pnl_pct)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''',
+            (
+                setup,
+                tf,
+                float(rsi_entry or 0),
+                float(adx_entry or 0),
+                float(volume_ratio or 0),
+                1 if int(win or 0) > 0 else 0,
+                float(pnl_pct or 0),
+            ),
+        )
+        return True
+
+    try:
+        return bool(_execute_write('record_trade_learning', _op))
+    except Exception as err:
+        print(f"⚠️ [TRADE_LEARNING] Falha ao registrar aprendizado: {err}", flush=True)
+        return False
+
+
+def get_trade_learning_stats(
+    setup_name: str,
+    timeframe: str = '15m',
+    limit: int = 20,
+) -> Dict[str, Any]:
+    """Retorna estatística dos últimos N trades de um setup/par."""
+    setup = str(setup_name or '').strip().upper()
+    tf = str(timeframe or '').strip().lower() or '15m'
+    lim = max(1, min(int(limit or 20), 200))
+    if not setup:
+        return {
+            'sample_size': 0,
+            'wins': 0,
+            'losses': 0,
+            'win_rate_pct': 0.0,
+            'avg_pnl_pct': 0.0,
+            'qty_multiplier': 1.0,
+            'decision': 'neutral',
+        }
+
+    conn = None
+    try:
+        conn = _connect()
+        cur = conn.cursor()
+        cur.execute(
+            '''
+            SELECT win, pnl_pct
+            FROM trade_learning
+            WHERE setup_name = ? AND timeframe = ?
+            ORDER BY id DESC
+            LIMIT ?
+            ''',
+            (setup, tf, lim),
+        )
+        rows = cur.fetchall()
+    except Exception as err:
+        print(f"⚠️ [TRADE_LEARNING] Falha ao consultar histórico: {err}", flush=True)
+        return {
+            'sample_size': 0,
+            'wins': 0,
+            'losses': 0,
+            'win_rate_pct': 0.0,
+            'avg_pnl_pct': 0.0,
+            'qty_multiplier': 1.0,
+            'decision': 'neutral',
+        }
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    sample = len(rows)
+    wins = sum(1 for r in rows if int(dict(r).get('win') or 0) > 0)
+    losses = max(0, sample - wins)
+    avg_pnl = (sum(float(dict(r).get('pnl_pct') or 0) for r in rows) / sample) if sample else 0.0
+    win_rate = (wins / sample * 100.0) if sample else 0.0
+
+    # Regra solicitada (últimos 20):
+    # >65% aumenta lote 15%; <40% reduz metade (ou descarta, se configurado)
+    qty_multiplier = 1.0
+    decision = 'neutral'
+    low_mode = str(os.getenv('TRADE_LEARNING_LOW_WIN_MODE', 'reduce')).strip().lower()
+    min_sample = max(5, int(os.getenv('TRADE_LEARNING_MIN_SAMPLE', '8') or 8))
+    if sample >= min_sample and win_rate > 65.0:
+        qty_multiplier = 1.15
+        decision = 'aggressive_up'
+    elif sample >= min_sample and win_rate < 40.0:
+        if low_mode in {'discard', 'skip', 'block'}:
+            qty_multiplier = 0.0
+            decision = 'discard_signal'
+        else:
+            qty_multiplier = 0.5
+            decision = 'defensive_down'
+
+    return {
+        'sample_size': sample,
+        'wins': wins,
+        'losses': losses,
+        'win_rate_pct': round(win_rate, 2),
+        'avg_pnl_pct': round(avg_pnl, 4),
+        'qty_multiplier': qty_multiplier,
+        'decision': decision,
+    }
 
 
 def mark_trade_profit_shield(

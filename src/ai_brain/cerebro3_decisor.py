@@ -80,6 +80,269 @@ def _f(v: Any, default: float = 0.0) -> float:
         return default
 
 
+class PositionGuard:
+    """Escada de lucro + kill-switch técnico para gestão ciclo a ciclo."""
+
+    def __init__(self) -> None:
+        self.level1_trigger_pct = _f(os.getenv('POSITION_GUARD_LEVEL1_TRIGGER_PCT'), 1.8)
+        self.level1_partial_fraction = max(
+            0.1,
+            min(0.9, _f(os.getenv('POSITION_GUARD_LEVEL1_PARTIAL_FRACTION'), 0.40)),
+        )
+        self.level2_trigger_pct = _f(os.getenv('POSITION_GUARD_LEVEL2_TRIGGER_PCT'), 3.5)
+        self.trailing_atr_mult = max(0.5, _f(os.getenv('POSITION_GUARD_TRAIL_ATR_MULT'), 1.5))
+        self.fee_buffer_pct = max(0.0, _f(os.getenv('POSITION_GUARD_FEE_BUFFER_PCT'), 0.12))
+
+    @staticmethod
+    def _is_long(side: str) -> bool:
+        return str(side or '').strip().lower() in ('buy', 'long', 'comprar')
+
+    @staticmethod
+    def _closed_df(df):
+        if df is None or len(df) < 3:
+            return None
+        try:
+            return df.iloc[:-1]
+        except Exception:
+            return df
+
+    @staticmethod
+    def _ema_series(values, span: int):
+        try:
+            import pandas as pd
+            series = values if hasattr(values, 'astype') else pd.Series(values)
+            return series.astype(float).ewm(span=int(span), adjust=False).mean()
+        except Exception:
+            return None
+
+    @staticmethod
+    def _atr_last(df, period: int = 14) -> float:
+        if df is None or len(df) < period + 1:
+            return 0.0
+        try:
+            high = df['high'].astype(float)
+            low = df['low'].astype(float)
+            close = df['close'].astype(float)
+            prev = close.shift(1)
+            tr_hl = (high - low).abs()
+            tr_hc = (high - prev).abs()
+            tr_lc = (low - prev).abs()
+            tr = tr_hl.combine(tr_hc, max).combine(tr_lc, max)
+            return _f(tr.tail(period).mean())
+        except Exception:
+            return 0.0
+
+    def _breakeven_sl(self, entry_price: float, side: str) -> float:
+        entry = _f(entry_price)
+        if entry <= 0:
+            return 0.0
+        buf = self.fee_buffer_pct / 100.0
+        if self._is_long(side):
+            return entry * (1.0 + buf)
+        return entry * (1.0 - buf)
+
+    def _kill_switch(self, side: str, df_5m) -> dict[str, Any]:
+        out = {'triggered': False, 'reason': ''}
+        work = self._closed_df(df_5m)
+        if work is None or len(work) < 25 or 'close' not in work.columns:
+            return out
+        try:
+            close = work['close'].astype(float)
+            open_ = work['open'].astype(float)
+            vol_col = 'volume' if 'volume' in work.columns else ('vol' if 'vol' in work.columns else None)
+            if not vol_col:
+                return out
+            vol = work[vol_col].astype(float)
+            ema20 = self._ema_series(close, 20)
+            if ema20 is None or len(ema20) < 2:
+                return out
+
+            last_close = _f(close.iloc[-1])
+            last_open = _f(open_.iloc[-1])
+            last_ema20 = _f(ema20.iloc[-1])
+            last_vol = _f(vol.iloc[-1])
+            vol_avg = _f(vol.iloc[:-1].tail(20).mean(), 0.0)
+            vol_ratio = (last_vol / vol_avg) if vol_avg > 0 else 1.0
+
+            is_long = self._is_long(side)
+            if is_long and last_close < last_ema20 and vol_ratio >= 1.1:
+                out['triggered'] = True
+                out['reason'] = (
+                    f'KILL_SWITCH_LONG: close 5m abaixo EMA20 ({last_close:.6g}<{last_ema20:.6g}) '
+                    f'com volume acima da média (x{vol_ratio:.2f})'
+                )
+                return out
+
+            buyer_volume = (last_close > last_open) and vol_ratio >= 1.1
+            if (not is_long) and last_close > last_ema20 and buyer_volume:
+                out['triggered'] = True
+                out['reason'] = (
+                    f'KILL_SWITCH_SHORT: close 5m acima EMA20 ({last_close:.6g}>{last_ema20:.6g}) '
+                    f'com volume comprador (x{vol_ratio:.2f})'
+                )
+                return out
+        except Exception:
+            return out
+        return out
+
+    def _level3_exhaustion_or_reversal(self, side: str, df_5m) -> dict[str, Any]:
+        out = {'triggered': False, 'reason': ''}
+        work = self._closed_df(df_5m)
+        if work is None or len(work) < 30:
+            return out
+        try:
+            close = work['close'].astype(float)
+            ema8 = self._ema_series(close, 8)
+            ema20 = self._ema_series(close, 20)
+            vol_col = 'volume' if 'volume' in work.columns else ('vol' if 'vol' in work.columns else None)
+            if ema8 is None or ema20 is None or vol_col is None or len(work) < 4:
+                return out
+
+            prev_ema8 = _f(ema8.iloc[-2])
+            prev_ema20 = _f(ema20.iloc[-2])
+            last_ema8 = _f(ema8.iloc[-1])
+            last_ema20 = _f(ema20.iloc[-1])
+
+            is_long = self._is_long(side)
+            cross_reversal = (
+                (is_long and prev_ema8 >= prev_ema20 and last_ema8 < last_ema20)
+                or ((not is_long) and prev_ema8 <= prev_ema20 and last_ema8 > last_ema20)
+            )
+
+            v = work[vol_col].astype(float)
+            v1, v2, v3 = _f(v.iloc[-3]), _f(v.iloc[-2]), _f(v.iloc[-1])
+            volume_exhaustion = v1 > v2 > v3 > 0
+
+            if cross_reversal:
+                out['triggered'] = True
+                out['reason'] = 'NIVEL3_REVERSAO_EMA: cruzamento reverso EMA8/EMA20 na vela 5m fechada'
+                return out
+            if volume_exhaustion:
+                out['triggered'] = True
+                out['reason'] = (
+                    f'NIVEL3_EXAUSTAO_VOLUME: 3 velas com volume decrescente ({v1:.3g}>{v2:.3g}>{v3:.3g})'
+                )
+                return out
+        except Exception:
+            return out
+        return out
+
+    def evaluate_position_cycle(
+        self,
+        *,
+        side: str,
+        entry_price: float,
+        mark_price: float,
+        roi_pct: float,
+        df_5m=None,
+        level1_done: bool = False,
+        level2_done: bool = False,
+    ) -> dict[str, Any]:
+        entry = _f(entry_price)
+        mark = _f(mark_price)
+        roi = _f(roi_pct)
+        out = {
+            'action': 'HOLD',
+            'motivo': '',
+            'tipo_execucao': '',
+            'sl_price': 0.0,
+            'partial_fraction': self.level1_partial_fraction,
+            'level1_done': bool(level1_done),
+            'level2_done': bool(level2_done),
+        }
+        if entry <= 0 or mark <= 0:
+            return out
+
+        kill = self._kill_switch(side, df_5m)
+        if kill.get('triggered'):
+            out.update({
+                'action': 'EARLY_EXIT',
+                'tipo_execucao': 'KILL_SWITCH_TECNICO',
+                'motivo': str(kill.get('reason') or ''),
+            })
+            return out
+
+        if (not level1_done) and roi >= self.level1_trigger_pct:
+            out.update({
+                'action': 'PARTIAL_TP',
+                'tipo_execucao': 'PROFIT_LADDER_N1',
+                'motivo': (
+                    f'Nível 1 acionado (ROI={roi:.2f}% >= {self.level1_trigger_pct:.2f}%). '
+                    f'Realiza {self.level1_partial_fraction*100:.0f}% e arma breakeven.'
+                ),
+                'sl_price': self._breakeven_sl(entry, side),
+                'level1_done': True,
+            })
+            return out
+
+        if roi >= self.level2_trigger_pct:
+            work = self._closed_df(df_5m)
+            if work is not None and len(work) >= 25:
+                close = work['close'].astype(float)
+                ema8_series = self._ema_series(close, 8)
+                ema8 = _f(ema8_series.iloc[-1]) if ema8_series is not None and len(ema8_series) else 0.0
+                atr = self._atr_last(work, period=14)
+                is_long = self._is_long(side)
+                atr_anchor = (mark - self.trailing_atr_mult * atr) if is_long else (mark + self.trailing_atr_mult * atr)
+                candidates = [x for x in (ema8, atr_anchor) if _f(x) > 0]
+                if candidates:
+                    sl = max(candidates) if is_long else min(candidates)
+                    out.update({
+                        'action': 'EXTEND_TRAILING',
+                        'tipo_execucao': 'PROFIT_LADDER_N2',
+                        'motivo': (
+                            f'Nível 2 acionado (ROI={roi:.2f}% >= {self.level2_trigger_pct:.2f}%). '
+                            f'Trailing ancorado em EMA8/ATR({self.trailing_atr_mult:.2f}x).'
+                        ),
+                        'sl_price': sl,
+                        'level2_done': True,
+                    })
+                    if level2_done:
+                        lvl3 = self._level3_exhaustion_or_reversal(side, df_5m)
+                        if lvl3.get('triggered'):
+                            out.update({
+                                'action': 'EARLY_EXIT',
+                                'tipo_execucao': 'PROFIT_LADDER_N3',
+                                'motivo': str(lvl3.get('reason') or 'Nível 3 acionado'),
+                            })
+                    return out
+
+        if level2_done:
+            lvl3 = self._level3_exhaustion_or_reversal(side, df_5m)
+            if lvl3.get('triggered'):
+                out.update({
+                    'action': 'EARLY_EXIT',
+                    'tipo_execucao': 'PROFIT_LADDER_N3',
+                    'motivo': str(lvl3.get('reason') or 'Nível 3 acionado'),
+                })
+                return out
+
+        return out
+
+
+def evaluate_position_guard(
+    *,
+    side: str,
+    entry_price: float,
+    mark_price: float,
+    roi_pct: float,
+    df_5m=None,
+    level1_done: bool = False,
+    level2_done: bool = False,
+) -> dict[str, Any]:
+    """Wrapper estável para uso no monitor de posições do runtime."""
+    guard = PositionGuard()
+    return guard.evaluate_position_cycle(
+        side=side,
+        entry_price=entry_price,
+        mark_price=mark_price,
+        roi_pct=roi_pct,
+        df_5m=df_5m,
+        level1_done=level1_done,
+        level2_done=level2_done,
+    )
+
+
 def _parse_decision_json(text: str) -> dict | None:
     text = (text or '').strip()
     text = re.sub(r'^```json\s*|\s*```$', '', text, flags=re.IGNORECASE).strip()
