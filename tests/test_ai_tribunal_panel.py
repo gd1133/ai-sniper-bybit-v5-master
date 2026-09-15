@@ -40,7 +40,7 @@ def test_consensus_returns_four_agents():
     })
     assert 'agents' in res
     ids = [a['id'] for a in res['agents']]
-    assert ids == ['gemini', 'groq', 'analyst', 'learner']
+    assert ids == ['macro', 'flow', 'analyst', 'learner']
 
 
 def test_tribunal_evidence_has_dialogue_and_candles():

@@ -709,94 +709,11 @@ def _call_abacus_tribunal(messages: list[dict], purpose: str = 'tribunal') -> di
     return None
 
 
-def _call_gemini_tribunal(messages: list[dict]) -> dict | None:
-    """Fallback Gemini quando Groq falha ou está em rate limit (cadeia v1beta)."""
-    if not _env_bool('ENABLE_GEMINI_C3_FALLBACK', True):
-        return None
-    if not str(os.getenv('GEMINI_API_KEY') or '').strip():
-        return None
-    try:
-        from src.intelligence.gemini_client import gemini_generate_content
-        system = next((m.get('content', '') for m in messages if m.get('role') == 'system'), '')
-        user = next((m.get('content', '') for m in messages if m.get('role') == 'user'), '')
-        result = gemini_generate_content(
-            f'{system}\n\n{user}',
-            purpose='c3',
-            temperature=0.15,
-            max_tokens=int(os.getenv('CEREBRO3_MAX_TOKENS', '320') or 320),
-        )
-        if not result.get('ok'):
-            print(
-                f"⚠️ [C3] Gemini fallback falhou: {result.get('error') or 'sem resposta'} "
-                f"— fallback técnico local",
-                flush=True,
-            )
-            return None
-        parsed = _parse_decision_json(result.get('text') or '')
-        if parsed:
-            print(f"⚠️ [C3] Groq/Abacus indisponível → Gemini ({result.get('model')})", flush=True)
-        return parsed
-    except Exception as exc:
-        print(f'⚠️ [C3] Gemini fallback falhou: {exc}', flush=True)
-        return None
-
-
-def _call_groq_tribunal(messages: list[dict], purpose: str = 'tribunal') -> dict | None:
-    try:
-        from src.intelligence.groq_client import groq_chat_completion, log_groq_degraded
-        result = groq_chat_completion(
-            messages=messages,
-            purpose=purpose,
-            temperature=0.15,
-            max_tokens=int(os.getenv('CEREBRO3_MAX_TOKENS', '320') or 320),
-        )
-        if result.get('ok'):
-            parsed = _parse_decision_json(result.get('content') or '')
-            if parsed:
-                return parsed
-        elif not result.get('cooldown'):
-            log_groq_degraded('C3 TRIBUNAL', result)
-    except Exception as exc:
-        print(f'⚠️ [C3] Groq erro: {exc}', flush=True)
-    return None
-
-
-def _c3_provider() -> str:
-    value = str(os.getenv('CEREBRO3_PROVIDER', 'abacus') or 'abacus').strip().lower()
-    if value not in {'abacus', 'groq', 'gemini'}:
-        return 'abacus'
-    return value
-
-
 def _call_llm(messages: list[dict], purpose: str = 'tribunal') -> dict | None:
+    """Camada LLM do C3: somente Abacus Agent (sem Groq/Gemini)."""
     if not _env_bool('ENABLE_CEREBRO3_LLM', True):
         return None
-
-    provider = _c3_provider()
-    use_legacy_fallback = _env_bool('CEREBRO3_LEGACY_FALLBACK', True)
-
-    if provider == 'abacus':
-        primary = _call_abacus_tribunal(messages, purpose=purpose)
-        if primary:
-            return primary
-        if not use_legacy_fallback:
-            return None
-        return _call_groq_tribunal(messages, purpose=purpose) or _call_gemini_tribunal(messages)
-
-    if provider == 'groq':
-        primary = _call_groq_tribunal(messages, purpose=purpose)
-        if primary:
-            return primary
-        if not use_legacy_fallback:
-            return None
-        return _call_gemini_tribunal(messages) or _call_abacus_tribunal(messages, purpose=purpose)
-
-    primary = _call_gemini_tribunal(messages)
-    if primary:
-        return primary
-    if not use_legacy_fallback:
-        return None
-    return _call_groq_tribunal(messages, purpose=purpose) or _call_abacus_tribunal(messages, purpose=purpose)
+    return _call_abacus_tribunal(messages, purpose=purpose)
 
 
 def decide_entry(context: dict[str, Any]) -> dict[str, Any]:
@@ -857,7 +774,7 @@ def decision_to_consensus(decision: dict, context: dict, report_c1: dict, report
     action = str(decision.get('decisao') or decision.get('action', 'WAIT')).upper()
     prob = float(decision.get('probabilidade') or decision.get('confidence', 0) * 100)
     intel = context.get('intel') or {}
-    flow_ok = bool((intel.get('groq_flow') or intel.get('order_flow') or {}).get('available'))
+    flow_ok = bool((intel.get('flow_ai') or intel.get('order_flow') or {}).get('available'))
     autonomous = bool(
         intel.get('force_assistants_unavailable')
         or (
@@ -867,20 +784,23 @@ def decision_to_consensus(decision: dict, context: dict, report_c1: dict, report
         )
     )
 
+    macro_ctx = intel.get('macro_ai') or {}
+    flow_ctx = intel.get('flow_ai') or intel.get('order_flow') or {}
+
     agents = [
         {
-            'id': 'gemini',
-            'label': 'Gemini Macro',
-            'score': float((intel.get('gemini_macro') or {}).get('score_sentimento_noticias', 0) or 0) * 50 + 50,
+            'id': 'macro',
+            'label': 'Macro IA',
+            'score': float(macro_ctx.get('score_sentimento_noticias', 0) or 0) * 50 + 50,
             'action': 'WAIT',
-            'motivo': str((intel.get('gemini_macro') or {}).get('motivo', 'contexto macro')),
+            'motivo': str(macro_ctx.get('motivo') or macro_ctx.get('narrativa_dominante') or 'contexto macro'),
         },
         {
-            'id': 'groq',
-            'label': 'Groq Tático',
-            'score': float((intel.get('groq_flow') or {}).get('forca_agressao', 0) or 0),
+            'id': 'flow',
+            'label': 'Fluxo IA',
+            'score': float(flow_ctx.get('forca_agressao', 0) or 0),
             'action': 'WAIT',
-            'motivo': str((intel.get('groq_flow') or {}).get('reason', 'fluxo de ordens')),
+            'motivo': str(flow_ctx.get('reason', 'fluxo de ordens')),
         },
         {
             'id': 'analyst',

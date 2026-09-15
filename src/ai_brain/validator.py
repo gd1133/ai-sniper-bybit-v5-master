@@ -213,7 +213,7 @@ class Cerebro2BookVolume:
         # Só força offline se explicitamente pedido. Groq cloud down + order book
         # local OK deve continuar gerando relatório de livro/volume.
         if ctx.get('force_assistants_unavailable') or (
-            ctx.get('ai_assistants_unavailable') and not ctx.get('groq_flow') and not tech_data
+            ctx.get('ai_assistants_unavailable') and not ctx.get('flow_ai') and not tech_data
         ):
             # #region agent log
             try:
@@ -236,8 +236,8 @@ class Cerebro2BookVolume:
             }
 
         # Se cloud marcou unavailable mas há fluxo local, usa livro/volume local
-        if ctx.get('ai_assistants_unavailable') and ctx.get('groq_flow_degraded'):
-            flow = ctx.get('groq_flow') or ctx.get('order_flow') or {}
+        if ctx.get('ai_assistants_unavailable') and (ctx.get('ai_flow_degraded') or ctx.get('groq_flow_degraded')):
+            flow = ctx.get('flow_ai') or ctx.get('order_flow') or {}
             if flow.get('available'):
                 score_f = float(flow.get('score_fluxo', 0) or 0)
                 volume_ratio = float((tech_data or {}).get('volume_ratio', 0) or 0)
@@ -424,8 +424,8 @@ class Cerebro3Sovereign:
             blend = get_cerebro3_soberano().calcular_probabilidade_sucesso(
                 sinais_5_estrategias=strat,
                 condicao_mercado=str(ctx.get('condicao_mercado') or market_condition_from_signals(enriched, ctx)),
-                dados_groq=ctx.get('groq_flow') or ctx.get('order_flow') or {},
-                dados_gemini=ctx.get('gemini_macro') or {},
+                dados_groq=ctx.get('flow_ai') or ctx.get('order_flow') or {},
+                dados_gemini=ctx.get('macro_ai') or {},
                 tech_confidence_0_100=probability,
             )
             ia_insights = blend.get('json_ia_insights') or {}
@@ -499,15 +499,15 @@ def _unavailable_report(brain: int, role: str) -> dict:
     }
 
 
-class GroqValidator:
+class AIDecisionValidator:
     """
-    Mantém o nome para compatibilidade com o restante do sistema.
+    Validador central de decisão.
     Hierarquia resiliente:
       - Cérebro 1/2: assistentes técnicos isolados (try/except)
       - Cérebro 3: tomador soberano (LocalML + histórico wins/losses)
     """
 
-    def __init__(self, api_key_gemini=None, api_key_groq=None):
+    def __init__(self, api_key_macro=None, api_key_flow=None):
         self.analyst = DataAnalystAgent()
         self.intelligence = IntelligenceAgent()
         self.learner = LearningAgent()
@@ -548,7 +548,7 @@ class GroqValidator:
             ctx.get('force_assistants_unavailable')
             or (
                 ctx.get('ai_assistants_unavailable')
-                and not (ctx.get('groq_flow') or {}).get('available')
+                and not (ctx.get('flow_ai') or {}).get('available')
             )
         )
 
@@ -567,7 +567,7 @@ class GroqValidator:
                 }
             # Soft veto / cloud down → autonomia; C2 local só se fluxo disponível
             ctx['autonomous_mode'] = True
-            if not (ctx.get('groq_flow') or {}).get('available'):
+            if not (ctx.get('flow_ai') or {}).get('available'):
                 ctx['ai_assistants_unavailable'] = True
                 ctx['force_assistants_unavailable'] = True
                 assistants_unavailable = True
@@ -605,42 +605,42 @@ class GroqValidator:
         action_learner = decision.get('action_learner', 'WAIT')
         motivo_learner = str(decision.get('motivo_learner', ''))
 
-        # Personas cloud preservadas para UI/Tribunal (não remove lógica atual)
-        score_gemini = min(100.0, (score_intel * 0.65) + (score_local * 0.35)) if report_c2.get('available') else 0.0
-        score_groq = (
+        # Personas de IA para UI/Tribunal (sem dependência Groq/Gemini)
+        score_macro = min(100.0, (score_intel * 0.65) + (score_local * 0.35)) if report_c2.get('available') else 0.0
+        score_flow = (
             min(100.0, (score_analyst * 0.55) + (float(tech_data.get('volume_ratio', 1) or 1) * 12) + (score_local * 0.2))
             if report_c1.get('available') else 0.0
         )
 
         if report_c2.get('available'):
-            action_gemini = action_intel if action_intel != 'WAIT' else (
-                'BUY' if trend == 'ALTA' and score_gemini >= 55 else (
-                    'SELL' if trend == 'BAIXA' and score_gemini >= 55 else 'WAIT'
+            action_macro = action_intel if action_intel != 'WAIT' else (
+                'BUY' if trend == 'ALTA' and score_macro >= 55 else (
+                    'SELL' if trend == 'BAIXA' and score_macro >= 55 else 'WAIT'
                 )
             )
-            motivo_gemini = (
+            motivo_macro = (
                 f"{motivo_intel} | Macro local={score_local:.0f} | "
                 f"Sentimento={ctx.get('global_trend', 'NEUTRAL')}"
             )
         else:
-            action_gemini = 'WAIT'
-            motivo_gemini = AI_UNAVAILABLE_REPORT
-            score_gemini = 0.0
+            action_macro = 'WAIT'
+            motivo_macro = AI_UNAVAILABLE_REPORT
+            score_macro = 0.0
 
         if report_c1.get('available'):
-            action_groq = action_analyst if action_analyst != 'WAIT' else (
-                'BUY' if trend == 'ALTA' and score_groq >= 55 else (
-                    'SELL' if trend == 'BAIXA' and score_groq >= 55 else 'WAIT'
+            action_flow = action_analyst if action_analyst != 'WAIT' else (
+                'BUY' if trend == 'ALTA' and score_flow >= 55 else (
+                    'SELL' if trend == 'BAIXA' and score_flow >= 55 else 'WAIT'
                 )
             )
-            motivo_groq = (
-                f"{motivo_analyst} | Timing tático score={score_groq:.0f} | "
+            motivo_flow = (
+                f"{motivo_analyst} | Timing tático score={score_flow:.0f} | "
                 f"Volume×={float(tech_data.get('volume_ratio', 0) or 0):.2f}"
             )
         else:
-            action_groq = 'WAIT'
-            motivo_groq = AI_UNAVAILABLE_REPORT
-            score_groq = 0.0
+            action_flow = 'WAIT'
+            motivo_flow = AI_UNAVAILABLE_REPORT
+            score_flow = 0.0
 
         autonomous = bool(decision.get('autonomous'))
         if autonomous:
@@ -651,14 +651,14 @@ class GroqValidator:
         else:
             # Consenso ponderado original (preservado) quando assistentes online
             probability = (
-                (score_gemini * 0.25) +
-                (score_groq * 0.25) +
+                (score_macro * 0.25) +
+                (score_flow * 0.25) +
                 (score_analyst * 0.30) +
                 (score_learner * 0.20)
             )
             final_action = 'WAIT'
             st = int(tech_data.get('supertrend_signal', 0) or 0)
-            actions = [action_gemini, action_groq, action_analyst, action_learner]
+            actions = [action_macro, action_flow, action_analyst, action_learner]
             buy_votes = sum(1 for a in actions if a == 'BUY')
             sell_votes = sum(1 for a in actions if a == 'SELL')
 
@@ -679,20 +679,20 @@ class GroqValidator:
 
         agents = [
             {
-                'id': 'gemini',
-                'label': 'Gemini Estratégico',
-                'score': round(float(score_gemini), 1),
-                'action': action_gemini,
-                'motivo': motivo_gemini,
+                'id': 'macro',
+                'label': 'Macro IA',
+                'score': round(float(score_macro), 1),
+                'action': action_macro,
+                'motivo': motivo_macro,
                 'provider': 'local+intel' if report_c2.get('available') else 'unavailable',
                 'weight': 25,
             },
             {
-                'id': 'groq',
-                'label': 'Groq Tático',
-                'score': round(float(score_groq), 1),
-                'action': action_groq,
-                'motivo': motivo_groq,
+                'id': 'flow',
+                'label': 'Fluxo IA',
+                'score': round(float(score_flow), 1),
+                'action': action_flow,
+                'motivo': motivo_flow,
                 'provider': 'local+analyst' if report_c1.get('available') else 'unavailable',
                 'weight': 25,
             },
@@ -724,16 +724,16 @@ class GroqValidator:
                 decision.get('motivo')
                 if autonomous
                 else (
-                    f'Gemini: {motivo_gemini[:80]} | '
-                    f'Groq: {motivo_groq[:80]} | '
+                    f'Macro IA: {motivo_macro[:80]} | '
+                    f'Fluxo IA: {motivo_flow[:80]} | '
                     f'Analista: {motivo_analyst[:80]} | '
                     f'Aprendizado: {motivo_learner[:80]}'
                 )
             ),
             'agents': agents,
             'brains': {
-                'gemini': 'online' if report_c2.get('available') else 'unavailable',
-                'groq': 'online' if report_c1.get('available') else 'unavailable',
+                'macro': 'online' if report_c2.get('available') else 'unavailable',
+                'flow': 'online' if report_c1.get('available') else 'unavailable',
                 'analyst': 'online' if report_c1.get('available') else 'unavailable',
                 'learner': 'online',
                 'local': 'autonomous' if autonomous else 'online',
@@ -809,7 +809,7 @@ class GroqValidator:
         )
         context = merge_context_for_cerebro3(symbol, tech_data, gates, report_c1, report_c2, ctx)
         # C2 local disponível → não marca modo autônomo forçado
-        if (ctx.get('groq_flow') or {}).get('available') and ctx.get('groq_flow_degraded'):
+        if (ctx.get('flow_ai') or {}).get('available') and (ctx.get('ai_flow_degraded') or ctx.get('groq_flow_degraded')):
             ctx['autonomous_mode'] = False
             ctx['ai_assistants_unavailable'] = False
         decision = decide_entry(context)
@@ -820,3 +820,8 @@ class GroqValidator:
         }
         result['intelligence'] = ctx
         return result
+
+
+
+# Alias legado para compatibilidade externa (evitar quebra de import antigo)
+GroqValidator = AIDecisionValidator

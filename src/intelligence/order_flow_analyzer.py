@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Subsistema Groq — análise de fluxo ultra-rápido (Order Book + agressões).
+Subsistema de análise de fluxo (Order Book + agressões).
 
-Incremental: não substitui whale_detector nem confluence_absoluta.
-Retorna JSON estrito para o Cérebro 3 modular a probabilidade (peso ~20%).
+Prioridade:
+1) Abacus Agent (quando habilitado)
+2) Fallback local por order book
+3) Fallback técnico por sinais
 
-Resiliência: Abacus Agent → Groq → Gemini (opcional) → order book local → sinais técnicos.
-Falha de IA NUNCA aborta ordem se hard-gates (Portas 1–5) já aprovaram.
+Falha de IA nunca interrompe execução quando hard-gates já aprovaram.
 """
 
 from __future__ import annotations
@@ -18,22 +19,14 @@ import time
 from typing import Any
 
 from src.intelligence.abacus_agent_client import abacus_agent_chat
-from src.intelligence.groq_client import (
-    get_groq_cooldown_info,
-    groq_chat_completion,
-    is_groq_in_cooldown,
-    log_groq_degraded,
-)
 
 _CACHE: dict[str, tuple[float, dict]] = {}
-_CACHE_TTL = 45.0  # fluxo muda rápido
-_CACHE_TTL_DEGRADED = 120.0  # menos chamadas quando Groq em cooldown
+_CACHE_TTL = 45.0
 _FLOW_DEGRADED_LOGGED_UNTIL = 0.0
 
-GROQ_FLOW_SYSTEM = """Você é o subsistema de análise de fluxo ultra-rápido do Motor Sniper. Sua função é analisar o Order Book (Livro de Ordens) e as últimas agressões de mercado enviadas pelo usuário.
-Identifique onde os investidores estão empurrando o preço através de ordens a mercado (agressão) ou defendendo posições (absorção).
-
-Retorne EXCLUSIVAMENTE um objeto JSON válido, sem qualquer texto explicativo antes ou depois, com a seguinte estrutura:
+FLOW_SYSTEM_PROMPT = """Você é o subsistema de análise de fluxo ultra-rápido do Motor Sniper.
+Analise o Order Book (Livro de Ordens) e agressões recentes.
+Retorne EXCLUSIVAMENTE JSON válido com:
 {
   "score_fluxo": -1.0 a 1.0,
   "forca_agressao": 0 a 100,
@@ -59,7 +52,7 @@ def _neutral_flow(reason: str = 'fluxo neutro') -> dict[str, Any]:
         'reason': reason,
         'available': False,
         'liquidity_ok': True,
-        'groq_degraded': False,
+        'ai_flow_degraded': False,
     }
 
 
@@ -93,7 +86,6 @@ def _summarize_order_book(order_book: dict | None, limit: int = 10) -> str:
 
 
 def _local_flow_from_book(order_book: dict | None, signals: dict | None) -> dict[str, Any]:
-    """Fallback matemático sem cloud — mantém o robô vivo."""
     signals = signals or {}
     if not order_book:
         vol_r = float(signals.get('volume_ratio', 1) or 1)
@@ -108,7 +100,7 @@ def _local_flow_from_book(order_book: dict | None, signals: dict | None) -> dict
             'forca_agressao': min(100.0, max(0.0, (vol_r - 1.0) * 40)),
             'source': 'local_volume',
             'available': True,
-            'groq_degraded': True,
+            'ai_flow_degraded': True,
         }
 
     bids = list(order_book.get('bids') or [])[:15]
@@ -127,12 +119,11 @@ def _local_flow_from_book(order_book: dict | None, signals: dict | None) -> dict
         'source': 'local_order_book',
         'reason': f'imbalance local {imb:+.3f}',
         'available': True,
-        'groq_degraded': True,
+        'ai_flow_degraded': True,
     }
 
 
 def _technical_flow_from_signals(signals: dict | None) -> dict[str, Any]:
-    """Fallback puro das Portas 1–5 / sinais técnicos quando cloud indisponível."""
     signals = signals or {}
     trend = str(signals.get('trend', 'NEUTRO')).upper()
     vol_r = float(signals.get('volume_ratio', 1) or 1)
@@ -151,11 +142,11 @@ def _technical_flow_from_signals(signals: dict | None) -> dict[str, Any]:
         'source': 'technical_gates',
         'reason': f'fallback técnico trend={trend} vol×={vol_r:.2f} ADX={adx:.0f}',
         'available': True,
-        'groq_degraded': True,
+        'ai_flow_degraded': True,
     }
 
 
-def _parse_flow_json(text: str, source: str = 'groq') -> dict | None:
+def _parse_flow_json(text: str, source: str = 'abacus_flow') -> dict | None:
     text = (text or '').strip()
     text = re.sub(r'^```json\s*|\s*```$', '', text, flags=re.IGNORECASE).strip()
     try:
@@ -168,6 +159,7 @@ def _parse_flow_json(text: str, source: str = 'groq') -> dict | None:
             data = json.loads(m.group(0))
         except Exception:
             return None
+
     try:
         score = float(data.get('score_fluxo', 0) or 0)
         score = max(-1.0, min(1.0, score))
@@ -181,43 +173,15 @@ def _parse_flow_json(text: str, source: str = 'groq') -> dict | None:
             'source': source,
             'reason': f'{source} order-flow JSON',
             'available': True,
-            'groq_degraded': source != 'groq',
+            'ai_flow_degraded': False,
         }
     except (TypeError, ValueError):
         return None
 
 
-def _gemini_flow_fallback(symbol: str, user_payload: str) -> dict | None:
-    """Segundo tier cloud — Gemini analisa order book quando Groq falha (cadeia v1beta)."""
-    if not _env_bool('ENABLE_GEMINI_FLOW_FALLBACK', True):
-        return None
-    if not str(os.getenv('GEMINI_API_KEY') or '').strip():
-        return None
-    try:
-        from src.intelligence.gemini_client import gemini_generate_content
-        prompt = f'{GROQ_FLOW_SYSTEM}\n\nSímbolo: {symbol}\n{user_payload}'
-        result = gemini_generate_content(
-            prompt, purpose='flow', temperature=0.1, max_tokens=220,
-        )
-        if not result.get('ok'):
-            return None
-        parsed = _parse_flow_json(result.get('text') or '', source='gemini_flow')
-        if parsed:
-            parsed['groq_degraded'] = True
-            parsed['groq_model'] = result.get('model')
-            parsed['reason'] = (
-                f"Gemini fallback ({result.get('model')}, Groq indisponível) — "
-                f"{parsed.get('reason', '')}"
-            )
-        return parsed
-    except Exception as exc:
-        print(f'⚠️ [GROQ FLOW] Gemini fallback indisponível: {exc}', flush=True)
-        return None
-
-
 def _call_abacus_flow(symbol: str, user_payload: str) -> dict | None:
     prompt = (
-        f'{GROQ_FLOW_SYSTEM}\n\n'
+        f'{FLOW_SYSTEM_PROMPT}\n\n'
         f'Símbolo: {symbol}\n'
         f'{user_payload}\n\n'
         'Retorne apenas o JSON solicitado.'
@@ -228,35 +192,10 @@ def _call_abacus_flow(symbol: str, user_payload: str) -> dict | None:
             return None
         parsed = _parse_flow_json(text, source='abacus_flow')
         if parsed:
-            parsed['groq_degraded'] = False
             parsed['reason'] = 'abacus_agent order-flow JSON'
             return parsed
     except Exception as exc:
         print(f'⚠️ [FLOW] Abacus Agent indisponível: {exc}', flush=True)
-    return None
-
-
-def _call_groq_flow(symbol: str, user_payload: str) -> dict | None:
-    if is_groq_in_cooldown():
-        return None
-    result = groq_chat_completion(
-        messages=[
-            {'role': 'system', 'content': GROQ_FLOW_SYSTEM},
-            {'role': 'user', 'content': user_payload},
-        ],
-        purpose='flow',
-        temperature=0.1,
-        max_tokens=int(os.getenv('GROQ_FLOW_MAX_TOKENS', '150') or 150),
-    )
-    if result.get('ok'):
-        parsed = _parse_flow_json(result.get('content') or '', source='groq')
-        if parsed:
-            parsed['groq_model'] = result.get('model')
-            parsed['groq_degraded'] = False
-            return parsed
-        return None
-    if not result.get('cooldown'):
-        log_groq_degraded('GROQ FLOW', result, symbol=symbol)
     return None
 
 
@@ -278,64 +217,43 @@ def analyze_order_book_flow(
     hard_gates_approved: bool = False,
 ) -> dict[str, Any]:
     """
-    Analisa order book via Abacus Agent (JSON estrito) com fallback Groq → Gemini → local → técnico.
-    Anexa BSL/SSL, sweep e FVG quando há OHLCV.
-    Desligável: ABACUS_AGENT_ENABLED=false e ENABLE_GROQ_FLOW_AI=false
-
-    hard_gates_approved: quando True, falha de IA nunca retorna available=False.
+    Analisa fluxo via Abacus Agent com fallback local/técnico.
     """
+
     def _finish(payload: dict) -> dict:
         out = enrich_flow_with_liquidity(payload, df=df, signals=signals)
-        if hard_gates_approved and not out.get('available', True):
-            tech = _technical_flow_from_signals(signals)
-            out.update(tech)
-            out['reason'] = f"hard-gates OK — {out.get('reason', tech.get('reason', ''))}"
+        # Alias de compatibilidade com partes legadas do projeto
+        out['groq_degraded'] = bool(out.get('ai_flow_degraded', False))
         return out
-
-    if (not _env_bool('ABACUS_AGENT_ENABLED', True)) and (not _env_bool('ENABLE_GROQ_FLOW_AI', True)):
-        local = _local_flow_from_book(order_book, signals)
-        local['groq_degraded'] = True
-        local['reason'] = 'ABACUS_AGENT_ENABLED=false e ENABLE_GROQ_FLOW_AI=false — fluxo local'
-        return _finish(local)
 
     cache_key = f"{symbol}:{bool(order_book)}"
     now = time.time()
-    ttl = _CACHE_TTL_DEGRADED if is_groq_in_cooldown() else _CACHE_TTL
-    if cache_key in _CACHE and (now - _CACHE[cache_key][0]) < ttl:
+    if cache_key in _CACHE and (now - _CACHE[cache_key][0]) < _CACHE_TTL:
         cached = dict(_CACHE[cache_key][1])
         cached['from_cache'] = True
         return _finish(cached)
 
     local = _local_flow_from_book(order_book, signals)
-    groq_key = os.getenv('GROQ_API_KEY', '').strip()
 
-    # Sem hard-gates: não gasta tokens Groq — fluxo local basta para o radar.
     if not hard_gates_approved:
-        local['groq_degraded'] = True
-        local['reason'] = 'hard-gates pendentes — fluxo local (economia Groq)'
+        local['reason'] = 'hard-gates pendentes — fluxo local'
         _CACHE[cache_key] = (now, local)
         return _finish(local)
 
-    groq_available = _env_bool('ENABLE_GROQ_FLOW_AI', True) and bool(groq_key) and (not is_groq_in_cooldown())
-    if not groq_available:
-        info = get_groq_cooldown_info()
-        reason = 'desabilitado/sem chave'
-        if info.get('in_cooldown'):
-            reason = f"cooldown {info.get('remaining_secs', 0):.0f}s"
-        _log_flow_degraded_once(f'⚠️ [FLOW] Groq legado indisponível ({reason})')
+    parsed = None
+    if _env_bool('ABACUS_AGENT_ENABLED', True):
+        book_txt = _summarize_order_book(order_book)
+        sig = signals or {}
+        user_payload = (
+            f'Símbolo: {symbol}\n'
+            f'Tendência técnica: {sig.get("trend")}\n'
+            f'Volume ratio: {sig.get("volume_ratio")}\n'
+            f'Sinal institucional: {sig.get("sinal_institucional")}\n'
+            f'{book_txt}\n'
+            f'Agressões recentes: {aggressions_summary or "n/d"}'
+        )
+        parsed = _call_abacus_flow(symbol, user_payload)
 
-    book_txt = _summarize_order_book(order_book)
-    sig = signals or {}
-    user_payload = (
-        f'Símbolo: {symbol}\n'
-        f'Tendência técnica: {sig.get("trend")}\n'
-        f'Volume ratio: {sig.get("volume_ratio")}\n'
-        f'Sinal institucional: {sig.get("sinal_institucional")}\n'
-        f'{book_txt}\n'
-        f'Agressões recentes: {aggressions_summary or "n/d"}'
-    )
-
-    parsed = _call_abacus_flow(symbol, user_payload)
     if parsed:
         parsed['score_fluxo'] = round(
             0.75 * float(parsed['score_fluxo']) + 0.25 * float(local.get('score_fluxo', 0)),
@@ -345,66 +263,31 @@ def analyze_order_book_flow(
         _CACHE[cache_key] = (now, parsed)
         return _finish(parsed)
 
-    # Abacus falhou — Groq legado opcional
-    parsed = None
-    if groq_available:
-        parsed = _call_groq_flow(symbol, user_payload)
-    if parsed:
-        parsed['score_fluxo'] = round(
-            0.75 * float(parsed['score_fluxo']) + 0.25 * float(local.get('score_fluxo', 0)),
-            4,
-        )
-        _log_flow_degraded_once('⚠️ [FLOW] Abacus indisponível — usando fallback Groq')
-        _CACHE[cache_key] = (now, parsed)
-        return _finish(parsed)
-
-    # Groq falhou — tenta Gemini legado opcional
-    gemini_parsed = None
-    if _env_bool('ENABLE_GEMINI_FLOW_FALLBACK', True) and not is_groq_in_cooldown():
-        gemini_parsed = _gemini_flow_fallback(symbol, user_payload)
-    if gemini_parsed:
-        gemini_parsed['score_fluxo'] = round(
-            0.70 * float(gemini_parsed['score_fluxo'])
-            + 0.30 * float(local.get('score_fluxo', 0)),
-            4,
-        )
-        _log_flow_degraded_once(
-            '⚠️ [FLOW] Abacus/Groq indisponíveis — usando Gemini fallback '
-            '(execução continua se hard-gates OK)'
-        )
-        _CACHE[cache_key] = (now, gemini_parsed)
-        return _finish(gemini_parsed)
-
-    # Fallback final: order book local ou sinais técnicos das portas
     fallback = local if order_book else _technical_flow_from_signals(signals)
     _log_flow_degraded_once(
-        f'⚠️ [FLOW] cloud indisponível → fallback {fallback.get("source")} '
-        f'score={fallback.get("score_fluxo"):+.2f} (hard-gates OK)'
+        f'⚠️ [FLOW] Abacus indisponível → fallback {fallback.get("source")} '
+        f'score={fallback.get("score_fluxo"):+.2f} (execução continua)'
     )
     _CACHE[cache_key] = (now, fallback)
     return _finish(fallback)
 
 
 def identify_liquidity_zones(df):
-    """BSL acima de swing highs / SSL abaixo de swing lows."""
     from src.engine.liquidity_smc import identify_liquidity_zones as _zones
     return _zones(df)
 
 
 def detect_liquidity_sweep(df, zones=None):
-    """Pavio longo além do nível + retorno = grab (invalida breakout)."""
     from src.engine.liquidity_smc import detect_liquidity_sweep as _sweep
     return _sweep(df, zones)
 
 
 def detect_fvg_magnets(df):
-    """Fair Value Gaps como zonas ímã de retorno de preço."""
     from src.engine.liquidity_smc import detect_fair_value_gaps
     return detect_fair_value_gaps(df)
 
 
 def enrich_flow_with_liquidity(flow: dict | None, df=None, signals: dict | None = None) -> dict[str, Any]:
-    """Anexa zonas SMC ao JSON de fluxo (Groq ou local) para o dashboard."""
     out = dict(flow or _neutral_flow())
     if df is None:
         return out
@@ -428,6 +311,6 @@ def enrich_flow_with_liquidity(flow: dict | None, df=None, signals: dict | None 
             out['reason'] = liq['sweep_reason']
         if liq.get('sweep_bsl') or liq.get('sweep_ssl'):
             out['alerta_liquidacao'] = True
-    except Exception as err:
-        out['liquidity_log'] = f'liquidez indisponível: {err}'
+    except Exception:
+        pass
     return out

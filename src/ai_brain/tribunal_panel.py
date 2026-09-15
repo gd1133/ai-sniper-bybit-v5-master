@@ -1,7 +1,7 @@
 """
 Tribunal de IAs — painel de evidência para o cliente.
 
-Quatro analistas conversam sobre a entrada (Gemini, Groq, Analista de Dados, Aprendizado),
+Quatro analistas conversam sobre a entrada (Macro IA, Fluxo IA, Analista de Dados, Aprendizado),
 explicam o estudo das velas e estimam assertividade de vitória.
 """
 
@@ -9,12 +9,6 @@ from __future__ import annotations
 
 import os
 from typing import Any
-
-try:
-    from groq import Groq
-except Exception:
-    Groq = None
-
 
 def _env_bool(name: str, default: bool = True) -> bool:
     raw = os.getenv(name)
@@ -118,50 +112,14 @@ def _estimate_assertiveness(
     return round(max(5.0, min(97.0, base)), 1)
 
 
-def _cloud_gemini_comment(symbol: str, side: str, tech_summary: str) -> str | None:
-    key = os.getenv('GEMINI_API_KEY', '').strip()
-    if not key or not _env_bool('ENABLE_AI_TRIBUNAL_CLOUD', True):
-        return None
-    try:
-        from src.intelligence.gemini_client import gemini_generate_content
-        prompt = (
-            f'Você é o analista Gemini do robô Motor Sniper. Em 2 frases curtas em português, '
-            f'explique por que a entrada {side} em {symbol} faz sentido (ou o risco). '
-            f'Dados:\n{tech_summary}\nResponda só o texto, sem JSON.'
-        )
-        result = gemini_generate_content(prompt, purpose='chat', temperature=0.3, max_tokens=180)
-        if not result.get('ok'):
-            return None
-        return (result.get('text') or '').strip()[:320] or None
-    except Exception as exc:
-        print(f'⚠️ [TRIBUNAL] Gemini indisponível: {exc}', flush=True)
-        return None
+def _cloud_macro_comment(symbol: str, side: str, tech_summary: str) -> str | None:
+    """Comentários cloud extras desativados por design (somente Abacus/local)."""
+    return None
 
 
-def _cloud_groq_comment(symbol: str, side: str, tech_summary: str) -> str | None:
-    key = os.getenv('GROQ_API_KEY', '').strip()
-    if not key or Groq is None or not _env_bool('ENABLE_AI_TRIBUNAL_CLOUD', True):
-        return None
-    try:
-        prompt = (
-            f'Você é o analista Groq tático do Motor Sniper. Em 2 frases curtas em português, '
-            f'debata a entrada {side} em {symbol} com foco em timing/volume/risco.\n{tech_summary}'
-        )
-        from src.intelligence.groq_client import groq_chat_completion, log_groq_degraded
-        result = groq_chat_completion(
-            messages=[{'role': 'user', 'content': prompt}],
-            purpose='tribunal',
-            temperature=0.3,
-            max_tokens=180,
-        )
-        if not result.get('ok'):
-            log_groq_degraded('TRIBUNAL', result, symbol=symbol)
-            return None
-        text = (result.get('content') or '').strip()
-        return text[:320] or None
-    except Exception as exc:
-        print(f'⚠️ [TRIBUNAL] Groq indisponível: {exc}', flush=True)
-        return None
+def _cloud_flow_comment(symbol: str, side: str, tech_summary: str) -> str | None:
+    """Comentários cloud extras desativados por design (somente Abacus/local)."""
+    return None
 
 
 def build_ai_tribunal_evidence(
@@ -186,11 +144,11 @@ def build_ai_tribunal_evidence(
     decisao = str(consensus.get('decisao', side) or side).upper()
     side_lbl = _side_label(decisao if decisao in ('BUY', 'SELL', 'COMPRAR', 'VENDER') else side)
 
-    # Garante 4 agentes nomeados (gemini, groq, analyst, learner)
+    # Garante 4 agentes nomeados (macro, flow, analyst, learner)
     by_id = {a.get('id'): a for a in agents_raw if isinstance(a, dict)}
     defaults = [
-        ('gemini', 'Gemini Estratégico', 25, 'Visão macro, notícias e viés institucional'),
-        ('groq', 'Groq Tático', 25, 'Timing, volume e execução rápida'),
+        ('macro', 'Macro IA', 25, 'Visão macro, notícias e viés institucional'),
+        ('flow', 'Fluxo IA', 25, 'Timing, volume e execução rápida'),
         ('analyst', 'Analista de Dados', 30, 'SMC, Fibonacci, SuperTrend e velas'),
         ('learner', 'Aprendizado Neural', 20, 'Memória das entradas anteriores'),
     ]
@@ -225,32 +183,32 @@ def build_ai_tribunal_evidence(
         f"motivo={str(consensus.get('motivo', ''))[:240]}"
     )
 
-    gemini_cloud = _cloud_gemini_comment(symbol, side_lbl, tech_summary)
-    groq_cloud = _cloud_groq_comment(symbol, side_lbl, tech_summary)
-    if gemini_cloud:
-        agents[0]['motivo'] = gemini_cloud
-        agents[0]['provider'] = 'gemini'
-    if groq_cloud:
-        agents[1]['motivo'] = groq_cloud
-        agents[1]['provider'] = 'groq'
+    macro_cloud = _cloud_macro_comment(symbol, side_lbl, tech_summary)
+    flow_cloud = _cloud_flow_comment(symbol, side_lbl, tech_summary)
+    if macro_cloud:
+        agents[0]['motivo'] = macro_cloud
+        agents[0]['provider'] = 'macro_cloud'
+    if flow_cloud:
+        agents[1]['motivo'] = flow_cloud
+        agents[1]['provider'] = 'flow_cloud'
 
     # Diálogo (conversa entre as IAs)
     dialogue = []
-    g, q, a, l = agents[0], agents[1], agents[2], agents[3]
+    m, f, a, l = agents[0], agents[1], agents[2], agents[3]
     dialogue.append({
-        'speaker': 'gemini',
-        'label': g['label'],
+        'speaker': 'macro',
+        'label': m['label'],
         'text': (
-            f"Estou vendo {symbol} para {side_lbl}. {g['motivo'][:180]} "
-            f"Assertividade estimada: {g['assertiveness']}%."
+            f"Estou vendo {symbol} para {side_lbl}. {m['motivo'][:180]} "
+            f"Assertividade estimada: {m['assertiveness']}%."
         ),
     })
     dialogue.append({
-        'speaker': 'groq',
-        'label': q['label'],
+        'speaker': 'flow',
+        'label': f['label'],
         'text': (
-            f"Concordo em debater o timing. {q['motivo'][:160]} "
-            f"Meu score tático: {q['score']}/100."
+            f"Concordo em debater o timing. {f['motivo'][:160]} "
+            f"Meu score tático: {f['score']}/100."
         ),
     })
     dialogue.append({
@@ -316,8 +274,8 @@ def build_ai_tribunal_evidence(
         'assertiveness': overall_assert,
         'threshold': threshold,
         'max_positions': max_positions,
-        'strategic_reason': g['motivo'],
-        'tactical_reason': q['motivo'],
+        'strategic_reason': m['motivo'],
+        'tactical_reason': f['motivo'],
         'local_reason': a['motivo'],
         'learning_reason': l['motivo'],
         'agents': agents,

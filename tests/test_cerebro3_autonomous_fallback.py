@@ -35,7 +35,7 @@ def test_consensus_returns_four_agents_compat():
         },
     )
     assert 'agents' in res
-    assert [a['id'] for a in res['agents']] == ['gemini', 'groq', 'analyst', 'learner']
+    assert [a['id'] for a in res['agents']] == ['macro', 'flow', 'analyst', 'learner']
     assert res.get('autonomous_mode') is False
 
 

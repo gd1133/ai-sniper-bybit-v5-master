@@ -35,8 +35,8 @@ const apiUrl = (path) => {
 };
 
 const AGENT_THEME = {
-  gemini: { accent: 'text-sky-300', border: 'border-sky-500/30', bg: 'bg-sky-500/10', chip: 'GEMINI' },
-  groq: { accent: 'text-orange-300', border: 'border-orange-500/30', bg: 'bg-orange-500/10', chip: 'GROQ' },
+  macro: { accent: 'text-sky-300', border: 'border-sky-500/30', bg: 'bg-sky-500/10', chip: 'MACRO IA' },
+  flow: { accent: 'text-orange-300', border: 'border-orange-500/30', bg: 'bg-orange-500/10', chip: 'FLUXO IA' },
   analyst: { accent: 'text-emerald-300', border: 'border-emerald-500/30', bg: 'bg-emerald-500/10', chip: 'DADOS' },
   learner: { accent: 'text-violet-300', border: 'border-violet-500/30', bg: 'bg-violet-500/10', chip: 'MEMÓRIA' },
   consensus: { accent: 'text-yellow-300', border: 'border-yellow-500/30', bg: 'bg-yellow-500/10', chip: 'VEREDITO' },
@@ -1267,7 +1267,7 @@ const App = () => {
 
             <div className="bg-[#0d0e12] p-10 rounded-[3rem] border border-white/5">
                <h4 className="text-[10px] font-black text-zinc-600 uppercase tracking-[0.5em] mb-4 flex items-center gap-3">
-                  <Search size={14} /> Veredito Institucional (Tribunal Gemini + Groq)
+                  <Search size={14} /> Veredito Institucional (Tribunal Macro IA + Fluxo IA)
                </h4>
                <p className="text-2xl font-medium italic text-zinc-300">"{data.ia2_decision?.motivo || 'Aguardando debate das IAs...'}"</p>
                <div className="mt-6 flex flex-wrap gap-4 text-[10px] font-black uppercase tracking-widest text-zinc-500">
@@ -1320,8 +1320,8 @@ const App = () => {
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
                 {(tribunalAgents.length ? tribunalAgents : [
-                  { id: 'gemini', label: 'Gemini Estratégico', score: 0, weight: 25, action: 'WAIT', motivo: 'Aguardando ciclo do radar...', assertiveness: 0 },
-                  { id: 'groq', label: 'Groq Tático', score: 0, weight: 25, action: 'WAIT', motivo: 'Aguardando ciclo do radar...', assertiveness: 0 },
+                  { id: 'macro', label: 'Macro IA', score: 0, weight: 25, action: 'WAIT', motivo: 'Aguardando ciclo do radar...', assertiveness: 0 },
+                  { id: 'flow', label: 'Fluxo IA', score: 0, weight: 25, action: 'WAIT', motivo: 'Aguardando ciclo do radar...', assertiveness: 0 },
                   { id: 'analyst', label: 'Analista de Dados', score: 0, weight: 30, action: 'WAIT', motivo: 'Aguardando ciclo do radar...', assertiveness: 0 },
                   { id: 'learner', label: 'Aprendizado Neural', score: 0, weight: 20, action: 'WAIT', motivo: 'Aguardando ciclo do radar...', assertiveness: 0, learning_notes: 'Sem histórico ainda' },
                 ]).slice(0, 4).map((agent) => (
@@ -1380,7 +1380,7 @@ const App = () => {
                   <div className="text-[10px] font-black text-zinc-600 uppercase tracking-[0.4em] italic">Raio-X do Tribunal de IAs</div>
                   <h2 className="text-4xl font-black italic uppercase tracking-tighter mt-3">{evidence.symbol || data.symbol || '---'}</h2>
                   <p className="text-zinc-500 text-sm font-bold uppercase tracking-widest mt-2 max-w-3xl leading-relaxed italic">
-                    {data.ia2_decision?.dialogue_preview || data.ia2_decision?.motivo || evidence.strategic_reason || 'O tribunal explica cada entrada com Gemini, Groq, Analista de Dados e Aprendizado Neural.'}
+                    {data.ia2_decision?.dialogue_preview || data.ia2_decision?.motivo || evidence.strategic_reason || 'O tribunal explica cada entrada com Macro IA, Fluxo IA, Analista de Dados e Aprendizado Neural.'}
                   </p>
                 </div>
                 <div className="flex flex-col items-end gap-3">
@@ -1961,12 +1961,12 @@ const App = () => {
 
                   <div className="grid grid-cols-3 gap-3">
                     <div className="bg-black/50 rounded-xl p-3 border border-white/5">
-                      <p className="text-[9px] text-zinc-600 font-black uppercase mb-1">Groq</p>
-                      <p className="text-sm font-bold">{manualEntryAnalysis.ai_analysis?.groq_decision || 'N/A'}</p>
+                      <p className="text-[9px] text-zinc-600 font-black uppercase mb-1">Fluxo IA</p>
+                      <p className="text-sm font-bold">{manualEntryAnalysis.ai_analysis?.flow_decision || 'N/A'}</p>
                     </div>
                     <div className="bg-black/50 rounded-xl p-3 border border-white/5">
-                      <p className="text-[9px] text-zinc-600 font-black uppercase mb-1">Gemini</p>
-                      <p className="text-sm font-bold">{manualEntryAnalysis.ai_analysis?.gemini_decision || 'N/A'}</p>
+                      <p className="text-[9px] text-zinc-600 font-black uppercase mb-1">Macro IA</p>
+                      <p className="text-sm font-bold">{manualEntryAnalysis.ai_analysis?.macro_decision || 'N/A'}</p>
                     </div>
                     <div className="bg-black/50 rounded-xl p-3 border border-white/5">
                       <p className="text-[9px] text-zinc-600 font-black uppercase mb-1">Local</p>

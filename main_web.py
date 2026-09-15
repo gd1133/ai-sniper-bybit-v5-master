@@ -39,7 +39,7 @@ except Exception as e:
 BybitClient = None
 BybitV5HTTP = None
 IndicatorEngine = None
-GroqValidator = None
+AIDecisionValidator = None
 public_price_broker = None
 public_radar_broker = None
 
@@ -734,7 +734,7 @@ central_state = {
     "win_rate": 0.0,  
     "ia2_decision": {
         "motivo": "Varrendo mercado com IA institucional: regime, baleias, notícias e timing...",
-        "brains": {"gemini": "online", "groq": "online", "analyst": "online", "learner": "online"}
+        "brains": {"macro": "online", "flow": "online", "analyst": "online", "learner": "online"}
     },
     "evidence": None,
     "ai_tribunal": None,
@@ -805,7 +805,7 @@ def _preload_runtime_modules():
     partially initialized module" (import parcial/circular) causado pela
     corrida entre a thread do radar e a primeira requisição no cold start.
     """
-    global BybitClient, IndicatorEngine, GroqValidator
+    global BybitClient, IndicatorEngine, AIDecisionValidator
     # OrderCalculator ANTES do BybitClient — desacopla o grafo de imports
     try:
         from src.broker.order_calculator import OrderCalculator as _OC  # noqa: F401
@@ -828,10 +828,10 @@ def _preload_runtime_modules():
     except Exception as e:
         print(f"⚠️ [BOOT] preload IndicatorEngine adiado: {e}", flush=True)
     try:
-        from src.ai_brain.validator import GroqValidator as _GV
-        GroqValidator = _GV
+        from src.ai_brain.validator import AIDecisionValidator as _GV
+        AIDecisionValidator = _GV
     except Exception as e:
-        print(f"⚠️ [BOOT] preload GroqValidator adiado: {e}", flush=True)
+        print(f"⚠️ [BOOT] preload AIDecisionValidator adiado: {e}", flush=True)
     try:
         from src.intelligence.market_intelligence import get_market_intelligence  # noqa: F401
         from src.engine.entry_timing import confirmar_timing_entrada  # noqa: F401
@@ -1625,7 +1625,7 @@ def _build_last_sniper_signal(symbol, side, entry_price, confidence, reason):
 
 def _publish_ai_tribunal_evidence(symbol, side, tech_data, consensus, intel_ctx=None, df=None):
     """
-    Publica os 4 cards do Tribunal (Gemini/Groq/Analista/Aprendizado) no /api/status
+    Publica os 4 cards do Tribunal (Macro IA/Fluxo IA/Analista/Aprendizado) no /api/status
     para o cliente ver por que o robô comprou/vendeu, o estudo das velas e a assertividade.
     """
     try:
@@ -1683,7 +1683,7 @@ def _publish_ai_tribunal_evidence(symbol, side, tech_data, consensus, intel_ctx=
             if mods:
                 by_label = {str(m.get('modulo')): m for m in mods}
                 label_map = {
-                    'groq': 'Groq Tático',
+                    'flow': 'Fluxo IA',
                     'analyst': 'Analista de Dados',
                     'learner': 'Aprendizado Neural',
                 }
@@ -1860,14 +1860,14 @@ def _adaptive_log_entry(symbol, tech_data, intel_ctx=None):
         ml = _get_local_ml()
         sigs = ml._strategy_signals(tech_data or {})
         ml.weights.log_entry(symbol, sigs)
-        # Incremental: pesos por condição + insights Groq/Gemini
+        # Incremental: pesos por condição + insights Macro/Fluxo IA
         try:
             from src.ai_brain.cerebro3_soberano import get_cerebro3_soberano, market_condition_from_signals
             ctx = intel_ctx or {}
             cond = str(ctx.get('condicao_mercado') or market_condition_from_signals(tech_data, ctx))
             insights = {
-                'groq': ctx.get('groq_flow') or ctx.get('order_flow'),
-                'gemini': ctx.get('gemini_macro'),
+                'flow': ctx.get('flow_ai') or ctx.get('order_flow'),
+                'macro': ctx.get('macro_ai'),
             }
             get_cerebro3_soberano().log_entry_with_insights(symbol, sigs, cond, insights)
         except Exception:
@@ -3847,7 +3847,7 @@ def sniper_worker_loop():
     time.sleep(1)
     from src.broker.bybit_client import BybitClient
     from src.engine.indicators import IndicatorEngine
-    from src.ai_brain.validator import GroqValidator
+    from src.ai_brain.validator import AIDecisionValidator
     from src.intelligence.market_intelligence import get_market_intelligence
     from src.engine.entry_timing import confirmar_timing_entrada
     global _FORCED_SIGNAL_FIRED
@@ -3897,7 +3897,7 @@ def sniper_worker_loop():
             radar_broker = _get_public_radar_broker_mainnet()
             top_coins = _refresh_radar_live_from_public_tickers() or []
 
-            validator = GroqValidator()
+            validator = AIDecisionValidator()
             market_intel = get_market_intelligence()
             oportunidades = []
 
@@ -4116,7 +4116,7 @@ def sniper_worker_loop():
                     print(
                         f"   🧠 [TRIPLO CÉREBRO] {clean_sym}: camada incremental ON "
                         f"(C1 Turtle/anatomia · C2 liquidez/FVG · C3 pesos extra) "
-                        f"— não substitui SMA/ST/Portas/VWAP/Groq/Gemini",
+                        f"— não substitui SMA/ST/Portas/VWAP e regras técnicas",
                         flush=True,
                     )
                     try:
@@ -4149,10 +4149,10 @@ def sniper_worker_loop():
                     intel_ctx['gates_advisory'] = hard_gate
                     intel_ctx['order_book'] = order_book
                     intel_ctx['ticker'] = t
-                    if intel_ctx.get('groq_flow_degraded'):
-                        flow_src = (intel_ctx.get('groq_flow') or {}).get('source', 'local')
+                    if intel_ctx.get('ai_flow_degraded'):
+                        flow_src = (intel_ctx.get('flow_ai') or intel_ctx.get('order_flow') or {}).get('source', 'local')
                         print(
-                            f"   ⚠️ [GROQ FLOW] {clean_sym}: API degradada → fallback {flow_src} "
+                            f"   ⚠️ [FLOW IA] {clean_sym}: Abacus indisponível → fallback {flow_src} "
                             f"(portas 1–5 OK — execução continua)",
                             flush=True,
                         )
@@ -4947,7 +4947,7 @@ def _process_client_orders_background(
                             adx_entry=float(signals.get('adx') or 0),
                             volume_ratio=float(signals.get('volume_ratio') or 0),
                         )
-                        # Feedback Loop — log inicial ABERTA (sinais Groq/Gemini/Cérebro 3)
+                        # Feedback Loop — log inicial ABERTA (sinais de IA/Cérebro 3)
                         try:
                             from src.learning.feedback_loop import get_feedback_loop
                             get_feedback_loop().registrar_operacao_aberta(
@@ -5133,7 +5133,7 @@ def add_cliente():
 @app.route('/api/estrategias/pesos', methods=['GET'])
 def api_estrategias_pesos():
     """
-    Pesos das 5 estratégias + módulos evolutivos (Groq/Analista/Neural)
+    Pesos das 5 estratégias + módulos evolutivos (Fluxo/Analista/Neural)
     alimentados pelo Feedback Loop (desbloqueia 0 Amostras no Render).
     """
     try:
@@ -5201,7 +5201,7 @@ def api_decisoes_ia():
 @app.route('/api/tribunal/status', methods=['GET'])
 def api_tribunal_status():
     """
-    Cards do Tribunal de Debate (Groq / Analista / Neural / Gemini)
+    Cards do Tribunal de Debate (Fluxo IA / Analista / Neural / Macro IA)
     lidos do SQLite + snapshot em memória.
     """
     try:
@@ -5471,9 +5471,9 @@ def api_manual_entry_trade():
         pub_broker = _get_public_price_broker()
         entry_price = float(pub_broker.get_last_price(symbol))
         
-        global IndicatorEngine, GroqValidator
+        global IndicatorEngine, AIDecisionValidator
         from src.engine.indicators import IndicatorEngine
-        from src.ai_brain.validator import GroqValidator
+        from src.ai_brain.validator import AIDecisionValidator
 
         df = pub_broker.fetch_ohlcv(symbol, timeframe='15m')
         tech_data = IndicatorEngine(df).get_signals() if df is not None and len(df) >= 200 else {
@@ -5524,7 +5524,7 @@ def api_manual_entry_trade():
                 if not handed_off:
                     _release_signal_slot(symbol)
 
-        ai_result = GroqValidator().consensus_predict(tech_data, symbol, force_local_only=True)
+        ai_result = AIDecisionValidator().consensus_predict(tech_data, symbol, force_local_only=True)
         return jsonify({
             "success": True,
             "analysis_only": True,
