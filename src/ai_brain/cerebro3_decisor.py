@@ -13,6 +13,11 @@ import os
 import re
 from typing import Any
 
+from src.intelligence.abacus_agent_client import (
+    abacus_agent_chat,
+    parse_abacus_agent_json_response,
+)
+
 CEREBRO3_SYSTEM_PROMPT = """Você é um Analista Quantitativo Sênior e Gestor de Risco do Motor Sniper.
 Analise o contexto técnico + sentimento e decida a operação.
 
@@ -125,7 +130,7 @@ def _normalize_decision(raw: dict | None, price: float, *, exit_mode: bool = Fal
         'take_profit_2': round(_f(raw.get('take_profit_2')), 8),
         'invalidation_reason': str(raw.get('invalidation_reason') or ''),
         'rationale': str(raw.get('rationale') or ''),
-        'source': 'llm',
+        'source': str(raw.get('source') or 'llm'),
     }
 
 
@@ -412,6 +417,35 @@ def _local_exit_decision(context: dict[str, Any], position: dict) -> dict[str, A
     }
 
 
+def _messages_to_abacus_text(messages: list[dict]) -> str:
+    parts: list[str] = []
+    for msg in messages or []:
+        role = str(msg.get('role') or 'user').upper()
+        content = str(msg.get('content') or '').strip()
+        if content:
+            parts.append(f'{role}:\n{content}')
+    return '\n\n'.join(parts)
+
+
+def _call_abacus_tribunal(messages: list[dict], purpose: str = 'tribunal') -> dict | None:
+    prompt = _messages_to_abacus_text(messages)
+    if not prompt:
+        return None
+    try:
+        text = abacus_agent_chat(prompt, purpose=f'c3_{purpose}')
+        if not text:
+            return None
+        parsed = parse_abacus_agent_json_response(text)
+        if not parsed:
+            parsed = _parse_decision_json(text)
+        if parsed:
+            parsed['source'] = 'abacus_agent'
+            return parsed
+    except Exception as exc:
+        print(f'⚠️ [C3] Abacus Agent indisponível: {exc}', flush=True)
+    return None
+
+
 def _call_gemini_tribunal(messages: list[dict]) -> dict | None:
     """Fallback Gemini quando Groq falha ou está em rate limit (cadeia v1beta)."""
     if not _env_bool('ENABLE_GEMINI_C3_FALLBACK', True):
@@ -437,16 +471,14 @@ def _call_gemini_tribunal(messages: list[dict]) -> dict | None:
             return None
         parsed = _parse_decision_json(result.get('text') or '')
         if parsed:
-            print(f"⚠️ [C3] Groq indisponível → Gemini ({result.get('model')})", flush=True)
+            print(f"⚠️ [C3] Groq/Abacus indisponível → Gemini ({result.get('model')})", flush=True)
         return parsed
     except Exception as exc:
         print(f'⚠️ [C3] Gemini fallback falhou: {exc}', flush=True)
         return None
 
 
-def _call_llm(messages: list[dict], purpose: str = 'tribunal') -> dict | None:
-    if not _env_bool('ENABLE_CEREBRO3_LLM', True):
-        return None
+def _call_groq_tribunal(messages: list[dict], purpose: str = 'tribunal') -> dict | None:
     try:
         from src.intelligence.groq_client import groq_chat_completion, log_groq_degraded
         result = groq_chat_completion(
@@ -463,7 +495,45 @@ def _call_llm(messages: list[dict], purpose: str = 'tribunal') -> dict | None:
             log_groq_degraded('C3 TRIBUNAL', result)
     except Exception as exc:
         print(f'⚠️ [C3] Groq erro: {exc}', flush=True)
-    return _call_gemini_tribunal(messages)
+    return None
+
+
+def _c3_provider() -> str:
+    value = str(os.getenv('CEREBRO3_PROVIDER', 'abacus') or 'abacus').strip().lower()
+    if value not in {'abacus', 'groq', 'gemini'}:
+        return 'abacus'
+    return value
+
+
+def _call_llm(messages: list[dict], purpose: str = 'tribunal') -> dict | None:
+    if not _env_bool('ENABLE_CEREBRO3_LLM', True):
+        return None
+
+    provider = _c3_provider()
+    use_legacy_fallback = _env_bool('CEREBRO3_LEGACY_FALLBACK', True)
+
+    if provider == 'abacus':
+        primary = _call_abacus_tribunal(messages, purpose=purpose)
+        if primary:
+            return primary
+        if not use_legacy_fallback:
+            return None
+        return _call_groq_tribunal(messages, purpose=purpose) or _call_gemini_tribunal(messages)
+
+    if provider == 'groq':
+        primary = _call_groq_tribunal(messages, purpose=purpose)
+        if primary:
+            return primary
+        if not use_legacy_fallback:
+            return None
+        return _call_gemini_tribunal(messages) or _call_abacus_tribunal(messages, purpose=purpose)
+
+    primary = _call_gemini_tribunal(messages)
+    if primary:
+        return primary
+    if not use_legacy_fallback:
+        return None
+    return _call_groq_tribunal(messages, purpose=purpose) or _call_abacus_tribunal(messages, purpose=purpose)
 
 
 def decide_entry(context: dict[str, Any]) -> dict[str, Any]:

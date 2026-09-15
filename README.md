@@ -60,7 +60,7 @@ Para a documentacao tecnica, operacional e comercial completa, consulte:
 - **Backend:** Python, Flask, SQLite
 - **Frontend:** React, Vite
 - **Trading/mercado:** CCXT / Bybit
-- **IA:** Groq + Gemini + motor local
+- **IA:** Abacus Agent (primario) + Groq/Gemini (fallback opcional) + motor local
 - **Persistencia:** SQLite local em /app/data/database.db
 
 ## Logica estrategica
@@ -214,6 +214,44 @@ Depois do deploy:
 1. Use o dashboard para alternar entre `paper`, `testnet` e `real`
 2. Cadastre clientes com `Conta Testnet` ou `Conta Real`
 3. Configure credenciais individuais por cliente no dashboard
+
+## Agente Abacus "Analista Sniper V5" (primario)
+
+O Cérebro 3 agora pode usar o agente Abacus como provedor principal de decisao, com fallback defensivo para Groq/Gemini (opcional) e fallback local/heuristico sempre ativo.
+
+### 1) Habilitar API metering na conta Abacus
+
+1. Acesse: `https://apps.abacus.ai/chatllm/admin/profile/`
+2. Ative **API metering**.
+3. Gere/obtenha sua chave de API Abacus.
+
+### 2) Variaveis no Render
+
+Cadastre no ambiente (sem versionar segredos):
+
+```env
+CEREBRO3_PROVIDER=abacus
+CEREBRO3_LEGACY_FALLBACK=true
+ABACUS_AGENT_ENABLED=true
+ABACUS_AGENT_API_URL=https://api.abacus.ai/api/v0/getChatResponse
+ABACUS_AGENT_DEPLOYMENT_ID=b85816e70
+ABACUS_AGENT_API_KEY=seu_api_key_abacus
+# opcional
+ABACUS_AGENT_DEPLOYMENT_TOKEN=
+ABACUS_AGENT_TIMEOUT_SECS=30
+ABACUS_AGENT_MAX_RETRIES=2
+ABACUS_AGENT_COOLDOWN_SECS=600
+```
+
+As chaves `GROQ_API_KEY` e `GEMINI_API_KEY` permanecem suportadas como legado/fallback opcional.
+
+### 3) Teste real do agente
+
+```bash
+python scripts/test_abacus_agent.py
+```
+
+Se a resposta vier vazia, normalmente e falta de metering habilitado, chave ausente/invalida ou cooldown temporario apos falhas de API.
 
 ## Como rodar
 
