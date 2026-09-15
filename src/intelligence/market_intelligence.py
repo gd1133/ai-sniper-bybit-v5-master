@@ -14,6 +14,7 @@ from src.intelligence.regime_detector import detect_market_regime
 from src.intelligence.whale_detector import analyze_whale_activity
 from src.intelligence.order_flow_analyzer import analyze_order_book_flow
 from src.intelligence.gemini_macro_analyzer import analyze_gemini_macro_news
+from src.intelligence.abacus_agent_client import abacus_agent_chat, extract_json_block
 from src.ai_brain.cerebro3_soberano import market_condition_from_signals
 
 
@@ -22,6 +23,57 @@ def _env_bool(name: str, default: bool = True) -> bool:
     if raw is None:
         return default
     return str(raw).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _f(v: Any, default: float = 0.0) -> float:
+    try:
+        return float(v if v is not None else default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _abacus_macro_default(reason: str) -> dict[str, Any]:
+    return {
+        'score_sentimento_noticias': 0.0,
+        'impacto_volatilidade': 'BAIXO',
+        'narrativa_dominante': reason,
+        'filtro_noticia_travar_bot': False,
+        'source': 'abacus_disabled',
+        'available': False,
+    }
+
+
+def _call_abacus_macro_news(symbol: str, headlines: list[str], news_blob: str, signals: dict) -> dict[str, Any] | None:
+    prompt = (
+        'Você é o Analista Sniper V5 de macroeconomia e sentimento. '\
+        'Retorne APENAS JSON válido com campos: '\
+        'score_sentimento_noticias (-1..1), impacto_volatilidade (ALTO|MEDIO|BAIXO), '\
+        'narrativa_dominante (string), filtro_noticia_travar_bot (bool).\n\n'
+        f'Símbolo: {symbol}\n'
+        f'Tendência técnica: {signals.get("trend")}\n'
+        f'Regime: {signals.get("market_regime")}\n'
+        f'Manchetes: {headlines[:8]}\n'
+        f'Bloco de notícias: {news_blob[:2200]}\n'
+    )
+    text = abacus_agent_chat(prompt, purpose='macro_news')
+    if not text:
+        return None
+    payload = extract_json_block(text)
+    if not payload:
+        return None
+
+    impacto = str(payload.get('impacto_volatilidade', 'BAIXO') or 'BAIXO').upper()
+    if impacto not in ('ALTO', 'MEDIO', 'BAIXO'):
+        impacto = 'BAIXO'
+
+    return {
+        'score_sentimento_noticias': max(-1.0, min(1.0, _f(payload.get('score_sentimento_noticias')))),
+        'impacto_volatilidade': impacto,
+        'narrativa_dominante': str(payload.get('narrativa_dominante') or 'macro abacus').strip()[:180],
+        'filtro_noticia_travar_bot': bool(payload.get('filtro_noticia_travar_bot', False)),
+        'source': 'abacus_agent',
+        'available': True,
+    }
 
 
 class MarketIntelligence:
@@ -54,14 +106,25 @@ class MarketIntelligence:
         news = analyze_news_sentiment(symbol, signals, regime, whale)
 
         headlines = list(news.get('headlines') or [])
-        # Macro Gemini só se notícias e macro estiverem explicitamente ligados
-        if _env_bool('ENABLE_NEWS_AI', False) and _env_bool('ENABLE_GEMINI_MACRO_AI', False):
-            gemini_macro = analyze_gemini_macro_news(
+        macro_signals = {**signals, 'market_regime': regime.get('market_regime')}
+        macro_blob = str(news.get('reason') or '')
+        # Macro primário: Abacus Agent. Gemini fica legado/opcional.
+        if _env_bool('ENABLE_NEWS_AI', False):
+            gemini_macro = _call_abacus_macro_news(
                 symbol,
-                headlines=headlines,
-                news_blob=str(news.get('reason') or ''),
-                signals={**signals, 'market_regime': regime.get('market_regime')},
+                headlines=[str(h) for h in headlines],
+                news_blob=macro_blob,
+                signals=macro_signals,
             )
+            if not gemini_macro and _env_bool('ENABLE_GEMINI_MACRO_AI', False):
+                gemini_macro = analyze_gemini_macro_news(
+                    symbol,
+                    headlines=headlines,
+                    news_blob=macro_blob,
+                    signals=macro_signals,
+                )
+            if not gemini_macro:
+                gemini_macro = _abacus_macro_default('macro Abacus/Gemini indisponível — pipeline técnico')
         else:
             gemini_macro = {
                 'score_sentimento_noticias': 0.0,
