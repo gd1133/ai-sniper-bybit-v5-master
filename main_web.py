@@ -662,6 +662,16 @@ RISK_MODE = 'aggressive'
 MAX_MOEDAS_ATIVAS = 5
 LEVERAGE = 10  # Alavancagem padrão (deve coincidir com main.py)
 
+# 🎯 MODO DE OPERAÇÃO: FUTUROS (linear/perp) — ganha na COMPRA e na VENDA (short).
+# 'linear' = derivativos/futuros | 'spot' = à vista (só compra).
+# Pode ser sobrescrito no Render via TRADING_MODE=spot, ou por investidor
+# (campo trading_mode do cadastro). Default = linear (futuros/daytrade).
+TRADING_MODE_DEFAULT = str(os.getenv('TRADING_MODE', 'linear') or 'linear').strip().lower()
+if TRADING_MODE_DEFAULT in ('perp', 'perpetual', 'futures', 'swap'):
+    TRADING_MODE_DEFAULT = 'linear'
+if TRADING_MODE_DEFAULT not in ('linear', 'spot'):
+    TRADING_MODE_DEFAULT = 'linear'
+
 # Constantes do Sniper Worker (ajustadas pelo modo de risco)
 SCAN_TOP_COINS = 40
 THRESHOLD_ENTRADA = 36.0
@@ -2123,8 +2133,21 @@ def _make_broker(client):
     use_testnet = endpoint_mode == 'testnet'
     endpoint_url = _endpoint_url_for_mode(endpoint_mode)
     broker_cls = _ensure_broker_class(exchange)
+
+    # 🎯 FUTUROS por padrão: se o investidor não define trading_mode explícito,
+    # aplica o default do sistema (linear/futuros). Assim o robô ganha na compra
+    # E na venda (short), sem depender de coluna nova no banco nem da env do Render.
+    client_mode = str(
+        client.get('trading_mode')
+        or client.get('TRADING_MODE')
+        or client.get('bybit_trading_mode')
+        or ''
+    ).strip().lower()
+    effective_mode = client_mode or TRADING_MODE_DEFAULT
+
     broker = _get_broker_manager().get_broker(
-        {**client, 'exchange': 'bybit'}, broker_cls, use_testnet, endpoint_url=endpoint_url
+        {**client, 'exchange': 'bybit', 'trading_mode': effective_mode},
+        broker_cls, use_testnet, endpoint_url=endpoint_url
     )
     return broker
 
