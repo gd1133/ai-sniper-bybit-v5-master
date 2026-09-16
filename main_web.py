@@ -1318,32 +1318,68 @@ def _radar_symbol_pre_checks(sym, clean_sym, radar_broker):
 
     return True
 
-def _count_live_open_positions():
-    """Conta símbolos únicos com posição aberta na Bybit (fonte de verdade)."""
-    symbols = set()
+def _open_symbols_by_client():
+    """
+    Mapeia {client_id: set(símbolos abertos)} POR investidor ativo (fonte Bybit).
+
+    IMPORTANTE (multi-investidor): cada investidor tem capital e conta próprios,
+    portanto a capacidade de novas entradas é avaliada POR CONTA. Nunca se deve
+    somar/unir as posições de todos os investidores num único limite global —
+    isso fazia com que, ao encher o limite de UM investidor, o motor parasse de
+    abrir sinais para TODOS os outros (bug de execução travada numa conta só).
+    """
+    per_client = {}
     try:
         for cliente in _get_registered_clients(active_only=True):
             client_id = int(cliente.get('id') or 0)
             if _is_training_fake_balance_client(cliente) or _is_client_temporarily_disabled(client_id):
                 continue
-            broker = _make_broker(cliente)
-            if not broker.pybit_session or not broker.authenticated:
-                continue
-            if getattr(broker, 'is_spot_trading', lambda: False)():
-                for h in broker.fetch_spot_holdings():
-                    symbols.add(_normalize_symbol_key(h.get('symbol')))
-                continue
-            rsp = broker.pybit_session.get_positions(category='linear', settleCoin='USDT')
-            ok, _ = broker._handle_v5_ret_code(rsp, 'get_positions')
-            if not ok:
-                continue
-            for pos in (rsp.get('result') or {}).get('list', []):
-                if float(pos.get('size') or 0) > 0:
-                    symbols.add(_normalize_symbol_key(pos.get('symbol')))
-        if symbols:
-            return len(symbols)
+            syms = set()
+            try:
+                broker = _make_broker(cliente)
+                if not broker.pybit_session or not broker.authenticated:
+                    per_client[client_id] = syms
+                    continue
+                if getattr(broker, 'is_spot_trading', lambda: False)():
+                    for h in broker.fetch_spot_holdings():
+                        syms.add(_normalize_symbol_key(h.get('symbol')))
+                else:
+                    rsp = broker.pybit_session.get_positions(category='linear', settleCoin='USDT')
+                    ok, _ = broker._handle_v5_ret_code(rsp, 'get_positions')
+                    if ok:
+                        for pos in (rsp.get('result') or {}).get('list', []):
+                            if float(pos.get('size') or 0) > 0:
+                                syms.add(_normalize_symbol_key(pos.get('symbol')))
+            except Exception as exc:
+                print(f"   ⚠️ [CAP] Falha ao contar posições de {cliente.get('nome')}: {str(exc)[:120]}", flush=True)
+            per_client[client_id] = syms
     except Exception:
         pass
+    return per_client
+
+
+def _any_client_has_capacity():
+    """
+    True se AO MENOS UM investidor ativo ainda pode abrir novas posições
+    (< MAX_MOEDAS_ATIVAS). O gate do worker deve continuar varrendo enquanto
+    qualquer conta tiver espaço — o dispatch por-cliente ignora automaticamente
+    quem já está cheio ou já detém o par.
+    """
+    per_client = _open_symbols_by_client()
+    if not per_client:
+        # Sem dados confiáveis da Bybit → não trava o motor (fail-open controlado).
+        return True
+    return any(len(syms) < MAX_MOEDAS_ATIVAS for syms in per_client.values())
+
+
+def _count_live_open_positions():
+    """Total de símbolos únicos (união de todos investidores) — SOMENTE exibição."""
+    per_client = _open_symbols_by_client()
+    if per_client:
+        union = set()
+        for syms in per_client.values():
+            union |= syms
+        return len(union)
     return len(central_state.get('active_trades') or [])
 
 
@@ -2667,16 +2703,51 @@ def _repair_open_trades():
 def _can_open_new_signal(symbol):
     _repair_open_trades()
     key = _normalize_symbol_key(_canonicalize_symbol(symbol))
-    open_symbols = {_normalize_symbol_key(t.get('pair')) for t in db.get_open_trades(100) if t.get('pair')}
-    # 🔒 TRAVA DE ATIVO ÚNICO: bloqueia se já há entrada em processamento (lock ativo)
+
+    # 🔒 TRAVA DE ATIVO ÚNICO: bloqueia se já há entrada em processamento (lock ativo).
+    # É a única trava GLOBAL legítima — evita dois threads despacharem o MESMO par
+    # ao mesmo tempo. Capacidade/duplicidade de posição é avaliada POR INVESTIDOR.
     if key in SNIPER_SIGNAL_RESERVATIONS:
         return False, "Entrada já em processamento (lock ativo)."
-    if key in open_symbols:
-        return False, "Moeda já ativa."
-    # Considera reservas + posições abertas no limite de ativos simultâneos
-    if len(open_symbols | SNIPER_SIGNAL_RESERVATIONS) >= MAX_MOEDAS_ATIVAS:
-        return False, f"Limite de {MAX_MOEDAS_ATIVAS} ativos atingido."
-    return True, "ok"
+
+    # Agrupa trades abertos POR investidor (não em um pool global). Assim, o
+    # limite de posições de UM investidor nunca bloqueia os demais.
+    open_by_client = {}
+    for t in db.get_open_trades(200):
+        pair = t.get('pair')
+        if not pair:
+            continue
+        cid = int(t.get('client_id') or 0)
+        # Normaliza com a MESMA cadeia da chave de consulta (canonicalize→key)
+        # para evitar falso-negativo de duplicidade (ex.: 'ADA/USDT' vs 'ADA/USDT:USDT').
+        open_by_client.setdefault(cid, set()).add(
+            _normalize_symbol_key(_canonicalize_symbol(pair))
+        )
+
+    active_clients = [
+        c for c in _get_registered_clients(active_only=True)
+        if not _is_training_fake_balance_client(c)
+        and not _is_client_temporarily_disabled(int(c.get('id') or 0))
+    ]
+    if not active_clients:
+        return False, "Sem investidores ativos."
+
+    # Libera o sinal se AO MENOS UM investidor ainda pode abrir este par:
+    #   - não detém o par (evita duplicidade na MESMA conta), e
+    #   - está abaixo do limite de posições simultâneas.
+    for c in active_clients:
+        cid = int(c.get('id') or 0)
+        held = open_by_client.get(cid, set())
+        if key in held:
+            continue  # este investidor já tem o par → tenta o próximo
+        if len(held) >= MAX_MOEDAS_ATIVAS:
+            continue  # este investidor está no limite → tenta o próximo
+        return True, "ok"
+
+    return False, (
+        "Todos os investidores já possuem este par ou atingiram o limite de "
+        f"{MAX_MOEDAS_ATIVAS} posições."
+    )
 
 def _reserve_signal_slot(symbol):
     """Reserva a trava de execução única para o par. Retorna True se reservado."""
@@ -3888,10 +3959,14 @@ def sniper_worker_loop():
             _calcular_pnl_trades()
             _refresh_real_balance_state()
 
-            if _count_live_open_positions() >= MAX_MOEDAS_ATIVAS:
+            # 🔑 CAPACIDADE POR INVESTIDOR: só pausa o radar quando TODOS os
+            # investidores ativos estão no limite. Enquanto qualquer conta tiver
+            # espaço, o motor continua analisando/abrindo sinais (o dispatch
+            # por-cliente ignora quem já está cheio ou já detém o par).
+            if not _any_client_has_capacity():
                 central_state['status'] = (
-                    f"📊 Monitorando {len(central_state.get('active_trades') or []) or _count_live_open_positions()} "
-                    f"posição(ões) — limite {MAX_MOEDAS_ATIVAS}"
+                    f"📊 Todos os investidores no limite de {MAX_MOEDAS_ATIVAS} "
+                    f"posição(ões) — aguardando liberação"
                 )
                 # Mantém RADAR LIVE atualizado mesmo sem abrir novas entradas
                 _refresh_radar_live_from_public_tickers()
