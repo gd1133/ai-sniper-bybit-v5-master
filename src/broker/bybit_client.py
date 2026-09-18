@@ -25,6 +25,14 @@ AUTH_10003_ALERT = (
     "ERRO DE AUTENTICAÇÃO: Verifique se a chave de API é de produção e se o 2FA está ativo na Bybit"
 )
 
+PERM_10005_ALERT = (
+    "🚫 [PERMISSÃO API 10005] A chave da Bybit NÃO tem permissão de DERIVATIVOS/FUTUROS.\n"
+    "   Como resolver na Bybit: API Management → editar a chave → habilitar\n"
+    "   'Contract - Orders & Positions' (Derivativos) e conta 'Unified Trading'.\n"
+    "   Sem essa permissão a Bybit bloqueia ordens linear (futuros) mesmo com a chave válida.\n"
+    "   Depois de habilitar, aguarde alguns minutos e o robô volta a operar futuros."
+)
+
 # Globals para carregamento em Lazy Loading com Thread Safety
 _ccxt_instance = None
 _pd_instance = None
@@ -1605,6 +1613,16 @@ class BybitClient:
             or 'not available to you due to regulatory' in s
         )
 
+    @staticmethod
+    def _is_permission_denied_error(message) -> bool:
+        """ErrCode 10005 — chave sem permissão de derivativos/futuros."""
+        s = str(message or '').lower()
+        return (
+            '10005' in s
+            or 'permission denied' in s
+            or 'check your api key permissions' in s
+        )
+
     def _enable_spot_fallback(self, reason: str) -> None:
         if not getattr(self, '_derivatives_restricted', False):
             print(
@@ -1762,6 +1780,8 @@ class BybitClient:
 
                 if not ok or rsp is None:
                     print(f"❌ [ERRO EXECUÇÃO BYBIT] {error_message or 'sem resposta'}", flush=True)
+                    if self._is_permission_denied_error(error_message):
+                        print(PERM_10005_ALERT, flush=True)
                     if raise_on_error:
                         raise RuntimeError(error_message or 'sem resposta')
                     return None
@@ -1876,6 +1896,8 @@ class BybitClient:
                 print(f"❌ ERRO DA CORRETORA BYBIT (CCXT): {e}", flush=True)
             else:
                 print(f"❌ [ERRO EXECUÇÃO BYBIT] Falha de infraestrutura: {e}", flush=True)
+            if self._is_permission_denied_error(e):
+                print(PERM_10005_ALERT, flush=True)
             if raise_on_error:
                 raise
             return None

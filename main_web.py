@@ -5145,6 +5145,14 @@ def _process_client_orders_background(
             except Exception as client_err:
                 exec_fail += 1
                 print(f"⚠️ [CLIENT ERROR] Falha ao processar ordem para cliente {c.get('nome', 'Unknown')}: {client_err}", flush=True)
+                _ce = str(client_err).lower()
+                if '10005' in _ce or 'permission denied' in _ce or 'check your api key permissions' in _ce:
+                    print(
+                        f"🚫 [PERMISSÃO API 10005] Investidor {c.get('nome', 'Unknown')}: a chave da Bybit "
+                        f"NÃO tem permissão de DERIVATIVOS/FUTUROS. Habilite 'Contract - Orders & Positions' "
+                        f"e conta 'Unified Trading' na API Management da Bybit para operar futuros (compra E venda).",
+                        flush=True,
+                    )
 
         print(
             f"📌 [EXEC SUMMARY] {symbol}: clientes={exec_total} executadas={exec_ok} falhas={exec_fail} sem_execução={max(exec_total - exec_ok - exec_fail, 0)}",
