@@ -18,12 +18,24 @@ def test_normalize_trading_mode_aliases():
 
 def test_resolve_trading_mode_defaults_to_spot():
     assert resolve_trading_mode({'trading_mode': 'spot'}) == 'spot'
-    with patch.dict('os.environ', {'TRADING_MODE': 'linear'}, clear=False):
+    # linear sem ALLOW_DERIVATIVES → spot (gate de segurança Render)
+    with patch.dict('os.environ', {'TRADING_MODE': 'linear', 'ALLOW_DERIVATIVES': 'false'}, clear=False):
+        assert resolve_trading_mode({}) == 'spot'
+    with patch.dict('os.environ', {'TRADING_MODE': 'linear', 'ALLOW_DERIVATIVES': 'true'}, clear=False):
         assert resolve_trading_mode({}) == 'linear'
     with patch.dict('os.environ', {}, clear=False):
         import os
         os.environ.pop('TRADING_MODE', None)
+        os.environ.pop('ALLOW_DERIVATIVES', None)
         assert resolve_trading_mode({}) == 'spot'
+
+
+def test_linear_blocked_without_allow_derivatives():
+    """Mesmo com trading_mode=linear no cliente, sem ALLOW_DERIVATIVES → spot."""
+    with patch.dict('os.environ', {'ALLOW_DERIVATIVES': 'false'}, clear=False):
+        assert resolve_trading_mode({'trading_mode': 'linear'}) == 'spot'
+    with patch.dict('os.environ', {'ALLOW_DERIVATIVES': 'true'}, clear=False):
+        assert resolve_trading_mode({'trading_mode': 'linear'}) == 'linear'
 
 
 def test_regulatory_error_detection():
@@ -70,7 +82,41 @@ def test_linear_payload_has_position_idx():
     assert tp_applied is True
 
 
-def test_execute_market_order_retries_spot_on_10024():
+def test_execute_market_order_aborts_on_10024_when_derivatives_allowed():
+    """Com ALLOW_DERIVATIVES=true, 10024 NÃO converte sessão para spot (preserva shorts)."""
+    client = object.__new__(BybitClient)
+    client.authenticated = True
+    client.trading_mode = 'linear'
+    client._derivatives_restricted = False
+    client.exchange = MagicMock()
+    client._normalize_order_qty = MagicMock(return_value='0.01')
+    client._format_tpsl_prices = MagicMock(return_value=(None, None))
+    client.get_last_price = MagicMock(return_value=100.0)
+    client._handle_v5_ret_code = MagicMock(
+        return_value=(False, 'retCode=10024 regulatory restrictions'),
+    )
+    client.fetch_order_details = MagicMock(return_value={'id': '1', 'price': 100})
+    client._normalize_v5_symbol = lambda s: 'BTCUSDT'
+    client._normalize_v5_side = lambda s: 'Buy'
+    client._enable_spot_fallback = BybitClient._enable_spot_fallback.__get__(client, BybitClient)
+    client.get_order_category = BybitClient.get_order_category.__get__(client, BybitClient)
+    client.is_spot_trading = BybitClient.is_spot_trading.__get__(client, BybitClient)
+    client._build_v5_market_payload = BybitClient._build_v5_market_payload.__get__(client, BybitClient)
+    client._is_regulatory_restriction_error = BybitClient._is_regulatory_restriction_error
+    client._is_position_idx_error = BybitClient._is_position_idx_error
+
+    session = MagicMock()
+    session.place_order.return_value = {'retCode': 10024, 'retMsg': 'regulatory'}
+    client.pybit_session = session
+
+    with patch.dict('os.environ', {'ALLOW_DERIVATIVES': 'true'}, clear=False):
+        result = client.execute_market_order('BTC/USDT', 'buy', 0.01)
+    assert result is None
+    assert client.trading_mode == 'linear'
+    assert client._derivatives_restricted is False
+
+
+def test_execute_market_order_retries_spot_on_10024_without_derivatives():
     client = object.__new__(BybitClient)
     client.authenticated = True
     client.trading_mode = 'linear'
@@ -93,12 +139,18 @@ def test_execute_market_order_retries_spot_on_10024():
     client.is_spot_trading = BybitClient.is_spot_trading.__get__(client, BybitClient)
     client._build_v5_market_payload = BybitClient._build_v5_market_payload.__get__(client, BybitClient)
     client._is_regulatory_restriction_error = BybitClient._is_regulatory_restriction_error
+    client._is_position_idx_error = BybitClient._is_position_idx_error
 
     session = MagicMock()
     session.place_order.return_value = {'retCode': 0, 'result': {'orderId': 'abc'}}
     client.pybit_session = session
 
-    result = client.execute_market_order('BTC/USDT', 'buy', 0.01)
+    # Força category linear no 1º call sem ALLOW_DERIVATIVES no get_order_category:
+    # simulamos linear via patch temporário
+    with patch.object(client, 'get_order_category', return_value='linear'):
+        with patch.dict('os.environ', {'ALLOW_DERIVATIVES': 'false'}, clear=False):
+            # get_order_category patched to linear; allow_derivatives false → spot fallback OK
+            result = client.execute_market_order('BTC/USDT', 'buy', 0.01)
     assert result is not None
     assert client.trading_mode == 'spot'
     assert session.place_order.call_count == 2
@@ -106,7 +158,7 @@ def test_execute_market_order_retries_spot_on_10024():
 
 
 def test_execute_market_order_retries_spot_when_pybit_raises_10024():
-    """Pybit frequentemente levanta Exception em vez de retornar retCode."""
+    """Sem ALLOW_DERIVATIVES, Exception 10024 → fallback spot."""
     client = object.__new__(BybitClient)
     client.authenticated = True
     client.trading_mode = 'linear'
@@ -124,6 +176,7 @@ def test_execute_market_order_retries_spot_when_pybit_raises_10024():
     client.is_spot_trading = BybitClient.is_spot_trading.__get__(client, BybitClient)
     client._build_v5_market_payload = BybitClient._build_v5_market_payload.__get__(client, BybitClient)
     client._is_regulatory_restriction_error = BybitClient._is_regulatory_restriction_error
+    client._is_position_idx_error = BybitClient._is_position_idx_error
 
     session = MagicMock()
     session.place_order.side_effect = [
@@ -135,7 +188,9 @@ def test_execute_market_order_retries_spot_when_pybit_raises_10024():
     ]
     client.pybit_session = session
 
-    result = client.execute_market_order('MAGMA/USDT', 'sell', 0.31)
+    with patch.object(client, 'get_order_category', return_value='linear'):
+        with patch.dict('os.environ', {'ALLOW_DERIVATIVES': 'false'}, clear=False):
+            result = client.execute_market_order('MAGMA/USDT', 'sell', 0.31)
     assert result is not None
     assert client.trading_mode == 'spot'
     assert session.place_order.call_count == 2
@@ -143,6 +198,16 @@ def test_execute_market_order_retries_spot_when_pybit_raises_10024():
     assert spot_kwargs['category'] == 'spot'
     assert 'positionIdx' not in spot_kwargs
     assert 'tpslMode' not in spot_kwargs
+
+
+def test_get_order_category_respects_allow_derivatives():
+    client = object.__new__(BybitClient)
+    client.trading_mode = 'linear'
+    client._derivatives_restricted = False
+    with patch.dict('os.environ', {'ALLOW_DERIVATIVES': 'false'}, clear=False):
+        assert BybitClient.get_order_category(client) == 'spot'
+    with patch.dict('os.environ', {'ALLOW_DERIVATIVES': 'true'}, clear=False):
+        assert BybitClient.get_order_category(client) == 'linear'
 
 
 def test_default_category_is_spot():
@@ -153,18 +218,14 @@ def test_default_category_is_spot():
 
 
 def test_groq_default_models():
-    from src.intelligence.groq_client import DEFAULT_GROQ_MODEL, get_groq_model_chain
+    from src.intelligence.groq_client import DEFAULT_GROQ_MODEL, get_groq_model_chain, groq_chat_completion
 
-    with patch.dict('os.environ', {}, clear=False):
-        for key in ('GROQ_FLOW_MODEL', 'GROQ_MODEL', 'GROQ_FALLBACK_MODELS'):
-            import os
-            os.environ.pop(key, None)
-        chain = get_groq_model_chain('flow')
-    assert chain[0] == 'openai/gpt-oss-120b'
-    assert DEFAULT_GROQ_MODEL == 'openai/gpt-oss-120b'
-    assert 'openai/gpt-oss-20b' in chain
-    assert 'llama3-70b-8192' not in chain
-    assert 'llama-3.3-70b-versatile' not in chain
+    chain = get_groq_model_chain('flow')
+    assert chain[0] == 'local-python'
+    assert DEFAULT_GROQ_MODEL == 'local-python'
+    result = groq_chat_completion(messages=[{'role': 'user', 'content': 'hi'}])
+    assert result.get('ok') is False
+    assert result.get('disabled') is True
 
 
 def test_cautious_gate_advisory_never_blocks():

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import logging
 import os
 import time
 import sys
@@ -9,6 +10,10 @@ import json
 import re
 from decimal import Decimal
 from typing import TYPE_CHECKING
+
+import requests
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from src.broker.order_calculator import OrderCalculator as OrderCalculatorType
@@ -1395,7 +1400,10 @@ class BybitClient:
         """Busca a ficha descritiva completa de uma boleta de mercado executada."""
         try:
             self._apply_rate_limit('fetch_order')
-            params = {'category': category or self.get_order_category()}
+            params = {
+                'category': category or self.get_order_category(),
+                'acknowledged': True,
+            }
             print(f"   🔍 Buscando detalhes da ordem {order_id} para {symbol}...", flush=True)
             order_details = self.exchange.fetch_order(order_id, symbol, params=params)
             print("   ✅ Detalhes da ordem obtidos com sucesso", flush=True)
@@ -1588,8 +1596,11 @@ class BybitClient:
 
     def get_order_category(self) -> str:
         """spot (default) ou linear — após erro 10024 força spot na sessão."""
+        from src.config.trading_mode import allow_derivatives
         mode = str(getattr(self, 'trading_mode', 'spot') or 'spot').strip().lower()
         if getattr(self, '_derivatives_restricted', False) or mode != 'linear':
+            return 'spot'
+        if not allow_derivatives():
             return 'spot'
         return 'linear'
 
@@ -1606,6 +1617,15 @@ class BybitClient:
         )
 
     def _enable_spot_fallback(self, reason: str) -> None:
+        from src.config.trading_mode import allow_derivatives
+        # Conta linear explícita: NÃO muda a sessão para spot (preserva shorts).
+        if allow_derivatives() and str(getattr(self, 'trading_mode', '')).lower() == 'linear':
+            print(
+                f'⚠️ [BYBIT] Restrição regulatória em linear — soft-fail '
+                f'(ALLOW_DERIVATIVES=true, sem fallback sticky spot): {str(reason)[:180]}',
+                flush=True,
+            )
+            return
         if not getattr(self, '_derivatives_restricted', False):
             print(
                 f'♻️ [BYBIT] Erro 10024 / restrição regulatória — fallback SPOT ativo: '
@@ -1614,6 +1634,22 @@ class BybitClient:
             )
         self._derivatives_restricted = True
         self.trading_mode = 'spot'
+
+    @staticmethod
+    def _is_position_idx_error(message) -> bool:
+        s = str(message or '').lower()
+        return any(
+            tok in s
+            for tok in (
+                'position idx',
+                'positionidx',
+                'position index',
+                'position mode',
+                'hedge mode',
+                'one-way',
+                'one way',
+            )
+        )
 
     def _build_v5_market_payload(
         self,
@@ -1662,9 +1698,9 @@ class BybitClient:
         """
         try:
             if not self.authenticated:
+                msg = 'Cliente sem credenciais válidas na exchange.'
+                logger.error("[ERRO BROKER] Ordem abortada: %s", msg)
                 print("[ERRO BROKER] Ordem abortada: chaves ausentes ou inválidas.", flush=True)
-                if raise_on_error:
-                    raise RuntimeError('Cliente sem credenciais válidas na exchange.')
                 return None
 
             normalized_qty = self._normalize_order_qty(symbol, qty, strict_pct_sizing=strict_pct_sizing)
@@ -1714,9 +1750,32 @@ class BybitClient:
                     err_txt = str(place_exc)
                     if cat == 'linear' and self._is_regulatory_restriction_error(err_txt):
                         return None, False, err_txt, False, True
-                    raise
+                    if cat == 'linear' and self._is_position_idx_error(err_txt) and payload.get('positionIdx') != 0:
+                        payload['positionIdx'] = 0
+                        print("   ↩️ [ORDEM] Retry place_order com positionIdx=0 (one-way)", flush=True)
+                        try:
+                            rsp = self.pybit_session.place_order(**payload)
+                        except Exception as retry_exc:
+                            if self._is_regulatory_restriction_error(retry_exc):
+                                return None, False, str(retry_exc), False, True
+                            raise
+                    else:
+                        raise
                 print(f"   📥 Resposta Bybit: {rsp}", flush=True)
                 ok, error_message = self._handle_v5_ret_code(rsp, 'v5/order/create')
+
+                # One-way: retCode de idx inválido → retry positionIdx=0
+                if (
+                    not ok
+                    and cat == 'linear'
+                    and self._is_position_idx_error(error_message)
+                    and payload.get('positionIdx') != 0
+                ):
+                    payload['positionIdx'] = 0
+                    print("   ↩️ [ORDEM] Retry place_order com positionIdx=0 (one-way)", flush=True)
+                    rsp = self.pybit_session.place_order(**payload)
+                    print(f"   📥 Resposta Bybit (idx=0): {rsp}", flush=True)
+                    ok, error_message = self._handle_v5_ret_code(rsp, 'v5/order/create')
 
                 if (
                     not ok
@@ -1753,6 +1812,19 @@ class BybitClient:
                 rsp, ok, error_message, tp_sl_applied, needs_spot = _place_pybit(category)
 
                 if needs_spot:
+                    from src.config.trading_mode import allow_derivatives
+                    if allow_derivatives() and category == 'linear':
+                        # Linear explícito: não converte short em spot sell
+                        logger.error(
+                            "Restrição 10024 em LINEAR com ALLOW_DERIVATIVES — aborta ordem: %s",
+                            error_message,
+                        )
+                        print(
+                            f"❌ [ERRO EXECUÇÃO BYBIT] Conta sem permissão de derivativos "
+                            f"({error_message}). Ordem abortada (modo linear preservado).",
+                            flush=True,
+                        )
+                        return None
                     self._enable_spot_fallback(error_message)
                     category = 'spot'
                     local_tp_sl = bool(tp_price or sl_price)
@@ -1761,9 +1833,9 @@ class BybitClient:
                     rsp, ok, error_message, tp_sl_applied, _ = _place_pybit('spot')
 
                 if not ok or rsp is None:
-                    print(f"❌ [ERRO EXECUÇÃO BYBIT] {error_message or 'sem resposta'}", flush=True)
-                    if raise_on_error:
-                        raise RuntimeError(error_message or 'sem resposta')
+                    err_msg = error_message or 'sem resposta'
+                    logger.error("[ERRO EXECUÇÃO BYBIT] %s", err_msg)
+                    print(f"❌ [ERRO EXECUÇÃO BYBIT] {err_msg}", flush=True)
                     return None
 
                 result = (rsp or {}).get('result') or {}
@@ -1818,7 +1890,20 @@ class BybitClient:
             try:
                 order = self.exchange.create_order(symbol, 'market', side, ccxt_qty, params=params)
             except Exception as ccxt_exc:
-                if category == 'linear' and self._is_regulatory_restriction_error(ccxt_exc):
+                if category == 'linear' and self._is_position_idx_error(ccxt_exc) and params.get('positionIdx') != 0:
+                    params['positionIdx'] = 0
+                    print("   ↩️ [ORDEM CCXT] Retry com positionIdx=0 (one-way)", flush=True)
+                    order = self.exchange.create_order(symbol, 'market', side, ccxt_qty, params=params)
+                elif category == 'linear' and self._is_regulatory_restriction_error(ccxt_exc):
+                    from src.config.trading_mode import allow_derivatives
+                    if allow_derivatives():
+                        logger.error("10024 em LINEAR via CCXT — aborta: %s", ccxt_exc)
+                        print(
+                            f"❌ [ERRO EXECUÇÃO BYBIT] Conta sem permissão de derivativos "
+                            f"({ccxt_exc}). Ordem abortada.",
+                            flush=True,
+                        )
+                        return None
                     self._enable_spot_fallback(str(ccxt_exc))
                     category = 'spot'
                     local_tp_sl = bool(tp_price or sl_price)
@@ -1853,31 +1938,54 @@ class BybitClient:
                     return {**order_details, **ccxt_extra}
 
             return {**order, **ccxt_extra}
-        except Exception as e:
-            # Última chance: qualquer 10024 fora do fluxo acima → spot
+        except (requests.exceptions.RequestException, Exception) as e:
+            # Última chance: 10024 → spot só se NÃO estiver em modo linear com ALLOW_DERIVATIVES
+            from src.config.trading_mode import allow_derivatives
             if (
                 not getattr(self, '_derivatives_restricted', False)
                 and self._is_regulatory_restriction_error(e)
                 and self.get_order_category() == 'linear'
+                and not allow_derivatives()
             ):
                 try:
                     self._enable_spot_fallback(str(e))
                     return self.execute_market_order(
                         symbol, side, qty,
-                        raise_on_error=raise_on_error,
+                        raise_on_error=False,
                         strict_pct_sizing=strict_pct_sizing,
                         tp_price=tp_price,
                         sl_price=sl_price,
                     )
                 except Exception as spot_retry_err:
                     e = spot_retry_err
+            elif (
+                self._is_regulatory_restriction_error(e)
+                and allow_derivatives()
+            ):
+                logger.error("10024 com ALLOW_DERIVATIVES — soft-fail sem spot: %s", e)
+                print(
+                    f"❌ [ERRO EXECUÇÃO BYBIT] Derivativos bloqueados pela corretora: {e}",
+                    flush=True,
+                )
+                return None
             ccxt = _get_ccxt()
-            if isinstance(e, ccxt.BaseError):
+            base_err = getattr(ccxt, 'BaseError', type(None))
+            is_ccxt = isinstance(e, base_err) if base_err is not type(None) else False
+            if is_ccxt:
+                logger.error("ERRO DA CORRETORA BYBIT (CCXT): %s", e, exc_info=True)
                 print(f"❌ ERRO DA CORRETORA BYBIT (CCXT): {e}", flush=True)
+            elif isinstance(e, requests.exceptions.RequestException):
+                logger.error("ERRO DE REDE BYBIT: %s", e, exc_info=True)
+                print(f"❌ [ERRO EXECUÇÃO BYBIT] Falha de rede: {e}", flush=True)
             else:
+                logger.error("ERRO EXECUÇÃO BYBIT: %s", e, exc_info=True)
                 print(f"❌ [ERRO EXECUÇÃO BYBIT] Falha de infraestrutura: {e}", flush=True)
+            # Soft-fail: nunca derruba o worker Render/gunicorn
             if raise_on_error:
-                raise
+                logger.error(
+                    "raise_on_error=True ignorado para preservar processo (soft-fail): %s",
+                    e,
+                )
             return None
 
     def test_connection(self):

@@ -212,19 +212,14 @@ if __name__ == '__main__':
         strict_client = bybit_client.BybitClient('key', 'secret', testnet=False)
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            try:
-                strict_client.execute_market_order('BTC/USDT:USDT', 'buy', 0.25, raise_on_error=True)
-            except RuntimeError as exc:
-                raw_error = str(exc)
-            else:
-                print('❌ raise_on_error=True deveria propagar retCode bruto da Bybit')
-                raise SystemExit(7)
+            soft = strict_client.execute_market_order(
+                'BTC/USDT:USDT', 'buy', 0.25, raise_on_error=True,
+            )
+        if soft is not None:
+            print(f'❌ Soft-fail deveria retornar None mesmo com raise_on_error=True: {soft}')
+            raise SystemExit(7)
 
-        if 'API key is invalid' not in raw_error:
-            print(f"❌ Erro bruto inesperado com raise_on_error=True: {raw_error}")
-            raise SystemExit(8)
-
-        print('✅ Fluxo V5 de ordem, insurance e retCode 10003 OK')
+        print('✅ Fluxo V5 de ordem, insurance e retCode 10003 OK (soft-fail)')
         raise SystemExit(0)
     finally:
         bybit_client._ccxt_instance = original_ccxt

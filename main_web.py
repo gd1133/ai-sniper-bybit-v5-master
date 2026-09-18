@@ -3547,17 +3547,22 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None, client_context
 
         # ── SPOT: entrada = mínimo da moeda (não % × 20x) ───────────────────
         if is_spot:
-            if capital_ref + 1e-9 < min_cost:
+            # Custo real do lote: max(minNotional USDT, minQty × preço).
+            # ETH minQty=0.01 ≈ $25 — muito acima de min_cost=$6.
+            lot_min_notional = max(min_cost, float(min_qty) * last_price) if last_price > 0 else min_cost
+            spendable = capital_ref * 0.98
+            if spendable + 1e-9 < lot_min_notional:
                 print(
-                    f"   🚫 [CALC QTY SPOT] Banca livre ${capital_ref:.2f} < mínimo "
-                    f"${min_cost:.2f} da moeda — aborta entrada",
+                    f"   🚫 [CALC QTY SPOT] USDT livre ${capital_ref:.2f} insuficiente para "
+                    f"lote mínimo ${lot_min_notional:.2f} "
+                    f"(min_cost=${min_cost:.2f}, min_qty={min_qty} @ ${last_price:.4f}) — aborta",
                     flush=True,
                 )
                 return 0.0, 0.0, saldo_atual
 
             qty_from_cost = (min_cost / last_price) if last_price > 0 else min_qty
             qty = quantize_qty_to_step(max(min_qty, qty_from_cost), qty_step, round_up=True)
-            # Teto % da banca, mas NUNCA abaixo do min_cost se a banca cobre o mínimo
+            # Teto % da banca, mas NUNCA abaixo do lot_min se a banca cobre
             try:
                 spot_cap_pct = float(os.getenv('SPOT_MAX_ENTRY_PCT', '35') or 35)
                 if spot_cap_pct > 1:
@@ -3565,31 +3570,46 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None, client_context
             except (TypeError, ValueError):
                 spot_cap_pct = 0.35
             max_notional = capital_ref * max(0.05, min(1.0, spot_cap_pct))
-            # Piso: se há saldo para o mínimo da exchange, o teto não pode forçar abaixo
-            max_notional = max(max_notional, min_cost)
-            # Não gastar mais que ~98% do USDT livre (pó de poeira)
-            max_notional = min(max_notional, capital_ref * 0.98)
+            max_notional = max(max_notional, lot_min_notional)
+            max_notional = min(max_notional, spendable)
 
             notional = qty * last_price
-            if notional > max_notional and last_price > 0:
-                qty = quantize_qty_to_step(max_notional / last_price, qty_step, round_up=False)
+            if notional > max_notional + 1e-9 and last_price > 0:
+                # Não usa round_down com “mínimo 1 step” — isso forçava 0.01 ETH ($25) de novo
+                raw = max_notional / last_price
+                qty_cap = quantize_qty_to_step(raw, qty_step, round_up=False)
+                if qty_cap < min_qty or (qty_cap * last_price) + 1e-9 < min_cost:
+                    print(
+                        f"   🚫 [CALC QTY SPOT] Após teto ${max_notional:.2f} não dá para "
+                        f"respeitar lote mínimo ${lot_min_notional:.2f} — aborta "
+                        f"(livre=${capital_ref:.2f})",
+                        flush=True,
+                    )
+                    return 0.0, 0.0, saldo_atual
+                qty = qty_cap
 
-            # Guarda final: nocional >= min_cost (senão bump round_up)
+            # Guarda: nocional >= min_cost e <= spendable
             if last_price > 0 and (qty * last_price) + 1e-9 < min_cost:
                 qty = quantize_qty_to_step(min_cost / last_price, qty_step, round_up=True)
 
             margem = round(qty * last_price, 4)
-            if margem + 1e-9 < min_cost or margem > capital_ref + 1e-6:
+            if (
+                margem + 1e-9 < min_cost
+                or margem > spendable + 1e-6
+                or qty + 1e-12 < min_qty
+            ):
                 print(
-                    f"   🚫 [CALC QTY SPOT] Após step: nocional=${margem:.2f} inválido "
-                    f"(min=${min_cost:.2f}, livre=${capital_ref:.2f})",
+                    f"   🚫 [CALC QTY SPOT] Após step: nocional=${margem:.2f} / qty={qty} inválido "
+                    f"(min=${min_cost:.2f}, lote_min=${lot_min_notional:.2f}, "
+                    f"livre=${capital_ref:.2f})",
                     flush=True,
                 )
                 return 0.0, 0.0, saldo_atual
 
             print(
                 f"   ⚡ [CALC QTY SPOT] Mínimo exchange: qty={qty} nocional=${margem:.2f} "
-                f"(min_cost=${min_cost:.2f}, step={qty_step}, teto=${max_notional:.2f})",
+                f"(min_cost=${min_cost:.2f}, lote_min=${lot_min_notional:.2f}, "
+                f"step={qty_step}, teto=${max_notional:.2f})",
                 flush=True,
             )
             try:
@@ -4648,6 +4668,19 @@ def _process_client_orders_background(
                 except Exception as dup_err:
                     print(f"   ⚠️ [ANTI-DUP] Falha ao verificar posição de {symbol}: {dup_err}", flush=True)
 
+                # Short/venda só faz sentido em LINEAR (perp). Spot sell = dump de inventário.
+                side_l = str(side or '').strip().lower()
+                if (
+                    getattr(broker, 'is_spot_trading', lambda: False)()
+                    and side_l in ('sell', 'short', 'vender')
+                ):
+                    print(
+                        f"   🚫 [EXEC] {c.get('nome')} {symbol}: SELL/SHORT bloqueado em SPOT "
+                        f"(configure TRADING_MODE=linear + ALLOW_DERIVATIVES=true)",
+                        flush=True,
+                    )
+                    continue
+
                 # 🔒 MARGEM ISOLADA + ALAVANCAGEM 20x (somente linear/perp)
                 if not getattr(broker, 'is_spot_trading', lambda: False)():
                     try:
@@ -4777,7 +4810,7 @@ def _process_client_orders_background(
                 # Linear: strict=True preserva o % da banca sem inflar qty.
                 _strict_pct = not bool(getattr(broker, 'is_spot_trading', lambda: False)())
                 order_result = broker.execute_market_order(
-                    symbol, side.lower(), qty, raise_on_error=True, strict_pct_sizing=_strict_pct,
+                    symbol, side.lower(), qty, raise_on_error=False, strict_pct_sizing=_strict_pct,
                     tp_price=tp_price, sl_price=sl_price,
                 )
                 if order_result:
@@ -4830,17 +4863,20 @@ def _process_client_orders_background(
                             print(f"   ⚠️ [FEEDBACK LOOP] ABERTA não registrada: {fb_open_err}", flush=True)
 
                         # Sempre aplica set_trading_stop DEPOIS do fill — é o que desenha TP/SL no gráfico.
-                        print("   🎯 [TP/SL] Aplicando takeProfit/stopLoss via set_trading_stop (gráfico Bybit)…", flush=True)
-                        time.sleep(0.45)
-                        tp_ok = broker.set_tp_sl_sniper(
-                            symbol, side.lower(), entry_price, qty,
-                            leverage=ALAVANCAGEM, tp_price=tp_price, sl_price=sl_price,
-                            signals=signals,
-                        )
-                        if tp_ok:
-                            print("   ✅ [TP/SL] takeProfit + stopLoss confirmados na posição.", flush=True)
-                        else:
-                            print("   ❌ [TP/SL] set_trading_stop falhou — veja retCode/retMsg acima.", flush=True)
+                        try:
+                            print("   🎯 [TP/SL] Aplicando takeProfit/stopLoss via set_trading_stop (gráfico Bybit)…", flush=True)
+                            time.sleep(0.45)
+                            tp_ok = broker.set_tp_sl_sniper(
+                                symbol, side.lower(), entry_price, qty,
+                                leverage=ALAVANCAGEM, tp_price=tp_price, sl_price=sl_price,
+                                signals=signals,
+                            )
+                            if tp_ok:
+                                print("   ✅ [TP/SL] takeProfit + stopLoss confirmados na posição.", flush=True)
+                            else:
+                                print("   ❌ [TP/SL] set_trading_stop falhou — veja retCode/retMsg acima.", flush=True)
+                        except Exception as tp_sl_err:
+                            print(f"   ⚠️ [TP/SL] Exceção pós-fill (ordem já enviada): {tp_sl_err}", flush=True)
 
                         # 2. DEPURAÇÃO ATIVA + 3. HIGIENIZAÇÃO DE ENVIO
                         if client_tk and client_chat:

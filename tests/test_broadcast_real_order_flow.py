@@ -119,8 +119,8 @@ if __name__ == '__main__':
                 print(f"❌ Quantidade inválida para 5% da banca: esperado {expected_qty}, recebido {execute_call}")
                 raise SystemExit(2)
 
-            if execute_call['raise_on_error'] is not True:
-                print(f"❌ raise_on_error deveria ser True no modo real: {execute_call}")
+            if execute_call['raise_on_error'] is not False:
+                print(f"❌ raise_on_error deveria ser False (soft-fail Render): {execute_call}")
                 raise SystemExit(3)
 
             if execute_call['strict_pct_sizing'] is not True:

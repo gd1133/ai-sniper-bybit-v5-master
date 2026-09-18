@@ -8,6 +8,22 @@ services:
         value: development
       - key: TRADING_MODE
         value: linear
+      - key: ALLOW_DERIVATIVES
+        value: "true"
+      - key: ENABLE_CEREBRO3_LLM
+        value: "false"
+      - key: ENABLE_GROQ_FLOW_AI
+        value: "false"
+      - key: ENABLE_GEMINI_C3_FALLBACK
+        value: "false"
+      - key: ENABLE_GEMINI_FLOW_FALLBACK
+        value: "false"
+      - key: ENABLE_GEMINI_MACRO_AI
+        value: "false"
+      - key: ENABLE_NEWS_AI
+        value: "false"
+      - key: ENABLE_AI_TRIBUNAL_CLOUD
+        value: "false"
       - key: SQLITE_DB_PATH
         value: ./data/database.db
       - key: LATERAL_AMPLITUDE_PERIODS

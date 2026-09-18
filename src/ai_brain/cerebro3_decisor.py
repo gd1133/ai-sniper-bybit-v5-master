@@ -445,42 +445,13 @@ def _call_gemini_tribunal(messages: list[dict]) -> dict | None:
 
 
 def _call_llm(messages: list[dict], purpose: str = 'tribunal') -> dict | None:
-    if not _env_bool('ENABLE_CEREBRO3_LLM', True):
-        return None
-    try:
-        from src.intelligence.groq_client import groq_chat_completion, log_groq_degraded
-        result = groq_chat_completion(
-            messages=messages,
-            purpose=purpose,
-            temperature=0.15,
-            max_tokens=int(os.getenv('CEREBRO3_MAX_TOKENS', '320') or 320),
-        )
-        if result.get('ok'):
-            parsed = _parse_decision_json(result.get('content') or '')
-            if parsed:
-                return parsed
-        elif not result.get('cooldown'):
-            log_groq_degraded('C3 TRIBUNAL', result)
-    except Exception as exc:
-        print(f'⚠️ [C3] Groq erro: {exc}', flush=True)
-    return _call_gemini_tribunal(messages)
+    """LLM cloud desabilitado no hot path — C3 quantitativo local apenas."""
+    return None
 
 
 def decide_entry(context: dict[str, Any]) -> dict[str, Any]:
-    """Decisão principal de entrada — Cérebro 3."""
-    price = _f(context.get('price'))
-    payload_txt = json.dumps(context, ensure_ascii=False, default=str)[:6000]
-    user_msg = f'Contexto de mercado:\n{payload_txt}\n\nDecida BUY/SELL/HOLD com gestão de risco.'
-
-    raw = _call_llm([
-        {'role': 'system', 'content': CEREBRO3_SYSTEM_PROMPT},
-        {'role': 'user', 'content': user_msg},
-    ], purpose='tribunal')
-
-    if raw:
-        decision = _normalize_decision(raw, price, exit_mode=False)
-    else:
-        decision = _local_entry_decision(context)
+    """Decisão principal de entrada — Cérebro 3 quantitativo local (sem LLM cloud)."""
+    decision = _local_entry_decision(context)
 
     decision['probabilidade'] = round(decision['confidence'] * 100, 2)
     if decision['action'] == 'BUY':
@@ -493,29 +464,8 @@ def decide_entry(context: dict[str, Any]) -> dict[str, Any]:
 
 
 def evaluate_exit(context: dict[str, Any], position: dict) -> dict[str, Any]:
-    """Avaliação ativa de posição aberta."""
+    """Avaliação ativa de posição aberta — C3 local (sem LLM cloud)."""
     position = position or {}
-    payload = {
-        'context': context,
-        'position': {
-            'side': position.get('side'),
-            'entry_price': position.get('entry_price'),
-            'mark_price': position.get('mark_price'),
-            'roi_pct': position.get('roi_pct'),
-            'age_secs': position.get('age_secs'),
-            'trailing_armed': position.get('trailing_armed'),
-        },
-    }
-    user_msg = json.dumps(payload, ensure_ascii=False, default=str)[:5000]
-
-    raw = _call_llm([
-        {'role': 'system', 'content': CEREBRO3_EXIT_PROMPT},
-        {'role': 'user', 'content': user_msg},
-    ], purpose='tribunal')
-
-    price = _f(position.get('mark_price') or context.get('price'))
-    if raw:
-        return _normalize_decision(raw, price, exit_mode=True)
     return _local_exit_decision(context, position)
 
 

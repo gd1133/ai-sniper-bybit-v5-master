@@ -189,10 +189,10 @@ def build_ai_tribunal_evidence(
     # Garante 4 agentes nomeados (gemini, groq, analyst, learner)
     by_id = {a.get('id'): a for a in agents_raw if isinstance(a, dict)}
     defaults = [
-        ('gemini', 'Gemini Estratégico', 25, 'Visão macro, notícias e viés institucional'),
-        ('groq', 'Groq Tático', 25, 'Timing, volume e execução rápida'),
-        ('analyst', 'Analista de Dados', 30, 'SMC, Fibonacci, SuperTrend e velas'),
-        ('learner', 'Aprendizado Neural', 20, 'Memória das entradas anteriores'),
+        ('gemini', 'Cérebro 1 Tendência', 25, 'Candles, SuperTrend e estrutura'),
+        ('groq', 'Cérebro 2 Fluxo', 25, 'Order book, volume e timing local'),
+        ('analyst', 'Analista Quantitativo', 30, 'SMC, Fibonacci, SuperTrend e velas'),
+        ('learner', 'Aprendizado Local', 20, 'Memória das entradas anteriores'),
     ]
     agents = []
     for aid, label, weight, role in defaults:

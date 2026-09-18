@@ -1,40 +1,23 @@
 # -*- coding: utf-8 -*-
-"""Cadeia Gemini v1beta — evita 404 em cascata."""
+"""Gemini cloud removido — stubs locais."""
 
-from __future__ import annotations
-
-import os
-from unittest.mock import MagicMock, patch
+from src.intelligence.gemini_client import (
+    DEFAULT_GEMINI_MODEL,
+    gemini_generate_content,
+    get_gemini_api_key,
+    get_gemini_model_chain,
+)
 
 
 def test_gemini_model_chain_defaults():
-    from src.intelligence.gemini_client import DEFAULT_GEMINI_MODEL, get_gemini_model_chain
-
-    with patch.dict(os.environ, {}, clear=False):
-        for key in (
-            'GEMINI_CHAT_MODEL', 'GEMINI_FLOW_MODEL',
-            'GEMINI_MACRO_MODEL', 'GEMINI_C3_MODEL',
-        ):
-            os.environ.pop(key, None)
-        chain = get_gemini_model_chain('chat')
-    assert chain[0] == DEFAULT_GEMINI_MODEL
-    assert chain[0] == 'gemini-2.0-flash'
-    assert 'gemini-1.5-flash' in chain
+    chain = get_gemini_model_chain('chat')
+    assert chain[0] == 'local-python'
+    assert DEFAULT_GEMINI_MODEL == 'local-python'
+    assert get_gemini_api_key() == ''
 
 
-def test_gemini_404_falls_through_to_next_model():
-    from src.intelligence.gemini_client import gemini_generate_content
-
-    rsp_404 = MagicMock(status_code=404)
-    rsp_ok = MagicMock(status_code=200)
-    rsp_ok.json.return_value = {
-        'candidates': [{'content': {'parts': [{'text': 'ok'}]}}],
-    }
-
-    with patch.dict(os.environ, {'GEMINI_API_KEY': 'test-key'}):
-        with patch('src.intelligence.gemini_client.requests.post', side_effect=[rsp_404, rsp_ok]) as mock_post:
-            result = gemini_generate_content('hello', purpose='chat')
-    assert result['ok'] is True
-    assert result['text'] == 'ok'
-    assert result['model'] == 'gemini-1.5-flash'
-    assert mock_post.call_count == 2
+def test_gemini_generate_content_disabled():
+    result = gemini_generate_content('hello', purpose='flow')
+    assert result.get('ok') is False
+    assert result.get('disabled') is True
+    assert 'local' in str(result.get('error') or '').lower() or 'removido' in str(result.get('error') or '').lower()

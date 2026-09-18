@@ -272,10 +272,17 @@ def analyze_order_book_flow(
             out['reason'] = f"hard-gates OK — {out.get('reason', tech.get('reason', ''))}"
         return out
 
-    if not _env_bool('ENABLE_GROQ_FLOW_AI', True):
+    # Hot path: sempre fluxo local (Groq/Gemini removidos).
+    local = _local_flow_from_book(order_book, signals)
+    local['groq_degraded'] = False
+    local['reason'] = 'fluxo local Python (cloud LLM removido)'
+    return _finish(local)
+
+    # Código cloud abaixo mantido inalcançável por compatibilidade de testes legados.
+    if False and not _env_bool('ENABLE_GROQ_FLOW_AI', False):
         local = _local_flow_from_book(order_book, signals)
         local['groq_degraded'] = True
-        local['reason'] = 'ENABLE_GROQ_FLOW_AI=false — fluxo local'
+        local['reason'] = 'fluxo local (LLM cloud desligado no hot path)'
         return _finish(local)
 
     cache_key = f"{symbol}:{bool(order_book)}"
