@@ -14,6 +14,8 @@ def test_auth_error_helpers_and_33004_in_source():
     assert '_handle_bybit_auth_failure' in MAIN_WEB
     assert '_mark_client_auth_error' in MAIN_WEB
     assert '33004' in MAIN_WEB
+    assert '10005' in MAIN_WEB
+    assert '_is_bybit_permission_denied_10005' in MAIN_WEB
     assert 'erro_autenticacao' in MAIN_WEB
 
 

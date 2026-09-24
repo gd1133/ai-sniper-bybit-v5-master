@@ -55,7 +55,7 @@ _CLIENT_AUTH_LOCK = threading.Lock()
 _CLIENT_AUTH_COOLDOWN_SECONDS = 10 * 60  # 10 min
 
 def _extract_bybit_ret_code_from_error(error):
-    """Extrai retCode (ex.: 10003) de exceções CCXT/Pybit ou mensagens logadas."""
+    """Extrai retCode (ex.: 10003/10005) de exceções CCXT/Pybit ou mensagens logadas."""
     try:
         for attr in ('error_code', 'code', 'retCode'):
             code = getattr(error, attr, None)
@@ -64,13 +64,36 @@ def _extract_bybit_ret_code_from_error(error):
     except Exception:
         pass
     text = str(error or '')
-    match = re.search(r'retCode\\s*["\\\']?\\s*[:=]\\s*(\\d+)', text)
+    match = re.search(r'retCode\s*["\']?\s*[:=]\s*(\d+)', text)
     if match:
         return match.group(1)
-    match = re.search(r'retCode=(\\d+)', text)
+    match = re.search(r'retCode=(\d+)', text)
+    if match:
+        return match.group(1)
+    match = re.search(r'ErrCode:\s*(\d+)', text, re.IGNORECASE)
     if match:
         return match.group(1)
     return None
+
+
+def _is_bybit_permission_denied_10005(err) -> bool:
+    """Bybit ErrCode 10005 — Permission denied (Trade/IP)."""
+    text = str(err or '')
+    lower = text.lower()
+    if '10005' in text or 'errcode: 10005' in lower:
+        return True
+    if 'permission denied' in lower and 'api key' in lower:
+        return True
+    return False
+
+
+MSG_10005_OPS = (
+    "API Key sem permissão de Trade (Derivatives) ou IP não autorizado. "
+    "Na Bybit → API Management: (1) desative Read-Only; "
+    "(2) ative Contract Trade (Order + Position); "
+    "(3) se houver IP bind, adicione o IP de saída do Render; "
+    "(4) use chave mainnet; (5) atualize Key/Secret no painel e salve o investidor."
+)
 
 def _is_client_temporarily_disabled(client_id):
     if not client_id:
@@ -139,22 +162,26 @@ def _handle_invalid_api_key_10003_for_client(client, source_label='bybit'):
 
 
 def _is_bybit_auth_error(err) -> bool:
-    """Detecta 10003 / 33004 / chave expirada ou inválida."""
+    """Detecta 10003 / 10005 / 33004 / chave expirada, inválida ou sem permissão."""
     text = str(err or '').upper()
     if not text:
         return False
     markers = (
         '33004',
         '10003',
+        '10005',
         'API KEY HAS EXPIRED',
         'API KEY IS INVALID',
         'INVALID API KEY',
         'API_KEY_EXPIRED',
         'PERMISSION DENIED',
+        'ERRCODE: 10005',
         'RETCODE=33004',
         'RETCODE=10003',
+        'RETCODE=10005',
         '"RETCODE":33004',
         '"RETCODE":10003',
+        '"RETCODE":10005',
     )
     return any(m in text for m in markers)
 
@@ -217,17 +244,30 @@ def _mark_client_auth_error(client, reason: str = '', status: str = 'erro_autent
         f"→ status={status} (ignorado nos próximos ciclos)",
         flush=True,
     )
-    _push_user_alert(
-        'api_expirada',
-        f'API Bybit expirada — {nome}',
-        (
-            f'A chave API da conta "{nome}" expirou ou foi rejeitada pela Bybit '
-            f'(erro 33004/10003). Crie uma nova API em Bybit → API Management, '
-            f'atualize Key/Secret no painel e salve o investidor de novo.'
-        ),
-        client_id=client_id,
-        nome=nome,
-    )
+    is_10005 = _is_bybit_permission_denied_10005(reason) or '10005' in str(reason or '')
+    if is_10005:
+        _push_user_alert(
+            'api_permissao',
+            f'API Bybit sem Trade — {nome}',
+            (
+                f'A chave API da conta "{nome}" foi rejeitada (erro 10005). '
+                f'{MSG_10005_OPS}'
+            ),
+            client_id=client_id,
+            nome=nome,
+        )
+    else:
+        _push_user_alert(
+            'api_expirada',
+            f'API Bybit expirada — {nome}',
+            (
+                f'A chave API da conta "{nome}" expirou ou foi rejeitada pela Bybit '
+                f'(erro 33004/10003). Crie uma nova API em Bybit → API Management, '
+                f'atualize Key/Secret no painel e salve o investidor de novo.'
+            ),
+            client_id=client_id,
+            nome=nome,
+        )
     try:
         if hasattr(db, 'set_client_status') and db.set_client_status(client_id, status):
             try:
@@ -250,12 +290,17 @@ def _mark_client_auth_error(client, reason: str = '', status: str = 'erro_autent
 
 
 def _handle_bybit_auth_failure(client, err, source_label='bybit'):
-    """Cooldowna 10003/33004: desativa conta no DB e no runtime (sem spam)."""
+    """Cooldowna 10003/10005/33004: desativa conta no DB e no runtime (sem spam)."""
     if not _is_bybit_auth_error(err):
         return False
-    code = _extract_bybit_ret_code_from_error(err) or (
-        '33004' if '33004' in str(err) else '10003'
-    )
+    code = _extract_bybit_ret_code_from_error(err)
+    if not code:
+        if _is_bybit_permission_denied_10005(err):
+            code = '10005'
+        elif '33004' in str(err):
+            code = '33004'
+        else:
+            code = '10003'
     _disable_client_temporarily(
         client,
         reason=f"bybit retCode={code} detectado em {source_label}",
@@ -2726,7 +2771,7 @@ def _monitor_financial_stop_loss():
                             ok, err = broker._handle_v5_ret_code(positions_response, 'get_positions')
 
                             if not ok:
-                                if _is_bybit_auth_error(err) or str(_extract_bybit_ret_code_from_error(err)) in ('10003', '33004'):
+                                if _is_bybit_auth_error(err) or str(_extract_bybit_ret_code_from_error(err)) in ('10003', '10005', '33004'):
                                     _handle_bybit_auth_failure(cliente, err, source_label='MONITOR FINANCEIRO:get_positions')
                                 continue
 
@@ -4756,11 +4801,33 @@ def _process_client_orders_background(
                             sellLeverage=leverage_str
                         )
                         ok, err = broker._handle_v5_ret_code(rsp_leverage, 'set_leverage')
-                        if ok or 'leverage not modified' in err.lower():
+                        if ok or 'leverage not modified' in (err or '').lower():
                             print(f"   ✅ [LEVERAGE] {v5_symbol} configurado para {ALAVANCAGEM}x", flush=True)
+                        elif _is_bybit_permission_denied_10005(err) or str(
+                            _extract_bybit_ret_code_from_error(err) or ''
+                        ) == '10005':
+                            print(
+                                f"   ❌ [LEVERAGE] Permission denied (10005) — "
+                                f"ordem abortada para {c.get('nome')}: {MSG_10005_OPS}",
+                                flush=True,
+                            )
+                            _handle_bybit_auth_failure(
+                                c, err or '10005', source_label='set_leverage'
+                            )
+                            continue
                         else:
                             print(f"   ⚠️ [LEVERAGE] Aviso ao definir alavancagem: {err}", flush=True)
                     except Exception as lev_err:
+                        if _is_bybit_permission_denied_10005(lev_err) or _is_bybit_auth_error(lev_err):
+                            print(
+                                f"   ❌ [LEVERAGE] Erro de permissão/auth — "
+                                f"ordem abortada para {c.get('nome')}: {lev_err}",
+                                flush=True,
+                            )
+                            _handle_bybit_auth_failure(
+                                c, lev_err, source_label='set_leverage'
+                            )
+                            continue
                         print(f"   ⚠️ [LEVERAGE] Erro ao configurar para {ALAVANCAGEM}x: {lev_err}", flush=True)
 
                 # 🎯 SL/TP: prioriza C3 soberano; fallback Turtle/Fib
@@ -4904,8 +4971,31 @@ def _process_client_orders_background(
                                 print(f"✅ [TELEGRAM] Notificação enviada com sucesso para {c.get('nome')} (chat_id: {clean_chat})", flush=True)
                             except Exception as tg_err:
                                 print(f"❌ [TELEGRAM ERROR] Falha ao enviar notificação para {c.get('nome')}: {tg_err}", flush=True)
+                else:
+                    auth_hint = (
+                        getattr(broker, 'last_auth_error_message', None)
+                        or getattr(broker, 'last_auth_error_code', None)
+                        or ''
+                    )
+                    if (
+                        str(getattr(broker, 'last_auth_error_code', '') or '') == '10005'
+                        or _is_bybit_permission_denied_10005(auth_hint)
+                        or _is_bybit_auth_error(auth_hint)
+                    ):
+                        print(
+                            f"   ❌ [ORDEM] Auth/permissão para {c.get('nome')}: "
+                            f"{auth_hint or MSG_10005_OPS}",
+                            flush=True,
+                        )
+                        _handle_bybit_auth_failure(
+                            c,
+                            auth_hint or '10005 Permission denied',
+                            source_label='execute_market_order',
+                        )
             except Exception as client_err:
                 print(f"⚠️ [CLIENT ERROR] Falha ao processar ordem para cliente {c.get('nome', 'Unknown')}: {client_err}", flush=True)
+                if _is_bybit_auth_error(client_err) or _is_bybit_permission_denied_10005(client_err):
+                    _handle_bybit_auth_failure(c, client_err, source_label='process_client_order')
     except Exception as general_err:
         print(f"❌ [PROCESS ERROR] Erro geral no processamento de ordens: {general_err}", flush=True)
     finally:

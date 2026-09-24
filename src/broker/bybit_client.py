@@ -30,6 +30,16 @@ AUTH_10003_ALERT = (
     "ERRO DE AUTENTICAÇÃO: Verifique se a chave de API é de produção e se o 2FA está ativo na Bybit"
 )
 
+# ErrCode 10005 — chave sem Trade/Contracts ou IP fora da whitelist (ex.: Render).
+AUTH_10005_MSG = (
+    "API Key sem permissão de Trade (Derivatives) ou IP não autorizado. "
+    "Na Bybit → API Management: (1) desative Read-Only; "
+    "(2) ative Contract Trade (Order + Position); "
+    "(3) se houver IP bind, adicione o IP de saída do Render (ou use * temporariamente); "
+    "(4) use chave mainnet; (5) atualize Key/Secret no painel e salve o investidor."
+)
+AUTH_10005_ALERT = f"ERRO DE PERMISSÃO (10005): {AUTH_10005_MSG}"
+
 # Globals para carregamento em Lazy Loading com Thread Safety
 _ccxt_instance = None
 _pd_instance = None
@@ -568,17 +578,71 @@ class BybitClient:
         return (time.time() - timestamp) < ttl
 
     def _is_auth_error(self, msg):
-        """Retorna True apenas para erros reais de credenciais inválidas."""
+        """Retorna True para credenciais inválidas ou sem permissão de trade (10005)."""
+        text = str(msg or '')
+        lower = text.lower()
         return (
-            '10003' in msg
-            or '10004' in msg
-            or '10002' in msg
-            or 'API key is invalid' in msg
-            or '403' in msg
-            or 'Forbidden' in msg
-            or 'timestamp' in msg.lower()
-            or 'nonce' in msg.lower()
+            '10003' in text
+            or '10004' in text
+            or '10002' in text
+            or '10005' in text
+            or 'API key is invalid' in text
+            or 'permission denied' in lower
+            or 'errcode: 10005' in lower
+            or '403' in text
+            or 'Forbidden' in text
+            or 'timestamp' in lower
+            or 'nonce' in lower
         )
+
+    @staticmethod
+    def _is_permission_denied_10005(err) -> bool:
+        """Detecta Bybit ErrCode 10005 (Permission denied / API key permissions)."""
+        text = str(err or '')
+        lower = text.lower()
+        if '10005' in text or 'errcode: 10005' in lower:
+            return True
+        if 'permission denied' in lower and 'api key' in lower:
+            return True
+        return False
+
+    @staticmethod
+    def _check_api_key_trade_permissions(api_result) -> tuple:
+        """
+        Valida readOnly + ContractTrade/Derivatives a partir de query-api.
+        Retorna (ok: bool, error_message: str|None).
+        """
+        result = api_result if isinstance(api_result, dict) else {}
+        read_only = result.get('readOnly')
+        if read_only in (1, '1', True, 'true', 'True'):
+            return False, (
+                "API Key sem permissão de Trade (Derivatives). "
+                "Ative Contract Trade na Bybit (não Read-Only)."
+            )
+
+        perms = result.get('permissions') or {}
+        if not isinstance(perms, dict):
+            perms = {}
+        contract = [str(x) for x in (perms.get('ContractTrade') or [])]
+        derivatives = [str(x) for x in (perms.get('Derivatives') or [])]
+        has_contract_order = 'Order' in contract
+        has_derivatives = 'DerivativesTrade' in derivatives
+        if not (has_contract_order or has_derivatives):
+            return False, (
+                "API Key sem permissão de Trade (Derivatives). "
+                "Ative Contract Trade (Order + Position) na Bybit."
+            )
+        return True, None
+
+    @classmethod
+    def format_permission_denied_message(cls, err=None) -> str:
+        """Mensagem acionável para 10005 (permissões + IP Render)."""
+        base = AUTH_10005_MSG
+        detail = str(err or '').strip()
+        if detail and '10005' not in base:
+            short = detail.split('\n')[0][:180]
+            return f"{base} Detalhe: {short}"
+        return base
 
     def _extract_bybit_ret_code(self, error):
         """Extrai retCode de erros (ccxt/pybit) sem depender do formato exato."""
@@ -598,7 +662,11 @@ class BybitClient:
                 pass
 
         text = str(error or '')
-        match = re.search(r'retCode\\s*["\']?\\s*[:=]\\s*(\\d+)', text)
+        match = re.search(r'retCode\s*["\']?\s*[:=]\s*(\d+)', text)
+        if match:
+            return match.group(1)
+
+        match = re.search(r'ErrCode:\s*(\d+)', text, re.IGNORECASE)
         if match:
             return match.group(1)
 
@@ -635,10 +703,16 @@ class BybitClient:
 
         ret_msg = str(payload.get('retMsg') or 'Erro Bybit').strip()
         message = f"{route_label} falhou: retCode={ret_code} retMsg={ret_msg}"
-        if str(ret_code) == '10003':
+        code_str = str(ret_code)
+        if code_str == '10003':
             self.authenticated = False
             self._record_last_auth_error(payload)
             self._emit_authentication_alert()
+        elif code_str == '10005' or self._is_permission_denied_10005(ret_msg):
+            self.authenticated = False
+            self._record_last_auth_error(payload)
+            print(AUTH_10005_ALERT, flush=True)
+            message = f"{route_label} falhou: retCode=10005 — {AUTH_10005_MSG}"
         return False, message
 
     def _normalize_v5_symbol(self, symbol):
@@ -1063,7 +1137,8 @@ class BybitClient:
         """
         Checagem leve de API (vincular investidor):
         1) GET /v5/user/query-api via get_api_key_information (prova retCode=0)
-        2) get_wallet_balance UNIFIED com coin=USDT (saldo opcional)
+        2) Rejeita readOnly / sem ContractTrade(Order) ou DerivativesTrade
+        3) get_wallet_balance UNIFIED com coin=USDT (saldo opcional)
         1 retry rápido em timeout/rede (httpx/requests/asyncio).
         """
         if not getattr(self, 'authenticated', False):
@@ -1113,6 +1188,16 @@ class BybitClient:
                     self._record_last_auth_error(api_info)
                     self.authenticated = False
                     return {'ok': False, 'balance': None, 'error': err or 'API Key inválida'}
+
+                api_result = (api_info or {}).get('result') or {}
+                trade_ok, trade_err = self._check_api_key_trade_permissions(api_result)
+                if not trade_ok:
+                    print(f"⚠️ [BYBIT LIGHT] permissões insuficientes: {trade_err}", flush=True)
+                    self._record_last_auth_error({'retCode': 10005, 'retMsg': trade_err})
+                    self.authenticated = False
+                    self.last_auth_error_code = '10005'
+                    self.last_auth_error_message = trade_err
+                    return {'ok': False, 'balance': None, 'error': trade_err}
 
                 balance = 0.0
                 try:
@@ -1834,6 +1919,10 @@ class BybitClient:
 
                 if not ok or rsp is None:
                     err_msg = error_message or 'sem resposta'
+                    if self._is_permission_denied_10005(err_msg):
+                        err_msg = self.format_permission_denied_message(err_msg)
+                        self._record_last_auth_error({'retCode': 10005, 'retMsg': err_msg})
+                        print(AUTH_10005_ALERT, flush=True)
                     logger.error("[ERRO EXECUÇÃO BYBIT] %s", err_msg)
                     print(f"❌ [ERRO EXECUÇÃO BYBIT] {err_msg}", flush=True)
                     return None
@@ -1977,6 +2066,13 @@ class BybitClient:
             elif isinstance(e, requests.exceptions.RequestException):
                 logger.error("ERRO DE REDE BYBIT: %s", e, exc_info=True)
                 print(f"❌ [ERRO EXECUÇÃO BYBIT] Falha de rede: {e}", flush=True)
+            elif self._is_permission_denied_10005(e):
+                friendly = self.format_permission_denied_message(e)
+                self._record_last_auth_error(e)
+                self.last_auth_error_code = '10005'
+                logger.error("ERRO EXECUÇÃO BYBIT 10005: %s", friendly, exc_info=True)
+                print(f"❌ [ERRO EXECUÇÃO BYBIT] {friendly}", flush=True)
+                print(AUTH_10005_ALERT, flush=True)
             else:
                 logger.error("ERRO EXECUÇÃO BYBIT: %s", e, exc_info=True)
                 print(f"❌ [ERRO EXECUÇÃO BYBIT] Falha de infraestrutura: {e}", flush=True)
