@@ -125,13 +125,13 @@ def inicializar_exchange_bybit(api_key=None, api_secret=None, e_testnet=False, e
     e_testnet = bool(e_testnet)
     e_demo = bool(e_demo)
 
+    # Spot Cross Margin 10x — defaultType=spot evita payload de futuros (:USDT / positionIdx).
     exchange_params = {
         'enableRateLimit': True,
         'rateLimit': 100,
         'timeout': 15000,
         'options': {
-            'defaultType': 'swap',
-            'defaultSubType': 'linear',
+            'defaultType': 'spot',
             'adjustForTimeDifference': True,
             'recvWindow': 20000,
         },
@@ -1396,8 +1396,7 @@ class BybitClient:
             'enableRateLimit': True,
             'timeout': 15000,
             'options': {
-                'defaultType': 'swap',
-                'defaultSubType': 'linear',
+                'defaultType': 'spot',
                 'adjustForTimeDifference': True,
             },
         })
@@ -1646,8 +1645,10 @@ class BybitClient:
                 )
             except (TypeError, ValueError):
                 qty = 0.0
-            if qty <= 0:
-                continue
+            try:
+                borrow = float(coin_row.get('borrowAmount') or 0)
+            except (TypeError, ValueError):
+                borrow = 0.0
             symbol = f'{coin}/USDT'
             mark = 0.0
             try:
@@ -1658,11 +1659,45 @@ class BybitClient:
                 mark = float(self.get_last_price(symbol) or 0)
             except Exception:
                 mark = 0.0
+
+            # Spot Margin Cross 10x: margem = nocional / L (não o valor cheio).
+            try:
+                spot_lev = max(float(os.getenv('SPOT_MARGIN_LEVERAGE', '10') or 10), 1.0)
+            except (TypeError, ValueError):
+                spot_lev = 10.0
+
+            # SHORT: empréstimo do ativo base (venda a descoberto)
+            if borrow > 0:
+                size = abs(borrow)
+                notional = size * mark if mark > 0 else abs(usd_val)
+                if notional >= min_notional:
+                    margin = round(notional / spot_lev, 6) if spot_lev > 0 else round(notional, 6)
+                    holdings.append({
+                        'coin': coin,
+                        'symbol': symbol,
+                        'raw_symbol': symbol,
+                        'side': 'VENDER',
+                        'size': size,
+                        'entry_price': mark,
+                        'mark_price': mark,
+                        'unrealised_pnl': 0.0,
+                        'leverage': spot_lev,
+                        'positionIM': margin,
+                        'positionValue': round(notional, 6),
+                        'category': 'spot',
+                        'is_short': True,
+                        'borrow_amount': size,
+                    })
+                continue
+
+            if qty <= 0:
+                continue
             notional = usd_val if usd_val > 0 else (qty * mark)
             if notional < min_notional:
                 continue
             if mark <= 0 and notional > 0 and qty > 0:
                 mark = notional / qty
+            margin = round(notional / spot_lev, 6) if spot_lev > 0 else round(notional, 6)
             holdings.append({
                 'coin': coin,
                 'symbol': symbol,
@@ -1672,10 +1707,11 @@ class BybitClient:
                 'entry_price': mark,
                 'mark_price': mark,
                 'unrealised_pnl': 0.0,
-                'leverage': 1.0,
-                'positionIM': round(notional, 6),
+                'leverage': spot_lev,
+                'positionIM': margin,
                 'positionValue': round(notional, 6),
                 'category': 'spot',
+                'is_short': False,
             })
         return holdings
 
@@ -1736,6 +1772,12 @@ class BybitClient:
             )
         )
 
+    @staticmethod
+    def _spot_margin_leverage_enabled() -> bool:
+        """Spot Cross Margin: isLeverage=1 (empréstimo automático). Default ON."""
+        raw = os.getenv('SPOT_MARGIN_IS_LEVERAGE', '1')
+        return str(raw or '1').strip().lower() in {'1', 'true', 'yes', 'on'}
+
     def _build_v5_market_payload(
         self,
         category: str,
@@ -1745,7 +1787,11 @@ class BybitClient:
         tp_str: str | None,
         sl_str: str | None,
     ) -> tuple[dict, bool]:
-        """Monta payload Bybit V5. Spot: sem positionIdx/leverage/TP-SL inline."""
+        """
+        Monta payload Bybit V5.
+        Spot Margin Cross: category=spot + isLeverage=1 (sem positionIdx/tpslMode).
+        Linear: positionIdx + TP/SL inline opcional.
+        """
         v5_symbol = self._normalize_v5_symbol(symbol)
         payload = {
             'category': category,
@@ -1769,7 +1815,15 @@ class BybitClient:
                     payload['slOrderType'] = 'Market'
                 tp_sl_applied = True
         else:
+            # Spot: sem parâmetros de futuros; isLeverage ativa Cross Margin (LONG/SHORT).
             payload['marketUnit'] = 'baseCoin'
+            if self._spot_margin_leverage_enabled():
+                payload['isLeverage'] = 1
+            for forbidden in (
+                'positionIdx', 'tpslMode', 'tpTriggerBy', 'slTriggerBy',
+                'takeProfit', 'stopLoss', 'tpOrderType', 'slOrderType',
+            ):
+                payload.pop(forbidden, None)
         return payload, tp_sl_applied
 
     def execute_market_order(self, symbol, side, qty, raise_on_error=False, strict_pct_sizing=False,
@@ -1969,7 +2023,15 @@ class BybitClient:
                 else:
                     tp_sl_applied = False
             else:
+                # Spot Margin Cross — sem params de futuros
+                if self._spot_margin_leverage_enabled():
+                    params['isLeverage'] = 1
                 tp_sl_applied = False
+                for forbidden in (
+                    'positionIdx', 'tpslMode', 'tpTriggerBy', 'slTriggerBy',
+                    'takeProfit', 'stopLoss', 'takeProfitPrice', 'stopLossPrice',
+                ):
+                    params.pop(forbidden, None)
 
             print(
                 f"   📤 Enviando via CCXT Fallback: {symbol} | qty={normalized_qty} | "
@@ -1997,6 +2059,8 @@ class BybitClient:
                     category = 'spot'
                     local_tp_sl = bool(tp_price or sl_price)
                     params = {'category': 'spot'}
+                    if self._spot_margin_leverage_enabled():
+                        params['isLeverage'] = 1
                     print(
                         f"   📤 Retry SPOT via CCXT: {symbol} | qty={normalized_qty}",
                         flush=True,
@@ -2396,7 +2460,11 @@ class BybitClient:
             return False
 
     def close_position_with_sl(self, symbol, position_side):
-        """Encerra posição aberta na Bybit (pybit V5 primeiro, CCXT como fallback)."""
+        """
+        Encerra posição Spot Margin ou linear.
+        Spot LONG  → Sell a mercado (vende o ativo).
+        Spot SHORT → Buy a mercado com isLeverage=1 (recompra e liquida empréstimo).
+        """
         try:
             if not self.authenticated:
                 return False
@@ -2404,17 +2472,50 @@ class BybitClient:
             print(f"🔒 [CLOSE POSITION] Disparando fechamento para {symbol}", flush=True)
 
             if self.is_spot_trading():
-                qty = 0.0
+                requested = str(position_side or '').strip().lower()
+                is_short = requested in ('sell', 'short', 'vender')
                 coin = self._spot_base_coin(symbol)
+                qty = 0.0
                 for h in self.fetch_spot_holdings(min_notional=0.01):
-                    if str(h.get('coin') or '').upper() == coin:
+                    if str(h.get('coin') or '').upper() != coin:
+                        continue
+                    h_short = bool(h.get('is_short')) or str(h.get('side') or '').upper() in (
+                        'VENDER', 'SELL', 'SHORT',
+                    )
+                    if is_short and h_short:
+                        qty = float(h.get('size') or h.get('borrow_amount') or 0)
+                        break
+                    if (not is_short) and (not h_short) and requested in (
+                        'buy', 'long', 'comprar',
+                    ):
                         qty = float(h.get('size') or 0)
                         break
+                    if requested not in (
+                        'sell', 'short', 'vender', 'buy', 'long', 'comprar',
+                    ):
+                        qty = float(h.get('size') or h.get('borrow_amount') or 0)
+                        is_short = h_short
+                        break
+                if qty <= 0 and not is_short:
+                    # fallback: qualquer holding do coin
+                    for h in self.fetch_spot_holdings(min_notional=0.01):
+                        if str(h.get('coin') or '').upper() == coin:
+                            qty = float(h.get('size') or h.get('borrow_amount') or 0)
+                            is_short = bool(h.get('is_short')) or str(h.get('side') or '').upper() in (
+                                'VENDER', 'SELL', 'SHORT',
+                            )
+                            break
                 if qty <= 0:
-                    print(f"⚠️ [CLOSE POSITION] Sem saldo Spot de {coin}", flush=True)
+                    print(f"⚠️ [CLOSE POSITION] Sem saldo/empréstimo Spot de {coin}", flush=True)
                     return False
+                close_side = 'buy' if is_short else 'sell'
+                print(
+                    f"   🔄 [SPOT MARGIN] Fechar {'SHORT' if is_short else 'LONG'} "
+                    f"{coin} via {close_side.upper()} qty={qty} (isLeverage=1)",
+                    flush=True,
+                )
                 order = self.execute_market_order(
-                    f'{coin}/USDT', 'sell', qty, raise_on_error=False,
+                    f'{coin}/USDT', close_side, qty, raise_on_error=False,
                 )
                 return bool(order)
 

@@ -110,7 +110,9 @@ def calculate_tp_sl_prices(
       movimento_preço_tp = tp_margin_ratio / L
       movimento_preço_sl = sl_margin_ratio / L
 
-    Ex.: 20× → TP +5% preço (+100% margem), SL -2.5% preço (-50% margem).
+    Ex.: 10× Cross → TP +10% preço (+100% margem), SL −5% preço (−50% margem).
+         Long:  TP=entry×1.10  SL=entry×0.95
+         Short: TP=entry×0.90  SL=entry×1.05
     """
     entry = float(entry_price or 0)
     leverage = max(float(leverage or 1), 1.0)
@@ -124,6 +126,63 @@ def calculate_tp_sl_prices(
     if side_norm in ('buy', 'long', 'comprar'):
         return entry * (1 + tp_move), entry * (1 - sl_move)
     return entry * (1 - tp_move), entry * (1 + sl_move)
+
+
+def calculate_fixed_roi_tp_sl(
+    entry_price: float,
+    side: str,
+    leverage: float = 10.0,
+) -> dict:
+    """
+    TP/SL estritos Spot Margin Cross 10x (sem ATR/Fib):
+      +100% / −50% ROI sobre a margem → ±10% / ±5% no preço a 10x.
+    """
+    tp, sl = calculate_tp_sl_prices(entry_price, side, leverage)
+    lev = max(float(leverage or 1), 1.0)
+    return {
+        'tp_price': float(tp or 0),
+        'sl_price': float(sl or 0),
+        'tp1_price': float(tp or 0),
+        'tp2_price': float(tp or 0),
+        'roi_tp': float(tp or 0),
+        'roi_sl': float(sl or 0),
+        'rule': (
+            f'FIXED ROI 100/50 @ {lev:.0f}x → '
+            f'TP={tp:.6g} SL={sl:.6g} (local monitor)'
+        ),
+    }
+
+
+def evaluate_price_level_exit(
+    mark_price: float,
+    entry_price: float,
+    side: str,
+    leverage: float = 10.0,
+) -> Tuple[str | None, float]:
+    """
+    Dispara TP/SL quando o preço atinge os níveis de +100%/−50% ROI (via L).
+    Retorna (motivo, roi_pct_estimado).
+    """
+    mark = float(mark_price or 0)
+    entry = float(entry_price or 0)
+    lev = max(float(leverage or 1), 1.0)
+    if mark <= 0 or entry <= 0:
+        return None, 0.0
+    tp, sl = calculate_tp_sl_prices(entry, side, lev)
+    is_long = str(side or '').strip().lower() in ('buy', 'long', 'comprar')
+    price_move = (mark - entry) / entry
+    roi = (price_move * lev * 100.0) if is_long else (-price_move * lev * 100.0)
+    if is_long:
+        if tp > 0 and mark + 1e-9 >= tp:
+            return 'TAKE_PROFIT', roi
+        if sl > 0 and mark - 1e-9 <= sl:
+            return 'STOP_LOSS', roi
+    else:
+        if tp > 0 and mark - 1e-9 <= tp:
+            return 'TAKE_PROFIT', roi
+        if sl > 0 and mark + 1e-9 >= sl:
+            return 'STOP_LOSS', roi
+    return None, roi
 
 
 def load_tp_roi_pct() -> float:

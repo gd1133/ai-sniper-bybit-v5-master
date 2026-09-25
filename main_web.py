@@ -319,8 +319,10 @@ from src.risk.position_sizing import (
     calculate_order_margin as _shared_calculate_order_margin,
     calculate_position_qty as _shared_calculate_position_qty,
     calcular_tamanho_posicao,
+    calculate_fixed_roi_tp_sl,
     calculate_tp_sl_prices,
     evaluate_position_exit,
+    evaluate_price_level_exit,
     extract_exchange_position_margin,
     financial_targets_from_margin,
     format_entry_pct,
@@ -330,11 +332,19 @@ from src.risk.position_sizing import (
     load_tp_roi_pct,
 )
 
-ALAVANCAGEM = 20  # Alavancagem fixa (pode ser alterado para 30 ou 50 no futuro)
+ALAVANCAGEM = 10  # Spot Margin Cross 10x (margem 5% → nocional 50% da banca)
 MARGEM_INPUT = 5.0  # fallback legado quando capital não estiver disponível
 PERCENTUAL_ENTRADA_BANCA = load_entry_pct()  # padrão 5% — override via RISK_PER_TRADE_PCT
 PERCENTUAL_ENTRADA_POS_STOP = load_entry_after_stop_pct()  # padrão 3% após STOP_LOSS
 WEBHOOK_ORDER_MARGIN_PCT = PERCENTUAL_ENTRADA_BANCA  # compatibilidade com testes/API
+
+
+def _spot_margin_leverage() -> float:
+    """Alavancagem efetiva do Spot Cross Margin (default = ALAVANCAGEM 10x)."""
+    try:
+        return max(float(os.getenv('SPOT_MARGIN_LEVERAGE', str(ALAVANCAGEM)) or ALAVANCAGEM), 1.0)
+    except (TypeError, ValueError):
+        return float(ALAVANCAGEM or 10)
 
 
 def _format_risk_per_trade_pct() -> str:
@@ -1018,7 +1028,9 @@ def _start_trend_position_manager():
                 mark_price = float(pos.get('markPrice') or entry_price or 0)
                 unrealised = float(pos.get('unrealisedPnl') or 0)
                 created_ms = float(pos.get('createdTime') or pos.get('updatedTime') or 0)
-                leverage = 1.0 if is_spot else float(pos.get('leverage') or ALAVANCAGEM or 1.0)
+                leverage = float(pos.get('leverage') or 0) or (
+                    _spot_margin_leverage() if is_spot else float(ALAVANCAGEM or 1.0)
+                )
                 entry_margin = _resolve_entry_margin_for_exit(cliente, symbol, pos=pos)
                 roi = float(position_roi_pct(unrealised, entry_margin)) if entry_margin else 0.0
 
@@ -1364,29 +1376,42 @@ def _spot_entry_from_open_trades(client_id: int, symbol: str, fallback_price: fl
 
 
 def _spot_holdings_as_positions(broker, cliente) -> list[dict]:
-    """Converte saldo Unified (ex.: 0.00999 ETH) em cards de trade ativo."""
+    """Converte saldo/empréstimo Unified Spot Margin em cards de trade ativo."""
     out = []
     client_id = cliente.get('id')
+    spot_lev = _spot_margin_leverage()
     for h in broker.fetch_spot_holdings():
         mark = float(h.get('mark_price') or 0)
         entry = _spot_entry_from_open_trades(client_id, h.get('symbol'), mark)
         size = float(h.get('size') or 0)
-        unrealised = (mark - entry) * size if entry > 0 and mark > 0 else 0.0
+        is_short = bool(h.get('is_short')) or str(h.get('side') or '').upper() in (
+            'VENDER', 'SELL', 'SHORT',
+        )
+        side_label = 'VENDER' if is_short else 'COMPRAR'
+        if entry > 0 and mark > 0:
+            unrealised = (entry - mark) * size if is_short else (mark - entry) * size
+        else:
+            unrealised = 0.0
         notional = size * (entry or mark)
+        margin = float(h.get('positionIM') or 0)
+        if margin <= 0 and notional > 0:
+            margin = notional / spot_lev
+        lev = float(h.get('leverage') or spot_lev or 10)
         pos = {
             'client_id': client_id,
             'client_nome': cliente.get('nome'),
             'symbol': h.get('symbol'),
             'raw_symbol': h.get('raw_symbol') or h.get('symbol'),
-            'side': 'COMPRAR',
+            'side': side_label,
             'size': size,
             'entry_price': entry or mark,
             'mark_price': mark,
             'unrealised_pnl': unrealised,
-            'leverage': 1.0,
-            'positionIM': notional,
+            'leverage': lev,
+            'positionIM': round(margin, 6),
             'positionValue': size * mark,
             'category': 'spot',
+            'is_short': is_short,
         }
         out.append(pos)
     return out
@@ -1394,9 +1419,9 @@ def _spot_holdings_as_positions(broker, cliente) -> list[dict]:
 def _build_exchange_trade_card(pos_data, key=None):
     """Monta card de posição para o dashboard (com fallback se preço live falhar)."""
     is_spot = str(pos_data.get('category') or '').lower() == 'spot'
-    leverage = float(pos_data.get('leverage') or (1 if is_spot else ALAVANCAGEM) or 1)
-    if is_spot:
-        leverage = 1.0
+    leverage = float(pos_data.get('leverage') or ( _spot_margin_leverage() if is_spot else ALAVANCAGEM) or 1)
+    if is_spot and leverage <= 1.0:
+        leverage = _spot_margin_leverage()
     margin_used = extract_exchange_position_margin(pos_data)
     if margin_used <= 0:
         notional_value = float(pos_data.get('size') or 0) * float(pos_data.get('entry_price') or 0)
@@ -2756,14 +2781,16 @@ def _monitor_financial_stop_loss():
                         if getattr(broker, 'is_spot_trading', lambda: False)():
                             positions_list = []
                             for h in _spot_holdings_as_positions(broker, cliente):
+                                side_raw = str(h.get('side') or 'COMPRAR').upper()
+                                bybit_side = 'Sell' if side_raw in ('VENDER', 'SELL', 'SHORT') else 'Buy'
                                 positions_list.append({
                                     'symbol': h.get('symbol'),
                                     'size': h.get('size'),
-                                    'side': 'Buy',
+                                    'side': bybit_side,
                                     'unrealisedPnl': h.get('unrealised_pnl'),
                                     'avgPrice': h.get('entry_price'),
                                     'markPrice': h.get('mark_price'),
-                                    'leverage': 1,
+                                    'leverage': h.get('leverage') or _spot_margin_leverage(),
                                     'positionIM': h.get('positionIM'),
                                 })
                         else:
@@ -2786,7 +2813,9 @@ def _monitor_financial_stop_loss():
                                 entry_price = float(pos.get('avgPrice') or pos.get('entryPrice') or 0)
                                 mark_price = float(pos.get('markPrice') or pos.get('lastPrice') or entry_price or 0)
                                 is_spot_pos = bool(getattr(broker, 'is_spot_trading', lambda: False)())
-                                leverage = 1.0 if is_spot_pos else float(pos.get('leverage') or ALAVANCAGEM or 1.0)
+                                leverage = float(pos.get('leverage') or 0) or (
+                                    _spot_margin_leverage() if is_spot_pos else float(ALAVANCAGEM or 1.0)
+                                )
 
                                 if size <= 0:
                                     continue
@@ -2828,6 +2857,19 @@ def _monitor_financial_stop_loss():
                                 motivo_fechamento, roi_pct = evaluate_position_exit(
                                     unrealised_pnl, entry_margin,
                                 )
+                                # Spot Margin: também dispara por preço (±5%/±10% a 10x)
+                                if not motivo_fechamento and is_spot_pos and entry_price > 0 and mark_price > 0:
+                                    price_motivo, price_roi = evaluate_price_level_exit(
+                                        mark_price, entry_price, side, leverage,
+                                    )
+                                    if price_motivo:
+                                        motivo_fechamento, roi_pct = price_motivo, price_roi
+                                        print(
+                                            f"   🎯 [SPOT MARGIN PRICE] {symbol} atingiu "
+                                            f"{motivo_fechamento} @ mark={mark_price} "
+                                            f"(entry={entry_price}, L={leverage:.0f}x)",
+                                            flush=True,
+                                        )
                                 alvo_lucro, alvo_perda = financial_targets_from_margin(entry_margin)
                                 print(
                                     f"   📊 [MONITOR] {symbol} | Margem entrada: ${entry_margin:.4f} | "
@@ -3526,11 +3568,10 @@ def _client_had_last_stop_loss(client_id: int) -> bool:
 
 def _calculate_dynamic_order_quantity(broker, symbol, banca=None, client_context=None):
     """
-    Gestão de entrada:
-      Spot  → qty = mínimo da exchange (min notional / step), leverage=1
-      Linear → MI = Saldo × % | Valor = MI × L | Qty = Valor / Preço
-
-    Spot nunca multiplica banca pela alavancagem de futuros (evita all-in).
+    Gestão de entrada (Spot Margin Cross 10x e Linear):
+      MI = Saldo × 5% (ou 3% após STOP_LOSS)
+      Nocional = MI × L  (L=10 no Spot Cross / ALAVANCAGEM)
+      Qty = Nocional / Preço  (ajustado a stepSize / minOrderQty / minNotional $5–$6)
     """
     from src.risk.entry_viability import (
         build_frontend_entry_card,
@@ -3542,7 +3583,7 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None, client_context
 
     try:
         is_spot = bool(getattr(broker, 'is_spot_trading', lambda: False)())
-        leverage_value = 1.0 if is_spot else float(ALAVANCAGEM or 1.0)
+        leverage_value = float(_spot_margin_leverage() if is_spot else (ALAVANCAGEM or 10))
 
         saldo_atual = broker.get_balance()
         if saldo_atual is None or saldo_atual <= 0:
@@ -3590,105 +3631,7 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None, client_context
         if min_cost <= 0:
             min_cost = 5.0
 
-        # ── SPOT: entrada = mínimo da moeda (não % × 20x) ───────────────────
-        if is_spot:
-            # Custo real do lote: max(minNotional USDT, minQty × preço).
-            # ETH minQty=0.01 ≈ $25 — muito acima de min_cost=$6.
-            lot_min_notional = max(min_cost, float(min_qty) * last_price) if last_price > 0 else min_cost
-            spendable = capital_ref * 0.98
-            if spendable + 1e-9 < lot_min_notional:
-                print(
-                    f"   🚫 [CALC QTY SPOT] USDT livre ${capital_ref:.2f} insuficiente para "
-                    f"lote mínimo ${lot_min_notional:.2f} "
-                    f"(min_cost=${min_cost:.2f}, min_qty={min_qty} @ ${last_price:.4f}) — aborta",
-                    flush=True,
-                )
-                return 0.0, 0.0, saldo_atual
-
-            qty_from_cost = (min_cost / last_price) if last_price > 0 else min_qty
-            qty = quantize_qty_to_step(max(min_qty, qty_from_cost), qty_step, round_up=True)
-            # Teto % da banca, mas NUNCA abaixo do lot_min se a banca cobre
-            try:
-                spot_cap_pct = float(os.getenv('SPOT_MAX_ENTRY_PCT', '35') or 35)
-                if spot_cap_pct > 1:
-                    spot_cap_pct /= 100.0
-            except (TypeError, ValueError):
-                spot_cap_pct = 0.35
-            max_notional = capital_ref * max(0.05, min(1.0, spot_cap_pct))
-            max_notional = max(max_notional, lot_min_notional)
-            max_notional = min(max_notional, spendable)
-
-            notional = qty * last_price
-            if notional > max_notional + 1e-9 and last_price > 0:
-                # Não usa round_down com “mínimo 1 step” — isso forçava 0.01 ETH ($25) de novo
-                raw = max_notional / last_price
-                qty_cap = quantize_qty_to_step(raw, qty_step, round_up=False)
-                if qty_cap < min_qty or (qty_cap * last_price) + 1e-9 < min_cost:
-                    print(
-                        f"   🚫 [CALC QTY SPOT] Após teto ${max_notional:.2f} não dá para "
-                        f"respeitar lote mínimo ${lot_min_notional:.2f} — aborta "
-                        f"(livre=${capital_ref:.2f})",
-                        flush=True,
-                    )
-                    return 0.0, 0.0, saldo_atual
-                qty = qty_cap
-
-            # Guarda: nocional >= min_cost e <= spendable
-            if last_price > 0 and (qty * last_price) + 1e-9 < min_cost:
-                qty = quantize_qty_to_step(min_cost / last_price, qty_step, round_up=True)
-
-            margem = round(qty * last_price, 4)
-            if (
-                margem + 1e-9 < min_cost
-                or margem > spendable + 1e-6
-                or qty + 1e-12 < min_qty
-            ):
-                print(
-                    f"   🚫 [CALC QTY SPOT] Após step: nocional=${margem:.2f} / qty={qty} inválido "
-                    f"(min=${min_cost:.2f}, lote_min=${lot_min_notional:.2f}, "
-                    f"livre=${capital_ref:.2f})",
-                    flush=True,
-                )
-                return 0.0, 0.0, saldo_atual
-
-            print(
-                f"   ⚡ [CALC QTY SPOT] Mínimo exchange: qty={qty} nocional=${margem:.2f} "
-                f"(min_cost=${min_cost:.2f}, lote_min=${lot_min_notional:.2f}, "
-                f"step={qty_step}, teto=${max_notional:.2f})",
-                flush=True,
-            )
-            try:
-                card = build_frontend_entry_card({
-                    'symbol': str(symbol),
-                    'bank_balance': capital_ref,
-                    'current_price': last_price,
-                    'min_order_qty': min_qty,
-                    'qty_step': qty_step,
-                    'min_cost_exchange': min_cost,
-                    'min_nominal': margem,
-                    'min_margin': margem,
-                    'leverage': 1.0,
-                    'target_pct': margem_pct,
-                    'target_pct_display': margem_pct * 100,
-                    'max_tolerance_pct': 1.0,
-                    'max_tolerance_pct_display': 100.0,
-                    'final_qty': qty,
-                    'final_margin': margem,
-                    'final_pct': (margem / capital_ref) * 100 if capital_ref else 0,
-                    'final_notional': margem,
-                    'aprovado': True,
-                    'decisao': 'APROVADO',
-                    'motivo': f'Spot mínimo da moeda (${min_cost:.2f})',
-                    'real_min_pct': (margem / capital_ref) * 100 if capital_ref else 0,
-                })
-                central_state['entry_sizing'] = card
-                central_state['proxima_entrada'] = card
-            except Exception:
-                pass
-            print(f"   💰 [CALC QTY] Saldo UNIFIED: ${saldo_atual:.2f} USDT", flush=True)
-            print(f"   📊 [CALC QTY] Preço: ${last_price:.4f} | Spot 1x | Qty={qty}", flush=True)
-            return float(margem), float(qty), saldo_atual
-
+        # Spot Margin e Linear: mesma fórmula MI × L / preço
         report = evaluate_entry_viability(
             bank_balance=capital_ref,
             current_price=last_price,
@@ -3701,8 +3644,15 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None, client_context
         )
         print_entry_viability_log(report)
         try:
-            central_state['entry_sizing'] = build_frontend_entry_card(report)
-            central_state['proxima_entrada'] = central_state['entry_sizing']
+            card = build_frontend_entry_card(report)
+            if is_spot:
+                card['motivo'] = (
+                    f"Spot Margin Cross {leverage_value:.0f}x — "
+                    f"MI={margem_pct*100:.0f}% × L → nocional"
+                )
+                card['leverage'] = leverage_value
+            central_state['entry_sizing'] = card
+            central_state['proxima_entrada'] = card
         except Exception:
             pass
 
@@ -3710,18 +3660,32 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None, client_context
         qty = float(report.get('final_qty') or 0)
 
         if not report.get('aprovado') or qty <= 0:
+            # Bump mínimo da exchange sem estourar a banca (margem ≈ nocional/L)
             qty_from_cost = (min_cost / last_price) if last_price > 0 else min_qty
             qty = quantize_qty_to_step(max(min_qty, qty_from_cost), qty_step, round_up=True)
-            margem = round((qty * last_price) / leverage_value, 4) if leverage_value > 0 else 0
+            notional = qty * last_price
+            margem = round(notional / leverage_value, 4) if leverage_value > 0 else round(notional, 4)
+            if margem > capital_ref * 0.98:
+                print(
+                    f"   🚫 [CALC QTY] Mínimo exchange (${notional:.2f} nocional / "
+                    f"margem ${margem:.2f}) > banca ${capital_ref:.2f} — aborta",
+                    flush=True,
+                )
+                return 0.0, 0.0, saldo_atual
             print(
                 f"   ⚡ [CALC QTY] Banca abaixo do alvo — bump para mínimo da exchange: "
-                f"qty={qty:.6f} nocional=${qty * last_price:.2f} USDT",
+                f"qty={qty:.6f} nocional=${notional:.2f} margem=${margem:.4f} USDT",
                 flush=True,
             )
 
+        mode_label = f"Spot Margin Cross {leverage_value:.0f}x" if is_spot else f"Linear {leverage_value:.0f}x"
         print(f"   💰 [CALC QTY] Saldo UNIFIED: ${saldo_atual:.2f} USDT", flush=True)
-        print(f"   💰 [CALC QTY] MI ≈ {report.get('final_pct') or round((margem/capital_ref)*100,2)}% = ${margem:.4f} USDT", flush=True)
-        print(f"   📊 [CALC QTY] Preço: ${last_price:.4f} | L={leverage_value}x | Qty={qty}", flush=True)
+        print(
+            f"   💰 [CALC QTY] MI ≈ {report.get('final_pct') or round((margem/capital_ref)*100,2)}% "
+            f"= ${margem:.4f} USDT | nocional=${margem * leverage_value:.2f}",
+            flush=True,
+        )
+        print(f"   📊 [CALC QTY] Preço: ${last_price:.4f} | {mode_label} | Qty={qty}", flush=True)
 
         try:
             qty, ok, reason = broker.validate_pct_sizing_qty(symbol, qty, strict=False)
@@ -4830,48 +4794,60 @@ def _process_client_orders_background(
                             continue
                         print(f"   ⚠️ [LEVERAGE] Erro ao configurar para {ALAVANCAGEM}x: {lev_err}", flush=True)
 
-                # 🎯 SL/TP: prioriza C3 soberano; fallback Turtle/Fib
+                # 🎯 SL/TP: Spot Margin = FIXED ROI 100/50 @ 10x (local monitor).
+                # Linear: Turtle/Fib + C3 opcional + attach exchange.
                 from src.risk.position_sizing import attach_exchange_tp, calculate_dynamic_tp_sl
-                dyn = calculate_dynamic_tp_sl(entry_price, side.lower(), ALAVANCAGEM, signals)
-                tp_price, sl_price = dyn.get('tp_price'), dyn.get('sl_price')
-                try:
-                    c3_sl = float(signals.get('c3_stop_loss') or signals.get('institutional_sl_price') or 0)
-                except (TypeError, ValueError):
-                    c3_sl = 0.0
-                try:
-                    c3_tp = float(signals.get('c3_take_profit_1') or 0)
-                except (TypeError, ValueError):
-                    c3_tp = 0.0
-                if c3_sl > 0:
-                    sl_price = c3_sl
-                if c3_tp > 0:
-                    tp_price = c3_tp
-                # Ajuste anti-chase soft (aperta SL)
-                try:
-                    tighten = float(signals.get('c3_stop_loss_tighten_pct') or 0)
-                except (TypeError, ValueError):
-                    tighten = 0.0
-                try:
-                    timing_tighten = float(signals.get('timing_advisory_sl_tighten_pct') or 0)
-                except (TypeError, ValueError):
-                    timing_tighten = 0.0
-                tighten = max(tighten, timing_tighten)
-                if tighten > 0 and sl_price and entry_price:
-                    is_long = str(side).lower() in ('buy', 'long', 'comprar')
-                    dist = abs(float(entry_price) - float(sl_price))
-                    new_dist = dist * max(0.5, 1.0 - (tighten / 100.0))
-                    sl_price = (
-                        float(entry_price) - new_dist if is_long
-                        else float(entry_price) + new_dist
+                is_spot_order = bool(getattr(broker, 'is_spot_trading', lambda: False)())
+                lev_tpsl = _spot_margin_leverage() if is_spot_order else float(ALAVANCAGEM or 10)
+                if is_spot_order:
+                    dyn = calculate_fixed_roi_tp_sl(entry_price, side.lower(), lev_tpsl)
+                    tp_price, sl_price = dyn.get('tp_price'), dyn.get('sl_price')
+                    print(
+                        f"   📐 [TP/SL SPOT MARGIN] L={lev_tpsl:.0f}x FIXED "
+                        f"TP={tp_price} SL={sl_price} (monitor local, sem set_trading_stop)",
+                        flush=True,
                     )
-                if not attach_exchange_tp():
-                    print("   ⚠️ [TP/SL] ATTACH_EXCHANGE_TP=false — TP não será enviado", flush=True)
-                    tp_price = None
-                print(
-                    f"   📐 [TP/SL] {dyn.get('rule')} TP={tp_price} SL={sl_price} "
-                    f"(C3={'sim' if c3_sl or c3_tp else 'não'})",
-                    flush=True,
-                )
+                else:
+                    dyn = calculate_dynamic_tp_sl(entry_price, side.lower(), lev_tpsl, signals)
+                    tp_price, sl_price = dyn.get('tp_price'), dyn.get('sl_price')
+                    try:
+                        c3_sl = float(signals.get('c3_stop_loss') or signals.get('institutional_sl_price') or 0)
+                    except (TypeError, ValueError):
+                        c3_sl = 0.0
+                    try:
+                        c3_tp = float(signals.get('c3_take_profit_1') or 0)
+                    except (TypeError, ValueError):
+                        c3_tp = 0.0
+                    if c3_sl > 0:
+                        sl_price = c3_sl
+                    if c3_tp > 0:
+                        tp_price = c3_tp
+                    # Ajuste anti-chase soft (aperta SL)
+                    try:
+                        tighten = float(signals.get('c3_stop_loss_tighten_pct') or 0)
+                    except (TypeError, ValueError):
+                        tighten = 0.0
+                    try:
+                        timing_tighten = float(signals.get('timing_advisory_sl_tighten_pct') or 0)
+                    except (TypeError, ValueError):
+                        timing_tighten = 0.0
+                    tighten = max(tighten, timing_tighten)
+                    if tighten > 0 and sl_price and entry_price:
+                        is_long = str(side).lower() in ('buy', 'long', 'comprar')
+                        dist = abs(float(entry_price) - float(sl_price))
+                        new_dist = dist * max(0.5, 1.0 - (tighten / 100.0))
+                        sl_price = (
+                            float(entry_price) - new_dist if is_long
+                            else float(entry_price) + new_dist
+                        )
+                    if not attach_exchange_tp():
+                        print("   ⚠️ [TP/SL] ATTACH_EXCHANGE_TP=false — TP não será enviado", flush=True)
+                        tp_price = None
+                    print(
+                        f"   📐 [TP/SL] {dyn.get('rule')} TP={tp_price} SL={sl_price} "
+                        f"(C3={'sim' if c3_sl or c3_tp else 'não'})",
+                        flush=True,
+                    )
 
                 # Spot: permite bump ao mínimo da exchange (strict=False).
                 # Linear: strict=True preserva o % da banca sem inflar qty.
