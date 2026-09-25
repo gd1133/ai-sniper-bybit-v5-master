@@ -1815,9 +1815,11 @@ class BybitClient:
                     payload['slOrderType'] = 'Market'
                 tp_sl_applied = True
         else:
-            # Spot: sem parâmetros de futuros; isLeverage ativa Cross Margin (LONG/SHORT).
+            # Spot: sem parâmetros de futuros.
+            # isLeverage=1 só em Sell (short a descoberto); Buy cash usa inventário USDT (5%).
             payload['marketUnit'] = 'baseCoin'
-            if self._spot_margin_leverage_enabled():
+            side_l = str(side or '').strip().lower()
+            if self._spot_margin_leverage_enabled() and side_l in ('sell', 'short', 'vender'):
                 payload['isLeverage'] = 1
             for forbidden in (
                 'positionIdx', 'tpslMode', 'tpTriggerBy', 'slTriggerBy',
@@ -2023,8 +2025,9 @@ class BybitClient:
                 else:
                     tp_sl_applied = False
             else:
-                # Spot Margin Cross — sem params de futuros
-                if self._spot_margin_leverage_enabled():
+                # Spot cash Buy; isLeverage só em Sell (short/cover)
+                side_l = str(side or '').strip().lower()
+                if self._spot_margin_leverage_enabled() and side_l in ('sell', 'short', 'vender'):
                     params['isLeverage'] = 1
                 tp_sl_applied = False
                 for forbidden in (
@@ -2208,23 +2211,136 @@ class BybitClient:
             pass
         return None
 
+    def place_spot_native_tpsl(
+        self,
+        symbol,
+        side,
+        qty,
+        tp_price,
+        sl_price,
+        *,
+        entry_price=None,
+    ) -> bool:
+        """
+        Spot: registra ordens condicionais TP/SL (orderFilter=tpslOrder) no gráfico Bybit.
+
+        Long  → Sell Market em triggerPrice=TP (rise) e SL (fall)
+        Short → Buy Market em triggerPrice=TP (fall) e SL (rise)
+        """
+        if not self.pybit_session or not self.authenticated:
+            print("❌ [SPOT TP/SL] Sessão/auth indisponível", flush=True)
+            return False
+        side_norm = str(side or '').strip().lower()
+        is_long = side_norm in ('buy', 'long', 'comprar')
+        close_side = 'Sell' if is_long else 'Buy'
+        try:
+            qty_str = self._normalize_order_qty(symbol, qty, strict_pct_sizing=True)
+        except Exception:
+            qty_str = str(qty)
+        try:
+            qty_f = float(qty_str)
+        except (TypeError, ValueError):
+            qty_f = float(qty or 0)
+        if qty_f <= 0:
+            print(f"❌ [SPOT TP/SL] qty inválida: {qty}", flush=True)
+            return False
+
+        # Níveis Spot cash ×2 / ×0.5 se não vierem preenchidos
+        if not tp_price or not sl_price:
+            from src.risk.position_sizing import calculate_spot_cash_tp_sl
+            levels = calculate_spot_cash_tp_sl(float(entry_price or 0), side)
+            tp_price = tp_price or levels.get('tp_price')
+            sl_price = sl_price or levels.get('sl_price')
+
+        tp_str, sl_str = self._format_tpsl_prices(
+            symbol, side, float(entry_price or 0), tp_price, sl_price,
+        )
+        v5_symbol = self._normalize_v5_symbol(symbol)
+        print(
+            f"🛡️  [SPOT TP/SL NATIVO] {v5_symbol} | {close_side} qty={qty_str} | "
+            f"TP={tp_str} SL={sl_str} (linhas no gráfico)",
+            flush=True,
+        )
+
+        ok_any = False
+        # triggerDirection: 1 = rise, 2 = fall
+        plans = []
+        if tp_str:
+            plans.append(('TP', tp_str, 1 if is_long else 2))
+        if sl_str:
+            plans.append(('SL', sl_str, 2 if is_long else 1))
+
+        for label, trigger, direction in plans:
+            payload = {
+                'category': 'spot',
+                'symbol': v5_symbol,
+                'side': close_side,
+                'orderType': 'Market',
+                'qty': str(qty_str),
+                'triggerPrice': str(trigger),
+                'orderFilter': 'tpslOrder',
+                'triggerDirection': int(direction),
+            }
+            # Spot TP/SL close: isLeverage=1 só ao cobrir short (Buy)
+            if self._spot_margin_leverage_enabled() and close_side == 'Buy':
+                payload['isLeverage'] = 1
+            try:
+                print(f"   📤 [SPOT {label}] place_order {payload}", flush=True)
+                rsp = self.pybit_session.place_order(**payload)
+                print(f"   📥 [SPOT {label}] {rsp}", flush=True)
+                ok, err = self._handle_v5_ret_code(rsp, f'spot_tpsl_{label.lower()}')
+                if ok:
+                    ok_any = True
+                    print(f"   ✅ [SPOT {label}] ordem condicional registrada", flush=True)
+                else:
+                    # Fallback sem triggerDirection (algumas contas UTA)
+                    payload.pop('triggerDirection', None)
+                    print(f"   ↩️ [SPOT {label}] retry sem triggerDirection ({err})", flush=True)
+                    rsp2 = self.pybit_session.place_order(**payload)
+                    ok2, err2 = self._handle_v5_ret_code(rsp2, f'spot_tpsl_{label.lower()}_retry')
+                    if ok2:
+                        ok_any = True
+                        print(f"   ✅ [SPOT {label}] registrado (retry)", flush=True)
+                    else:
+                        print(f"   ⚠️ [SPOT {label}] falhou: {err2}", flush=True)
+            except Exception as exc:
+                print(f"   ⚠️ [SPOT {label}] exceção: {exc}", flush=True)
+
+        if ok_any:
+            print("✅ [SPOT TP/SL] Proteção nativa enviada à Bybit (visível no gráfico).", flush=True)
+        else:
+            print(
+                "⚠️ [SPOT TP/SL] Bybit não aceitou condicionais — backup no monitor local.",
+                flush=True,
+            )
+        return ok_any
+
     def set_tp_sl_sniper(self, symbol, side, entry_price, position_qty, leverage=None,
                          tp_price=None, sl_price=None, signals=None):
         """
-        TP/SL na posição (Bybit V5 set_trading_stop).
-        Padrão: SL Turtle 2×ATR (teto −50% ROI) e TP Fib 161.8% ou +100% ROI.
-        takeProfit/stopLoss vão como STRING no tickSize — desenha as linhas no gráfico.
+        TP/SL na posição.
+        Spot: ordens condicionais tpslOrder (linhas no gráfico) + monitor local.
+        Linear: set_trading_stop.
         """
         try:
             if not self.authenticated:
                 print("❌ [TP/SL] Não autenticado. Proteção de capital ABORTADA.", flush=True)
                 return False
             if self.is_spot_trading():
-                print(
-                    "   ℹ️ [TP/SL] Spot — TP/SL ficam no monitor local (sem set_trading_stop)",
-                    flush=True,
+                from src.risk.position_sizing import calculate_spot_cash_tp_sl
+                if not tp_price or not sl_price:
+                    levels = calculate_spot_cash_tp_sl(entry_price, side)
+                    tp_price = tp_price or levels.get('tp_price')
+                    sl_price = sl_price or levels.get('sl_price')
+                    print(f"   📐 [SPOT CASH] {levels.get('rule')}", flush=True)
+                return self.place_spot_native_tpsl(
+                    symbol,
+                    side,
+                    position_qty,
+                    tp_price,
+                    sl_price,
+                    entry_price=entry_price,
                 )
-                return True
             if not self.pybit_session:
                 print("❌ [TP/SL] Sessão pybit indisponível.", flush=True)
                 return False

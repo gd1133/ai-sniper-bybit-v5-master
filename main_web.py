@@ -320,9 +320,11 @@ from src.risk.position_sizing import (
     calculate_position_qty as _shared_calculate_position_qty,
     calcular_tamanho_posicao,
     calculate_fixed_roi_tp_sl,
+    calculate_spot_cash_tp_sl,
     calculate_tp_sl_prices,
     evaluate_position_exit,
     evaluate_price_level_exit,
+    evaluate_spot_cash_price_exit,
     extract_exchange_position_margin,
     financial_targets_from_margin,
     format_entry_pct,
@@ -1376,10 +1378,9 @@ def _spot_entry_from_open_trades(client_id: int, symbol: str, fallback_price: fl
 
 
 def _spot_holdings_as_positions(broker, cliente) -> list[dict]:
-    """Converte saldo/empréstimo Unified Spot Margin em cards de trade ativo."""
+    """Converte saldo/empréstimo Unified Spot em cards de trade ativo (cash 1x)."""
     out = []
     client_id = cliente.get('id')
-    spot_lev = _spot_margin_leverage()
     for h in broker.fetch_spot_holdings():
         mark = float(h.get('mark_price') or 0)
         entry = _spot_entry_from_open_trades(client_id, h.get('symbol'), mark)
@@ -1393,10 +1394,9 @@ def _spot_holdings_as_positions(broker, cliente) -> list[dict]:
         else:
             unrealised = 0.0
         notional = size * (entry or mark)
-        margin = float(h.get('positionIM') or 0)
-        if margin <= 0 and notional > 0:
-            margin = notional / spot_lev
-        lev = float(h.get('leverage') or spot_lev or 10)
+        # Spot cash: margem = nocional investido (1x) para ROI 100%/50% ≡ ×2 / ×0.5
+        lev = 1.0 if not is_short else float(h.get('leverage') or _spot_margin_leverage())
+        margin = notional if lev <= 1.0 else round(notional / lev, 6)
         pos = {
             'client_id': client_id,
             'client_nome': cliente.get('nome'),
@@ -1419,9 +1419,9 @@ def _spot_holdings_as_positions(broker, cliente) -> list[dict]:
 def _build_exchange_trade_card(pos_data, key=None):
     """Monta card de posição para o dashboard (com fallback se preço live falhar)."""
     is_spot = str(pos_data.get('category') or '').lower() == 'spot'
-    leverage = float(pos_data.get('leverage') or ( _spot_margin_leverage() if is_spot else ALAVANCAGEM) or 1)
-    if is_spot and leverage <= 1.0:
-        leverage = _spot_margin_leverage()
+    leverage = float(pos_data.get('leverage') or (1.0 if is_spot else ALAVANCAGEM) or 1)
+    if is_spot and not pos_data.get('is_short'):
+        leverage = 1.0
     margin_used = extract_exchange_position_margin(pos_data)
     if margin_used <= 0:
         notional_value = float(pos_data.get('size') or 0) * float(pos_data.get('entry_price') or 0)
@@ -2857,17 +2857,17 @@ def _monitor_financial_stop_loss():
                                 motivo_fechamento, roi_pct = evaluate_position_exit(
                                     unrealised_pnl, entry_margin,
                                 )
-                                # Spot Margin: também dispara por preço (±5%/±10% a 10x)
+                                # Spot cash: TP/SL por preço ×2 / ×0.5 (backup se Bybit falhar)
                                 if not motivo_fechamento and is_spot_pos and entry_price > 0 and mark_price > 0:
-                                    price_motivo, price_roi = evaluate_price_level_exit(
-                                        mark_price, entry_price, side, leverage,
+                                    price_motivo, price_roi = evaluate_spot_cash_price_exit(
+                                        mark_price, entry_price, side,
                                     )
                                     if price_motivo:
                                         motivo_fechamento, roi_pct = price_motivo, price_roi
                                         print(
-                                            f"   🎯 [SPOT MARGIN PRICE] {symbol} atingiu "
+                                            f"   🎯 [SPOT CASH PRICE] {symbol} atingiu "
                                             f"{motivo_fechamento} @ mark={mark_price} "
-                                            f"(entry={entry_price}, L={leverage:.0f}x)",
+                                            f"(entry={entry_price} TP×2/SL×0.5)",
                                             flush=True,
                                         )
                                 alvo_lucro, alvo_perda = financial_targets_from_margin(entry_margin)
@@ -3583,7 +3583,8 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None, client_context
 
     try:
         is_spot = bool(getattr(broker, 'is_spot_trading', lambda: False)())
-        leverage_value = float(_spot_margin_leverage() if is_spot else (ALAVANCAGEM or 10))
+        # Spot cash: entrada = 5% do USDT livre (L=1). Linear: ALAVANCAGEM.
+        leverage_value = 1.0 if is_spot else float(ALAVANCAGEM or 10)
 
         saldo_atual = broker.get_balance()
         if saldo_atual is None or saldo_atual <= 0:
@@ -3647,10 +3648,10 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None, client_context
             card = build_frontend_entry_card(report)
             if is_spot:
                 card['motivo'] = (
-                    f"Spot Margin Cross {leverage_value:.0f}x — "
-                    f"MI={margem_pct*100:.0f}% × L → nocional"
+                    f"Spot cash — MI={margem_pct*100:.0f}% do USDT livre "
+                    f"(TP×2 / SL×0.5)"
                 )
-                card['leverage'] = leverage_value
+                card['leverage'] = 1.0
             central_state['entry_sizing'] = card
             central_state['proxima_entrada'] = card
         except Exception:
@@ -3678,7 +3679,7 @@ def _calculate_dynamic_order_quantity(broker, symbol, banca=None, client_context
                 flush=True,
             )
 
-        mode_label = f"Spot Margin Cross {leverage_value:.0f}x" if is_spot else f"Linear {leverage_value:.0f}x"
+        mode_label = "Spot cash 1x (5% USDT)" if is_spot else f"Linear {leverage_value:.0f}x"
         print(f"   💰 [CALC QTY] Saldo UNIFIED: ${saldo_atual:.2f} USDT", flush=True)
         print(
             f"   💰 [CALC QTY] MI ≈ {report.get('final_pct') or round((margem/capital_ref)*100,2)}% "
@@ -4794,17 +4795,17 @@ def _process_client_orders_background(
                             continue
                         print(f"   ⚠️ [LEVERAGE] Erro ao configurar para {ALAVANCAGEM}x: {lev_err}", flush=True)
 
-                # 🎯 SL/TP: Spot Margin = FIXED ROI 100/50 @ 10x (local monitor).
+                # 🎯 SL/TP Spot cash: TP=entry×2 (+100%) | SL=entry×0.5 (−50%) + nativo Bybit.
                 # Linear: Turtle/Fib + C3 opcional + attach exchange.
                 from src.risk.position_sizing import attach_exchange_tp, calculate_dynamic_tp_sl
                 is_spot_order = bool(getattr(broker, 'is_spot_trading', lambda: False)())
                 lev_tpsl = _spot_margin_leverage() if is_spot_order else float(ALAVANCAGEM or 10)
                 if is_spot_order:
-                    dyn = calculate_fixed_roi_tp_sl(entry_price, side.lower(), lev_tpsl)
+                    dyn = calculate_spot_cash_tp_sl(entry_price, side.lower())
                     tp_price, sl_price = dyn.get('tp_price'), dyn.get('sl_price')
                     print(
-                        f"   📐 [TP/SL SPOT MARGIN] L={lev_tpsl:.0f}x FIXED "
-                        f"TP={tp_price} SL={sl_price} (monitor local, sem set_trading_stop)",
+                        f"   📐 [TP/SL SPOT CASH] {dyn.get('rule')} "
+                        f"(nativo Bybit tpslOrder + monitor local)",
                         flush=True,
                     )
                 else:
@@ -4905,19 +4906,58 @@ def _process_client_orders_background(
                         except Exception as fb_open_err:
                             print(f"   ⚠️ [FEEDBACK LOOP] ABERTA não registrada: {fb_open_err}", flush=True)
 
-                        # Sempre aplica set_trading_stop DEPOIS do fill — é o que desenha TP/SL no gráfico.
+                        # Pós-fill: Spot → tpslOrder nativo (×2/×0.5); Linear → set_trading_stop.
                         try:
-                            print("   🎯 [TP/SL] Aplicando takeProfit/stopLoss via set_trading_stop (gráfico Bybit)…", flush=True)
+                            fill_price = float(
+                                order_result.get('average')
+                                or order_result.get('avgPrice')
+                                or order_result.get('price')
+                                or entry_price
+                                or 0
+                            )
+                            fill_qty = float(
+                                order_result.get('filled')
+                                or order_result.get('cumExecQty')
+                                or order_result.get('qty')
+                                or order_result.get('amount')
+                                or qty
+                                or 0
+                            )
+                            if fill_qty <= 0:
+                                fill_qty = float(qty or 0)
+                            if is_spot_order and fill_price > 0:
+                                from src.risk.position_sizing import calculate_spot_cash_tp_sl
+                                spot_lv = calculate_spot_cash_tp_sl(fill_price, side.lower())
+                                tp_price = spot_lv.get('tp_price')
+                                sl_price = spot_lv.get('sl_price')
+                                print(
+                                    f"   🎯 [TP/SL SPOT] Pós-fill entry={fill_price} qty={fill_qty} "
+                                    f"→ TP={tp_price} SL={sl_price} (tpslOrder nativo)",
+                                    flush=True,
+                                )
+                            else:
+                                print(
+                                    "   🎯 [TP/SL] Aplicando takeProfit/stopLoss via set_trading_stop…",
+                                    flush=True,
+                                )
                             time.sleep(0.45)
                             tp_ok = broker.set_tp_sl_sniper(
-                                symbol, side.lower(), entry_price, qty,
-                                leverage=ALAVANCAGEM, tp_price=tp_price, sl_price=sl_price,
+                                symbol,
+                                side.lower(),
+                                fill_price or entry_price,
+                                fill_qty or qty,
+                                leverage=ALAVANCAGEM,
+                                tp_price=tp_price,
+                                sl_price=sl_price,
                                 signals=signals,
                             )
                             if tp_ok:
-                                print("   ✅ [TP/SL] takeProfit + stopLoss confirmados na posição.", flush=True)
+                                print("   ✅ [TP/SL] Proteção confirmada na Bybit/gráfico.", flush=True)
                             else:
-                                print("   ❌ [TP/SL] set_trading_stop falhou — veja retCode/retMsg acima.", flush=True)
+                                print(
+                                    "   ❌ [TP/SL] Falha na exchange — monitor local assume backup.",
+                                    flush=True,
+                                )
                         except Exception as tp_sl_err:
                             print(f"   ⚠️ [TP/SL] Exceção pós-fill (ordem já enviada): {tp_sl_err}", flush=True)
 

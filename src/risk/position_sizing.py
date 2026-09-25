@@ -134,8 +134,8 @@ def calculate_fixed_roi_tp_sl(
     leverage: float = 10.0,
 ) -> dict:
     """
-    TP/SL estritos Spot Margin Cross 10x (sem ATR/Fib):
-      +100% / −50% ROI sobre a margem → ±10% / ±5% no preço a 10x.
+    TP/SL por ROI de margem (ex.: Cross 10x):
+      +100% / −50% ROI → ±10% / ±5% no preço a 10x.
     """
     tp, sl = calculate_tp_sl_prices(entry_price, side, leverage)
     lev = max(float(leverage or 1), 1.0)
@@ -151,6 +151,72 @@ def calculate_fixed_roi_tp_sl(
             f'TP={tp:.6g} SL={sl:.6g} (local monitor)'
         ),
     }
+
+
+def calculate_spot_cash_tp_sl(entry_price: float, side: str) -> dict:
+    """
+    Spot cash (1x) — TP/SL sobre o valor investido:
+      Long:  TP = entry × 2.00 (+100% preço) | SL = entry × 0.50 (−50% preço)
+      Short: TP = entry × 0.50 | SL = entry × 2.00
+    """
+    entry = float(entry_price or 0)
+    if entry <= 0:
+        return {
+            'tp_price': 0.0,
+            'sl_price': 0.0,
+            'tp1_price': 0.0,
+            'tp2_price': 0.0,
+            'rule': 'SPOT CASH TP/SL inválido (entry<=0)',
+        }
+    is_long = str(side or '').strip().lower() in ('buy', 'long', 'comprar')
+    if is_long:
+        tp, sl = entry * 2.0, entry * 0.5
+    else:
+        tp, sl = entry * 0.5, entry * 2.0
+    return {
+        'tp_price': float(tp),
+        'sl_price': float(sl),
+        'tp1_price': float(tp),
+        'tp2_price': float(tp),
+        'roi_tp': float(tp),
+        'roi_sl': float(sl),
+        'rule': (
+            f'SPOT CASH 100/50 → TP={tp:.6g} ({"×2" if is_long else "×0.5"}) '
+            f'SL={sl:.6g} ({"×0.5" if is_long else "×2"})'
+        ),
+    }
+
+
+def evaluate_spot_cash_price_exit(
+    mark_price: float,
+    entry_price: float,
+    side: str,
+) -> Tuple[str | None, float]:
+    """
+    Backup local Spot: dispara venda/recompra quando preço atinge ×2 (TP) ou ×0.5 (SL).
+    Retorna (motivo, pnl_pct_sobre_entrada).
+    """
+    mark = float(mark_price or 0)
+    entry = float(entry_price or 0)
+    if mark <= 0 or entry <= 0:
+        return None, 0.0
+    levels = calculate_spot_cash_tp_sl(entry, side)
+    tp = float(levels.get('tp_price') or 0)
+    sl = float(levels.get('sl_price') or 0)
+    is_long = str(side or '').strip().lower() in ('buy', 'long', 'comprar')
+    pnl_pct = ((mark - entry) / entry) * 100.0 if is_long else ((entry - mark) / entry) * 100.0
+    eps = 1e-9
+    if is_long:
+        if tp > 0 and mark + eps >= tp:
+            return 'TAKE_PROFIT', pnl_pct
+        if sl > 0 and mark - eps <= sl:
+            return 'STOP_LOSS', pnl_pct
+    else:
+        if tp > 0 and mark - eps <= tp:
+            return 'TAKE_PROFIT', pnl_pct
+        if sl > 0 and mark + eps >= sl:
+            return 'STOP_LOSS', pnl_pct
+    return None, pnl_pct
 
 
 def evaluate_price_level_exit(
