@@ -119,49 +119,13 @@ def _estimate_assertiveness(
 
 
 def _cloud_gemini_comment(symbol: str, side: str, tech_summary: str) -> str | None:
-    key = os.getenv('GEMINI_API_KEY', '').strip()
-    if not key or not _env_bool('ENABLE_AI_TRIBUNAL_CLOUD', True):
-        return None
-    try:
-        from src.intelligence.gemini_client import gemini_generate_content
-        prompt = (
-            f'Você é o analista Gemini do robô Motor Sniper. Em 2 frases curtas em português, '
-            f'explique por que a entrada {side} em {symbol} faz sentido (ou o risco). '
-            f'Dados:\n{tech_summary}\nResponda só o texto, sem JSON.'
-        )
-        result = gemini_generate_content(prompt, purpose='chat', temperature=0.3, max_tokens=180)
-        if not result.get('ok'):
-            return None
-        return (result.get('text') or '').strip()[:320] or None
-    except Exception as exc:
-        print(f'⚠️ [TRIBUNAL] Gemini indisponível: {exc}', flush=True)
-        return None
+    """Cloud LLM desligado — tribunal usa só agentes Python locais (anti-bloqueio Render)."""
+    return None
 
 
 def _cloud_groq_comment(symbol: str, side: str, tech_summary: str) -> str | None:
-    key = os.getenv('GROQ_API_KEY', '').strip()
-    if not key or Groq is None or not _env_bool('ENABLE_AI_TRIBUNAL_CLOUD', True):
-        return None
-    try:
-        prompt = (
-            f'Você é o analista Groq tático do Motor Sniper. Em 2 frases curtas em português, '
-            f'debata a entrada {side} em {symbol} com foco em timing/volume/risco.\n{tech_summary}'
-        )
-        from src.intelligence.groq_client import groq_chat_completion, log_groq_degraded
-        result = groq_chat_completion(
-            messages=[{'role': 'user', 'content': prompt}],
-            purpose='tribunal',
-            temperature=0.3,
-            max_tokens=180,
-        )
-        if not result.get('ok'):
-            log_groq_degraded('TRIBUNAL', result, symbol=symbol)
-            return None
-        text = (result.get('content') or '').strip()
-        return text[:320] or None
-    except Exception as exc:
-        print(f'⚠️ [TRIBUNAL] Groq indisponível: {exc}', flush=True)
-        return None
+    """Cloud LLM desligado — Cérebro 2/3 locais (sem HTTP Abacus/Groq/Gemini)."""
+    return None
 
 
 def build_ai_tribunal_evidence(

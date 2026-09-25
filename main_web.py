@@ -921,10 +921,40 @@ class CachedValue:
     def is_expired(self): return time.time() - self.timestamp > self.ttl
     def clear(self): self.timestamp = 0; self.value = None
 
-client_balance_cache = CachedValue(ttl_seconds=10)  
-_status_cache = CachedValue(ttl_seconds=3)  
+client_balance_cache = CachedValue(ttl_seconds=15)
+_status_cache = CachedValue(ttl_seconds=5)  # alinhado ao poll frontend ≥5s (anti OOM Render)
 _balance_refresh_lock = threading.Lock()
 _balance_refresh_in_progress = False
+
+# Campos pesados que NÃO entram no /api/status (candles, logs brutos, histórico longo)
+_STATUS_HEAVY_KEYS = frozenset({
+    'ohlcv', 'candles', 'candle_history', 'raw_logs', 'debug_dump',
+    'order_book', 'trades_raw', 'scan_dump',
+})
+
+
+def _strip_heavy_status_blob(obj, *, depth=0):
+    """Remove candles/logs profundos do JSON do dashboard (evita payloads ~200KB+)."""
+    if depth > 6 or obj is None:
+        return obj
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            kl = str(k).lower()
+            if kl in _STATUS_HEAVY_KEYS or kl.endswith('_candles') or kl == 'candles':
+                continue
+            if kl == 'candle_study' and isinstance(v, dict):
+                slim = {kk: vv for kk, vv in v.items() if str(kk).lower() != 'candles'}
+                out[k] = _strip_heavy_status_blob(slim, depth=depth + 1)
+                continue
+            if kl in ('dialogue', 'dialogue_preview') and isinstance(v, list) and len(v) > 6:
+                out[k] = v[:6]
+                continue
+            out[k] = _strip_heavy_status_blob(v, depth=depth + 1)
+        return out
+    if isinstance(obj, list):
+        return [_strip_heavy_status_blob(x, depth=depth + 1) for x in obj[:40]]
+    return obj
 
 if db is not None:
     _saved_risk_mode = db.get_config('RISK_MODE')
@@ -2332,26 +2362,43 @@ def _fetch_active_client_balances(force=False):
         for client in _get_registered_clients(active_only=True):
             balance = None
             error = None
+            nome = client.get('nome') or client.get('id')
             try:
                 client_id = int(client.get('id') or 0)
                 if _is_client_temporarily_disabled(client_id):
                     error = _get_client_disable_reason(client_id) or 'Cliente temporariamente desativado por erro de autenticação'
                 else:
                     broker = _make_broker(client)
-                    balance = broker.get_balance()
+                    # Caminho leve (evita cascata CCXT que OOM/timeout no Render)
+                    try:
+                        balance = broker.get_balance_quick()
+                    except Exception:
+                        balance = None
+                    if balance is None:
+                        try:
+                            balance = broker.get_balance()
+                        except Exception as bal_err:
+                            error = str(bal_err)[:200]
+                            print(
+                                f"⚠️ [BALANCE] {nome}: falha isolada — {error}",
+                                flush=True,
+                            )
                     code = str(getattr(broker, 'last_auth_error_code', '') or '')
+                    auth_msg = getattr(broker, 'last_auth_error_message', None) or getattr(broker, 'last_auth_error', None) or code
                     if code == '10003' and balance is None:
                         _handle_invalid_api_key_10003_for_client(client, source_label='fetch_balance')
-                    elif balance is None and _is_bybit_auth_error(getattr(broker, 'last_auth_error', '') or code):
+                    elif balance is None and _is_bybit_auth_error(auth_msg or code):
                         _handle_bybit_auth_failure(
                             client,
-                            getattr(broker, 'last_auth_error', None) or code,
+                            auth_msg or code,
                             source_label='fetch_balance',
                         )
                 if balance is not None:
                     balance = round(float(balance), 2)
                     total += balance
-            except Exception as e: error = str(e)
+            except Exception as e:
+                error = str(e)[:200]
+                print(f"⚠️ [BALANCE] {nome}: exceção isolada — {error}", flush=True)
             items.append({
                 "id": client.get('id'),
                 "nome": client.get('nome'),
@@ -2365,10 +2412,12 @@ def _fetch_active_client_balances(force=False):
                         "exchange": str(client.get('exchange') or 'bybit').lower(),
                         "error": error,
                         "is_fake_balance": False,
+                        "balance_live": balance is not None,
                     },
                 ),
             })
-    except Exception: pass
+    except Exception as loop_err:
+        print(f"⚠️ [BALANCE] loop investidores: {loop_err}", flush=True)
 
     res = {"items": items, "total": round(total, 2)}
     client_balance_cache.set(res)
@@ -2542,14 +2591,45 @@ def _persist_live_client_balance(cliente, saldo):
 
 def _build_api_status_payload():
     """
-    Payload do `/api/status` — 100% REAL.
-    Consolida apenas a soma das bancas reais ativas e as posições reais abertas
-    nas corretoras (Bybit/Binance).
+    Payload ENXUTO do `/api/status` — evita OOM no Render (512MB).
+    Sem histórico completo de candles nem dumps brutos a cada poll.
     """
-    payload = dict(central_state or {})
+    src = central_state if isinstance(central_state, dict) else {}
+    # Allowlist — NÃO copiar central_state inteiro
+    payload = {
+        'status': src.get('status') or 'running',
+        'mode': 'real',
+        'is_testnet': False,
+        'test_mode': False,
+        'symbol': src.get('symbol') or '---',
+        'radar': src.get('symbol') or '---',
+        'confidence': _coerce_float(src.get('confidence'), default=0.0),
+        'confianca_ia': _coerce_float(src.get('confidence'), default=0.0),
+        'ultimo_scan': src.get('ultimo_scan') or src.get('last_scan_at') or src.get('status') or '',
+        'last_scan_at': src.get('last_scan_at') or src.get('ultimo_scan'),
+        'active_trades': [
+            _strip_heavy_status_blob(t) for t in list(src.get('active_trades') or [])[:12]
+        ],
+        'opportunities': [
+            _strip_heavy_status_blob(o) for o in list(src.get('opportunities') or [])[:5]
+        ],
+        'recent_sniper_signals': list(src.get('recent_sniper_signals') or [])[:8],
+        'last_sniper_signal': src.get('last_sniper_signal'),
+        'ia2_decision': _strip_heavy_status_blob(src.get('ia2_decision')),
+        'segundo_cerebro': src.get('segundo_cerebro') or {},
+        'porta3': src.get('porta3'),
+        'entry_sizing': src.get('entry_sizing') or src.get('proxima_entrada'),
+        'trades': [
+            _strip_heavy_status_blob(t) for t in list(src.get('trades') or [])[:8]
+        ],
+        'pesos_ia_evolutivo': src.get('pesos_ia_evolutivo') or [],
+        'feedback_learning': src.get('feedback_learning'),
+    }
+    payload['posicoes'] = payload['active_trades']
+    payload['active_positions'] = payload['active_trades']
 
     # Soma somente saldos reais lidos das corretoras
-    real_client_balances = payload.get('real_client_balances')
+    real_client_balances = src.get('real_client_balances')
     if isinstance(real_client_balances, list) and real_client_balances:
         normalized_balances = []
         for c in real_client_balances:
@@ -2559,7 +2639,12 @@ def _build_api_status_payload():
                 default=0.0,
             )
             normalized_balances.append({
-                **c,
+                'id': c.get('id'),
+                'nome': c.get('nome'),
+                'status': c.get('status') or 'ativo',
+                'error': (str(c.get('error') or '')[:160] or None),
+                'exchange': c.get('exchange') or 'bybit',
+                'corretora': c.get('corretora') or 'BYBIT',
                 **_investor_balance_aliases(
                     saldo,
                     pnl_ciclo=c.get('pnl_ciclo'),
@@ -2579,48 +2664,25 @@ def _build_api_status_payload():
             2,
         )
     else:
-        balance = round(_coerce_float(payload.get('balance'), default=0.0), 2)
+        balance = round(_coerce_float(src.get('balance'), default=0.0), 2)
 
-    active_trades = payload.get('active_trades')
-    if not isinstance(active_trades, list):
-        active_trades = []
-    payload['active_trades'] = active_trades
-
-    payload['mode'] = 'real'
-    payload['is_testnet'] = False
-    payload['test_mode'] = False
     payload['balance'] = balance
     payload['saldo_real'] = balance
     payload['saldo'] = balance
     payload['saldo_atual'] = balance
-    payload['posicoes'] = active_trades
-    payload['active_positions'] = active_trades
-    # Feedback Loop — amostras/pesos para o painel (evita travar em 0)
-    try:
-        from src.learning.feedback_loop import get_feedback_loop
-        resumo = get_feedback_loop().resumo_aprendizado()
-        payload['pesos_ia_evolutivo'] = resumo.get('modulos') or payload.get('pesos_ia_evolutivo') or []
-        payload['feedback_learning'] = resumo
-        ev = payload.get('evidence') if isinstance(payload.get('evidence'), dict) else {}
-        if int(resumo.get('sample_size') or 0) > 0:
-            lfh = dict(ev.get('learning_from_history') or {})
-            lfh.update({
-                'sample_size': resumo.get('sample_size'),
-                'win_rate': resumo.get('win_rate'),
-                'summary': resumo.get('summary'),
-                'modulos': resumo.get('modulos'),
-            })
-            ev = dict(ev)
-            ev['learning_from_history'] = lfh
-            payload['evidence'] = ev
-    except Exception:
-        pass
-    payload['radar'] = payload.get('symbol') or '---'
-    payload['confianca_ia'] = _coerce_float(payload.get('confidence'), default=0.0)
-    # Card da próxima entrada (~5% da banca) com filtro de viabilidade
+
+    # Feedback / aprendizado — snapshot em memória (sem I/O DB no poll)
+    fb = src.get('feedback_learning')
+    if isinstance(fb, dict):
+        payload['feedback_learning'] = {
+            'sample_size': fb.get('sample_size'),
+            'win_rate': fb.get('win_rate'),
+            'summary': (str(fb.get('summary') or ''))[:160],
+        }
+    payload['pesos_ia_evolutivo'] = list(src.get('pesos_ia_evolutivo') or [])[:6]
+
     entry_sizing = payload.get('entry_sizing') or payload.get('proxima_entrada')
     if not isinstance(entry_sizing, dict):
-        # Preview estático com saldo atual × alvo 5% (até haver cálculo real)
         target = float(PERCENTUAL_ENTRADA_BANCA or 0.05)
         preview_margin = round(balance * target, 4) if balance > 0 else 0.0
         entry_sizing = {
@@ -2636,18 +2698,17 @@ def _build_api_status_payload():
         }
     payload['entry_sizing'] = entry_sizing
     payload['proxima_entrada'] = entry_sizing
-    # Alertas ao usuário (API expirada, etc.)
+
     try:
-        alerts = list(central_state.get('user_alerts') or [])
-        payload['user_alerts'] = [a for a in alerts if not a.get('dismissed')][:10]
+        alerts = list(src.get('user_alerts') or [])
+        payload['user_alerts'] = [a for a in alerts if not a.get('dismissed')][:8]
     except Exception:
         payload['user_alerts'] = []
-    # Espelha status de auth nas bancas (dashboard)
+
     try:
         bal_list = payload.get('real_client_balances')
         if isinstance(bal_list, list):
             for c in bal_list:
-                cid = int(c.get('id') or 0)
                 st = str(c.get('status') or '').lower()
                 if st in ('erro_autenticacao', 'erro_api', 'inativo') or '33004' in str(c.get('error') or ''):
                     c['auth_disabled'] = True
@@ -2655,53 +2716,33 @@ def _build_api_status_payload():
                     c['status_label'] = 'API EXPIRADA — crie nova na Bybit'
     except Exception:
         pass
-    try:
-        from src.database.decision_history import list_ia_decisions
-        payload['ia_decisions'] = list_ia_decisions(20) or payload.get('ia_decisions') or []
-        payload['historico_decisoes_ia'] = payload['ia_decisions']
-    except Exception:
-        payload['ia_decisions'] = payload.get('ia_decisions') or []
-        payload['historico_decisoes_ia'] = payload['ia_decisions']
 
-    # Tribunal persistido — preenche cards mesmo após restart
-    try:
-        from src.database.tribunal_debate import latest_tribunal_debate, list_tribunal_debates
-        latest = latest_tribunal_debate()
-        debates = list_tribunal_debates(12)
-        payload['tribunal_debates'] = debates
-        if latest:
-            payload['tribunal_latest'] = latest
-            # Se memória vazia, reidrata evidence/ai_tribunal a partir do SQLite
-            if not payload.get('ai_tribunal') or not (payload.get('ai_tribunal') or {}).get('agents'):
-                agents = latest.get('agents') or []
-                payload['ai_tribunal'] = {
-                    'agents': agents,
-                    'dialogue': latest.get('dialogue') or [],
-                    'assertiveness': latest.get('assertiveness'),
-                    'symbol': latest.get('symbol'),
-                    'side': latest.get('side'),
-                }
-                if not payload.get('evidence'):
-                    payload['evidence'] = {
-                        'agents': agents,
-                        'dialogue': latest.get('dialogue') or [],
-                        'assertiveness': latest.get('assertiveness'),
-                        'symbol': latest.get('symbol'),
-                        'side': latest.get('side'),
-                        'confidence': latest.get('confidence'),
-                        'strategic_reason': latest.get('veredito'),
-                    }
-    except Exception:
-        payload['tribunal_debates'] = payload.get('tribunal_debates') or []
+    # Histórico IA / tribunal: NÃO consultar DB a cada poll (OOM/CPU no Render).
+    # Cards usam snapshot em memória; detalhes via /api/tribunal/status sob demanda.
+    payload['ia_decisions'] = []
+    payload['historico_decisoes_ia'] = []
+    payload['tribunal_debates'] = []
+    live_trib = src.get('ai_tribunal')
+    if isinstance(live_trib, dict):
+        payload['ai_tribunal'] = {
+            'agents': (live_trib.get('agents') or [])[:4],
+            'assertiveness': live_trib.get('assertiveness'),
+            'symbol': live_trib.get('symbol'),
+            'side': live_trib.get('side'),
+        }
+        payload['tribunal_latest'] = payload['ai_tribunal']
 
-    # Porta 3 adaptativa + Segundo Cérebro (Turtle / liquidez / anatomia)
-    try:
-        from src.engine.porta3_adaptive import porta3_status
-        payload['porta3'] = payload.get('porta3') or porta3_status()
-    except Exception:
-        pass
-    if payload.get('segundo_cerebro') is None:
-        payload['segundo_cerebro'] = (central_state or {}).get('segundo_cerebro') or {}
+    # Evidence enxuta (sem candle arrays)
+    ev = src.get('evidence')
+    if isinstance(ev, dict):
+        payload['evidence'] = _strip_heavy_status_blob({
+            'symbol': ev.get('symbol'),
+            'side': ev.get('side'),
+            'confidence': ev.get('confidence'),
+            'strategic_reason': (str(ev.get('strategic_reason') or ''))[:280],
+            'assertiveness': ev.get('assertiveness'),
+            'agents': (ev.get('agents') or [])[:4],
+        })
 
     return payload
 
@@ -3895,6 +3936,12 @@ def broadcast_ordem_global(symbol, side, entry_price, res_ia):
             _release_signal_slot(symbol)
 
 def sniper_worker_loop():
+    """
+    Scanner de mercado em thread daemon.
+    Nenhuma falha de rede/Bybit/parsing pode derrubar o processo (Render OOM/crash loop).
+    """
+    import logging
+    _log = logging.getLogger('sniper.radar')
     time.sleep(1)
     from src.broker.bybit_client import BybitClient
     from src.engine.indicators import IndicatorEngine
@@ -3903,14 +3950,32 @@ def sniper_worker_loop():
     from src.engine.entry_timing import confirmar_timing_entrada
     global _FORCED_SIGNAL_FIRED
 
+    _RADAR_CYCLE_SLEEP = max(3.0, float(os.getenv('RADAR_CYCLE_SLEEP_SECS', '15') or 15))
+
     while True:
         try:
             # Feedback Loop: reconcilia fechamentos Bybit antes de buscar novos pares
-            _run_feedback_pnl_sync(force=False)
+            try:
+                _run_feedback_pnl_sync(force=False)
+            except Exception as fb_err:
+                _log.error("Erro no ciclo de trading (feedback): %s", fb_err)
+                print(f"⚠️ [RADAR] feedback: {fb_err}", flush=True)
 
-            _repair_open_trades()
-            _calcular_pnl_trades()
-            _refresh_real_balance_state()
+            try:
+                _repair_open_trades()
+            except Exception as repair_err:
+                _log.error("Erro no ciclo de trading (repair): %s", repair_err)
+
+            try:
+                _calcular_pnl_trades()
+            except Exception:
+                pass
+
+            try:
+                _refresh_real_balance_state()
+            except Exception as bal_err:
+                _log.error("Erro no ciclo de trading (balances): %s", bal_err)
+                print(f"⚠️ [RADAR] balances isolado: {bal_err}", flush=True)
 
             if _count_live_open_positions() >= MAX_MOEDAS_ATIVAS:
                 central_state['status'] = (
@@ -3918,20 +3983,26 @@ def sniper_worker_loop():
                     f"posição(ões) — limite {MAX_MOEDAS_ATIVAS}"
                 )
                 # Mantém RADAR LIVE atualizado mesmo sem abrir novas entradas
-                _refresh_radar_live_from_public_tickers()
-                time.sleep(15)
+                try:
+                    _refresh_radar_live_from_public_tickers()
+                except Exception:
+                    pass
+                time.sleep(_RADAR_CYCLE_SLEEP)
                 continue
 
             _, key, sec = _get_active_investor_bybit_credentials()
             if not key or not sec:
-                _refresh_radar_live_from_public_tickers()
-                time.sleep(10)
+                try:
+                    _refresh_radar_live_from_public_tickers()
+                except Exception:
+                    pass
+                time.sleep(max(3.0, _RADAR_CYCLE_SLEEP * 0.66))
                 continue
 
             # Reutiliza broker via BrokerManager (singleton cacheado) em vez de instanciar novo BybitClient
             active_clients = _get_registered_clients(active_only=True)
             if not active_clients:
-                time.sleep(10)
+                time.sleep(max(3.0, _RADAR_CYCLE_SLEEP * 0.66))
                 continue
             master_client = None
             for c in active_clients:
@@ -3941,7 +4012,7 @@ def sniper_worker_loop():
                 master_client = c
                 break
             if not master_client:
-                time.sleep(10)
+                time.sleep(max(3.0, _RADAR_CYCLE_SLEEP * 0.66))
                 continue
             # RADAR/ANÁLISE: usa sempre Mainnet (dados reais), mesmo quando USE_TESTNET=True
             # para execução de ordens (Testnet).
@@ -4697,9 +4768,10 @@ def sniper_worker_loop():
                     },
                 )
                 time.sleep(COOLDOWN_INSTITUCIONAL_SECS)
-        except Exception as loop_err:
-            print(f"   ❌ [RADAR LOOP] {type(loop_err).__name__}: {loop_err}", flush=True)
-        time.sleep(15)
+        except Exception as e:
+            _log.error("Erro no ciclo de trading: %s", e)
+            print(f"⚠️ [RADAR] Erro no ciclo de trading: {e}", flush=True)
+        time.sleep(_RADAR_CYCLE_SLEEP)
 
 def _process_client_orders_background(
     symbol,

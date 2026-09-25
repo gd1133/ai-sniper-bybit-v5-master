@@ -490,9 +490,10 @@ const App = () => {
 
     fetchStatus();
     fetchInvestidores();
-    const iv = setInterval(fetchStatus, 3000);
-    const iv2 = setInterval(fetchInvestidores, 4000);
-    // Reconexão agressiva se o backend voltar após 502/timeout
+    // Poll ≥5s — payloads /api/status frequentes OOM no Render (512MB)
+    const iv = setInterval(fetchStatus, 5000);
+    const iv2 = setInterval(fetchInvestidores, 10000);
+    // Reconexão se o backend voltar após 502/timeout
     const ivHealth = setInterval(async () => {
       try {
         const r = await fetchJson('/api/health', 5000);
@@ -500,7 +501,7 @@ const App = () => {
           fetchStatus();
         }
       } catch (_) { /* silencioso */ }
-    }, 15000);
+    }, 20000);
     return () => {
       mounted = false;
       clearInterval(iv);
