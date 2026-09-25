@@ -313,6 +313,93 @@ def _handle_bybit_auth_failure(client, err, source_label='bybit'):
     )
     return True
 
+
+def _get_master_telegram_config():
+    """Token/chat master do ambiente (Render env / .env)."""
+    token = str(os.getenv('TELEGRAM_TOKEN') or '').strip()
+    chat_id = str(os.getenv('TELEGRAM_CHAT_ID') or '').strip()
+    return token, chat_id
+
+
+def _resolve_telegram_credentials(client=None):
+    """
+    Prioridade: credenciais do investidor → TELEGRAM_* do ambiente.
+    Retorna (token, chat_id).
+    """
+    master_tk, master_chat = _get_master_telegram_config()
+    c = client or {}
+    token = str(
+        c.get('tg_token')
+        or c.get('tg_api_key')
+        or c.get('telegram_token')
+        or c.get('token_telegram')
+        or master_tk
+        or ''
+    ).strip()
+    chat_id = str(
+        c.get('chat_id')
+        or c.get('telegram_chat_id')
+        or c.get('tg_chat_id')
+        or master_chat
+        or ''
+    ).strip()
+    return token, chat_id
+
+
+def _send_telegram_message(text: str, *, token: str = '', chat_id: str = '', client=None, label: str = '') -> bool:
+    """
+    Envia mensagem ao Telegram e valida ret HTTP + ok=true.
+    Usa credenciais do cliente se passadas; senão token/chat explícitos.
+    """
+    tk = str(token or '').strip()
+    chat = str(chat_id or '').strip()
+    if client is not None and (not tk or not chat):
+        tk2, chat2 = _resolve_telegram_credentials(client)
+        tk = tk or tk2
+        chat = chat or chat2
+    if not tk or not chat:
+        who = (client or {}).get('nome') or label or 'master'
+        print(
+            f"⚠️ [TELEGRAM] Sem TELEGRAM_TOKEN/CHAT_ID (ou tg_token/chat_id do investidor) — "
+            f"não notificou {who}",
+            flush=True,
+        )
+        return False
+    clean_chat = str(chat).strip()
+    try:
+        if clean_chat.lstrip('-').isdigit():
+            clean_chat = int(clean_chat)
+    except (TypeError, ValueError):
+        pass
+    try:
+        rsp = requests.post(
+            f"https://api.telegram.org/bot{tk}/sendMessage",
+            json={"chat_id": clean_chat, "text": str(text or '')},
+            timeout=8,
+        )
+        body = {}
+        try:
+            body = rsp.json() if rsp is not None else {}
+        except Exception:
+            body = {}
+        if rsp is not None and rsp.status_code == 200 and body.get('ok'):
+            print(
+                f"✅ [TELEGRAM] Enviado ({label or (client or {}).get('nome') or 'ok'}) "
+                f"chat={clean_chat}",
+                flush=True,
+            )
+            return True
+        print(
+            f"❌ [TELEGRAM] Falha HTTP {getattr(rsp, 'status_code', '?')} "
+            f"desc={body.get('description') or (rsp.text[:160] if rsp is not None else '')}",
+            flush=True,
+        )
+        return False
+    except Exception as tg_err:
+        print(f"❌ [TELEGRAM ERROR] {tg_err}", flush=True)
+        return False
+
+
 # 🔧 CONFIGURAÇÃO DE GERENCIAMENTO DE RISCO MOTOR SNIPER V60.7
 # Entrada = percentual da banca (NÃO o mínimo da moeda na exchange)
 from src.risk.position_sizing import (
@@ -2941,6 +3028,25 @@ def _monitor_financial_stop_loss():
                                         except Exception:
                                             pass
 
+                                        # Telegram WIN / LOSS
+                                        try:
+                                            emoji = '🏆' if motivo_fechamento == 'TAKE_PROFIT' else '🛑'
+                                            _send_telegram_message(
+                                                (
+                                                    f"{emoji} {motivo_fechamento}\n\n"
+                                                    f"👤 Investidor: {cliente.get('nome')}\n"
+                                                    f"📦 Ativo: {symbol}\n"
+                                                    f"📈 Lado: {str(side).upper()}\n"
+                                                    f"💵 PnL: ${float(unrealised_pnl or 0):.2f}\n"
+                                                    f"📊 ROI: {float(roi_pct or 0):.1f}%\n"
+                                                    f"🎯 Entrada: {entry_price} → Mark: {mark_price}"
+                                                ),
+                                                client=cliente,
+                                                label=f"close:{motivo_fechamento}",
+                                            )
+                                        except Exception as tg_close_err:
+                                            print(f"   ⚠️ [TELEGRAM] close: {tg_close_err}", flush=True)
+
                                         try:
                                             profit = unrealised_pnl
                                             note_tag = (
@@ -4644,12 +4750,27 @@ def _process_client_orders_background(
                 flush=True,
             )
 
-        # 1. DUALIDADE DE CONFIGURAÇÃO (FALLBACK DO BANCO)
-        # Primeiro tenta ler do .env, depois fallback para variáveis do banco
-        tk = f"{os.getenv('TELEGRAM_TOKEN') or ''}".strip()
-        chat = f"{os.getenv('TELEGRAM_CHAT_ID') or ''}".strip()
-
+        # Credenciais Telegram (investidor → env master)
         clientes = _get_registered_clients(active_only=True)
+
+        # Aviso master no início do broadcast (mesmo se algum cliente falhar depois)
+        try:
+            master_tk, master_chat = _get_master_telegram_config()
+            _send_telegram_message(
+                (
+                    f"🚀 SINAL SNIPER\n\n"
+                    f"📦 Ativo: {symbol}\n"
+                    f"📈 Lado: {str(side).upper()}\n"
+                    f"🎯 Entrada: ${float(entry_price or 0):.4f}\n"
+                    f"🧠 Confiança: {confidence}%\n"
+                    f"📝 {str(reason or '')[:180]}"
+                ),
+                token=master_tk,
+                chat_id=master_chat,
+                label='broadcast',
+            )
+        except Exception as tg_bc_err:
+            print(f"⚠️ [TELEGRAM] broadcast: {tg_bc_err}", flush=True)
 
         for c in clientes:
             try:
@@ -4661,10 +4782,7 @@ def _process_client_orders_background(
                     print(f"   ⚠️ [EXEC] Cliente {c.get('nome')} desativado por autenticação — ignorando execução de ordens", flush=True)
                     continue
 
-                # Fallback dinâmico: se .env estiver vazio, busca do dicionário do cliente
-                # CORREÇÃO: campos corretos do banco são 'tg_token', 'tg_api_key' e 'chat_id'
-                client_tk = tk or f"{c.get('tg_token') or c.get('tg_api_key') or c.get('telegram_token') or c.get('token_telegram') or ''}".strip()
-                client_chat = chat or f"{c.get('chat_id') or c.get('telegram_chat_id') or ''}".strip()
+                client_tk, client_chat = _resolve_telegram_credentials(c)
 
                 broker = _make_broker(c)
                 banca = float(c.get('saldo_base', 1000.0))
@@ -4678,20 +4796,7 @@ def _process_client_orders_background(
                 except Exception as dup_err:
                     print(f"   ⚠️ [ANTI-DUP] Falha ao verificar posição de {symbol}: {dup_err}", flush=True)
 
-                # Short/venda só faz sentido em LINEAR (perp). Spot sell = dump de inventário.
-                side_l = str(side or '').strip().lower()
-                if (
-                    getattr(broker, 'is_spot_trading', lambda: False)()
-                    and side_l in ('sell', 'short', 'vender')
-                ):
-                    print(
-                        f"   🚫 [EXEC] {c.get('nome')} {symbol}: SELL/SHORT bloqueado em SPOT "
-                        f"(configure TRADING_MODE=linear + ALLOW_DERIVATIVES=true)",
-                        flush=True,
-                    )
-                    continue
-
-                # 🔒 MARGEM ISOLADA + ALAVANCAGEM 20x (somente linear/perp)
+                # Spot SHORT: permitido via isLeverage=1 (venda a descoberto / margin)
                 if not getattr(broker, 'is_spot_trading', lambda: False)():
                     try:
                         if hasattr(broker, 'switch_isolated_margin'):
@@ -4961,32 +5066,25 @@ def _process_client_orders_background(
                         except Exception as tp_sl_err:
                             print(f"   ⚠️ [TP/SL] Exceção pós-fill (ordem já enviada): {tp_sl_err}", flush=True)
 
-                        # 2. DEPURAÇÃO ATIVA + 3. HIGIENIZAÇÃO DE ENVIO
-                        if client_tk and client_chat:
-                            msg_tg = (
-                                f"🔥 OPERACAO REAL EXECUTADA\n\n"
-                                f"👤 Investidor: {c.get('nome')}\n"
-                                f"📦 Ativo: {symbol}\n"
-                                f"📈 Direcao: {side_label}\n"
-                                f"📊 Lote: {qty}\n"
-                                f"💰 Margem Separada: ${margem:.2f} USDT\n"
-                                f"💼 Saldo Atualizado: ${saldo_atualizado:.2f} USDT\n"
-                                f"🆔 Hash ID: {order_id}"
-                            )
-                            try:
-                                # Higienização: limpa espaços e converte chat_id numérico para int
-                                clean_chat = str(client_chat).strip()
-                                if clean_chat.isdigit():
-                                    clean_chat = int(clean_chat)
-
-                                requests.post(
-                                    f"https://api.telegram.org/bot{client_tk}/sendMessage",
-                                    json={"chat_id": clean_chat, "text": msg_tg},
-                                    timeout=5
-                                )
-                                print(f"✅ [TELEGRAM] Notificação enviada com sucesso para {c.get('nome')} (chat_id: {clean_chat})", flush=True)
-                            except Exception as tg_err:
-                                print(f"❌ [TELEGRAM ERROR] Falha ao enviar notificação para {c.get('nome')}: {tg_err}", flush=True)
+                        # Telegram: confirmação de ordem (sempre tenta master/investidor)
+                        msg_tg = (
+                            f"🔥 OPERACAO REAL EXECUTADA\n\n"
+                            f"👤 Investidor: {c.get('nome')}\n"
+                            f"📦 Ativo: {symbol}\n"
+                            f"📈 Direcao: {side_label}\n"
+                            f"📊 Lote: {qty}\n"
+                            f"💰 Margem: ${margem:.2f} USDT\n"
+                            f"🎯 TP: {tp_price} | SL: {sl_price}\n"
+                            f"💼 Saldo: ${saldo_atualizado:.2f} USDT\n"
+                            f"🆔 Hash ID: {order_id}"
+                        )
+                        _send_telegram_message(
+                            msg_tg,
+                            token=client_tk,
+                            chat_id=client_chat,
+                            client=c,
+                            label=f"ordem:{c.get('nome')}",
+                        )
                 else:
                     auth_hint = (
                         getattr(broker, 'last_auth_error_message', None)
